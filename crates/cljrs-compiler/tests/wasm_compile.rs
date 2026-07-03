@@ -102,7 +102,7 @@ fn bundles_required_namespace_initializer() {
     std::fs::write(&src_path, "(ns withdep (:require [helper]))\n(+ 1 2)\n").unwrap();
     let out_path = dir.join("withdep.wasm");
 
-    cljrs_compiler::aot::compile_file_to_wasm(&src_path, &out_path, &[dir.clone()])
+    cljrs_compiler::aot::compile_file_to_wasm(&src_path, &out_path, std::slice::from_ref(&dir))
         .unwrap_or_else(|e| panic!("compile_file_to_wasm failed: {e}"));
 
     let bytes = std::fs::read(&out_path).unwrap();

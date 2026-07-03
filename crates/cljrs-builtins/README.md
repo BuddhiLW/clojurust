@@ -3,6 +3,25 @@
 Built-in functions for clojurust (the `clojure.core`-equivalent runtime
 implemented in Rust, registered into a name → fn dispatch table).
 
+## Map entries
+
+Map entries are a dedicated type, not plain 2-element vectors: seq'ing a map,
+`find`, and the `map-entry` constructor produce vectors tagged as entries
+(`PersistentVector::map_entry` in `cljrs-value`).
+
+- `(map-entry k v)` / `(map-entry coll)` — build an entry from a key and
+  value, or from any seqable of exactly two elements.
+- `(map-entry? x)` — true only for real entries; `(map-entry? [:a 1])` is
+  false.
+- `key` / `val` (bootstrap) — accept only real map entries and throw
+  otherwise.
+
+Entries otherwise behave exactly like 2-element vectors (equality, hashing,
+printing, `nth`, destructuring), and, as in Clojure, any vector derived from
+an entry (`conj`, `assoc`, `pop`, `subvec`, ...) is a plain vector again.
+
+## Unchecked arithmetic
+
 Includes the `unchecked-*` integer arithmetic family — `unchecked-add`,
 `unchecked-subtract`, `unchecked-multiply`, `unchecked-inc`, `unchecked-dec`,
 `unchecked-negate` (and their `-int` aliases) — which wrap on overflow, in

@@ -1019,13 +1019,13 @@
 
 (defn key
   [x]
-  (if (and (vector? x) (= 2 (count x)))
+  (if (map-entry? x)
     (first x)
     (throw (ex-info "not a map entry" {}))))
 
 (defn val
   [x]
-  (if (and (vector? x) (= 2 (count x)))
+  (if (map-entry? x)
     (second x)
     (throw (ex-info "not a map entry" {}))))
 
@@ -1095,4 +1095,3 @@
   (let [matcher (re-matcher re s)]
     (seq (take-while identity (repeatedly #(re-find matcher))))))
 
-(defn map-entry? [x] (and (vector? x) (= 2 (count x))))

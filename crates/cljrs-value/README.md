@@ -227,7 +227,7 @@ Whole-number doubles hash like their `Long` equivalent.
 | Type | Description | Key operations |
 |---|---|---|
 | `PersistentList` | Singly-linked cons list | `cons`, `first`, `rest`, `count` (O(1)) |
-| `PersistentVector` | 32-way trie + tail buffer | `conj`, `nth`, `assoc_nth`, `pop`, `iter` |
+| `PersistentVector` | 32-way trie + tail buffer | `conj`, `nth`, `assoc_nth`, `pop`, `iter`, `map_entry`, `is_map_entry` |
 | `PersistentArrayMap` | Flat key/value vec, ≤8 entries | `assoc` (returns `AssocResult`), `get`, `dissoc`, `iter` |
 | `PersistentHashMap` | 32-way HAMT | `assoc`, `get`, `dissoc`, `merge`, `iter`, `keys`, `vals` |
 | `PersistentHashSet` | Backed by `PersistentHashMap` | `conj`, `disj`, `contains`, `iter` |
@@ -240,6 +240,16 @@ threshold, or `AssocResult::Promote(Vec<(Value, Value)>)` when the map is full.
 All collections implement `PartialEq`, `Debug`, `Clone`, and `cljrs_gc::Trace`.
 `PersistentList`, `PersistentVector`, and `PersistentHashSet` implement
 `std::iter::FromIterator<Value>`.
+
+A `PersistentVector` may be tagged as a **map entry** — the `[key val]` pairs
+produced by seq'ing a map, `find`, or the `map-entry` builtin.
+`PersistentVector::map_entry(key, val)` builds one; `is_map_entry()` reads the
+tag (there is also a `Value::map_entry(k, v)` / `Value::is_map_entry()`
+convenience pair). The tag is invisible to equality, hashing, and printing —
+`(= (first {:a 1}) [:a 1])` still holds — and it exists only so `map-entry?`
+can distinguish real entries from plain 2-element vectors. As in Clojure, any
+derived vector (`conj`, `assoc_nth`, `pop`, `from_iter`, ...) is a plain
+vector again.
 
 All collection Trace impls also override `gc_size_extra` to report the heap
 bytes owned by each collection beyond the GcBox struct.  Approximations used:
