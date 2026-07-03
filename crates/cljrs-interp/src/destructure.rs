@@ -4,7 +4,7 @@ use cljrs_builtins::form::form_to_value;
 use cljrs_gc::GcPtr;
 use cljrs_reader::Form;
 use cljrs_reader::form::FormKind;
-use cljrs_value::{Keyword, PersistentList, PersistentVector, Symbol, Value};
+use cljrs_value::{Keyword, PersistentList, Symbol, Value};
 use std::sync::Arc;
 
 use cljrs_env::env::Env;
@@ -132,10 +132,7 @@ pub fn value_to_seq_vec(val: &Value) -> Vec<Value> {
         Value::Map(m) => {
             let mut result = Vec::new();
             m.for_each(|k, v| {
-                result.push(Value::Vector(GcPtr::new(PersistentVector::from_iter([
-                    k.clone(),
-                    v.clone(),
-                ]))));
+                result.push(Value::map_entry(k.clone(), v.clone()));
             });
             result
         }

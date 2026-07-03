@@ -2879,9 +2879,7 @@ pub unsafe extern "C" fn rt_seq(coll: *const Value) -> *const Value {
                 // rt_first/rt_rest don't handle Map, so we must materialise the entry list.
                 let mut pairs = Vec::new();
                 m.for_each(|k, v| {
-                    pairs.push(Value::Vector(GcPtr::new(PersistentVector::from_iter(
-                        vec![k.clone(), v.clone()],
-                    ))));
+                    pairs.push(Value::map_entry(k.clone(), v.clone()));
                 });
                 box_val(Value::List(GcPtr::new(PersistentList::from_iter(pairs))))
             }

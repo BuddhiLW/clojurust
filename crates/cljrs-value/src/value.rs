@@ -1210,6 +1210,17 @@ impl Value {
         Value::Str(GcPtr::new(s.into()))
     }
 
+    /// Convenience: build a `[key val]` map entry (a tagged 2-element vector).
+    pub fn map_entry(key: Value, val: Value) -> Self {
+        Value::Vector(GcPtr::new(PersistentVector::map_entry(key, val)))
+    }
+
+    /// True only for map entries (`[k v]` pairs from seq'ing a map, `find`,
+    /// or the `map-entry` constructor) — not for plain 2-element vectors.
+    pub fn is_map_entry(&self) -> bool {
+        matches!(self.unwrap_meta(), Value::Vector(v) if v.get().is_map_entry())
+    }
+
     /// Convenience: wrap a `Symbol`.
     pub fn symbol(s: Symbol) -> Self {
         Value::Symbol(GcPtr::new(s))

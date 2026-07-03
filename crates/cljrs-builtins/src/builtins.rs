@@ -227,6 +227,7 @@ pub fn register_all(globals: &Arc<GlobalEnv>, ns: &str) {
         ("list?", Arity::Fixed(1), builtin_list_q),
         ("case=", Arity::Fixed(2), builtin_case_eq),
         ("map?", Arity::Fixed(1), builtin_map_q),
+        ("map-entry?", Arity::Fixed(1), builtin_map_entry_q),
         ("vector?", Arity::Fixed(1), builtin_vector_q),
         ("set?", Arity::Fixed(1), builtin_set_q),
         ("coll?", Arity::Fixed(1), builtin_coll_q),
@@ -246,6 +247,7 @@ pub fn register_all(globals: &Arc<GlobalEnv>, ns: &str) {
         ("list", Arity::Variadic { min: 0 }, builtin_list),
         ("list*", Arity::Variadic { min: 1 }, builtin_list_star),
         ("vector", Arity::Variadic { min: 0 }, builtin_vector),
+        ("map-entry", Arity::Variadic { min: 1 }, builtin_map_entry),
         ("hash-map", Arity::Variadic { min: 0 }, builtin_hash_map),
         ("array-map", Arity::Variadic { min: 0 }, builtin_array_map),
         ("hash-set", Arity::Variadic { min: 0 }, builtin_hash_set),
@@ -799,10 +801,7 @@ impl Iterator for ValueIter {
                 Value::Map(m) => {
                     let mut pairs = Vec::new();
                     m.for_each(|k, v| {
-                        pairs.push(Value::Vector(GcPtr::new(PersistentVector::from_iter([
-                            k.clone(),
-                            v.clone(),
-                        ]))));
+                        pairs.push(Value::map_entry(k.clone(), v.clone()));
                     });
                     self.current = Value::List(GcPtr::new(PersistentList::from_iter(pairs)));
                 }
@@ -897,10 +896,7 @@ impl Iterator for ValueIter {
                 Value::TypeInstance(ti) => {
                     let mut pairs = Vec::new();
                     ti.get().fields.for_each(|k, v| {
-                        pairs.push(Value::Vector(GcPtr::new(PersistentVector::from_iter([
-                            k.clone(),
-                            v.clone(),
-                        ]))));
+                        pairs.push(Value::map_entry(k.clone(), v.clone()));
                     });
                     self.current = Value::List(GcPtr::new(PersistentList::from_iter(pairs)));
                 }
@@ -2279,6 +2275,9 @@ fn builtin_vector_q(args: &[Value]) -> ValueResult<Value> {
         Value::Vector(_)
     )))
 }
+fn builtin_map_entry_q(args: &[Value]) -> ValueResult<Value> {
+    Ok(Value::Bool(args[0].is_map_entry()))
+}
 fn builtin_set_q(args: &[Value]) -> ValueResult<Value> {
     Ok(Value::Bool(matches!(args[0].unwrap_meta(), Value::Set(_))))
 }
@@ -2432,6 +2431,31 @@ fn builtin_vector(args: &[Value]) -> ValueResult<Value> {
     Ok(Value::Vector(GcPtr::new(PersistentVector::from_iter(
         args.iter().cloned(),
     ))))
+}
+
+/// `(map-entry k v)` or `(map-entry [k v])` — build a map entry from a key
+/// and value, or from any seqable of exactly two elements.
+fn builtin_map_entry(args: &[Value]) -> ValueResult<Value> {
+    match args {
+        [key, val] => Ok(Value::map_entry(key.clone(), val.clone())),
+        [coll] => {
+            let items = value_to_seq(coll)?;
+            if items.len() != 2 {
+                return Err(ValueError::Other(format!(
+                    "map-entry requires exactly 2 elements, got {}",
+                    items.len()
+                )));
+            }
+            let mut items = items.into_iter();
+            let key = items.next().unwrap();
+            let val = items.next().unwrap();
+            Ok(Value::map_entry(key, val))
+        }
+        _ => Err(ValueError::Other(format!(
+            "map-entry expects 1 or 2 arguments, got {}",
+            args.len()
+        ))),
+    }
 }
 
 fn builtin_hash_map(args: &[Value]) -> ValueResult<Value> {
@@ -2872,10 +2896,7 @@ fn builtin_rseq(args: &[Value]) -> ValueResult<Value> {
                     .get()
                     .iter()
                     .map(|(k, v)| {
-                        Value::Vector(GcPtr::new(PersistentVector::from_iter([
-                            k.clone(),
-                            v.clone(),
-                        ])))
+                        Value::map_entry(k.clone(), v.clone())
                     })
                     .collect();
                 Ok(cons_from_iter(pairs.into_iter().rev()))
@@ -2921,10 +2942,7 @@ fn builtin_seq(args: &[Value]) -> ValueResult<Value> {
             }
             let mut pairs = Vec::new();
             m.for_each(|k, v| {
-                let pair = Value::Vector(GcPtr::new(PersistentVector::from_iter([
-                    k.clone(),
-                    v.clone(),
-                ])));
+                let pair = Value::map_entry(k.clone(), v.clone());
                 pairs.push(pair);
             });
             Ok(cons_from_iter(pairs))
@@ -3020,10 +3038,7 @@ fn builtin_seq(args: &[Value]) -> ValueResult<Value> {
         Value::TypeInstance(ti) => {
             let mut pairs = Vec::new();
             ti.get().fields.for_each(|k, v| {
-                pairs.push(Value::Vector(GcPtr::new(PersistentVector::from_iter([
-                    k.clone(),
-                    v.clone(),
-                ]))));
+                pairs.push(Value::map_entry(k.clone(), v.clone()));
             });
             if pairs.is_empty() {
                 Ok(Value::Nil)
@@ -3055,10 +3070,7 @@ fn builtin_first(args: &[Value]) -> ValueResult<Value> {
             let mut result = None;
             m.for_each(|k, v| {
                 if result.is_none() {
-                    result = Some(Value::Vector(GcPtr::new(PersistentVector::from_iter([
-                        k.clone(),
-                        v.clone(),
-                    ]))));
+                    result = Some(Value::map_entry(k.clone(), v.clone()));
                 }
             });
             Ok(result.unwrap_or(Value::Nil))
@@ -3114,10 +3126,7 @@ fn builtin_rest(args: &[Value]) -> ValueResult<Value> {
                 .iter()
                 .skip(1)
                 .map(|(k, v)| {
-                    Value::Vector(GcPtr::new(PersistentVector::from_iter([
-                        k.clone(),
-                        v.clone(),
-                    ])))
+                    Value::map_entry(k.clone(), v.clone())
                 })
                 .collect();
             Ok(Value::List(GcPtr::new(PersistentList::from_iter(items))))
@@ -3168,10 +3177,7 @@ fn builtin_cons(args: &[Value]) -> ValueResult<Value> {
             let kvs = m
                 .iter()
                 .map(|e| {
-                    Value::Vector(GcPtr::new(PersistentVector::from_iter([
-                        e.0.clone(),
-                        e.1.clone(),
-                    ])))
+                    Value::map_entry(e.0.clone(), e.1.clone())
                 })
                 .collect::<Vec<_>>();
             let tail = PersistentList::from_iter(kvs.iter().cloned());
@@ -3444,10 +3450,7 @@ fn concat_first_rest(val: &Value) -> (Option<Value>, Value) {
             // seq on a map produces [k v] pairs.
             let mut pairs = Vec::new();
             m.for_each(|k, v| {
-                pairs.push(Value::Vector(GcPtr::new(PersistentVector::from_iter([
-                    k.clone(),
-                    v.clone(),
-                ]))));
+                pairs.push(Value::map_entry(k.clone(), v.clone()));
             });
             if pairs.is_empty() {
                 (None, Value::Nil)
@@ -4773,10 +4776,7 @@ fn seq_first_rest(v: &Value) -> ValueResult<Option<(Value, Value)>> {
         Value::Map(m) => {
             let mut pairs = Vec::new();
             m.for_each(|k, v| {
-                pairs.push(Value::Vector(GcPtr::new(PersistentVector::from_iter([
-                    k.clone(),
-                    v.clone(),
-                ]))));
+                pairs.push(Value::map_entry(k.clone(), v.clone()));
             });
             if pairs.is_empty() {
                 Ok(None)
@@ -4854,20 +4854,14 @@ fn builtin_find(args: &[Value]) -> ValueResult<Value> {
     match &args[0] {
         Value::Map(m) => {
             if let Some(v) = m.get(&args[1]) {
-                Ok(Value::Vector(GcPtr::new(PersistentVector::from_iter([
-                    args[1].clone(),
-                    v,
-                ]))))
+                Ok(Value::map_entry(args[1].clone(), v))
             } else {
                 Ok(Value::Nil)
             }
         }
         Value::TransientMap(m) => {
             if let Some((k, v)) = m.get().find(&args[1]) {
-                Ok(Value::Vector(GcPtr::new(PersistentVector::from_iter([
-                    k.clone(),
-                    v.clone(),
-                ]))))
+                Ok(Value::map_entry(k.clone(), v.clone()))
             } else {
                 Ok(Value::Nil)
             }
@@ -4877,10 +4871,7 @@ fn builtin_find(args: &[Value]) -> ValueResult<Value> {
                 let idx = *idx;
                 if idx >= 0 && (idx as usize) < v.get().count() {
                     let val = v.get().nth(idx as usize).cloned().unwrap();
-                    Ok(Value::Vector(GcPtr::new(PersistentVector::from_iter([
-                        args[1].clone(),
-                        val,
-                    ]))))
+                    Ok(Value::map_entry(args[1].clone(), val))
                 } else {
                     Ok(Value::Nil)
                 }
