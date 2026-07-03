@@ -43,25 +43,48 @@ pub fn expand_anon_fn(body: &[Form], span: cljrs_types::span::Span) -> Form {
 
 fn find_pct_refs(forms: &[Form], max_pos: &mut usize, has_rest: &mut bool) {
     for form in forms {
-        match &form.kind {
-            FormKind::Symbol(s) if (s == "%" || s == "%1") && *max_pos < 1 => {
-                *max_pos = 1;
-            }
-            FormKind::Symbol(s) if s == "%&" => {
-                *has_rest = true;
-            }
-            FormKind::Symbol(s) if s.starts_with('%') => {
-                if let Ok(n) = s[1..].parse::<usize>()
-                    && n > *max_pos
-                {
-                    *max_pos = n;
-                }
-            }
-            FormKind::List(c) | FormKind::Vector(c) | FormKind::Set(c) | FormKind::Map(c) => {
-                find_pct_refs(c, max_pos, has_rest);
-            }
-            _ => {}
+        find_pct_refs_form(form, max_pos, has_rest);
+    }
+}
+
+fn find_pct_refs_form(form: &Form, max_pos: &mut usize, has_rest: &mut bool) {
+    match &form.kind {
+        FormKind::Symbol(s) if (s == "%" || s == "%1") && *max_pos < 1 => {
+            *max_pos = 1;
         }
+        FormKind::Symbol(s) if s == "%&" => {
+            *has_rest = true;
+        }
+        FormKind::Symbol(s) if s.starts_with('%') => {
+            if let Ok(n) = s[1..].parse::<usize>()
+                && n > *max_pos
+            {
+                *max_pos = n;
+            }
+        }
+        FormKind::List(c) | FormKind::Vector(c) | FormKind::Set(c) | FormKind::Map(c) => {
+            find_pct_refs(c, max_pos, has_rest);
+        }
+        // Reader-macro sugar (`@%`, `#'%`, `'%`, `` `% ``, `~%`, `~@%`, `#tag %`)
+        // wraps a single inner form; it must be scanned the same as any
+        // other nested form so `%` refs under sugar aren't missed.
+        FormKind::Quote(inner)
+        | FormKind::SyntaxQuote(inner)
+        | FormKind::Unquote(inner)
+        | FormKind::UnquoteSplice(inner)
+        | FormKind::Deref(inner)
+        | FormKind::Var(inner)
+        | FormKind::TaggedLiteral(_, inner) => {
+            find_pct_refs_form(inner, max_pos, has_rest);
+        }
+        FormKind::Meta(meta, inner) => {
+            find_pct_refs_form(meta, max_pos, has_rest);
+            find_pct_refs_form(inner, max_pos, has_rest);
+        }
+        FormKind::ReaderCond { clauses, .. } => {
+            find_pct_refs(clauses, max_pos, has_rest);
+        }
+        _ => {}
     }
 }
 
@@ -101,6 +124,48 @@ fn rewrite_pct_form(form: &Form, span: cljrs_types::span::Span) -> Form {
             let rewritten = rewrite_pct_refs(c, span.clone());
             Form::new(FormKind::Map(rewritten), span)
         }
+        FormKind::Quote(inner) => Form::new(
+            FormKind::Quote(Box::new(rewrite_pct_form(inner, span.clone()))),
+            span,
+        ),
+        FormKind::SyntaxQuote(inner) => Form::new(
+            FormKind::SyntaxQuote(Box::new(rewrite_pct_form(inner, span.clone()))),
+            span,
+        ),
+        FormKind::Unquote(inner) => Form::new(
+            FormKind::Unquote(Box::new(rewrite_pct_form(inner, span.clone()))),
+            span,
+        ),
+        FormKind::UnquoteSplice(inner) => Form::new(
+            FormKind::UnquoteSplice(Box::new(rewrite_pct_form(inner, span.clone()))),
+            span,
+        ),
+        FormKind::Deref(inner) => Form::new(
+            FormKind::Deref(Box::new(rewrite_pct_form(inner, span.clone()))),
+            span,
+        ),
+        FormKind::Var(inner) => Form::new(
+            FormKind::Var(Box::new(rewrite_pct_form(inner, span.clone()))),
+            span,
+        ),
+        FormKind::TaggedLiteral(tag, inner) => Form::new(
+            FormKind::TaggedLiteral(tag.clone(), Box::new(rewrite_pct_form(inner, span.clone()))),
+            span,
+        ),
+        FormKind::Meta(meta, inner) => Form::new(
+            FormKind::Meta(
+                Box::new(rewrite_pct_form(meta, span.clone())),
+                Box::new(rewrite_pct_form(inner, span.clone())),
+            ),
+            span,
+        ),
+        FormKind::ReaderCond { splicing, clauses } => Form::new(
+            FormKind::ReaderCond {
+                splicing: *splicing,
+                clauses: rewrite_pct_refs(clauses, span.clone()),
+            },
+            span,
+        ),
         _ => form.clone(),
     }
 }
@@ -264,4 +329,55 @@ pub fn expand_reader_conds(forms: &[Form]) -> Vec<Form> {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cljrs_reader::Parser;
+
+    fn parse_anon_fn(src: &str) -> Form {
+        let mut parser = Parser::new(src.to_string(), "<test>".to_string());
+        let form = parser.parse_one().unwrap().unwrap();
+        let FormKind::AnonFn(body) = form.kind else {
+            panic!("expected AnonFn, got {:?}", form.kind);
+        };
+        expand_anon_fn(&body, form.span)
+    }
+
+    fn arity(expanded: &Form) -> usize {
+        let FormKind::List(parts) = &expanded.kind else {
+            panic!("expected (fn* [...] ...)");
+        };
+        let FormKind::Vector(params) = &parts[1].kind else {
+            panic!("expected param vector");
+        };
+        params.len()
+    }
+
+    #[test]
+    fn deref_sugar_counts_as_one_arg() {
+        // #(:x @%) must expand to (fn* [p__1] (:x (deref p__1))), arity 1 —
+        // not 0, as if % under `@` were invisible to the arg scanner.
+        let expanded = parse_anon_fn("#(:x @%)");
+        assert_eq!(arity(&expanded), 1);
+
+        let FormKind::List(parts) = &expanded.kind else {
+            unreachable!()
+        };
+        let FormKind::List(body) = &parts[2].kind else {
+            panic!("expected body list");
+        };
+        let FormKind::Deref(inner) = &body[1].kind else {
+            panic!("expected deref form, got {:?}", body[1].kind);
+        };
+        assert_eq!(inner.kind, FormKind::Symbol("p__1".to_string()));
+    }
+
+    #[test]
+    fn var_and_meta_sugar_also_scanned() {
+        assert_eq!(arity(&parse_anon_fn("#(#'%)")), 1);
+        assert_eq!(arity(&parse_anon_fn("#(^:x %)")), 1);
+        assert_eq!(arity(&parse_anon_fn("#('%)")), 1);
+    }
 }
