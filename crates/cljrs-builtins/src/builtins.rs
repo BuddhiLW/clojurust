@@ -2895,9 +2895,7 @@ fn builtin_rseq(args: &[Value]) -> ValueResult<Value> {
                 let pairs: Vec<Value> = m
                     .get()
                     .iter()
-                    .map(|(k, v)| {
-                        Value::map_entry(k.clone(), v.clone())
-                    })
+                    .map(|(k, v)| Value::map_entry(k.clone(), v.clone()))
                     .collect();
                 Ok(cons_from_iter(pairs.into_iter().rev()))
             }
@@ -3125,9 +3123,7 @@ fn builtin_rest(args: &[Value]) -> ValueResult<Value> {
             let items: Vec<Value> = m
                 .iter()
                 .skip(1)
-                .map(|(k, v)| {
-                    Value::map_entry(k.clone(), v.clone())
-                })
+                .map(|(k, v)| Value::map_entry(k.clone(), v.clone()))
                 .collect();
             Ok(Value::List(GcPtr::new(PersistentList::from_iter(items))))
         }
@@ -3176,9 +3172,7 @@ fn builtin_cons(args: &[Value]) -> ValueResult<Value> {
         Value::Map(m) => {
             let kvs = m
                 .iter()
-                .map(|e| {
-                    Value::map_entry(e.0.clone(), e.1.clone())
-                })
+                .map(|e| Value::map_entry(e.0.clone(), e.1.clone()))
                 .collect::<Vec<_>>();
             let tail = PersistentList::from_iter(kvs.iter().cloned());
             let new_list = PersistentList::cons(head, Arc::new(tail));
