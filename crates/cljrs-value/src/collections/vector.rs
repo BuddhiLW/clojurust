@@ -1,20 +1,48 @@
 use crate::Value;
 
 /// An immutable persistent vector backed by `rpds::Vector`.
+///
+/// A vector may additionally be tagged as a *map entry* (see
+/// [`PersistentVector::map_entry`]): a two-element `[key val]` pair produced
+/// by seq'ing a map, `find`, or the `map-entry` builtin. Map entries behave
+/// exactly like vectors (equality, hashing, printing, indexing) — the tag
+/// only answers `map-entry?` — and, as in Clojure, any derived vector
+/// (`conj`, `assoc`, `pop`, ...) is a plain vector again.
 #[derive(Debug, Clone)]
 pub struct PersistentVector {
     inner: rpds::VectorSync<Value>,
+    is_map_entry: bool,
 }
 
 impl PersistentVector {
     pub fn empty() -> Self {
         Self {
             inner: rpds::VectorSync::new_sync(),
+            is_map_entry: false,
         }
     }
 
     pub fn from_vector(vector: rpds::VectorSync<Value>) -> Self {
-        Self { inner: vector }
+        Self {
+            inner: vector,
+            is_map_entry: false,
+        }
+    }
+
+    /// Build a `[key val]` pair tagged as a map entry.
+    pub fn map_entry(key: Value, val: Value) -> Self {
+        let mut inner = rpds::VectorSync::new_sync();
+        inner = inner.push_back(key);
+        inner = inner.push_back(val);
+        Self {
+            inner,
+            is_map_entry: true,
+        }
+    }
+
+    /// True only for vectors created via [`PersistentVector::map_entry`].
+    pub fn is_map_entry(&self) -> bool {
+        self.is_map_entry
     }
 
     pub fn count(&self) -> usize {
@@ -29,6 +57,7 @@ impl PersistentVector {
     pub fn conj(&self, val: Value) -> Self {
         Self {
             inner: self.inner.push_back(val),
+            is_map_entry: false,
         }
     }
 
@@ -49,6 +78,7 @@ impl PersistentVector {
         } else {
             Some(Self {
                 inner: self.inner.set(idx, val)?,
+                is_map_entry: false,
             })
         }
     }
@@ -57,6 +87,7 @@ impl PersistentVector {
     pub fn pop(&self) -> Option<Self> {
         Some(Self {
             inner: self.inner.drop_last()?,
+            is_map_entry: false,
         })
     }
 
@@ -76,7 +107,10 @@ impl std::iter::FromIterator<Value> for PersistentVector {
         for item in iter {
             v = v.push_back(item);
         }
-        Self { inner: v }
+        Self {
+            inner: v,
+            is_map_entry: false,
+        }
     }
 }
 
@@ -180,6 +214,23 @@ mod tests {
         let c = PersistentVector::from_iter([int(1), int(3)]);
         assert_eq!(a, b);
         assert_ne!(a, c);
+    }
+
+    #[test]
+    fn test_map_entry_flag() {
+        let e = PersistentVector::map_entry(int(1), int(2));
+        assert!(e.is_map_entry());
+        assert_eq!(e.count(), 2);
+        assert_eq!(e.nth(0), Some(&int(1)));
+        assert_eq!(e.nth(1), Some(&int(2)));
+        // Equal to a plain vector with the same elements.
+        assert_eq!(e, PersistentVector::from_iter([int(1), int(2)]));
+        // Plain constructors never produce map entries.
+        assert!(!PersistentVector::from_iter([int(1), int(2)]).is_map_entry());
+        // Derived vectors are plain vectors again.
+        assert!(!e.conj(int(3)).is_map_entry());
+        assert!(!e.assoc_nth(0, int(9)).unwrap().is_map_entry());
+        assert!(!e.pop().unwrap().is_map_entry());
     }
 
     #[test]

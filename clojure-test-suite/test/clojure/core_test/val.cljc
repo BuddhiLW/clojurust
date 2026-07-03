@@ -11,7 +11,7 @@
       ;; https://groups.google.com/g/clojure/c/FVcrbHJpCW4/m/Fh7NsX_Yb7sJ
       (is (= 'v (val #?(:cljs    (cljs.core/MapEntry. 'k 'v nil)
                         :lpy     (map-entry 'k 'v)
-                        :rust    ['k 'v]
+                        :rust    (map-entry 'k 'v)
                         :default (clojure.lang.MapEntry/create 'k 'v)))))
       (is (= :b (val (first (hash-map :a :b)))))
       (when-var-exists sorted-map
@@ -27,7 +27,6 @@
                  {}
                  {1 2}
                  []
-                 #?@(:rust [] ; don't really care in rust
-                     :default [[1 2]])
+                 [1 2]
                  #{}
                  #{1 2}))))
