@@ -3710,7 +3710,7 @@ fn builtin_empty(args: &[Value]) -> ValueResult<Value> {
             None => v,
         }
     };
-    Ok(apply_meta(match &args[0] {
+    Ok(apply_meta(match args[0].unwrap_meta() {
         Value::List(_) => Value::List(GcPtr::new(PersistentList::empty())),
         Value::Vector(_) => Value::Vector(GcPtr::new(PersistentVector::empty())),
         Value::Map(_) => Value::Map(MapValue::empty()),
