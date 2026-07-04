@@ -3619,7 +3619,8 @@ fn builtin_into(args: &[Value]) -> ValueResult<Value> {
         }
         return Ok(acc);
     }
-    let mut result = args[0].clone();
+    let meta = args[0].get_meta().cloned();
+    let mut result = args[0].unwrap_meta().clone();
     let mut iter = ValueIter::new(args[1].clone());
     for item in iter.by_ref() {
         result = match result {
@@ -3653,7 +3654,10 @@ fn builtin_into(args: &[Value]) -> ValueResult<Value> {
     if let Some(err) = iter.take_error() {
         return Err(ValueError::Other(err));
     }
-    Ok(result)
+    Ok(match meta {
+        Some(m) => result.with_meta(m),
+        None => result,
+    })
 }
 
 fn builtin_reduce(args: &[Value]) -> ValueResult<Value> {
@@ -3719,7 +3723,9 @@ fn builtin_empty(args: &[Value]) -> ValueResult<Value> {
 }
 
 fn builtin_vec(args: &[Value]) -> ValueResult<Value> {
-    match &args[0] {
+    let meta = args[0].get_meta().cloned();
+    let coll = args[0].unwrap_meta();
+    match coll {
         Value::List(_)
         | Value::Cons(_)
         | Value::Set(_)
@@ -3738,17 +3744,21 @@ fn builtin_vec(args: &[Value]) -> ValueResult<Value> {
         | Value::BooleanArray(_)
         | Value::CharArray(_)
         | Value::Nil => {
-            let mut iter = ValueIter::new(args[0].clone());
+            let mut iter = ValueIter::new(coll.clone());
             let v: Vec<Value> = iter.by_ref().collect();
             if let Some(err) = iter.take_error() {
                 return Err(ValueError::Other(err));
             }
-            Ok(Value::Vector(GcPtr::new(PersistentVector::from_iter(v))))
+            let result = Value::Vector(GcPtr::new(PersistentVector::from_iter(v)));
+            Ok(match meta {
+                Some(m) => result.with_meta(m),
+                None => result,
+            })
         }
 
-        _ => Err(ValueError::WrongType {
+        other => Err(ValueError::WrongType {
             expected: "seq",
-            got: args[0].type_name().to_string(),
+            got: other.type_name().to_string(),
         }),
     }
 }
