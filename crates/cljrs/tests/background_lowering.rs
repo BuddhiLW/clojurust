@@ -102,6 +102,28 @@ fn background_lowering_publishes_ir() {
     );
 }
 
+/// `(str tag id)` with a `nil` arg must keep treating `nil` as the empty
+/// string once the caller tiers up from tree-walk to the IR interpreter —
+/// not print the literal `"nil"`.
+#[test]
+fn str_with_nil_arg_stays_correct_after_tiering_up() {
+    let src = r#"
+        (defn get-tag [tag id] (str tag id))
+        (loop [i 0]
+          (when (< i 200)
+            (let [got (get-tag "h1" nil)]
+              (when (not= got "h1") (println "WRONG at" i got)))
+            (recur (+ i 1))))
+        (println "done")
+    "#;
+    let (stdout, stderr) = run_warm(src, &["--jit-threshold", "0"], &[]);
+    assert!(
+        !stdout.contains("WRONG"),
+        "str(nil) corrupted after IR lowering:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(stdout.contains("done"), "stdout:\n{stdout}");
+}
+
 /// Rebinding a defn while its caller is warm/hot must be reflected
 /// immediately: the dependent's IR is invalidated and re-lowered in the
 /// background, and every interim call (tree-walk fallback) already resolves

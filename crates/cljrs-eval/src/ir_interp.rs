@@ -1195,7 +1195,12 @@ fn dispatch_known_fn(known_fn: &KnownFn, args: Vec<Value>, env: &mut Env) -> Eva
         KnownFn::Str => {
             let s: String = args
                 .iter()
-                .map(|v| format!("{}", cljrs_value::value::PrintValue(v)))
+                .map(|v| match v {
+                    Value::Nil => String::new(),
+                    Value::Str(s) => s.get().to_string(),
+                    Value::Char(c) => c.to_string(),
+                    other => format!("{}", cljrs_value::value::PrintValue(other)),
+                })
                 .collect();
             Ok(Value::Str(GcPtr::new(s)))
         }
