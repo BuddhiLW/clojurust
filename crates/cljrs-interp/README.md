@@ -138,6 +138,7 @@ implement sentinel operations without hitting the stub errors registered in
 | `eval_vary_meta(args, env)` | `vary-meta` — apply f to obj metadata |
 | `eval_with_bindings_star(args, env)` | `with-bindings*` — push binding frame, call f |
 | `eval_send_to_agent(args, env)` | `send` / `send-off` — dispatch action to agent |
+| `dispatch_method(method, target, args)` | `(.method target args…)` — interop method dispatch on an evaluated target (strings, vectors, seqs) |
 
 `make_lazy_seq_from_fn(f, globals, ns)` (already public) creates a `LazySeq`
 from a zero-arg callable; the above `make_delay_from_fn` is the analogous

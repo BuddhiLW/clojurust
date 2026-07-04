@@ -228,6 +228,11 @@ walk directly, preserving full semantics.
   through to `rt_call` for non-protocol callees.  Cached values (interned keywords, impl fns)
   are kept alive by an IC root tracer registered per allocating thread; IC slots in compiled
   modules hold only indices/interned pointers, never GC roots.
+- **Slash-named builtins:** when `(ns, name)` resolution fails, `rt_load_global` retries the
+  joined `"{ns}/{name}"` in the current namespace (reaching clojure.core through its refers),
+  mirroring `eval_symbol` — so `Math/abs`-style builtins, which the lowerer splits into
+  `(ns="Math", name="abs")`, resolve in compiled code instead of yielding nil (which turned
+  into "not callable: <nil> is not callable" at the first call).
 - **Versioned symbols:** `rt_load_global` detects a `name@<sha>` suffix and resolves it through
   the shared `cljrs_env::versioned` resolver (lazily loading the immutable `ns@sha` namespace;
   resolution failures surface as pending exceptions); lookups into a not-yet-loaded `ns@sha`

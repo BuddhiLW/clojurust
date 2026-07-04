@@ -2460,6 +2460,14 @@ pub unsafe extern "C" fn rt_load_global(
                 }
             }
         }
+        // Slash-named builtins (`Math/abs`, `Math/PI`, …) are registered in
+        // clojure.core under their full `Class/member` name; IR lowering
+        // split them into (ns="Math", name="abs").  Mirror eval_symbol's
+        // whole-symbol lookup (which reaches clojure.core through the
+        // namespace's refers) before yielding nil.
+        if let Some(val) = globals.lookup_in_ns(&current_ns, &format!("{ns}/{name}")) {
+            return box_or_intern_val(val);
+        }
     }
     rt_const_nil()
 }

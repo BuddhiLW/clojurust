@@ -904,6 +904,16 @@ fn expanded_needs_interpreter(form: &cljrs_reader::Form) -> bool {
                 if is_interpreter_only_sym(s.as_str()) || base == "await" {
                     return true;
                 }
+                // `(.method target …)` interop and the interpreter-only
+                // special forms below have no native codegen: lowering
+                // either dot-marks them as `CallDirect`s codegen cannot
+                // resolve or rejects them outright.  Run any form
+                // containing one in the interpreted preamble.
+                if (s.len() > 1 && s != ".." && s.starts_with('.'))
+                    || matches!(s.as_str(), "." | "reify" | "deftype" | "defn-")
+                {
+                    return true;
+                }
             }
             parts.iter().any(expanded_needs_interpreter)
         }
