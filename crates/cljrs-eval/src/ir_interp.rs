@@ -807,6 +807,15 @@ fn load_global_value(
         }
     }
 
+    // Slash-named builtins (`Math/abs`, `Math/PI`, …) are registered in
+    // clojure.core under their full `Class/member` name; the lowerer's
+    // split_sym split them into (ns="Math", name="abs").  Mirror
+    // eval_symbol's whole-symbol lookup (which reaches clojure.core through
+    // the namespace's refers) before giving up.
+    if let Some(val) = globals.lookup_in_ns(defining_ns, &format!("{ns}/{name}")) {
+        return Ok(val);
+    }
+
     // JVM class names resolve to themselves as symbols, mirroring eval_symbol.
     if cljrs_interp::eval::is_jvm_class_name(name) {
         return Ok(Value::symbol(cljrs_value::Symbol::simple(name)));
@@ -1050,6 +1059,20 @@ fn dispatch_sentinel_by_name(
     ns: &Arc<str>,
     env: &mut Env,
 ) -> EvalResult {
+    // `(.method target args…)` interop: the lowerer emits these as
+    // `CallDirect` with the dot-prefixed method name (see `lower_list` in
+    // cljrs-ir).  Route to the tree-walker's method dispatch — args[0] is
+    // the target object.
+    if let Some(method) = name.strip_prefix('.')
+        && !method.is_empty()
+    {
+        let Some((target, rest)) = args.split_first() else {
+            return Err(EvalError::Runtime(format!(
+                ".{method} requires a target object"
+            )));
+        };
+        return cljrs_interp::apply::dispatch_method(method, target, rest);
+    }
     match name {
         "volatile!" => cljrs_interp::apply::eval_volatile(args),
         "reset!" => cljrs_interp::apply::eval_reset_bang(args, env),
@@ -1345,10 +1368,20 @@ fn dispatch_known_fn(known_fn: &KnownFn, args: Vec<Value>, env: &mut Env) -> Eva
         KnownFn::SetBangVar => builtin_call_native("set!", &args),
         KnownFn::WithBindings => eval_ir_with_bindings(args, env),
         KnownFn::TryCatchFinally => eval_ir_try_catch_finally(args, env),
+        // `(with-out-str body…)` — the lowerer wraps the body in a zero-arg
+        // thunk.  Capture output around the call, exactly like the
+        // tree-walker's eval_with_out_str and the compiled tier's
+        // rt_with_out_str.  (clojure.core's `with-out-str` var is a nil stub
+        // — the tree-walker intercepts the form before the var is ever
+        // called — so dispatching to it by name silently returned nil.)
         KnownFn::WithOutStr => {
-            let fn_name = known_fn_to_name(known_fn);
-            let callee = load_builtin(env, fn_name)?;
-            apply_value(&callee, args, env)
+            let body = args.into_iter().next().unwrap_or(Value::Nil);
+            cljrs_builtins::builtins::push_output_capture();
+            let result = apply_value(&body, vec![], env);
+            let captured = cljrs_builtins::builtins::pop_output_capture().unwrap_or_default();
+            // Propagate errors, but only after the capture frame is popped.
+            result?;
+            Ok(Value::Str(GcPtr::new(captured)))
         }
         // Analysis-only KnownFns: variants the analyzer cares about but
         // the interpreter has no specialised path for.  Fall back to a

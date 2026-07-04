@@ -328,9 +328,18 @@ without going through the stubs:
 | `alter-var-root` | `dispatch_sentinel_by_name` → `eval_alter_var_root` |
 | `vary-meta` | `dispatch_sentinel_by_name` → `eval_vary_meta` |
 | `send` / `send-off` | `dispatch_sentinel_by_name` → `eval_send_to_agent` |
+| `with-out-str` (`KnownFn::WithOutStr`) | native: `push_output_capture` → apply body thunk → `pop_output_capture` (the clojure.core var is a nil stub and must never be called) |
+| `(.method target args…)` interop | `dispatch_sentinel_by_name` intercepts dot-prefixed `CallDirect` names → `cljrs_interp::apply::dispatch_method` |
 
 Both `Inst::Call` (where the callee register holds a sentinel `NativeFunction`)
 and `Inst::CallDirect` (where the callee is named directly) are intercepted.
+
+`load_global_value` additionally mirrors `eval_symbol`'s whole-symbol lookup:
+when `(ns, name)` resolution fails, it retries `"{ns}/{name}"` in the defining
+namespace (with the clojure.core refers fallback), so slash-named builtins
+like `Math/abs` — registered in clojure.core under their full name but split
+by the lowerer — resolve at Tier 1 exactly as they do tree-walked.
+(`rt_load_global` in cljrs-compiler does the same for compiled code.)
 
 ---
 

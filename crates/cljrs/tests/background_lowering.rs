@@ -204,3 +204,81 @@ fn ir_threshold_zero_disables_background_lowering() {
         "lowering ran despite --ir-threshold 0:\n{stderr}"
     );
 }
+
+/// Regression for the Tier-1 "not callable" family: forms the tree-walker
+/// implements specially must not lower to generic calls of their clojure.core
+/// stub vars (which return nil) or to unresolvable globals.  Each shape below
+/// worked tree-walked and broke permanently once its function crossed the
+/// warm threshold:
+///
+/// - `(.method target …)` interop lowered to `LoadGlobal(ns, ".method")` →
+///   "var not found ns/.method" at Tier 1 (and a nil call — "not callable:
+///   <nil> is not callable" — once JIT-compiled).  Now lowers to a dot-marked
+///   `CallDirect` routed to the interpreter's method dispatch.
+/// - `Math/abs` is registered in clojure.core under its full slash name, but
+///   lowering split it into (ns="Math", name="abs") → "var not found".  Both
+///   `load_global_value` and `rt_load_global` now retry the whole name.
+/// - `((var f) …)` lowered to a call of the `var` stub → nil → "not callable:
+///   <nil> is not callable".  Now lowers to `LoadVar` like `#'f`.
+/// - `(with-out-str …)` dispatched KnownFn::WithOutStr to the clojure.core
+///   stub → returned nil.  Now captures output natively.
+#[test]
+fn interpreter_special_shapes_survive_promotion() {
+    let src = r#"
+        (defn shout [s] (.toUpperCase s))
+        (defn measure [s] (+ (.length s) (.indexOf s "b")))
+        (defn absolutize [x] (Math/abs x))
+        (defn leaf [x] (str "v" x))
+        (defn via-var [x] ((var leaf) x))
+        (defn capture [x] (with-out-str (print "out" x)))
+        (loop [i 0]
+          (when (< i 200)
+            (when (not= (shout "abc") "ABC") (println "WRONG-interop at" i))
+            (when (not= (measure "abc") 4) (println "WRONG-measure at" i))
+            (when (not= (absolutize -7) 7) (println "WRONG-math at" i))
+            (when (not= (via-var 3) "v3") (println "WRONG-var at" i (via-var 3)))
+            (when (not= (capture 1) "out 1") (println "WRONG-wos at" i (capture 1)))
+            (recur (+ i 1))))
+        (println "special-shapes ok")
+    "#;
+    let (stdout, stderr) = run_warm(src, &[], &[]);
+    assert!(
+        !stdout.contains("WRONG"),
+        "interpreter-special shape diverged after warm-up:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stdout.contains("special-shapes ok"),
+        "program did not complete:\n{stdout}\nstderr:\n{stderr}"
+    );
+}
+
+/// Interpreter-only special forms with no IR equivalent (defmulti, defmethod,
+/// defrecord, reify, …) must be *rejected* by lowering — the function stays
+/// at Tier 0 — rather than lowered to calls of their nil stub vars.  A
+/// defmethod registered from inside a warm function must keep taking effect
+/// after the warm threshold.
+#[test]
+fn interpreter_only_forms_stay_at_tier0() {
+    let src = r#"
+        (defmulti pick :kind)
+        (defmethod pick :default [m] :none)
+        (defn install [k v]
+          (defmethod pick k [m] v)
+          k)
+        (loop [i 0]
+          (when (< i 60)
+            (install :a :got-a)
+            (when (not= (pick {:kind :a}) :got-a) (println "WRONG-defmethod at" i))
+            (recur (+ i 1))))
+        (println "tier0-forms ok")
+    "#;
+    let (stdout, stderr) = run_warm(src, &[], &[]);
+    assert!(
+        !stdout.contains("WRONG"),
+        "defmethod inside a warm fn stopped registering:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stdout.contains("tier0-forms ok"),
+        "program did not complete:\n{stdout}\nstderr:\n{stderr}"
+    );
+}
