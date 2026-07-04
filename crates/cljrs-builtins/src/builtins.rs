@@ -3619,7 +3619,8 @@ fn builtin_into(args: &[Value]) -> ValueResult<Value> {
         }
         return Ok(acc);
     }
-    let mut result = args[0].clone();
+    let meta = args[0].get_meta().cloned();
+    let mut result = args[0].unwrap_meta().clone();
     let mut iter = ValueIter::new(args[1].clone());
     for item in iter.by_ref() {
         result = match result {
@@ -3653,7 +3654,10 @@ fn builtin_into(args: &[Value]) -> ValueResult<Value> {
     if let Some(err) = iter.take_error() {
         return Err(ValueError::Other(err));
     }
-    Ok(result)
+    Ok(match meta {
+        Some(m) => result.with_meta(m),
+        None => result,
+    })
 }
 
 fn builtin_reduce(args: &[Value]) -> ValueResult<Value> {
