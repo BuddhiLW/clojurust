@@ -123,6 +123,19 @@ the `LoadGlobal` name string, and lowering inside a versioned namespace
 (`"base@sha"`) rewrites base-qualified self-references (`base/x`) to the
 versioned namespace (see `split_sym` in `lower/anf.rs`).
 
+Method interop needs no dedicated instruction either: `(.method target args…)`
+lowers to `CallDirect(dst, ".method", [target, args…])` — the leading dot in
+the name is the marker.  The IR interpreter routes these to the tree-walker's
+`dispatch_method`; Cranelift/wasm codegen reject the unknown name, so
+interop-bearing functions decline JIT compilation instead of miscompiling to
+a nil call.  `(var sym)` lowers to `LoadVar` exactly like the `#'sym` reader
+form.  Interpreter-only special forms with no IR equivalent (`defprotocol`,
+`extend-type`, `extend-protocol`, `defmulti`, `defmethod`, `defrecord`,
+`deftype`, `reify`, `defn-`, bare `.`) are **rejected**
+(`LowerError::UnsupportedForm`) so the function stays at tree-walk — lowering
+them as generic calls would resolve their clojure.core stub vars, which
+return nil and silently corrupt the promoted function.
+
 `Const`, `LoadLocal`, `LoadGlobal`, `LoadVar`, `AllocVector`, `AllocMap`,
 `AllocSet`, `AllocList`, `AllocCons`, `AllocClosure`, `CallKnown`, `Call`,
 `CallDirect`, `Deref`, `DefVar`, `SetBang`, `Throw`, `Phi`, `Recur`,
