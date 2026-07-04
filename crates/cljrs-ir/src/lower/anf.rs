@@ -674,20 +674,36 @@ fn lower_destructure_associative(
         let k = &pairs[i];
         let v = &pairs[i + 1];
 
-        match &k.kind {
-            FormKind::Keyword(kname) if kname == "keys" => {
+        // A `:keys`/`:strs`/`:syms` directive keyword may itself be
+        // namespace-qualified (`:person/keys [a b]`), supplying a default
+        // namespace for every unqualified symbol in its vector; an
+        // individual symbol's own namespace (`ui/dest`) takes precedence.
+        let directive = if let FormKind::Keyword(kname) = &k.kind {
+            Some(split_ns_name(kname))
+        } else {
+            None
+        };
+
+        match directive {
+            Some((directive_ns, "keys")) => {
                 if let FormKind::Vector(syms) = &v.kind {
                     for sym_form in syms {
                         if let FormKind::Symbol(sym) = &sym_form.kind {
-                            let kw_var = ctx.emit_const(Const::Keyword(Arc::from(sym.as_str())));
+                            let (sym_ns, sym_name) = split_ns_name(sym);
+                            let full_key = match sym_ns.or(directive_ns) {
+                                Some(ns) => format!("{ns}/{sym_name}"),
+                                None => sym_name.to_string(),
+                            };
+                            let kw_var =
+                                ctx.emit_const(Const::Keyword(Arc::from(full_key.as_str())));
                             let got = lower_emit_get(ctx, val, kw_var);
-                            let final_var = apply_default_if_nil(ctx, got, sym, &defaults)?;
-                            ctx.bind_local(Arc::from(sym.as_str()), final_var);
+                            let final_var = apply_default_if_nil(ctx, got, sym_name, &defaults)?;
+                            ctx.bind_local(Arc::from(sym_name), final_var);
                         }
                     }
                 }
             }
-            FormKind::Keyword(kname) if kname == "strs" => {
+            Some((_, "strs")) => {
                 if let FormKind::Vector(syms) = &v.kind {
                     for sym_form in syms {
                         if let FormKind::Symbol(sym) = &sym_form.kind {
@@ -699,24 +715,30 @@ fn lower_destructure_associative(
                     }
                 }
             }
-            FormKind::Keyword(kname) if kname == "syms" => {
+            Some((directive_ns, "syms")) => {
                 if let FormKind::Vector(syms) = &v.kind {
                     for sym_form in syms {
                         if let FormKind::Symbol(sym) = &sym_form.kind {
-                            let sym_var = ctx.emit_const(Const::Symbol(Arc::from(sym.as_str())));
+                            let (sym_ns, sym_name) = split_ns_name(sym);
+                            let full_key = match sym_ns.or(directive_ns) {
+                                Some(ns) => format!("{ns}/{sym_name}"),
+                                None => sym_name.to_string(),
+                            };
+                            let sym_var =
+                                ctx.emit_const(Const::Symbol(Arc::from(full_key.as_str())));
                             let got = lower_emit_get(ctx, val, sym_var);
-                            let final_var = apply_default_if_nil(ctx, got, sym, &defaults)?;
-                            ctx.bind_local(Arc::from(sym.as_str()), final_var);
+                            let final_var = apply_default_if_nil(ctx, got, sym_name, &defaults)?;
+                            ctx.bind_local(Arc::from(sym_name), final_var);
                         }
                     }
                 }
             }
-            FormKind::Keyword(kname) if kname == "as" => {
+            Some((_, "as")) => {
                 if let FormKind::Symbol(sym) = &v.kind {
                     ctx.bind_local(Arc::from(sym.as_str()), val);
                 }
             }
-            FormKind::Keyword(kname) if kname == "or" => {
+            Some((_, "or")) => {
                 // Already collected above; skip.
             }
             _ => {
@@ -2686,6 +2708,17 @@ fn split_sym(s: &str, current_ns: &Arc<str>) -> (Arc<str>, Arc<str>) {
             (Arc::from(ns_part), Arc::from(&s[pos + 1..]))
         }
         None => (current_ns.clone(), Arc::from(s)),
+    }
+}
+
+/// Split `s` into an optional namespace and a bare name on the first `/`,
+/// with no namespace defaulting (unlike `split_sym`). Mirrors
+/// `cljrs_value::keyword::Keyword::parse` / `Symbol::parse` (cljrs-ir cannot
+/// depend on cljrs-value).
+fn split_ns_name(s: &str) -> (Option<&str>, &str) {
+    match s.find('/') {
+        Some(idx) if idx > 0 && idx < s.len() - 1 => (Some(&s[..idx]), &s[idx + 1..]),
+        _ => (None, s),
     }
 }
 
