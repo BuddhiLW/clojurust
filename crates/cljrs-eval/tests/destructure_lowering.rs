@@ -82,6 +82,14 @@ fn vec_of(items: impl IntoIterator<Item = Value>) -> Value {
     Value::Vector(cljrs_gc::GcPtr::new(PersistentVector::from_iter(items)))
 }
 
+fn map_of(pairs: impl IntoIterator<Item = (Value, Value)>) -> Value {
+    let mut m = cljrs_value::MapValue::empty();
+    for (k, v) in pairs {
+        m = m.assoc(k, v);
+    }
+    Value::Map(m)
+}
+
 #[test]
 fn sequential_destructure_binds_first_element() {
     // (fn [[a b]] a) called with [10 3] => 10
@@ -94,6 +102,34 @@ fn sequential_destructure_binds_second_element() {
     // (fn [[a b]] b) called with [10 3] => 3
     let got = run_destructured("[a b]", "b", vec_of([Value::Long(10), Value::Long(3)]));
     assert_eq!(got, Value::Long(3));
+}
+
+#[test]
+fn keys_destructure_binds_namespaced_symbol() {
+    // (fn [{:keys [ui/dest]}] dest) called with {:ui/dest 2} => 2
+    let got = run_destructured(
+        "{:keys [ui/dest]}",
+        "dest",
+        map_of([(
+            Value::keyword(cljrs_value::Keyword::qualified("ui", "dest")),
+            Value::Long(2),
+        )]),
+    );
+    assert_eq!(got, Value::Long(2));
+}
+
+#[test]
+fn keys_destructure_binds_namespaced_directive() {
+    // (fn [{:ui/keys [dest]}] dest) called with {:ui/dest 2} => 2
+    let got = run_destructured(
+        "{:ui/keys [dest]}",
+        "dest",
+        map_of([(
+            Value::keyword(cljrs_value::Keyword::qualified("ui", "dest")),
+            Value::Long(2),
+        )]),
+    );
+    assert_eq!(got, Value::Long(2));
 }
 
 #[test]

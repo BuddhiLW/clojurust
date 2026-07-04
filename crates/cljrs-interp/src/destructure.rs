@@ -190,19 +190,41 @@ pub fn bind_associative(pattern: &[Form], val: &Value, env: &mut Env) -> EvalRes
         let v = &pattern[i + 1];
         i += 2;
 
+        // A `:keys`/`:strs`/`:syms` keyword may itself be namespace-qualified
+        // (`:person/keys [a b]`), supplying a default namespace for every
+        // unqualified symbol in its vector; an individual symbol's own
+        // namespace (`ui/dest`) takes precedence over that default.
+        let directive_ns = if let FormKind::Keyword(kw) = &k.kind {
+            Keyword::parse(kw).namespace
+        } else {
+            None
+        };
+        let directive_name = if let FormKind::Keyword(kw) = &k.kind {
+            Keyword::parse(kw).name.to_string()
+        } else {
+            String::new()
+        };
+
         match &k.kind {
-            FormKind::Keyword(kw) if kw == "keys" => {
+            FormKind::Keyword(_) if directive_name == "keys" => {
                 if let FormKind::Vector(syms) = &v.kind {
                     for sym_form in syms {
                         if let FormKind::Symbol(sym) = &sym_form.kind {
-                            let key = Value::keyword(Keyword::simple(sym.as_str()));
+                            let parsed = Symbol::parse(sym);
+                            let key =
+                                match parsed.namespace.clone().or_else(|| directive_ns.clone()) {
+                                    Some(ns) => {
+                                        Value::keyword(Keyword::qualified(ns, parsed.name.clone()))
+                                    }
+                                    None => Value::keyword(Keyword::simple(parsed.name.clone())),
+                                };
                             let mut bound_val = get_val(&key);
                             if matches!(bound_val, Value::Nil)
-                                && let Some(d) = defaults.get(sym.as_str())
+                                && let Some(d) = defaults.get(parsed.name.as_ref())
                             {
                                 bound_val = d.clone();
                             }
-                            env.bind(Arc::from(sym.as_str()), bound_val);
+                            env.bind(parsed.name.clone(), bound_val);
                         }
                     }
                 }
@@ -223,18 +245,25 @@ pub fn bind_associative(pattern: &[Form], val: &Value, env: &mut Env) -> EvalRes
                     }
                 }
             }
-            FormKind::Keyword(kw) if kw == "syms" => {
+            FormKind::Keyword(_) if directive_name == "syms" => {
                 if let FormKind::Vector(syms) = &v.kind {
                     for sym_form in syms {
                         if let FormKind::Symbol(sym) = &sym_form.kind {
-                            let key = Value::symbol(Symbol::simple(sym.as_str()));
+                            let parsed = Symbol::parse(sym);
+                            let key =
+                                match parsed.namespace.clone().or_else(|| directive_ns.clone()) {
+                                    Some(ns) => {
+                                        Value::symbol(Symbol::qualified(ns, parsed.name.clone()))
+                                    }
+                                    None => Value::symbol(Symbol::simple(parsed.name.clone())),
+                                };
                             let mut bound_val = get_val(&key);
                             if matches!(bound_val, Value::Nil)
-                                && let Some(d) = defaults.get(sym.as_str())
+                                && let Some(d) = defaults.get(parsed.name.as_ref())
                             {
                                 bound_val = d.clone();
                             }
-                            env.bind(Arc::from(sym.as_str()), bound_val);
+                            env.bind(parsed.name.clone(), bound_val);
                         }
                     }
                 }
