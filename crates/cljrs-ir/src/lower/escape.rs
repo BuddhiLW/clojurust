@@ -84,8 +84,14 @@ pub(crate) fn known_fn_arg_escapes(func: &KnownFn, arg_index: usize) -> bool {
         Rest | Next | Seq => arg_index == 0,
         Pop | Vec => arg_index == 0,
         Transient => arg_index == 0,
-        AssocBang | ConjBang => arg_index == 0,
         PersistentBang => arg_index == 0,
+
+        // `assoc!`/`conj!` mutate arg 0 *and* retain the newly stored
+        // value(s) inside it — unlike `dissoc`/`disj` (which only consult a
+        // key/item to discard), the added value's lifetime becomes bound to
+        // the transient's. Falls through to the default (all args escape),
+        // matching how plain `assoc`/`conj` are handled (neither is listed
+        // above, so both already use the `true` default).
 
         // Default: argument escapes
         _ => true,
