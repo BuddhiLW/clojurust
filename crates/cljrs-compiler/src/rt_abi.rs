@@ -1201,7 +1201,7 @@ pub unsafe extern "C" fn rt_alloc_cons(head: *const Value, tail: *const Value) -
 /// Both pointers must be valid.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rt_get(coll: *const Value, key: *const Value) -> *const Value {
-    let coll = unsafe { val_ref(coll) };
+    let coll = unsafe { val_ref(coll) }.unwrap_meta();
     let key = unsafe { val_ref(key) };
     let result = match coll {
         Value::Map(m) => m.get(key),
@@ -1224,7 +1224,7 @@ pub unsafe extern "C" fn rt_get(coll: *const Value, key: *const Value) -> *const
 /// `coll` must be a valid pointer.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rt_count(coll: *const Value) -> *const Value {
-    let coll = unsafe { val_ref(coll) };
+    let coll = unsafe { val_ref(coll) }.unwrap_meta();
     let n = match coll {
         Value::Vector(v) => v.get().count(),
         Value::Map(m) => m.count(),
@@ -1640,7 +1640,7 @@ pub unsafe extern "C" fn rt_into_map(
 /// `coll` must be a valid pointer.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rt_is_empty(coll: *const Value) -> *const Value {
-    let coll = unsafe { val_ref(coll) };
+    let coll = unsafe { val_ref(coll) }.unwrap_meta();
     let empty = match coll {
         Value::Vector(v) => v.get().is_empty(),
         Value::Map(m) => m.count() == 0,
@@ -1659,7 +1659,7 @@ pub unsafe extern "C" fn rt_is_empty(coll: *const Value) -> *const Value {
 /// `coll` must be a valid pointer.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rt_first(coll: *const Value) -> *const Value {
-    let coll_ref = unsafe { val_ref(coll) };
+    let coll_ref = unsafe { val_ref(coll) }.unwrap_meta();
     match coll_ref {
         // Return interior pointer for Vector — no alloc needed.
         Value::Vector(v) => match v.get().nth(0) {
@@ -1691,7 +1691,7 @@ pub unsafe extern "C" fn rt_first(coll: *const Value) -> *const Value {
 /// `coll` must be a valid pointer.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rt_rest(coll: *const Value) -> *const Value {
-    let coll_ref = unsafe { val_ref(coll) };
+    let coll_ref = unsafe { val_ref(coll) }.unwrap_meta();
     match coll_ref {
         Value::List(l) => {
             let rest = (*l.get().rest()).clone();
@@ -1753,7 +1753,7 @@ pub unsafe extern "C" fn rt_assoc(
     k: *const Value,
     v: *const Value,
 ) -> *const Value {
-    let m = unsafe { val_ref(m) };
+    let m = unsafe { val_ref(m) }.unwrap_meta();
     let k = unsafe { val_ref(k) }.clone();
     let v = unsafe { val_ref(v) }.clone();
     match m {
@@ -1779,7 +1779,7 @@ pub unsafe extern "C" fn rt_assoc(
 /// Both pointers must be valid.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rt_conj(coll: *const Value, val: *const Value) -> *const Value {
-    let coll = unsafe { val_ref(coll) };
+    let coll = unsafe { val_ref(coll) }.unwrap_meta();
     let val = unsafe { val_ref(val) }.clone();
     match coll {
         Value::Vector(v) => {
@@ -2687,14 +2687,17 @@ pub unsafe extern "C" fn rt_is_seq(v: *const Value) -> *const Value {
 /// `v` must be a valid pointer.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rt_is_vector(v: *const Value) -> *const Value {
-    intern_bool(matches!(unsafe { val_ref(v) }, Value::Vector(_)))
+    intern_bool(matches!(
+        unsafe { val_ref(v) }.unwrap_meta(),
+        Value::Vector(_)
+    ))
 }
 
 /// # Safety
 /// `v` must be a valid pointer.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rt_is_map(v: *const Value) -> *const Value {
-    intern_bool(matches!(unsafe { val_ref(v) }, Value::Map(_)))
+    intern_bool(matches!(unsafe { val_ref(v) }.unwrap_meta(), Value::Map(_)))
 }
 
 // ── Identity ────────────────────────────────────────────────────────────────
@@ -2776,7 +2779,7 @@ pub unsafe extern "C" fn rt_with_out_str(body_fn: *const Value) -> *const Value 
 /// Both pointers must be valid.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rt_dissoc(m: *const Value, k: *const Value) -> *const Value {
-    let m = unsafe { val_ref(m) };
+    let m = unsafe { val_ref(m) }.unwrap_meta();
     let k = unsafe { val_ref(k) };
     match m {
         Value::Map(map) => box_coll_val(Value::Map(map.dissoc(k))),
@@ -2790,7 +2793,7 @@ pub unsafe extern "C" fn rt_dissoc(m: *const Value, k: *const Value) -> *const V
 /// Both pointers must be valid.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rt_disj(set: *const Value, val: *const Value) -> *const Value {
-    let set = unsafe { val_ref(set) };
+    let set = unsafe { val_ref(set) }.unwrap_meta();
     let val = unsafe { val_ref(val) };
     match set {
         Value::Set(s) => box_coll_val(Value::Set(s.disj(val))),
@@ -2804,7 +2807,7 @@ pub unsafe extern "C" fn rt_disj(set: *const Value, val: *const Value) -> *const
 /// Both pointers must be valid.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rt_nth(coll: *const Value, idx: *const Value) -> *const Value {
-    let coll = unsafe { val_ref(coll) };
+    let coll = unsafe { val_ref(coll) }.unwrap_meta();
     let idx = unsafe { val_ref(idx) };
     let i = match idx {
         Value::Long(n) => *n as usize,
@@ -2834,7 +2837,7 @@ pub unsafe extern "C" fn rt_nth(coll: *const Value, idx: *const Value) -> *const
 /// Both pointers must be valid.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rt_contains(coll: *const Value, key: *const Value) -> *const Value {
-    let coll = unsafe { val_ref(coll) };
+    let coll = unsafe { val_ref(coll) }.unwrap_meta();
     let key = unsafe { val_ref(key) };
     let result = match coll {
         Value::Map(m) => m.contains_key(key),
@@ -2860,7 +2863,7 @@ pub unsafe extern "C" fn rt_contains(coll: *const Value, key: *const Value) -> *
 /// `coll` must be a valid pointer.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rt_seq(coll: *const Value) -> *const Value {
-    let coll_ref = unsafe { val_ref(coll) };
+    let coll_ref = unsafe { val_ref(coll) }.unwrap_meta();
     match coll_ref {
         Value::Nil => rt_const_nil(),
         Value::List(l) => {
@@ -2960,7 +2963,7 @@ pub unsafe extern "C" fn rt_lazy_seq(thunk_fn: *const Value) -> *const Value {
 pub unsafe extern "C" fn rt_transient(coll: *const Value) -> *const Value {
     use cljrs_value::collections::{TransientMap, TransientSet, TransientVector};
 
-    let coll = unsafe { val_ref(coll) };
+    let coll = unsafe { val_ref(coll) }.unwrap_meta();
     match coll {
         Value::Vector(v) => box_val(Value::TransientVector(GcPtr::new(
             TransientVector::new_from_vector(v.get().inner()),
@@ -3117,6 +3120,13 @@ pub unsafe extern "C" fn rt_atom_swap(
                 args.extend(extra.iter().cloned());
                 match cljrs_env::callback::invoke(&f, args) {
                     Ok(new_val) => {
+                        // Heap-promotion fallback (see `Atom::reset`): an atom
+                        // is program-lifetime shared state, so a region-tagged
+                        // value must be deep-copied to the GC heap (or the
+                        // region poisoned) *before* it is stored here — this
+                        // CAS loop bypasses `Atom::reset`, so it must run the
+                        // barrier itself instead of silently skipping it.
+                        let new_val = cljrs_value::publish::publish_value(new_val);
                         let mut guard = a.get().value.lock().unwrap();
                         if *guard == current {
                             *guard = new_val.clone();
