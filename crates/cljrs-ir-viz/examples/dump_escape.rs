@@ -94,7 +94,9 @@ fn describe_use(kind: &UseKind) -> String {
         UseKind::Throw => "Throw".into(),
         UseKind::StoredInHeap => "StoredInHeap".into(),
         UseKind::Recur => "Recur".into(),
-        UseKind::KnownCallArg { func, arg_index } => {
+        UseKind::KnownCallArg {
+            func, arg_index, ..
+        } => {
             format!("KnownCall({func:?}, arg {arg_index})")
         }
         UseKind::UnknownCallArg { arg_index, .. } => format!("UnknownCall(arg {arg_index})"),
