@@ -380,6 +380,33 @@ fn stage4_skipped_when_callee_result_escapes() {
 }
 
 #[test]
+fn stage4_skipped_when_callee_result_conjd_into_transient() {
+    // `conj!`/`assoc!` mutate their collection arg *and* retain the newly
+    // added value inside it — same as plain `conj`/`assoc`.  A caller that
+    // conj!'s a callee's `Returns`-tagged result into a transient it then
+    // returns must classify that result as escaping (`Returns`), not
+    // `NoEscape` — otherwise stage 4 clones the callee into a region-scoped
+    // variant whose allocation is freed at the *conj! call site*, well before
+    // the transient (and the value it retains) escapes to this function's own
+    // caller. This mirrors the real-world `(conj! coll (f x))` shape used by
+    // Replicant's `flatten-map-seqs*`/`get-children-ks`.
+    let ir = lower(
+        "(do
+           (defn make-pair [a b]
+             (let [f (fn [x] x)]
+               [a b]))
+           (defn collect-pair [coll x] (conj! coll (make-pair x x))))",
+    );
+    let optimized = optimize(ir);
+    assert_eq!(
+        call_with_region_count(&optimized),
+        0,
+        "no CallWithRegion should be emitted when the call result is conj!'d \
+         into a collection that escapes; IR:\n{optimized}"
+    );
+}
+
+#[test]
 fn stage4_inline_first_falls_back_to_promotion() {
     // When the callee is small enough to inline, stage-1 inlining handles it
     // and stage 4 has nothing to do.  This test verifies that the small
