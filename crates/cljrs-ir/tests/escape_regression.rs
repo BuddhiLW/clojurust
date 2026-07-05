@@ -641,3 +641,33 @@ fn count_filter_not_fused_when_filter_escapes() {
 fn _arc_witness() -> Arc<str> {
     Arc::from("x")
 }
+
+#[test]
+fn stage4_skipped_when_one_destructured_binding_escapes() {
+    // A 4-way destructuring bind `[a b c d] (make-pair x x)` lowers to four
+    // separate `NthLenient` calls on the same tuple var, all in one block.
+    // Only `b` is used afterwards (in the returned vector literal); `a`,
+    // `c`, and `d` are dead. A use-chain walk that resolves "the NthLenient
+    // call on this var" by re-scanning the block for *any* matching
+    // `(func, contains(var))` instruction always finds the same (here dead)
+    // first match — so it never looks at `b`'s use, and wrongly concludes
+    // the whole tuple is `NoEscape`. Each use must instead carry the exact
+    // `CallKnown` dst it belongs to, so `b`'s escaping use is the one
+    // actually walked.
+    let ir = lower(
+        "(do
+           (defn make-pair [a b]
+             (let [f (fn [x] x)]
+               [a b :c :d]))
+           (defn wrap [x]
+             (let [[a b c d] (make-pair x x)]
+               [1 b 3])))",
+    );
+    let optimized = optimize(ir);
+    assert_eq!(
+        call_with_region_count(&optimized),
+        0,
+        "no CallWithRegion should be emitted when a destructured binding \
+         escapes into a returned vector; IR:\n{optimized}"
+    );
+}

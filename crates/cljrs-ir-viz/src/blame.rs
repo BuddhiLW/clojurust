@@ -56,7 +56,9 @@ pub fn use_kind_label(kind: &UseKind) -> String {
         UseKind::Throw => "thrown".into(),
         UseKind::StoredInHeap => "stored into heap object".into(),
         UseKind::Recur => "passed to recur".into(),
-        UseKind::KnownCallArg { func, arg_index } => {
+        UseKind::KnownCallArg {
+            func, arg_index, ..
+        } => {
             format!("arg {arg_index} of known call {func:?}")
         }
         UseKind::UnknownCallArg { arg_index, .. } => {

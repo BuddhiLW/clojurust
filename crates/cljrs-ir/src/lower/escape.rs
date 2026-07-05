@@ -44,8 +44,24 @@ pub enum UseKind {
     Throw,
     StoredInHeap,
     Recur,
-    KnownCallArg { func: KnownFn, arg_index: usize },
-    UnknownCallArg { callee: VarId, arg_index: usize },
+    KnownCallArg {
+        func: KnownFn,
+        arg_index: usize,
+        /// The `dst` of the specific `CallKnown` instruction this use
+        /// belongs to — recorded at use-collection time so callers never
+        /// need to re-scan the block for "a" matching call. Re-scanning by
+        /// `(func, contains(var))` alone is ambiguous whenever the same var
+        /// feeds *multiple* calls to the same known fn in one block (e.g. a
+        /// 4-way destructuring bind lowers to four separate `NthLenient`
+        /// calls on the same tuple var) — a naive first-match re-scan always
+        /// resolves to the same (possibly dead) call, silently losing the
+        /// escape contribution of every other one.
+        dst: VarId,
+    },
+    UnknownCallArg {
+        callee: VarId,
+        arg_index: usize,
+    },
     PhiInput,
     BranchCond,
     Deref,
@@ -64,20 +80,21 @@ pub struct UseInfo {
 pub(crate) fn known_fn_arg_escapes(func: &KnownFn, arg_index: usize) -> bool {
     use KnownFn::*;
     match func {
-        // Non-escaping: predicates, arithmetic, I/O, lookups that return a
-        // freshly boxed/copied element (`Get` clones the value out).
-        Get | Count | CountFilter | Contains | Add | Sub | Mul | Div | Rem | Eq | Lt | Gt | Lte
-        | Gte | IsNil | IsSeq | IsVector | IsMap | IsEmpty | Identical | IsNumber | IsString
+        // Non-escaping: predicates, arithmetic, I/O.
+        Count | CountFilter | Contains | Add | Sub | Mul | Div | Rem | Eq | Lt | Gt | Lte | Gte
+        | IsNil | IsSeq | IsVector | IsMap | IsEmpty | Identical | IsNumber | IsString
         | IsKeyword | IsSymbol | IsBool | IsInt | Str | Deref | AtomDeref | Println | Pr | Prn
         | Print => false,
 
         // These return an *interior pointer* aliasing arg 0's storage
-        // (`rt_first`/`rt_nth`/`rt_peek` hand back `&elem` into the vector/leaf,
-        // not a fresh box).  The returned element therefore shares the
-        // collection's lifetime: if it escapes, arg 0 must be treated as
-        // escaping too, or arg 0 could be region-allocated and freed while the
-        // interior pointer is still live (use-after-free / heap corruption).
-        First | Nth | NthLenient | Peek => arg_index == 0,
+        // (`rt_first`/`rt_nth`/`rt_peek`/`rt_get` hand back a clone of the
+        // stored `Value` — a shallow clone that shares the same `GcPtr` for
+        // any heap-backed element (vector/map/string/...), not a fresh box).
+        // The returned element therefore shares the collection's lifetime: if
+        // it escapes, arg 0 must be treated as escaping too, or arg 0 could be
+        // region-allocated and freed while the interior pointer is still live
+        // (use-after-free / heap corruption).
+        First | Nth | NthLenient | Peek | Get => arg_index == 0,
 
         // These return a modified copy of arg 0 → arg 0 escapes; others don't
         Dissoc | Disj => arg_index == 0,
@@ -137,7 +154,7 @@ fn add_use(uses: &mut HashMap<VarId, Vec<UseInfo>>, var: VarId, block: BlockId, 
 
 fn add_uses_for_inst(uses: &mut HashMap<VarId, Vec<UseInfo>>, inst: &Inst, block_id: BlockId) {
     match inst {
-        Inst::CallKnown(_, func, args) => {
+        Inst::CallKnown(call_dst, func, args) => {
             for (i, &arg) in args.iter().enumerate() {
                 add_use(
                     uses,
@@ -146,6 +163,7 @@ fn add_uses_for_inst(uses: &mut HashMap<VarId, Vec<UseInfo>>, inst: &Inst, block
                     UseKind::KnownCallArg {
                         func: func.clone(),
                         arg_index: i,
+                        dst: *call_dst,
                     },
                 );
             }
@@ -395,25 +413,6 @@ fn resolve_call_target(
 }
 
 // ── Find helpers ─────────────────────────────────────────────────────────────
-
-/// Find the destination of a CallKnown for `known_fn` that uses `used_var` in `block_id`.
-fn find_call_result(
-    used_var: VarId,
-    known_fn: &KnownFn,
-    ir_func: &IrFunction,
-    block_id: BlockId,
-) -> Option<VarId> {
-    let block = ir_func.blocks.iter().find(|b| b.id == block_id)?;
-    for inst in &block.insts {
-        if let Inst::CallKnown(dst, func, args) = inst
-            && func == known_fn
-            && args.contains(&used_var)
-        {
-            return Some(*dst);
-        }
-    }
-    None
-}
 
 /// Walk from a `Recur` use back to the loop-header phi(s) that the
 /// recur arg feeds.  Returns the destination `VarId` of each matching
@@ -711,18 +710,18 @@ pub(crate) fn classify_escape_with_ctx(
                     }
                     let _ = arg_index; // suppress unused warning
                 }
-                UseKind::KnownCallArg { func, arg_index }
-                    if known_fn_arg_escapes(func, *arg_index) =>
-                {
-                    // The call result may carry this alloc
-                    if let Some(call_result) =
-                        find_call_result(current, func, ir_func, use_info.block)
-                    {
-                        worklist.push_back(call_result);
-                    } else {
-                        result = EscapeState::Escapes;
-                        break 'outer;
-                    }
+                UseKind::KnownCallArg {
+                    func,
+                    arg_index,
+                    dst,
+                } if known_fn_arg_escapes(func, *arg_index) => {
+                    // The call result may carry this alloc.  `dst` was
+                    // recorded directly against *this* use at use-collection
+                    // time, so it names the exact `CallKnown` this use
+                    // belongs to — unlike a `(func, contains(var))` re-scan,
+                    // it can't resolve to some other call to the same known
+                    // fn on the same var earlier in the block.
+                    worklist.push_back(*dst);
                 }
                 UseKind::KnownCallArg { .. } => {
                     // doesn't escape through this call

@@ -303,20 +303,18 @@ pub(crate) fn collect_use_blocks(
         for use_info in uses.get(&current).into_iter().flatten() {
             use_blocks.insert(use_info.block);
             match &use_info.kind {
-                UseKind::KnownCallArg { func, arg_index }
-                    if known_fn_arg_escapes(func, *arg_index) =>
-                {
-                    // Find the call result and propagate
-                    if let Some(block) = ir_func.blocks.iter().find(|b| b.id == use_info.block) {
-                        for inst in &block.insts {
-                            if let Inst::CallKnown(dst, f, args) = inst
-                                && f == func
-                                && args.contains(&current)
-                            {
-                                worklist.push(*dst);
-                            }
-                        }
-                    }
+                UseKind::KnownCallArg {
+                    func,
+                    arg_index,
+                    dst,
+                } if known_fn_arg_escapes(func, *arg_index) => {
+                    // `dst` names the exact `CallKnown` this use belongs to
+                    // (recorded at use-collection time), so propagate to it
+                    // directly instead of re-scanning the block — a
+                    // `(func, contains(var))` re-scan is ambiguous whenever
+                    // the same var feeds multiple calls to the same known fn
+                    // in one block.
+                    worklist.push(*dst);
                 }
                 UseKind::KnownCallArg { .. } => {}
                 UseKind::PhiInput => {

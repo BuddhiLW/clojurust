@@ -208,26 +208,6 @@ fn deep_returns_allocs(callee: &IrFunction, shallow: &HashSet<VarId>) -> HashSet
     result
 }
 
-/// Locate the result of a `CallKnown(_, kf, args)` in `block_id` whose
-/// arguments include `used_var`.
-fn find_known_call_result(
-    func: &IrFunction,
-    used_var: VarId,
-    kf: &KnownFn,
-    block_id: crate::BlockId,
-) -> Option<VarId> {
-    let block = func.blocks.iter().find(|b| b.id == block_id)?;
-    for inst in &block.insts {
-        if let Inst::CallKnown(dst, f, args) = inst
-            && f == kf
-            && args.contains(&used_var)
-        {
-            return Some(*dst);
-        }
-    }
-    None
-}
-
 /// Returns `true` when it is safe to co-promote the deep (container-contained)
 /// allocations of a call whose result is `dst`.
 ///
@@ -255,6 +235,7 @@ fn call_result_safe_for_deep(
                 UseKind::KnownCallArg {
                     func: kf,
                     arg_index,
+                    dst: call_dst,
                 } => {
                     // Element extractors return an inner pointer by reference.
                     if matches!(
@@ -267,12 +248,11 @@ fn call_result_safe_for_deep(
                     ) {
                         return false;
                     }
-                    // Forwarding fns: follow into the call result.
+                    // Forwarding fns: follow into the call result. `call_dst`
+                    // was recorded directly against this use, so it names the
+                    // exact `CallKnown` involved — no re-scan needed.
                     if known_fn_arg_escapes(kf, *arg_index) {
-                        match find_known_call_result(func, v, kf, use_info.block) {
-                            Some(r) => worklist.push(r),
-                            None => return false,
-                        }
+                        worklist.push(*call_dst);
                     }
                 }
                 UseKind::PhiInput => {
