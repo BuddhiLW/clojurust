@@ -258,9 +258,7 @@ mod tests {
     #[test]
     fn test_iteration_order_matches_insertion_order() {
         let mut m = PersistentHashMap::empty();
-        let keys = [
-            "j", "i", "h", "g", "f", "e", "d", "c", "b", "a", "z", "y",
-        ];
+        let keys = ["j", "i", "h", "g", "f", "e", "d", "c", "b", "a", "z", "y"];
         for k in keys {
             m = m.assoc(kw(k), int(0));
         }
