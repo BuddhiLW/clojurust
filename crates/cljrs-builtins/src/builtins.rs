@@ -4544,18 +4544,29 @@ fn assoc_in_impl(m: Value, keys: &[Value], val: Value) -> ValueResult<Value> {
     if keys.is_empty() {
         return Ok(val);
     }
+    // Unwrap metadata (like `get`/`assoc` do) so a map carrying meta isn't
+    // mistaken for a non-map and blown away to a fresh single-key map.
+    let meta = m.get_meta().cloned();
+    let base = m.unwrap_meta();
     let k = &keys[0];
-    let inner = match &m {
+    let inner = match base {
         Value::Map(map) => map.get(k).unwrap_or(Value::Nil),
-        Value::Nil => Value::Nil,
+        Value::TypeInstance(ti) => ti.get().fields.get(k).unwrap_or(Value::Nil),
         _ => Value::Nil,
     };
     let updated = assoc_in_impl(inner, &keys[1..], val)?;
-    match m {
-        Value::Map(map) => Ok(Value::Map(map.assoc(k.clone(), updated))),
-        Value::Nil => Ok(Value::Map(MapValue::empty().assoc(k.clone(), updated))),
-        _ => Ok(Value::Map(MapValue::empty().assoc(k.clone(), updated))),
-    }
+    let result = match base {
+        Value::Map(map) => Value::Map(map.assoc(k.clone(), updated)),
+        Value::TypeInstance(ti) => Value::TypeInstance(GcPtr::new(TypeInstance {
+            type_tag: ti.get().type_tag.clone(),
+            fields: ti.get().fields.assoc(k.clone(), updated),
+        })),
+        _ => Value::Map(MapValue::empty().assoc(k.clone(), updated)),
+    };
+    Ok(match meta {
+        Some(meta) => result.with_meta(meta),
+        None => result,
+    })
 }
 
 fn builtin_update_in_stub(_args: &[Value]) -> ValueResult<Value> {
