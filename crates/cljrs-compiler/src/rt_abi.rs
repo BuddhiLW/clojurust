@@ -66,6 +66,18 @@ fn box_val(v: Value) -> *const Value {
 /// Safety: the returned pointer is valid until the active region is popped
 /// (i.e. until `rt_region_end`).  The IR analysis guarantees collection values
 /// are consumed before that point.
+/// Reattach `meta` (captured from an input collection via `get_meta()`,
+/// before `unwrap_meta()` peeled it off to dispatch) to a freshly built
+/// result, matching the identity-preserving builtins (`assoc`/`conj`/
+/// `dissoc`/`disj`) in cljrs-builtins, which all do the same.
+#[inline]
+fn apply_meta(v: Value, meta: Option<Value>) -> Value {
+    match meta {
+        Some(m) => v.with_meta(m),
+        None => v,
+    }
+}
+
 #[inline]
 fn box_coll_val(v: Value) -> *const Value {
     if cljrs_gc::region::region_is_active() {
@@ -1753,21 +1765,29 @@ pub unsafe extern "C" fn rt_assoc(
     k: *const Value,
     v: *const Value,
 ) -> *const Value {
-    let m = unsafe { val_ref(m) }.unwrap_meta();
+    let m_ref = unsafe { val_ref(m) };
+    let meta = m_ref.get_meta().cloned();
+    let m = m_ref.unwrap_meta();
     let k = unsafe { val_ref(k) }.clone();
     let v = unsafe { val_ref(v) }.clone();
+    // `assoc` preserves the input's metadata on the result (matching
+    // `builtin_assoc`) — `unwrap_meta()` above only peels it off to dispatch
+    // on the underlying collection kind.
     match m {
         Value::Map(map) => {
             let new_map = map.assoc(k, v);
-            box_coll_val(Value::Map(new_map))
+            box_coll_val(apply_meta(Value::Map(new_map), meta))
         }
         Value::TypeInstance(ti) => {
             let mut fields = ti.get().fields.clone();
             fields = fields.assoc(k, v);
-            box_coll_val(Value::TypeInstance(alloc_inner_coll(TypeInstance {
-                type_tag: ti.get().type_tag.clone(),
-                fields,
-            })))
+            box_coll_val(apply_meta(
+                Value::TypeInstance(alloc_inner_coll(TypeInstance {
+                    type_tag: ti.get().type_tag.clone(),
+                    fields,
+                })),
+                meta,
+            ))
         }
         _ => rt_const_nil(),
     }
@@ -1779,25 +1799,32 @@ pub unsafe extern "C" fn rt_assoc(
 /// Both pointers must be valid.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rt_conj(coll: *const Value, val: *const Value) -> *const Value {
-    let coll = unsafe { val_ref(coll) }.unwrap_meta();
+    let coll_ref = unsafe { val_ref(coll) };
+    let meta = coll_ref.get_meta().cloned();
+    let coll = coll_ref.unwrap_meta();
     let val = unsafe { val_ref(val) }.clone();
+    // `conj` preserves the input's metadata on the result (matching
+    // `builtin_conj`).
     match coll {
         Value::Vector(v) => {
             let new_pv = v.get().conj(val);
-            box_coll_val(Value::Vector(alloc_inner_coll(new_pv)))
+            box_coll_val(apply_meta(Value::Vector(alloc_inner_coll(new_pv)), meta))
         }
         Value::List(l) => {
             let new_list = PersistentList::cons(val, Arc::new((*l.get()).clone()));
-            box_coll_val(Value::List(alloc_inner_coll(new_list)))
+            box_coll_val(apply_meta(Value::List(alloc_inner_coll(new_list)), meta))
         }
         Value::Set(SetValue::Hash(m)) => {
             let new_phs = m.get().conj(val);
-            box_coll_val(Value::Set(SetValue::Hash(alloc_inner_coll(new_phs))))
+            box_coll_val(apply_meta(
+                Value::Set(SetValue::Hash(alloc_inner_coll(new_phs))),
+                meta,
+            ))
         }
         Value::Set(s) => {
             // Sorted sets: delegate to interpreter (rare path)
             let new_set = s.conj(val);
-            box_coll_val(Value::Set(new_set))
+            box_coll_val(apply_meta(Value::Set(new_set), meta))
         }
         _ => rt_const_nil(),
     }
@@ -2779,10 +2806,14 @@ pub unsafe extern "C" fn rt_with_out_str(body_fn: *const Value) -> *const Value 
 /// Both pointers must be valid.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rt_dissoc(m: *const Value, k: *const Value) -> *const Value {
-    let m = unsafe { val_ref(m) }.unwrap_meta();
+    let m_ref = unsafe { val_ref(m) };
+    let meta = m_ref.get_meta().cloned();
+    let m = m_ref.unwrap_meta();
     let k = unsafe { val_ref(k) };
+    // `dissoc` preserves the input's metadata on the result (matching
+    // `builtin_dissoc`).
     match m {
-        Value::Map(map) => box_coll_val(Value::Map(map.dissoc(k))),
+        Value::Map(map) => box_coll_val(apply_meta(Value::Map(map.dissoc(k)), meta)),
         _ => box_coll_val(m.clone()),
     }
 }
@@ -2793,10 +2824,14 @@ pub unsafe extern "C" fn rt_dissoc(m: *const Value, k: *const Value) -> *const V
 /// Both pointers must be valid.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rt_disj(set: *const Value, val: *const Value) -> *const Value {
-    let set = unsafe { val_ref(set) }.unwrap_meta();
+    let set_ref = unsafe { val_ref(set) };
+    let meta = set_ref.get_meta().cloned();
+    let set = set_ref.unwrap_meta();
     let val = unsafe { val_ref(val) };
+    // `disj` preserves the input's metadata on the result (matching
+    // `builtin_disj`).
     match set {
-        Value::Set(s) => box_coll_val(Value::Set(s.disj(val))),
+        Value::Set(s) => box_coll_val(apply_meta(Value::Set(s.disj(val)), meta)),
         _ => box_coll_val(set.clone()),
     }
 }

@@ -302,3 +302,42 @@ fn collection_ops_see_through_metadata_under_jit() {
         "final results wrong; got:\n{out}"
     );
 }
+
+#[test]
+fn assoc_conj_dissoc_disj_preserve_metadata_under_jit() {
+    // rt_assoc/rt_conj/rt_dissoc/rt_disj unwrap_meta() the input to dispatch
+    // on the underlying collection kind, but the *result* they build is a
+    // brand new collection with no metadata of its own. cljrs-builtins'
+    // builtin_assoc/conj/dissoc/disj all capture the input's metadata before
+    // unwrapping and reattach it to the result (`(meta (assoc ^{:a 1} {} :b
+    // 2))` => `{:a 1}` in real Clojure) — the rt_abi fast paths must match
+    // that, not just return a correct but metadata-stripped value.
+    let src = r#"
+        (def impl {:x 1})
+        (def m (with-meta {:a 1} impl))
+        (def v (with-meta [1] impl))
+        (def s (with-meta #{1 2} impl))
+
+        (defn assoc-it [] (meta (assoc m :b 2)))
+        (defn conj-it [] (meta (conj v 2)))
+        (defn dissoc-it [] (meta (dissoc m :a)))
+        (defn disj-it [] (meta (disj s 1)))
+
+        (dotimes [i 10000]
+          (let [a (assoc-it) c (conj-it) d (dissoc-it) j (disj-it)]
+            (when (or (not= a impl) (not= c impl) (not= d impl) (not= j impl))
+              (println "WRONG at" i ":" a c d j))
+            (when (= i 9999)
+              (println "final:" a c d j))))
+    "#;
+
+    let out = run_jit(src);
+    assert!(
+        !out.contains("WRONG at"),
+        "assoc/conj/dissoc/disj dropped metadata under JIT; got:\n{out}"
+    );
+    assert!(
+        out.contains("final: {:x 1} {:x 1} {:x 1} {:x 1}"),
+        "final results wrong; got:\n{out}"
+    );
+}
