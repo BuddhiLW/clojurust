@@ -45,7 +45,10 @@ fn assoc_in_preserves_metadata_on_map() {
     let meta_val = eval_fresh(
         "(:parent (meta (assoc-in (with-meta {:tag-name \"h1\"} {:parent :root}) [:on :click] :handler)))",
     );
-    assert_eq!(meta_val, Value::keyword(cljrs_value::Keyword::simple("root")));
+    assert_eq!(
+        meta_val,
+        Value::keyword(cljrs_value::Keyword::simple("root"))
+    );
 }
 
 #[test]
