@@ -31,7 +31,6 @@ use num_bigint::{BigInt, Sign, ToBigInt};
 use num_rational::Ratio;
 use num_traits::{FromPrimitive, Signed as _, ToPrimitive, Zero as _};
 use rand::prelude::SliceRandom;
-use rpds::HashTrieMapSync;
 use std::cmp::Ordering;
 use std::num::ParseFloatError;
 use std::ops::{Add, Sub};
@@ -4823,7 +4822,7 @@ fn seq_first_rest(v: &Value) -> ValueResult<Option<(Value, Value)>> {
 }
 
 fn builtin_select_keys(args: &[Value]) -> ValueResult<Value> {
-    let mut map: HashTrieMapSync<Value, Value> = HashTrieMapSync::new_sync();
+    let mut map = PersistentHashMap::empty();
     match &args[0] {
         Value::Map(src) => {
             if matches!(
@@ -4838,12 +4837,10 @@ fn builtin_select_keys(args: &[Value]) -> ValueResult<Value> {
             ) {
                 for k in ValueIter::new(args[1].clone()) {
                     if let Some(v) = src.get(&k) {
-                        map.insert_mut(k.clone(), v.clone());
+                        map = map.assoc(k.clone(), v.clone());
                     }
                 }
-                Ok(Value::Map(MapValue::Hash(GcPtr::new(
-                    PersistentHashMap::new(map),
-                ))))
+                Ok(Value::Map(MapValue::Hash(GcPtr::new(map))))
             } else {
                 Err(ValueError::WrongType {
                     expected: "seqable",

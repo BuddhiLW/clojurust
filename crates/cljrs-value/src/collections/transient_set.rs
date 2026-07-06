@@ -4,19 +4,19 @@ use std::sync::Mutex;
 
 #[derive(Debug)]
 pub struct TransientSet {
-    set: Mutex<rpds::HashTrieSetSync<Value>>,
+    set: Mutex<PersistentHashSet>,
     persisted: Mutex<bool>,
 }
 
 impl TransientSet {
     pub fn new() -> Self {
         TransientSet {
-            set: Mutex::new(Default::default()),
+            set: Mutex::new(PersistentHashSet::empty()),
             persisted: Mutex::new(false),
         }
     }
 
-    pub fn new_from_set(set: &rpds::HashTrieSetSync<Value>) -> TransientSet {
+    pub fn new_from_set(set: &PersistentHashSet) -> TransientSet {
         TransientSet {
             set: Mutex::new(set.clone()),
             persisted: Mutex::new(false),
@@ -27,7 +27,8 @@ impl TransientSet {
         if *self.persisted.lock().unwrap() {
             return Err(ValueError::TransientAlreadyPersisted);
         }
-        self.set.lock().unwrap().insert_mut(value.clone());
+        let mut set = self.set.lock().unwrap();
+        set.conj_mut(value);
         Ok(())
     }
 
@@ -35,7 +36,8 @@ impl TransientSet {
         if *self.persisted.lock().unwrap() {
             return Err(ValueError::TransientAlreadyPersisted);
         }
-        self.set.lock().unwrap().remove_mut(value);
+        let mut set = self.set.lock().unwrap();
+        *set = set.disj(value);
         Ok(())
     }
 
@@ -46,12 +48,12 @@ impl TransientSet {
             return Err(ValueError::TransientAlreadyPersisted);
         }
         *persisted = true;
-        Ok(PersistentHashSet::from_set(set.clone()))
+        Ok(set.clone())
     }
 
     pub fn count(&self) -> usize {
         let set = self.set.lock().unwrap();
-        set.size()
+        set.count()
     }
 }
 
@@ -85,8 +87,8 @@ impl cljrs_gc::Trace for TransientSet {
     }
 
     fn gc_size_extra(&self) -> usize {
-        let n = self.set.lock().unwrap().size();
-        n * (40 + std::mem::size_of::<crate::Value>())
+        let set = self.set.lock().unwrap();
+        set.gc_size_extra()
     }
 }
 

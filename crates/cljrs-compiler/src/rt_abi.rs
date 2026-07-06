@@ -3004,10 +3004,10 @@ pub unsafe extern "C" fn rt_transient(coll: *const Value) -> *const Value {
             TransientVector::new_from_vector(v.get().inner()),
         ))),
         Value::Map(MapValue::Hash(m)) => box_val(Value::TransientMap(GcPtr::new(
-            TransientMap::new_from_map(m.get().inner()),
+            TransientMap::new_from_map(m.get()),
         ))),
         Value::Set(SetValue::Hash(s)) => box_val(Value::TransientSet(GcPtr::new(
-            TransientSet::new_from_set(s.get().inner()),
+            TransientSet::new_from_set(s.get()),
         ))),
         _ => box_val(coll.clone()),
     }

@@ -12,19 +12,19 @@ use std::sync::Mutex;
 
 #[derive(Debug)]
 pub struct TransientMap {
-    map: Mutex<rpds::HashTrieMapSync<Value, Value>>,
+    map: Mutex<PersistentHashMap>,
     persisted: Mutex<bool>,
 }
 
 impl TransientMap {
     pub fn new() -> TransientMap {
         TransientMap {
-            map: Mutex::new(rpds::HashTrieMapSync::default()),
+            map: Mutex::new(PersistentHashMap::empty()),
             persisted: Mutex::new(false),
         }
     }
 
-    pub fn new_from_map(map: &rpds::HashTrieMapSync<Value, Value>) -> TransientMap {
+    pub fn new_from_map(map: &PersistentHashMap) -> TransientMap {
         TransientMap {
             map: Mutex::new(map.clone()),
             persisted: Mutex::new(false),
@@ -36,7 +36,7 @@ impl TransientMap {
             return Err(ValueError::TransientAlreadyPersisted);
         }
         let mut map = self.map.lock().unwrap();
-        map.insert_mut(key.clone(), value.clone());
+        *map = map.assoc(key, value);
         Ok(())
     }
 
@@ -45,7 +45,7 @@ impl TransientMap {
             return Err(ValueError::TransientAlreadyPersisted);
         }
         let mut map = self.map.lock().unwrap();
-        map.remove_mut(key);
+        *map = map.dissoc(key);
         Ok(())
     }
 
@@ -56,7 +56,7 @@ impl TransientMap {
             return Err(ValueError::TransientAlreadyPersisted);
         }
         *persisted = true;
-        Ok(PersistentHashMap::new(map.clone()))
+        Ok(map.clone())
     }
 
     pub fn find(&self, key: &Value) -> Option<(Value, Value)> {
@@ -67,7 +67,7 @@ impl TransientMap {
 
     pub fn count(&self) -> usize {
         let map = self.map.lock().unwrap();
-        map.size()
+        map.count()
     }
 }
 
@@ -105,8 +105,8 @@ impl cljrs_gc::Trace for TransientMap {
     }
 
     fn gc_size_extra(&self) -> usize {
-        let n = self.map.lock().unwrap().size();
-        n * (40 + 2 * std::mem::size_of::<crate::Value>())
+        let map = self.map.lock().unwrap();
+        map.gc_size_extra()
     }
 }
 

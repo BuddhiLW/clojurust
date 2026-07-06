@@ -36,8 +36,8 @@ src/
   collections/
     mod.rs                       — re-exports all collection types
     array_map.rs                 — PersistentArrayMap (≤8 entries, linear scan)
-    hash_map.rs                  — PersistentHashMap (32-way HAMT)
-    hash_set.rs                  — PersistentHashSet (backed by PersistentHashMap)
+    hash_map.rs                  — PersistentHashMap (32-way HAMT keyed by insertion-sequence index + a red-black tree ordering log, so iteration order matches insertion order deterministically)
+    hash_set.rs                  — PersistentHashSet (same index+ordering-log technique as PersistentHashMap)
     list.rs                      — PersistentList (singly-linked cons list)
     queue.rs                     — PersistentQueue (front-list + rear-vector)
     vector.rs                    — PersistentVector (32-way trie + tail buffer)
@@ -229,8 +229,8 @@ Whole-number doubles hash like their `Long` equivalent.
 | `PersistentList` | Singly-linked cons list | `cons`, `first`, `rest`, `count` (O(1)) |
 | `PersistentVector` | 32-way trie + tail buffer | `conj`, `nth`, `assoc_nth`, `pop`, `iter`, `map_entry`, `is_map_entry` |
 | `PersistentArrayMap` | Flat key/value vec, ≤8 entries | `assoc` (returns `AssocResult`), `get`, `dissoc`, `iter` |
-| `PersistentHashMap` | 32-way HAMT | `assoc`, `get`, `dissoc`, `merge`, `iter`, `keys`, `vals` |
-| `PersistentHashSet` | Backed by `PersistentHashMap` | `conj`, `disj`, `contains`, `iter` |
+| `PersistentHashMap` | 32-way HAMT index (key→seq) + red-black ordering log (seq→(key,val)); iterates in insertion order | `assoc`, `get`, `dissoc`, `merge`, `iter`, `keys`, `vals` |
+| `PersistentHashSet` | Same index+ordering-log technique; iterates in insertion order | `conj`, `disj`, `contains`, `iter` |
 | `PersistentQueue` | Front-list + rear-vector | `enqueue`, `dequeue`, `peek` |
 
 `PersistentArrayMap::assoc` returns `AssocResult::Array(Self)` while under the
@@ -257,8 +257,8 @@ bytes owned by each collection beyond the GcBox struct.  Approximations used:
 | Type | Formula |
 |------|---------|
 | `PersistentArrayMap` | `16 + capacity × size_of::<Value>()` |
-| `PersistentHashMap` | `n × (40 + 2×size_of::<Value>())` |
-| `PersistentHashSet` | `n × (40 + size_of::<Value>())` |
+| `PersistentHashMap` | `n × (88 + 2×size_of::<Value>())` |
+| `PersistentHashSet` | `n × (88 + size_of::<Value>())` |
 | `PersistentVector` | `n × (24 + size_of::<Value>())` |
 | `SortedMap` | `n × (40 + 2×size_of::<Value>())` |
 | `TransientMap/Set` | same as HashMap/Set (locked at alloc) |
