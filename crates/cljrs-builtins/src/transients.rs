@@ -15,10 +15,10 @@ pub fn builtin_transient(args: &[Value]) -> ValueResult<Value> {
             Ok(Value::TransientMap(GcPtr::new(map)))
         }
         Value::Map(MapValue::Hash(m)) => Ok(Value::TransientMap(GcPtr::new(
-            TransientMap::new_from_map(m.get().inner()),
+            TransientMap::new_from_map(m.get()),
         ))),
         Value::Set(SetValue::Hash(s)) => Ok(Value::TransientSet(GcPtr::new(
-            TransientSet::new_from_set(s.get().inner()),
+            TransientSet::new_from_set(s.get()),
         ))),
         Value::Vector(v) => Ok(Value::TransientVector(GcPtr::new(
             TransientVector::new_from_vector(v.get().inner()),

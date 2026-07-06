@@ -1,84 +1,122 @@
 use crate::Value;
 use crate::collections::array_map::PersistentArrayMap;
-use rpds::HashTrieMapSync;
+use rpds::{HashTrieMapSync, RedBlackTreeMapSync};
 
-/// An immutable hash map backed by `rpds::HashTrieMap`.
+/// An immutable hash map that preserves insertion order when iterated.
+///
+/// Lookups go through a `rpds::HashTrieMap` from key to insertion sequence
+/// number; the sequence number then indexes a `rpds::RedBlackTreeMap` that
+/// holds the actual `(key, value)` pairs in insertion order. Re-associating
+/// an existing key keeps its original position (matching `PersistentArrayMap`
+/// and how most ordered-map implementations behave), so iteration order is
+/// deterministic and matches the order keys were first written, rather than
+/// depending on hash-bucket layout (which — since `rpds` seeds its hasher
+/// randomly per instance — would otherwise vary from run to run).
 ///
 /// Small maps (≤8 entries) are represented as `PersistentArrayMap` instead;
 /// the two types share the same `Value::Map` variant.  `PersistentHashMap` is
 /// used once the entry count exceeds the array-map threshold.
 #[derive(Debug, Clone)]
 pub struct PersistentHashMap {
-    inner: rpds::HashTrieMapSync<Value, Value>,
+    index: HashTrieMapSync<Value, u64>,
+    order: RedBlackTreeMapSync<u64, (Value, Value)>,
+    next_seq: u64,
 }
 
 impl PersistentHashMap {
     pub fn empty() -> Self {
         Self {
-            inner: rpds::HashTrieMapSync::new_sync(),
+            index: HashTrieMapSync::new_sync(),
+            next_seq: 0,
+            order: RedBlackTreeMapSync::new_sync(),
         }
     }
 
+    /// Build from a raw `HashTrieMap`, in its (arbitrary) iteration order.
+    ///
+    /// Prefer `from_pairs`/`assoc` when the caller has a meaningful source
+    /// order to preserve.
     pub fn new(map: HashTrieMapSync<Value, Value>) -> Self {
-        Self { inner: map }
+        Self::from_pairs(map.iter().map(|(k, v)| (k.clone(), v.clone())))
     }
 
     pub fn count(&self) -> usize {
-        self.inner.size()
+        self.index.size()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.inner.is_empty()
+        self.index.is_empty()
     }
 
     /// Look up a key.
     pub fn get(&self, key: &Value) -> Option<&Value> {
-        self.inner.get(key)
+        let seq = self.index.get(key)?;
+        self.order.get(seq).map(|(_, v)| v)
     }
 
     pub fn contains_key(&self, key: &Value) -> bool {
-        self.inner.contains_key(key)
+        self.index.contains_key(key)
     }
 
     /// Return a new map with `key` → `value`.
+    ///
+    /// Re-associating a key that is already present keeps its original
+    /// insertion position; a brand-new key is appended at the end.
     pub fn assoc(&self, key: Value, value: Value) -> Self {
-        Self {
-            inner: self.inner.insert(key, value),
+        if let Some(seq) = self.index.get(&key) {
+            let seq = *seq;
+            Self {
+                index: self.index.clone(),
+                order: self.order.insert(seq, (key, value)),
+                next_seq: self.next_seq,
+            }
+        } else {
+            let seq = self.next_seq;
+            Self {
+                index: self.index.insert(key.clone(), seq),
+                order: self.order.insert(seq, (key, value)),
+                next_seq: seq + 1,
+            }
         }
     }
 
     /// Return a new map with `key` removed.
     pub fn dissoc(&self, key: &Value) -> Self {
-        Self {
-            inner: self.inner.remove(key),
+        match self.index.get(key) {
+            Some(seq) => Self {
+                index: self.index.remove(key),
+                order: self.order.remove(seq),
+                next_seq: self.next_seq,
+            },
+            None => self.clone(),
         }
     }
 
-    /// Iterate over all `(key, value)` pairs in an unspecified order.
+    /// Iterate over all `(key, value)` pairs in insertion order.
     pub fn iter(&self) -> impl Iterator<Item = (&Value, &Value)> {
-        self.inner.iter()
+        self.order.iter().map(|(_, (k, v))| (k, v))
     }
 
-    /// Collect all keys.
+    /// Collect all keys, in insertion order.
     pub fn keys(&self) -> Vec<Value> {
-        self.inner.keys().cloned().collect()
+        self.iter().map(|(k, _)| k.clone()).collect()
     }
 
-    /// Collect all values.
+    /// Collect all values, in insertion order.
     pub fn vals(&self) -> Vec<Value> {
-        self.inner.values().cloned().collect()
+        self.iter().map(|(_, v)| v.clone()).collect()
     }
 
     /// Merge two maps; right-hand side wins on key collision.
     pub fn merge(&self, other: &Self) -> Self {
         let mut result = self.clone();
-        for (k, v) in other.inner.iter() {
+        for (k, v) in other.iter() {
             result = result.assoc(k.clone(), v.clone());
         }
         result
     }
 
-    /// Build from an iterator of `(key, value)` pairs.
+    /// Build from an iterator of `(key, value)` pairs, in the given order.
     pub fn from_pairs<I: IntoIterator<Item = (Value, Value)>>(iter: I) -> Self {
         let mut m = Self::empty();
         for (k, v) in iter {
@@ -91,10 +129,6 @@ impl PersistentHashMap {
     pub fn from_array_map(am: &PersistentArrayMap) -> Self {
         Self::from_pairs(am.iter().map(|(k, v)| (k.clone(), v.clone())))
     }
-
-    pub fn inner(&self) -> &HashTrieMapSync<Value, Value> {
-        &self.inner
-    }
 }
 
 impl PartialEq for PersistentHashMap {
@@ -102,23 +136,23 @@ impl PartialEq for PersistentHashMap {
         if self.count() != other.count() {
             return false;
         }
-        self.inner.iter().all(|(k, v)| other.get(k) == Some(v))
+        self.iter().all(|(k, v)| other.get(k) == Some(v))
     }
 }
 
 impl cljrs_gc::Trace for PersistentHashMap {
     fn trace(&self, visitor: &mut cljrs_gc::MarkVisitor) {
-        for (k, v) in self.inner.iter() {
+        for (_, (k, v)) in self.order.iter() {
             k.trace(visitor);
             v.trace(visitor);
         }
     }
 
     fn gc_size_extra(&self) -> usize {
-        // Per entry: Arc<(K,V)> allocation (16 overhead) + EntryWithHash (16)
-        // + tree-node share (~8). Values stored inline (not behind GcPtr).
-        let n = self.inner.size();
-        n * (40 + 2 * std::mem::size_of::<Value>())
+        // Per entry: index HashTrieMap entry (~40) + order RedBlackTree node
+        // (~48) + values stored inline in the order tree (not behind GcPtr).
+        let n = self.index.size();
+        n * (88 + 2 * std::mem::size_of::<Value>())
     }
 }
 
@@ -219,5 +253,39 @@ mod tests {
         for i in 0..3i64 {
             assert_eq!(hm.get(&int(i)), Some(&int(i * 2)));
         }
+    }
+
+    #[test]
+    fn test_iteration_order_matches_insertion_order() {
+        let mut m = PersistentHashMap::empty();
+        let keys = ["j", "i", "h", "g", "f", "e", "d", "c", "b", "a", "z", "y"];
+        for k in keys {
+            m = m.assoc(kw(k), int(0));
+        }
+        let iterated: Vec<Value> = m.keys();
+        let expected: Vec<Value> = keys.iter().map(|k| kw(k)).collect();
+        assert_eq!(iterated, expected);
+    }
+
+    #[test]
+    fn test_reassoc_keeps_original_position() {
+        let m = PersistentHashMap::empty()
+            .assoc(kw("a"), int(1))
+            .assoc(kw("b"), int(2))
+            .assoc(kw("c"), int(3))
+            .assoc(kw("b"), int(99));
+        let keys = m.keys();
+        assert_eq!(keys, vec![kw("a"), kw("b"), kw("c")]);
+        assert_eq!(m.get(&kw("b")), Some(&int(99)));
+    }
+
+    #[test]
+    fn test_dissoc_preserves_remaining_order() {
+        let m = PersistentHashMap::empty()
+            .assoc(kw("a"), int(1))
+            .assoc(kw("b"), int(2))
+            .assoc(kw("c"), int(3))
+            .dissoc(&kw("b"));
+        assert_eq!(m.keys(), vec![kw("a"), kw("c")]);
     }
 }
