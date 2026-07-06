@@ -118,7 +118,7 @@
        (if (pred (first s))
          (recur (next s) (conj acc (first s)))
          (recur (next s) acc))
-       (seq acc)))))
+       (or (seq acc) '())))))
 
 (defn remove
   ([pred] (filter (complement pred)))
@@ -140,7 +140,7 @@
          (if (nil? v)
            (recur (next s) acc)
            (recur (next s) (conj acc v))))
-       (seq acc)))))
+       (or (seq acc) '())))))
 
 (defn cat
   "A transducer which concatenates the contents of each input, which must
