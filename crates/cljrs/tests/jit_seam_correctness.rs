@@ -242,3 +242,102 @@ fn macro_generated_case_with_int_cast_correct_under_jit() {
         "case with integer keys produced wrong final values; got:\n{out}"
     );
 }
+
+#[test]
+fn collection_ops_see_through_metadata_under_jit() {
+    // rt_abi's fast-path collection ops (rt_get, rt_count, rt_first, rt_rest,
+    // rt_assoc, rt_conj, rt_dissoc, rt_disj, rt_nth, rt_contains, rt_seq,
+    // rt_is_empty, rt_is_vector, rt_is_map, rt_transient) matched on the raw
+    // `Value` variant, unlike their tree-walker counterparts in
+    // cljrs-builtins, which all call `.unwrap_meta()` first. A
+    // metadata-carrying collection (`with-meta`) — e.g. a protocol
+    // implementation map built via `(with-meta {...} impl)`, the idiom
+    // Replicant's mutation-log renderer uses — therefore fell through every
+    // fast path's `_` arm once the caller crossed the JIT threshold: `get`
+    // silently returned nil, `count`/`contains?`/`empty?` reported wrong
+    // answers, `first`/`rest`/`nth`/`seq` returned nil/empty, and
+    // `assoc`/`conj`/`dissoc`/`disj` returned the value unchanged instead of
+    // updating it. Interpreted code (Tier 0/1) was always correct; only
+    // native-compiled call sites were affected.
+    let src = r#"
+        (def impl {:some-method (fn [x] x)})
+        (def m (with-meta {:a 1 :b 2} impl))
+        (def v (with-meta [1 2 3] impl))
+
+        (defn get-a [] (:a m))
+        (defn cnt [] (count m))
+        (defn has-a [] (contains? m :a))
+        (defn is-empty [] (empty? (with-meta {} impl)))
+        (defn is-vec [] (vector? v))
+        (defn is-map [] (map? m))
+        (defn first-of [] (first v))
+        (defn rest-of [] (rest v))
+        (defn nth-of [] (nth v 1))
+        (defn seq-of [] (seq v))
+        (defn assoc-into [] (:c (assoc m :c 3)))
+        (defn conj-into [] (conj v 4))
+        (defn dissoc-from [] (contains? (dissoc m :a) :a))
+
+        (dotimes [i 10000]
+          (let [a (get-a) c (cnt) h (has-a) e (is-empty)
+                iv (is-vec) im (is-map) f (first-of) r (rest-of)
+                n (nth-of) s (seq-of) ai (assoc-into) cj (conj-into)
+                d (dissoc-from)]
+            (when (or (not= a 1) (not= c 2) (not= h true) (not= e true)
+                      (not= iv true) (not= im true) (not= f 1)
+                      (not= (vec r) [2 3]) (not= n 2) (not= (vec s) [1 2 3])
+                      (not= ai 3) (not= cj [1 2 3 4]) (not= d false))
+              (println "WRONG at" i ":" a c h e iv im f r n s ai cj d))
+            (when (= i 9999)
+              (println "final:" a c h e iv im f (vec r) n (vec s) ai cj d))))
+    "#;
+
+    let out = run_jit(src);
+    assert!(
+        !out.contains("WRONG at"),
+        "collection ops on a with-meta value returned wrong results under JIT; got:\n{out}"
+    );
+    assert!(
+        out.contains("final: 1 2 true true true true 1 [2 3] 2 [1 2 3] 3 [1 2 3 4] false"),
+        "final results wrong; got:\n{out}"
+    );
+}
+
+#[test]
+fn assoc_conj_dissoc_disj_preserve_metadata_under_jit() {
+    // rt_assoc/rt_conj/rt_dissoc/rt_disj unwrap_meta() the input to dispatch
+    // on the underlying collection kind, but the *result* they build is a
+    // brand new collection with no metadata of its own. cljrs-builtins'
+    // builtin_assoc/conj/dissoc/disj all capture the input's metadata before
+    // unwrapping and reattach it to the result (`(meta (assoc ^{:a 1} {} :b
+    // 2))` => `{:a 1}` in real Clojure) — the rt_abi fast paths must match
+    // that, not just return a correct but metadata-stripped value.
+    let src = r#"
+        (def impl {:x 1})
+        (def m (with-meta {:a 1} impl))
+        (def v (with-meta [1] impl))
+        (def s (with-meta #{1 2} impl))
+
+        (defn assoc-it [] (meta (assoc m :b 2)))
+        (defn conj-it [] (meta (conj v 2)))
+        (defn dissoc-it [] (meta (dissoc m :a)))
+        (defn disj-it [] (meta (disj s 1)))
+
+        (dotimes [i 10000]
+          (let [a (assoc-it) c (conj-it) d (dissoc-it) j (disj-it)]
+            (when (or (not= a impl) (not= c impl) (not= d impl) (not= j impl))
+              (println "WRONG at" i ":" a c d j))
+            (when (= i 9999)
+              (println "final:" a c d j))))
+    "#;
+
+    let out = run_jit(src);
+    assert!(
+        !out.contains("WRONG at"),
+        "assoc/conj/dissoc/disj dropped metadata under JIT; got:\n{out}"
+    );
+    assert!(
+        out.contains("final: {:x 1} {:x 1} {:x 1} {:x 1}"),
+        "final results wrong; got:\n{out}"
+    );
+}

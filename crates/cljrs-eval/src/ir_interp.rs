@@ -1173,8 +1173,14 @@ fn dispatch_known_fn(known_fn: &KnownFn, args: Vec<Value>, env: &mut Env) -> Eva
             args.first(),
             Some(Value::List(_) | Value::Cons(_) | Value::LazySeq(_))
         ))),
-        KnownFn::IsVector => Ok(Value::Bool(matches!(args.first(), Some(Value::Vector(_))))),
-        KnownFn::IsMap => Ok(Value::Bool(matches!(args.first(), Some(Value::Map(_))))),
+        KnownFn::IsVector => Ok(Value::Bool(matches!(
+            args.first().map(Value::unwrap_meta),
+            Some(Value::Vector(_))
+        ))),
+        KnownFn::IsMap => Ok(Value::Bool(matches!(
+            args.first().map(Value::unwrap_meta),
+            Some(Value::Map(_))
+        ))),
         KnownFn::IsNumber => Ok(Value::Bool(matches!(
             args.first(),
             Some(
