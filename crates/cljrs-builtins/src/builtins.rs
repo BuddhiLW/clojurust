@@ -458,7 +458,6 @@ pub fn register_all(globals: &Arc<GlobalEnv>, ns: &str) {
         ("walk", Arity::Fixed(3), builtin_walk_stub),
         ("postwalk", Arity::Fixed(2), builtin_postwalk_stub),
         ("prewalk", Arity::Fixed(2), builtin_prewalk_stub),
-        ("tree-seq", Arity::Fixed(3), builtin_tree_seq_stub),
         ("printf", Arity::Variadic { min: 1 }, builtin_printf),
         ("newline", Arity::Fixed(0), builtin_newline),
         ("flush", Arity::Fixed(0), builtin_flush),
@@ -6756,10 +6755,6 @@ fn builtin_postwalk_stub(_args: &[Value]) -> ValueResult<Value> {
 }
 
 fn builtin_prewalk_stub(_args: &[Value]) -> ValueResult<Value> {
-    Ok(Value::Nil)
-}
-
-fn builtin_tree_seq_stub(_args: &[Value]) -> ValueResult<Value> {
     Ok(Value::Nil)
 }
 
