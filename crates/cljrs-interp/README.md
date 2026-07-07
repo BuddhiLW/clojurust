@@ -45,7 +45,10 @@ src/
                    (apply, atom, reset!, swap!, volatile!, vreset!, vswap!,
                    agent, send/send-off, with-bindings*, alter-var-root,
                    vary-meta, find-ns, all-ns, create-ns, ns-aliases, remove-ns,
-                   alter-meta!, ns-resolve, resolve, intern, bound-fn*)
+                   alter-meta!, ns-resolve, resolve, intern, bound-fn*,
+                   ns-interns, ns-publics, ns-refers, ns-map — the latter four
+                   resolve their argument via `the_ns` (namespace, symbol,
+                   string, or keyword name), matching Clojure's `the-ns`)
   arity.rs       — fresh arity ID generator (pub; `fresh_arity_id`, plus `next_arity_id`
                    for the Phase 10.7 bootstrap watermark snapshot)
   destructure.rs — pattern destructuring (vector, map, & rest)
