@@ -32,6 +32,7 @@ use num_rational::Ratio;
 use num_traits::{FromPrimitive, Signed as _, ToPrimitive, Zero as _};
 use rand::prelude::SliceRandom;
 use std::cmp::Ordering;
+use std::collections::HashMap;
 use std::num::ParseFloatError;
 use std::ops::{Add, Sub};
 use std::str::FromStr;
@@ -121,6 +122,931 @@ fn capture_or_print(s: &str) -> bool {
         }
     })
 }
+
+// ── Docstrings ───────────────────────────────────────────────────────────────
+
+/// `:doc` metadata for native builtins, keyed by the name they're interned
+/// under in `register_all`. Not every builtin has an entry — special-form
+/// stub vars (`if`, `let`, `def`, ...) and rarely-used internals are skipped
+/// — but any builtin *may* carry a docstring by adding it here; `doc` and
+/// `doc-data` read it back off the var's metadata like any other docstring.
+const BUILTIN_DOCS: &[(&str, &str)] = &[
+    // Arithmetic
+    ("+", "Returns the sum of nums. (+) returns 0."),
+    (
+        "+'",
+        "Returns the sum of nums, promoting to BigInt on overflow. (+') returns 0.",
+    ),
+    ("-", "Negates x, or subtracts the rest of ys from x."),
+    (
+        "-'",
+        "Negates x, or subtracts the rest of ys from x, promoting to BigInt on overflow.",
+    ),
+    ("*", "Returns the product of nums. (*) returns 1."),
+    (
+        "*'",
+        "Returns the product of nums, promoting to BigInt on overflow. (*') returns 1.",
+    ),
+    (
+        "/",
+        "If no denominators are supplied, returns 1/numerator; otherwise returns numerator divided by all the denominators.",
+    ),
+    (
+        "mod",
+        "Modulus of num and div; result has the same sign as div.",
+    ),
+    (
+        "rem",
+        "Remainder of dividing num by div; result has the same sign as num.",
+    ),
+    ("quot", "Quotient of dividing num by div."),
+    ("inc", "Returns a number one greater than x."),
+    ("dec", "Returns a number one less than x."),
+    ("abs", "Returns the absolute value of x."),
+    (
+        "unchecked-add",
+        "Adds two ints, wrapping on overflow instead of promoting or throwing.",
+    ),
+    (
+        "unchecked-add-int",
+        "Adds two ints, wrapping on overflow instead of promoting or throwing.",
+    ),
+    (
+        "unchecked-subtract",
+        "Subtracts two ints, wrapping on overflow instead of promoting or throwing.",
+    ),
+    (
+        "unchecked-subtract-int",
+        "Subtracts two ints, wrapping on overflow instead of promoting or throwing.",
+    ),
+    (
+        "unchecked-multiply",
+        "Multiplies two ints, wrapping on overflow instead of promoting or throwing.",
+    ),
+    (
+        "unchecked-multiply-int",
+        "Multiplies two ints, wrapping on overflow instead of promoting or throwing.",
+    ),
+    (
+        "unchecked-inc",
+        "Returns a number one greater than x, wrapping on overflow.",
+    ),
+    (
+        "unchecked-inc-int",
+        "Returns a number one greater than x, wrapping on overflow.",
+    ),
+    (
+        "unchecked-dec",
+        "Returns a number one less than x, wrapping on overflow.",
+    ),
+    (
+        "unchecked-dec-int",
+        "Returns a number one less than x, wrapping on overflow.",
+    ),
+    ("unchecked-negate", "Negates x, wrapping on overflow."),
+    ("unchecked-negate-int", "Negates x, wrapping on overflow."),
+    ("bigdec", "Coerces x to a BigDecimal."),
+    ("bigint", "Coerces x to a BigInt."),
+    ("num", "Coerces x to a Number."),
+    ("numerator", "Returns the numerator of a ratio."),
+    ("denominator", "Returns the denominator of a ratio."),
+    (
+        "rationalize",
+        "Returns the rational value of x, reduced to lowest terms.",
+    ),
+    ("byte", "Coerces x to a byte."),
+    ("short", "Coerces x to a short."),
+    ("int", "Coerces x to an int."),
+    ("long", "Coerces x to a long."),
+    ("float", "Coerces x to a float."),
+    ("double", "Coerces x to a double."),
+    (
+        "boolean",
+        "Coerces x to a boolean; false and nil become false, everything else true.",
+    ),
+    (
+        "char",
+        "Coerces x (an int or a single-char string) to a Character.",
+    ),
+    // Comparison / predicates
+    (
+        "=",
+        "Equality. Returns true if all args are equal (value equality for collections/numbers).",
+    ),
+    (
+        "==",
+        "Numeric equality; returns true only if all args are numerically equal.",
+    ),
+    // "not=" is redefined in bootstrap.cljrs and documented there.
+    (
+        "<",
+        "Returns true if nums are in monotonically increasing order.",
+    ),
+    (
+        "<=",
+        "Returns true if nums are in monotonically non-decreasing order.",
+    ),
+    (
+        ">",
+        "Returns true if nums are in monotonically decreasing order.",
+    ),
+    (
+        ">=",
+        "Returns true if nums are in monotonically non-increasing order.",
+    ),
+    (
+        "compare",
+        "Comparator; returns a negative, zero, or positive number when x is logically less than, equal to, or greater than y.",
+    ),
+    (
+        "identical?",
+        "Tests if two arguments are the same identical object.",
+    ),
+    ("zero?", "Returns true if num is zero."),
+    ("pos?", "Returns true if num is greater than zero."),
+    ("neg?", "Returns true if num is less than zero."),
+    ("even?", "Returns true if n is even."),
+    ("odd?", "Returns true if n is odd."),
+    ("true?", "Returns true if x is exactly true."),
+    ("false?", "Returns true if x is exactly false."),
+    ("nil?", "Returns true if x is nil."),
+    (
+        "not",
+        "Returns true if x is logical false (nil or false), else false.",
+    ),
+    ("number?", "Returns true if x is a number."),
+    (
+        "integer?",
+        "Returns true if x is an integer (fixnum or BigInt).",
+    ),
+    ("int?", "Returns true if x is a fixed-precision integer."),
+    ("float?", "Returns true if x is a float or double."),
+    ("double?", "Returns true if x is a double."),
+    ("decimal?", "Returns true if x is a BigDecimal."),
+    ("ratio?", "Returns true if x is a Ratio."),
+    (
+        "rational?",
+        "Returns true if x is rational (integer, ratio, or BigDecimal).",
+    ),
+    ("string?", "Returns true if x is a String."),
+    ("keyword?", "Returns true if x is a Keyword."),
+    ("symbol?", "Returns true if x is a Symbol."),
+    ("boolean?", "Returns true if x is a Boolean."),
+    ("char?", "Returns true if x is a Character."),
+    ("fn?", "Returns true if x implements IFn (is callable)."),
+    (
+        "ifn?",
+        "Returns true if x implements IFn (is callable), including keywords and collections.",
+    ),
+    (
+        "coll?",
+        "Returns true if x implements the persistent collection interface.",
+    ),
+    ("seq?", "Returns true if x is a sequence."),
+    ("map?", "Returns true if x is a map."),
+    ("vector?", "Returns true if x is a vector."),
+    ("set?", "Returns true if x is a set."),
+    ("sorted?", "Returns true if x is a sorted collection."),
+    ("sorted-map?", "Returns true if x is a sorted map."),
+    ("sorted-set?", "Returns true if x is a sorted set."),
+    ("list?", "Returns true if x is a PersistentList."),
+    ("array?", "Returns true if x is a native array."),
+    (
+        "record?",
+        "Returns true if x is an instance of a defrecord/deftype.",
+    ),
+    ("atom?", "Returns true if x is an atom."),
+    (
+        "shared-atom?",
+        "Returns true if x is a shared-atom (cross-isolate).",
+    ),
+    ("volatile?", "Returns true if x is a volatile."),
+    ("var?", "Returns true if x is a Var."),
+    ("namespace?", "Returns true if x is a Namespace value."),
+    (
+        "map-entry?",
+        "Returns true if x is a real map entry (as produced by seq'ing a map, find, or map-entry).",
+    ),
+    (
+        "distinct?",
+        "Returns true if no two of the arguments are equal.",
+    ),
+    ("empty?", "Returns true if coll has no items."),
+    ("not-empty", "Returns nil if coll is empty, else coll."),
+    (
+        "contains?",
+        "Returns true if key is present in coll (for sets and sequential collections, tests for a valid index/element membership per collection semantics).",
+    ),
+    (
+        "reduced?",
+        "Returns true if x is the result of a call to reduced.",
+    ),
+    (
+        "realized?",
+        "Returns true if the delay/lazy-seq/future/promise has been forced/realized.",
+    ),
+    ("special-symbol?", "Returns true if s names a special form."),
+    (
+        "type",
+        "Returns the type-tag of x (from metadata `:type`, or its class).",
+    ),
+    (
+        "instance?",
+        "Returns true if x is an instance of the class/type named by c.",
+    ),
+    ("satisfies?", "Returns true if x extends protocol."),
+    ("extends?", "Returns true if atype extends protocol."),
+    ("uuid?", "Returns true if x is a UUID."),
+    (
+        "native-object?",
+        "Returns true if x is a NativeObject (a value produced by Rust interop).",
+    ),
+    // Collections — general
+    (
+        "conj",
+        "Returns a new collection with x added, using the collection's own conj semantics (append for vectors, prepend for lists, etc.).",
+    ),
+    (
+        "conj!",
+        "Transient version of conj; mutates and returns the transient.",
+    ),
+    (
+        "cons",
+        "Returns a new seq with x as the first element and coll as the rest.",
+    ),
+    (
+        "into",
+        "Returns a new coll consisting of to-coll with all of the items of from-coll conjoined.",
+    ),
+    (
+        "into-array",
+        "Returns an object array with the contents of coll. An optional leading type argument is accepted but ignored.",
+    ),
+    (
+        "to-array",
+        "Returns an object array with the contents of coll.",
+    ),
+    (
+        "to-array-2d",
+        "Returns a 2-dimensional object array from a collection of collections.",
+    ),
+    (
+        "empty",
+        "Returns an empty collection of the same category as coll, or nil if coll is nil.",
+    ),
+    (
+        "get",
+        "Returns the value mapped to key in coll, not-found or nil if key is not present.",
+    ),
+    (
+        "get-in",
+        "Returns the value in a nested associative structure, per the given key sequence, or not-found/nil if not present.",
+    ),
+    (
+        "assoc",
+        "Returns a new collection with key mapped to val; a persistent-vector version accepts any number of key/val pairs.",
+    ),
+    (
+        "assoc!",
+        "Transient version of assoc; mutates and returns the transient.",
+    ),
+    (
+        "assoc-in",
+        "Returns a new nested structure with a value in a nested associative structure set, per a given key sequence.",
+    ),
+    // "update" / "update-in" are (re)defined in bootstrap.cljrs and documented there.
+    ("dissoc", "Returns a new map with the given keys removed."),
+    (
+        "dissoc!",
+        "Transient version of dissoc; mutates and returns the transient.",
+    ),
+    ("disj", "Returns a new set with the given keys removed."),
+    (
+        "disj!",
+        "Transient version of disj; mutates and returns the transient.",
+    ),
+    (
+        "merge",
+        "Returns a map that consists of the rest of the maps merged onto the first; later values win on key conflicts.",
+    ),
+    (
+        "select-keys",
+        "Returns a map containing only those entries in map whose key is in keyseq.",
+    ),
+    ("keys", "Returns a sequence of the map's keys."),
+    ("vals", "Returns a sequence of the map's values."),
+    (
+        "map-keys",
+        "Returns a map with f applied to each key, values unchanged.",
+    ),
+    (
+        "map-vals",
+        "Returns a map with f applied to each value, keys unchanged.",
+    ),
+    (
+        "zipmap",
+        "Returns a map with the keys mapped to the corresponding vals.",
+    ),
+    // "frequencies" is redefined in bootstrap.cljrs and documented there.
+    (
+        "find",
+        "Returns the map entry for key, or nil if key is not present.",
+    ),
+    (
+        "map-entry",
+        "Constructs a map entry from a key and value, or from any seqable of exactly two elements.",
+    ),
+    (
+        "hash-map",
+        "Returns a new hash map with supplied key/value pairs.",
+    ),
+    (
+        "array-map",
+        "Returns a new array map with supplied key/value pairs.",
+    ),
+    (
+        "sorted-map",
+        "Returns a new sorted map with supplied key/value pairs, sorted by key comparison.",
+    ),
+    ("hash-set", "Returns a new hash set with supplied keys."),
+    ("sorted-set", "Returns a new sorted set with supplied keys."),
+    ("set", "Returns a set of the distinct elements of coll."),
+    (
+        "vec",
+        "Creates a new vector containing the contents of coll.",
+    ),
+    ("vector", "Creates a new vector containing the args."),
+    ("list", "Creates a new list containing the args."),
+    (
+        "list*",
+        "Creates a new list from the args, with the last arg (a seqable) spliced in as the tail.",
+    ),
+    (
+        "queue",
+        "Creates a new persistent queue containing the args.",
+    ),
+    (
+        "transient",
+        "Returns a new, transient (mutable, single-threaded) version of a persistent collection.",
+    ),
+    (
+        "persistent!",
+        "Returns a new, persistent version of a transient collection.",
+    ),
+    (
+        "pop",
+        "For a vector, removes the last item; for a list/queue, removes the first item.",
+    ),
+    (
+        "pop!",
+        "Transient version of pop; mutates and returns the transient.",
+    ),
+    (
+        "peek",
+        "For a vector, returns the last item; for a list/queue, returns the first item.",
+    ),
+    (
+        "subvec",
+        "Returns a persistent vector of the items in vector from start (inclusive) to end (exclusive, default (count vector)).",
+    ),
+    // "flatten" is redefined in bootstrap.cljrs and documented there.
+    (
+        "methods",
+        "Returns a map of dispatch-value -> method for a multimethod.",
+    ),
+    (
+        "prefer-method",
+        "Causes a multimethod to prefer matches of dispatch-val-x over dispatch-val-y when both match.",
+    ),
+    (
+        "remove-method",
+        "Removes the method of a multimethod associated with dispatch-val.",
+    ),
+    (
+        "make-hierarchy",
+        "Creates a new, independent global hierarchy for use with derive/isa?.",
+    ),
+    (
+        "ancestors",
+        "Returns the immediate and indirect parents of tag, as a set.",
+    ),
+    (
+        "descendants",
+        "Returns the immediate and indirect children of tag, as a set.",
+    ),
+    ("parents", "Returns the immediate parents of tag, as a set."),
+    (
+        "isa?",
+        "Returns true if (= child parent), or child is directly or transitively derived from parent.",
+    ),
+    // Seq ops
+    ("seq", "Returns a seq on coll, or nil if coll is empty/nil."),
+    ("first", "Returns the first item in coll."),
+    (
+        "rest",
+        "Returns a possibly-empty seq of the items after the first.",
+    ),
+    (
+        "next",
+        "Returns a seq of the items after the first, or nil if there are none.",
+    ),
+    ("last", "Returns the last item in coll."),
+    (
+        "nth",
+        "Returns the value at index in coll; throws (or returns not-found) if out of bounds.",
+    ),
+    ("count", "Returns the number of items in coll."),
+    (
+        "reverse",
+        "Returns a seq of the items in coll in reverse order.",
+    ),
+    (
+        "rseq",
+        "Returns a seq of the items in a reversible collection in reverse order, in O(1) time.",
+    ),
+    (
+        "concat",
+        "Returns a lazy seq of the concatenation of the given collections.",
+    ),
+    (
+        "interleave",
+        "Returns a lazy seq of the first item in each coll, then the second, etc.",
+    ),
+    ("shuffle", "Returns a random permutation of coll."),
+    (
+        "sort",
+        "Returns a sorted seq of the items in coll, using compare or the given comparator.",
+    ),
+    // "distinct", "interpose", "take-nth", "random-sample", "range", and
+    // "partition" are (re)defined in bootstrap.cljrs and documented there.
+    (
+        "sort-by",
+        "Returns a sorted seq of the items in coll, sorted by the result of applying keyfn to each.",
+    ),
+    // Higher-order (natively implemented pieces; most of clojure.core's HOFs
+    // live in bootstrap.cljrs and carry their own docstrings)
+    (
+        "apply",
+        "Applies f to the argument list formed by prepending the fixed args to the final args.",
+    ),
+    (
+        "reduce",
+        "Reduces coll with f: (f init x1), (f (f init x1) x2), etc. Without init, uses the first item as the seed. Terminates early if f returns a reduced value.",
+    ),
+    // I/O
+    (
+        "print",
+        "Writes the args to *out*, human-readably (as with pr but strings/chars unquoted), separated by spaces.",
+    ),
+    ("println", "Same as print, followed by a newline."),
+    (
+        "pr",
+        "Writes the args to *out*, machine-readably (as by print-dup if *print-dup* is true, else as by print-method), separated by spaces.",
+    ),
+    ("prn", "Same as pr, followed by a newline."),
+    (
+        "pr-str",
+        "Returns the string that pr would have printed for the args.",
+    ),
+    (
+        "printf",
+        "Writes a formatted string to *out*, as with format.",
+    ),
+    (
+        "format",
+        "Returns a string formatted using the Rust/printf-style format string and args.",
+    ),
+    ("newline", "Writes a newline to *out*."),
+    ("flush", "Flushes *out*."),
+    ("read-string", "Reads one object from the given string."),
+    ("slurp", "Reads the contents of a file into a string."),
+    (
+        "spit",
+        "Writes content to a file, creating or overwriting it.",
+    ),
+    (
+        "str",
+        "Concatenates the string representations of the args, with nil rendered as the empty string.",
+    ),
+    // String functions
+    (
+        "join",
+        "Returns a string of all elements in coll, optionally separated by separator.",
+    ),
+    (
+        "split",
+        "Splits string on a regular expression, returning a vector of the parts.",
+    ),
+    (
+        "trim",
+        "Removes leading and trailing whitespace from string.",
+    ),
+    ("upper-case", "Converts string to all upper-case."),
+    ("lower-case", "Converts string to all lower-case."),
+    (
+        "starts-with?",
+        "Returns true if s starts with the given substring.",
+    ),
+    (
+        "ends-with?",
+        "Returns true if s ends with the given substring.",
+    ),
+    (
+        "includes?",
+        "Returns true if s contains the given substring.",
+    ),
+    (
+        "subs",
+        "Returns the substring of s beginning at start inclusive, and ending at end (default (count s)) exclusive.",
+    ),
+    (
+        "name",
+        "Returns the name string of a symbol, keyword, or string.",
+    ),
+    (
+        "namespace",
+        "Returns the namespace string of a symbol or keyword, or nil.",
+    ),
+    (
+        "symbol",
+        "Returns a Symbol with the given namespace and name, or parsed from a single string.",
+    ),
+    (
+        "keyword",
+        "Returns a Keyword with the given namespace and name, or parsed from a single string/symbol.",
+    ),
+    (
+        "gensym",
+        "Returns a new symbol with a unique name, optionally prefixed.",
+    ),
+    (
+        "char-code",
+        "Returns the integer Unicode code point of a character.",
+    ),
+    ("char-at", "Returns the character at index in string."),
+    ("string->list", "Returns a seq of the characters in string."),
+    (
+        "number->string",
+        "Returns the string representation of a number.",
+    ),
+    (
+        "string->number",
+        "Parses a number from a string, in an optional radix.",
+    ),
+    (
+        "parse-long",
+        "Parses string as a long, or returns nil if it isn't a valid long.",
+    ),
+    (
+        "parse-double",
+        "Parses string as a double, or returns nil if it isn't a valid double.",
+    ),
+    (
+        "parse-boolean",
+        "Parses string (\"true\"/\"false\") as a boolean, or returns nil otherwise.",
+    ),
+    (
+        "parse-uuid",
+        "Parses string as a UUID, or returns nil if it isn't a valid UUID.",
+    ),
+    ("random-uuid", "Returns a new random (version 4) UUID."),
+    // "clojure-version" is redefined in bootstrap.cljrs and documented there.
+    // Math
+    (
+        "floor",
+        "Returns the largest integer value less than or equal to x, as a double.",
+    ),
+    (
+        "ceil",
+        "Returns the smallest integer value greater than or equal to x, as a double.",
+    ),
+    ("round", "Returns x rounded to the nearest integer."),
+    ("sqrt", "Returns the square root of x."),
+    ("pow", "Returns x raised to the power y."),
+    ("log", "Returns the natural logarithm of x."),
+    ("log10", "Returns the base-10 logarithm of x."),
+    ("exp", "Returns Euler's number e raised to the power x."),
+    ("sin", "Returns the sine of x (in radians)."),
+    ("cos", "Returns the cosine of x (in radians)."),
+    ("tan", "Returns the tangent of x (in radians)."),
+    ("asin", "Returns the arc sine of x."),
+    ("acos", "Returns the arc cosine of x."),
+    (
+        "atan",
+        "Returns the arc tangent of x, or of y/x when given two args.",
+    ),
+    (
+        "atan2",
+        "Returns the angle theta of the polar coordinates (r, theta) that correspond to the rectangular coordinates (x, y).",
+    ),
+    (
+        "rand",
+        "Returns a random floating-point number between 0 (inclusive) and n (default 1, exclusive).",
+    ),
+    (
+        "rand-int",
+        "Returns a random integer between 0 (inclusive) and n (exclusive).",
+    ),
+    (
+        "nanotime",
+        "Returns the current value of a monotonic high-resolution time source, in nanoseconds.",
+    ),
+    (
+        "sleep",
+        "Pauses the current thread for the given number of milliseconds.",
+    ),
+    // Bit ops
+    ("bit-and", "Bitwise and."),
+    ("bit-or", "Bitwise or."),
+    ("bit-xor", "Bitwise exclusive or."),
+    ("bit-not", "Bitwise complement."),
+    ("bit-and-not", "Bitwise and with complement."),
+    ("bit-clear", "Clears bit n of x."),
+    ("bit-set", "Sets bit n of x."),
+    ("bit-flip", "Flips bit n of x."),
+    ("bit-test", "Tests bit n of x, returning a boolean."),
+    ("bit-shift-left", "Bitwise shift left."),
+    ("bit-shift-right", "Bitwise shift right (arithmetic)."),
+    (
+        "unsigned-bit-shift-right",
+        "Bitwise shift right, without sign extension.",
+    ),
+    // Arrays
+    ("aget", "Returns the value at index(es) in a native array."),
+    (
+        "aset",
+        "Sets the value at index(es) in a native array, returning the value set.",
+    ),
+    ("aset-int", "Sets an int element in an array."),
+    ("aset-long", "Sets a long element in an array."),
+    ("aset-float", "Sets a float element in an array."),
+    ("aset-short", "Sets a short element in an array."),
+    ("aset-byte", "Sets a byte element in an array."),
+    ("alength", "Returns the length of a native array."),
+    ("aclone", "Returns a shallow clone of a native array."),
+    (
+        "amap",
+        "Applies a function to every element of an array, returning a new array of the results.",
+    ),
+    (
+        "areduce",
+        "Reduces an array with an accumulator expression.",
+    ),
+    (
+        "object-array",
+        "Creates a new array of Objects, sized or seeded from a collection.",
+    ),
+    (
+        "int-array",
+        "Creates a new array of ints, sized or seeded from a collection.",
+    ),
+    (
+        "long-array",
+        "Creates a new array of longs, sized or seeded from a collection.",
+    ),
+    (
+        "float-array",
+        "Creates a new array of floats, sized or seeded from a collection.",
+    ),
+    (
+        "double-array",
+        "Creates a new array of doubles, sized or seeded from a collection.",
+    ),
+    (
+        "byte-array",
+        "Creates a new array of bytes, sized or seeded from a collection.",
+    ),
+    (
+        "char-array",
+        "Creates a new array of chars, sized or seeded from a collection.",
+    ),
+    (
+        "booleans",
+        "Type-hint cast to a boolean array; identity in this runtime.",
+    ),
+    (
+        "bytes",
+        "Type-hint cast to a byte array; identity in this runtime.",
+    ),
+    (
+        "shorts",
+        "Type-hint cast to a short array; identity in this runtime.",
+    ),
+    (
+        "ints",
+        "Type-hint cast to an int array; identity in this runtime.",
+    ),
+    (
+        "longs",
+        "Type-hint cast to a long array; identity in this runtime.",
+    ),
+    (
+        "floats",
+        "Type-hint cast to a float array; identity in this runtime.",
+    ),
+    (
+        "chars",
+        "Type-hint cast to a char array; identity in this runtime.",
+    ),
+    (
+        "array-list",
+        "Creates a new, mutable, growable array-backed list.",
+    ),
+    (
+        "array-list-push",
+        "Appends a value to an array-list, mutating it in place.",
+    ),
+    (
+        "array-list-length",
+        "Returns the number of elements in an array-list.",
+    ),
+    (
+        "array-list-remove",
+        "Removes the element at index from an array-list, mutating it in place.",
+    ),
+    (
+        "array-list-to-array",
+        "Copies an array-list's contents into a new object array.",
+    ),
+    (
+        "array-list-clear",
+        "Removes all elements from an array-list, mutating it in place.",
+    ),
+    // Regex
+    (
+        "re-pattern",
+        "Returns an instance of a regex pattern, compiled from string.",
+    ),
+    (
+        "re-matcher",
+        "Returns a matcher for a given pattern and string.",
+    ),
+    (
+        "re-find",
+        "Returns the next regex match, if any, of string to pattern (or a stateful matcher).",
+    ),
+    (
+        "re-matches",
+        "Returns the match, if the entire string matches the pattern.",
+    ),
+    (
+        "re-groups",
+        "Returns the groups from the most recent match of a matcher.",
+    ),
+    // Atoms / refs / concurrency
+    ("atom", "Creates and returns an atom with an initial value."),
+    (
+        "deref",
+        "Returns the current state of an atom/ref/agent/var, or blocks and returns the value of a delay/future/promise.",
+    ),
+    (
+        "reset!",
+        "Sets the value of atom to newval, without regard to the current value.",
+    ),
+    // "swap!" is redefined in bootstrap.cljrs (in terms of reset!/deref) and
+    // carries its own docstring there, superseding this native's.
+    (
+        "compare-and-set!",
+        "Atomically sets the value of atom to newval if and only if the current value is identical to oldval.",
+    ),
+    (
+        "shared-atom",
+        "Creates a cross-isolate atom whose contents can be mutated concurrently from multiple isolates.",
+    ),
+    (
+        "volatile!",
+        "Creates and returns a volatile (a fast, non-atomic mutable reference).",
+    ),
+    (
+        "vreset!",
+        "Sets the value of a volatile, without regard to the current value.",
+    ),
+    (
+        "vswap!",
+        "Non-atomically swaps the value of a volatile to be (apply f current-value args).",
+    ),
+    (
+        "add-watch",
+        "Adds a watch function to an atom/ref/agent/var, called on every state change.",
+    ),
+    (
+        "remove-watch",
+        "Removes a watch function from an atom/ref/agent/var.",
+    ),
+    (
+        "get-validator",
+        "Returns the validator function of a ref/atom/agent/var, or nil.",
+    ),
+    (
+        "promise",
+        "Returns a promise object that can be read with deref/@, and set (once) with deliver.",
+    ),
+    (
+        "deliver",
+        "Delivers the supplied value to the given promise, releasing any pending derefs.",
+    ),
+    (
+        "send",
+        "Dispatches an action to an agent, running f on the agent's state in a background thread.",
+    ),
+    (
+        "force",
+        "Forces a delay/promise-like value, returning its already-realized value or forcing evaluation.",
+    ),
+    (
+        "ensure-reduced",
+        "Wraps x in a reduced if it isn't already one.",
+    ),
+    (
+        "unreduced",
+        "Returns x's inner value if it's reduced, else x.",
+    ),
+    (
+        "reduced",
+        "Wraps x so that reduce will terminate the reduction early with this value.",
+    ),
+    (
+        "bound?",
+        "Returns true if all the given vars have thread-local or root bindings.",
+    ),
+    (
+        "thread-bound?",
+        "Returns true if all the given vars have thread-local bindings on the current thread.",
+    ),
+    (
+        "var-get",
+        "Returns the current value of a var (dynamic bindings respected).",
+    ),
+    (
+        "var-set!",
+        "Sets the thread-local binding of a dynamic var, or its root binding if none.",
+    ),
+    // Metadata / vars / namespaces
+    (
+        "meta",
+        "Returns the metadata of x, or nil if there is none.",
+    ),
+    (
+        "with-meta",
+        "Returns an object of the same type as x, with the given metadata attached.",
+    ),
+    (
+        "doc-data",
+        "Returns {:doc <string-or-nil> :arities <vector-or-nil>} for a Var or function value. See also `doc`.",
+    ),
+    ("ns-name", "Returns the name of a namespace as a Symbol."),
+    (
+        "ns-interns",
+        "Returns a map of unqualified symbol -> var for all vars interned in the namespace.",
+    ),
+    (
+        "ns-publics",
+        "Returns a map of unqualified symbol -> var for all public vars interned in the namespace.",
+    ),
+    (
+        "ns-refers",
+        "Returns a map of unqualified symbol -> var for all vars referred into the namespace.",
+    ),
+    (
+        "ns-map",
+        "Returns a map of all the mappings (interned and referred) for the namespace.",
+    ),
+    (
+        "ns-aliases",
+        "Returns a map of alias -> namespace for the given namespace.",
+    ),
+    // Exceptions
+    (
+        "ex-info",
+        "Creates an exception carrying a message, an ex-data map, and an optional cause.",
+    ),
+    (
+        "ex-data",
+        "Returns the ex-data map from an exception, or nil if not present.",
+    ),
+    ("ex-message", "Returns the message of an exception."),
+    ("ex-cause", "Returns the cause of an exception, or nil."),
+    // Taps
+    (
+        "add-tap",
+        "Adds f as a tap function; f will be called with any value sent via tap>.",
+    ),
+    ("remove-tap", "Removes f from the set of tap functions."),
+    (
+        "tap>",
+        "Sends val to any registered tap functions asynchronously; returns true.",
+    ),
+    // Interop
+    (
+        "new",
+        "Constructs a new instance of the named class or record.",
+    ),
+    (
+        "native-type",
+        "Returns the type tag string of a NativeObject, or nil.",
+    ),
+    ("close", "Closes a resource (e.g. a file handle)."),
+];
 
 // ── Registration ──────────────────────────────────────────────────────────────
 
@@ -619,6 +1545,7 @@ pub fn register_all(globals: &Arc<GlobalEnv>, ns: &str) {
         ("bound?", Arity::Fixed(1), builtin_bound_q),
         ("thread-bound?", Arity::Fixed(1), builtin_thread_bound_q),
         ("meta", Arity::Fixed(1), builtin_meta),
+        ("doc-data", Arity::Fixed(1), builtin_doc_data),
         ("with-meta", Arity::Fixed(2), builtin_with_meta),
         (
             "vary-meta",
@@ -708,9 +1635,16 @@ pub fn register_all(globals: &Arc<GlobalEnv>, ns: &str) {
         ("nanotime", Arity::Fixed(0), builtin_nanotime),
     ];
 
+    let docs: HashMap<&str, &str> = BUILTIN_DOCS.iter().copied().collect();
     for (name, arity, func) in fns {
         let nf = NativeFn::new(name, arity, func);
-        globals.intern(ns, Arc::from(name), Value::NativeFunction(GcPtr::new(nf)));
+        let var = globals.intern(ns, Arc::from(name), Value::NativeFunction(GcPtr::new(nf)));
+        if let Some(doc) = docs.get(name) {
+            var.get().set_meta(Value::Map(MapValue::empty().assoc(
+                Value::keyword(Keyword::parse("doc")),
+                Value::string((*doc).to_string()),
+            )));
+        }
     }
 
     // Math constants.
@@ -7377,6 +8311,98 @@ fn builtin_meta(args: &[Value]) -> ValueResult<Value> {
     }
 }
 
+/// `(doc-data x)` — structured docs for a Var or function value:
+/// `{:doc <string-or-nil> :arities <vector-or-nil>}`. Accepts a `Var`
+/// (`#'foo`), any value carrying attached metadata (`with-meta`), or a bare
+/// function value (native or interpreted), for which only `:arities` can be
+/// derived (functions don't carry `:doc` on their own — only their Var does).
+fn builtin_doc_data(args: &[Value]) -> ValueResult<Value> {
+    let (meta, target) = match &args[0] {
+        Value::Var(vp) => (vp.get().get_meta(), vp.get().deref().unwrap_or(Value::Nil)),
+        Value::WithMeta(inner, m) => (Some((**m).clone()), (**inner).clone()),
+        other => (None, other.clone()),
+    };
+    let doc = meta
+        .as_ref()
+        .and_then(|m| map_val_get(m, "doc"))
+        .unwrap_or(Value::Nil);
+    let arities = meta
+        .as_ref()
+        .and_then(|m| map_val_get(m, "arglists"))
+        .or_else(|| fn_arities(&target))
+        .unwrap_or(Value::Nil);
+    Ok(Value::Map(
+        MapValue::empty()
+            .assoc(Value::keyword(Keyword::parse("doc")), doc)
+            .assoc(Value::keyword(Keyword::parse("arities")), arities),
+    ))
+}
+
+/// Look up a keyword-keyed entry in a `Value::Map`.
+fn map_val_get(m: &Value, key: &str) -> Option<Value> {
+    match m {
+        Value::Map(m) => m.get(&Value::keyword(Keyword::parse(key))),
+        _ => None,
+    }
+}
+
+/// Compute a Clojure-style arglists vector (`([x] [x y & more])`) for a
+/// function value that has no `:arglists` metadata of its own — used for
+/// native builtins, whose arities are known but whose parameter names are
+/// not.
+fn fn_arities(v: &Value) -> Option<Value> {
+    match v {
+        Value::Fn(f) | Value::Macro(f) => {
+            let skip = if matches!(v, Value::Macro(_)) { 2 } else { 0 };
+            let lists: Vec<Value> = f
+                .get()
+                .arities
+                .iter()
+                .map(|a| {
+                    let mut syms: Vec<Value> = a
+                        .params
+                        .iter()
+                        .skip(skip)
+                        .map(|p| Value::symbol(Symbol::simple(p.as_ref())))
+                        .collect();
+                    if let Some(rest) = &a.rest_param {
+                        syms.push(Value::symbol(Symbol::simple("&")));
+                        syms.push(Value::symbol(Symbol::simple(rest.as_ref())));
+                    }
+                    Value::Vector(GcPtr::new(PersistentVector::from_iter(syms)))
+                })
+                .collect();
+            Some(Value::Vector(GcPtr::new(PersistentVector::from_iter(
+                lists,
+            ))))
+        }
+        Value::NativeFunction(nf) => {
+            let params = synthetic_params(&nf.get().arity);
+            Some(Value::Vector(GcPtr::new(PersistentVector::from_iter(
+                vec![Value::Vector(GcPtr::new(PersistentVector::from_iter(
+                    params,
+                )))],
+            ))))
+        }
+        _ => None,
+    }
+}
+
+/// Generate placeholder parameter symbols for a native fn's `Arity` — its
+/// real parameter names aren't tracked, only the arity shape is.
+fn synthetic_params(arity: &Arity) -> Vec<Value> {
+    let name = |i: usize| Value::symbol(Symbol::simple(format!("arg{}", i + 1)));
+    match arity {
+        Arity::Fixed(n) => (0..*n).map(name).collect(),
+        Arity::Variadic { min } => {
+            let mut params: Vec<Value> = (0..*min).map(name).collect();
+            params.push(Value::symbol(Symbol::simple("&")));
+            params.push(Value::symbol(Symbol::simple("more")));
+            params
+        }
+    }
+}
+
 /// `(with-meta v m)` — attach metadata to a value.
 fn builtin_with_meta(args: &[Value]) -> ValueResult<Value> {
     match &args[0] {
@@ -7632,5 +8658,63 @@ fn builtin_native_type(args: &[Value]) -> ValueResult<Value> {
     match &args[0] {
         Value::NativeObject(obj) => Ok(Value::Str(GcPtr::new(obj.get().type_tag().to_string()))),
         _ => Ok(Value::Nil),
+    }
+}
+
+#[cfg(test)]
+mod doc_tests {
+    use super::*;
+    use cljrs_env::env::{Env, GlobalEnv};
+    use cljrs_env::error::EvalResult;
+    use cljrs_reader::Form;
+
+    // `register_all` never calls back into the evaluator, so these stubs are
+    // never invoked; they only satisfy `GlobalEnv::new`'s signature.
+    fn stub_eval_fn(_form: &Form, _env: &mut Env) -> EvalResult {
+        Ok(Value::Nil)
+    }
+    fn stub_call_cljrs_fn(_f: &cljrs_value::CljxFn, _args: &[Value], _env: &mut Env) -> EvalResult {
+        Ok(Value::Nil)
+    }
+
+    fn test_globals() -> std::sync::Arc<GlobalEnv> {
+        let globals = GlobalEnv::new(stub_eval_fn, stub_call_cljrs_fn, None);
+        register_all(&globals, "clojure.core");
+        globals
+    }
+
+    /// Every `BUILTIN_DOCS` entry must name a builtin that's actually
+    /// registered — an entry for a typo'd or renamed name would silently
+    /// never attach, so catch that here instead.
+    #[test]
+    fn builtin_docs_names_are_all_registered() {
+        let globals = test_globals();
+        for (name, _) in BUILTIN_DOCS {
+            assert!(
+                globals.lookup_var("clojure.core", name).is_some(),
+                "BUILTIN_DOCS has an entry for {name:?}, but no builtin is registered under that name"
+            );
+        }
+    }
+
+    #[test]
+    fn builtin_docs_has_no_duplicate_names() {
+        let mut seen = std::collections::HashSet::new();
+        for (name, _) in BUILTIN_DOCS {
+            assert!(seen.insert(*name), "duplicate BUILTIN_DOCS entry: {name:?}");
+        }
+    }
+
+    /// Docs attach as `:doc` var metadata, readable via `meta`/`doc-data`.
+    #[test]
+    fn builtin_doc_attaches_as_var_meta() {
+        let globals = test_globals();
+        let var = globals
+            .lookup_var("clojure.core", "+")
+            .expect("+ should be registered");
+        let meta = var.get().get_meta().expect("+ should carry :doc metadata");
+        let doc = map_val_get(&meta, "doc").expect(":doc key should be present");
+        let expected = BUILTIN_DOCS.iter().find(|(n, _)| *n == "+").unwrap().1;
+        assert_eq!(doc, Value::string(expected.to_string()));
     }
 }

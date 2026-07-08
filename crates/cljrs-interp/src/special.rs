@@ -66,11 +66,13 @@ fn eval_def(args: &[Form], env: &mut Env) -> EvalResult {
         return Err(EvalError::Runtime("def requires a name".into()));
     }
     let (name, meta_opt) = extract_def_name(&args[0], env)?;
-    // Skip optional docstring: (def name "docstring" value)
-    let val_idx = if args.len() > 2 && matches!(args[1].kind, FormKind::Str(_)) {
-        2
+    // Optional docstring: (def name "docstring" value)
+    let (docstring, val_idx) = if args.len() > 2
+        && let FormKind::Str(s) = &args[1].kind
+    {
+        (Some(s.clone()), 2)
     } else {
-        1
+        (None, 1)
     };
     let val = if args.len() > val_idx {
         // Under no-gc: def value expressions go to the StaticArena since the
@@ -84,10 +86,51 @@ fn eval_def(args: &[Form], env: &mut Env) -> EvalResult {
     let var = env
         .globals
         .intern(&env.current_ns, Arc::from(name.as_str()), val.clone());
-    if let Some(meta_val) = meta_opt {
+    let meta = merge_meta(meta_opt, docstring.as_deref().map(doc_meta));
+    if let Some(meta_val) = meta {
         var.get().set_meta(meta_val);
     }
     Ok(Value::Var(var))
+}
+
+/// Build a `{:doc "..."}` metadata map fragment for a docstring.
+fn doc_meta(doc: &str) -> Value {
+    Value::Map(MapValue::empty().assoc(
+        Value::keyword(Keyword::parse("doc")),
+        Value::string(doc.to_string()),
+    ))
+}
+
+/// Build a `{:arglists ([x] [x y & more])}` metadata fragment from a
+/// `Value::Fn`/`Value::Macro`'s parsed arities. `skip` elides leading fixed
+/// params that aren't part of the public signature (defmacro's implicit
+/// `&form`/`&env`).
+fn arglists_meta(fn_val: &Value, skip: usize) -> Option<Value> {
+    let arities = match fn_val {
+        Value::Fn(f) => &f.get().arities,
+        Value::Macro(f) => &f.get().arities,
+        _ => return None,
+    };
+    let lists: Vec<Value> = arities
+        .iter()
+        .map(|a| {
+            let mut syms: Vec<Value> = a
+                .params
+                .iter()
+                .skip(skip)
+                .map(|p| Value::symbol(cljrs_value::Symbol::simple(p.as_ref())))
+                .collect();
+            if let Some(rest) = &a.rest_param {
+                syms.push(Value::symbol(cljrs_value::Symbol::simple("&")));
+                syms.push(Value::symbol(cljrs_value::Symbol::simple(rest.as_ref())));
+            }
+            Value::Vector(GcPtr::new(cljrs_value::PersistentVector::from_iter(syms)))
+        })
+        .collect();
+    Some(Value::Map(MapValue::empty().assoc(
+        Value::keyword(Keyword::parse("arglists")),
+        Value::Vector(GcPtr::new(cljrs_value::PersistentVector::from_iter(lists))),
+    )))
 }
 
 /// Extract the def name and optional metadata from the name form.
@@ -1066,16 +1109,22 @@ pub fn eval_defn(args: &[Form], env: &mut Env) -> EvalResult {
         },
         _ => return Err(EvalError::Runtime("defn requires a symbol name".into())),
     };
-    // Skip optional docstring and/or metadata map after the name.
+    // Optional docstring and/or metadata map after the name.
     // Valid orderings: (defn name body...), (defn name "doc" body...),
     // (defn name {:meta ...} body...), (defn name "doc" {:meta ...} body...).
     let mut rest_start = 1;
-    if rest_start < args.len() && matches!(args[rest_start].kind, FormKind::Str(_)) {
+    let mut docstring: Option<String> = None;
+    if rest_start < args.len()
+        && let FormKind::Str(s) = &args[rest_start].kind
+    {
+        docstring = Some(s.clone());
         rest_start += 1;
     }
+    let mut attr_meta: Option<Value> = None;
     if rest_start < args.len() && matches!(args[rest_start].kind, FormKind::Map(_)) {
         // An attr-map such as `{:async true}` can also request async dispatch.
         is_async |= meta_form_is_async(&args[rest_start]);
+        attr_meta = Some(eval(&args[rest_start], env)?);
         rest_start += 1;
     }
     // Build (fn* name ...)
@@ -1095,6 +1144,14 @@ pub fn eval_defn(args: &[Form], env: &mut Env) -> EvalResult {
     let var = env
         .globals
         .intern(&env.current_ns, Arc::from(name.as_str()), fn_val.clone());
+    let mut meta = attr_meta;
+    if let Some(doc) = &docstring {
+        meta = merge_meta(meta, Some(doc_meta(doc)));
+    }
+    meta = merge_meta(meta, arglists_meta(&fn_val, 0));
+    if let Some(meta_val) = meta {
+        var.get().set_meta(meta_val);
+    }
     Ok(Value::Var(var))
 }
 
@@ -1154,7 +1211,11 @@ fn eval_defmacro(args: &[Form], env: &mut Env) -> EvalResult {
     };
 
     let mut rest_start = 1;
-    if rest_start < args.len() && matches!(args[rest_start].kind, FormKind::Str(_)) {
+    let mut docstring: Option<String> = None;
+    if rest_start < args.len()
+        && let FormKind::Str(s) = &args[rest_start].kind
+    {
+        docstring = Some(s.clone());
         rest_start += 1;
     }
     let mut attr_meta = None;
@@ -1189,7 +1250,13 @@ fn eval_defmacro(args: &[Form], env: &mut Env) -> EvalResult {
     let var = env
         .globals
         .intern(&env.current_ns, Arc::from(name.as_str()), macro_val.clone());
-    if let Some(m) = merge_meta(name_meta, attr_meta) {
+    let mut meta = merge_meta(name_meta, attr_meta);
+    if let Some(doc) = &docstring {
+        meta = merge_meta(meta, Some(doc_meta(doc)));
+    }
+    // Skip the implicit &form/&env params when showing the macro's signature.
+    meta = merge_meta(meta, arglists_meta(&macro_val, 2));
+    if let Some(m) = meta {
         var.get().set_meta(m);
     }
     Ok(Value::Var(var))

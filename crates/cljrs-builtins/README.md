@@ -28,6 +28,32 @@ Includes the `unchecked-*` integer arithmetic family — `unchecked-add`,
 contrast to the checked `+`/`-`/`*` (which throw on overflow at the IR/compiled
 tiers and promote to BigInt in the tree-walk tier).
 
+## Docstrings (`doc` / `doc-data`)
+
+`register_all` attaches `:doc` var metadata to native builtins from the
+`BUILTIN_DOCS: &[(&str, &str)]` table (in `builtins.rs`), keyed by the name
+the builtin is interned under. Not every builtin has an entry — special-form
+stub vars and rarely-used internals are skipped, and a builtin later
+redefined in `bootstrap.cljrs` (e.g. `swap!`, `partition`, `range`) carries
+its docstring there instead, since the Clojure-level `defn`/`defmacro`
+re-interns the var (see `cljrs-interp`'s README for how `def`/`defn`/
+`defmacro` capture docstrings into var meta). Any builtin *may* carry a
+docstring simply by adding a `BUILTIN_DOCS` entry; `#[cfg(test)] mod
+doc_tests` in `builtins.rs` asserts every entry names something actually
+registered, and that there are no duplicate names.
+
+`doc-data` (`builtin_doc_data`, registered as a native fn) takes a `Var`
+(`#'foo`), a value carrying attached metadata (`with-meta`), or a bare
+function value, and returns `{:doc <string-or-nil> :arities <vector-or-nil>}`.
+`:arities` prefers `:arglists` var metadata when present (real parameter
+names, from `def`/`defn`/`defmacro`); otherwise it synthesizes placeholder
+parameter names (`arg1`, `arg2`, ...) from a native fn's `Arity` shape, since
+native fns don't carry real parameter names.
+
+`clojure.core/doc` (a macro, defined in `bootstrap.cljrs`) wraps `(var sym)` +
+`doc-data` in a `try`/`catch` so `(doc some-unbound-symbol)` returns `nil`
+instead of throwing, and returns just the `:doc` string.
+
 ## Phase B3 — `shared-atom` (cross-isolate, two-tier atom ADR)
 
 `shared-atom` is the cross-isolate tier of the two-tier atom design in
