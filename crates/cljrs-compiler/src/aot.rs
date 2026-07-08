@@ -1093,6 +1093,62 @@ struct CompiledNamespace {
     preamble: String,
 }
 
+/// Write each compiled namespace's interpreted preamble into `harness_dir/src`
+/// and generate the harness Rust code that wires its compiled initializer into
+/// `require`: the `extern "C"` declarations for the `__cljrs_ns_init_*` symbols
+/// and the `register_compiled_ns_loader` registrations.  Shared between the run
+/// harness (`build_harness`) and the test harness (`compile_test_harness`).
+/// Returns `(externs, registrations)`.
+fn write_compiled_ns_wiring(
+    harness_dir: &Path,
+    compiled_namespaces: &[CompiledNamespace],
+) -> AotResult<(String, String)> {
+    let mut ns_init_externs = String::new();
+    let mut compiled_ns_registration = String::new();
+    for (i, cns) in compiled_namespaces.iter().enumerate() {
+        let preamble_file = format!("ns_{i}_preamble.cljrs");
+        std::fs::write(harness_dir.join("src").join(&preamble_file), &cns.preamble)?;
+        let ns = cns.ns.as_ref();
+        let ns_label = format!("<{ns}>");
+        eprintln!(
+            "[aot] compiled namespace {ns} → src/{preamble_file} + {}",
+            cns.init_symbol.as_deref().unwrap_or("(preamble only)")
+        );
+
+        let init_call = match &cns.init_symbol {
+            Some(sym) => {
+                ns_init_externs.push_str(&format!("    fn {sym}() -> *const Value;\n"));
+                format!("        unsafe {{ {sym}(); }}\n")
+            }
+            None => String::new(),
+        };
+
+        compiled_ns_registration.push_str(&format!(
+            r#"    globals.register_compiled_ns_loader({ns:?}, std::sync::Arc::new(
+        |globals: &std::sync::Arc<cljrs_env::env::GlobalEnv>| -> cljrs_env::error::EvalResult<()> {{
+        let mut env = cljrs_eval::Env::new(globals.clone(), {ns:?});
+        cljrs_env::callback::push_eval_context(&env);
+        let preamble = include_str!({preamble_file:?});
+        if !preamble.is_empty() {{
+            let mut parser = cljrs_reader::Parser::new(preamble.to_string(), {ns_label:?}.to_string());
+            let forms = parser.parse_all().map_err(cljrs_env::error::EvalError::Read)?;
+            for form in &forms {{
+                cljrs_eval::eval(form, &mut env)?;
+            }}
+        }}
+        // Re-push the eval context with the (possibly updated) namespace before
+        // running the compiled initializer.
+        cljrs_env::callback::pop_eval_context();
+        cljrs_env::callback::push_eval_context(&env);
+{init_call}        cljrs_env::callback::pop_eval_context();
+        Ok(())
+    }}));
+"#,
+        ));
+    }
+    Ok((ns_init_externs, compiled_ns_registration))
+}
+
 /// Recursively resolve reader conditionals (`#?(...)` / `#?@(...)`) to their
 /// `:rust` (or `:default`) branch throughout a form tree.
 ///
@@ -1538,49 +1594,8 @@ edition = "2024"
     // Write the interpreted preamble for each AOT-compiled namespace, and build
     // the extern declarations + loader registrations that wire each required
     // namespace's compiled initializer into `require`.
-    let mut ns_init_externs = String::new();
-    let mut compiled_ns_registration = String::new();
-    for (i, cns) in compiled_namespaces.iter().enumerate() {
-        let preamble_file = format!("ns_{i}_preamble.cljrs");
-        std::fs::write(harness_dir.join("src").join(&preamble_file), &cns.preamble)?;
-        let ns = cns.ns.as_ref();
-        let ns_label = format!("<{ns}>");
-        eprintln!(
-            "[aot] compiled namespace {ns} → src/{preamble_file} + {}",
-            cns.init_symbol.as_deref().unwrap_or("(preamble only)")
-        );
-
-        let init_call = match &cns.init_symbol {
-            Some(sym) => {
-                ns_init_externs.push_str(&format!("    fn {sym}() -> *const Value;\n"));
-                format!("        unsafe {{ {sym}(); }}\n")
-            }
-            None => String::new(),
-        };
-
-        compiled_ns_registration.push_str(&format!(
-            r#"    globals.register_compiled_ns_loader({ns:?}, std::sync::Arc::new(
-        |globals: &std::sync::Arc<cljrs_env::env::GlobalEnv>| -> cljrs_env::error::EvalResult<()> {{
-        let mut env = cljrs_eval::Env::new(globals.clone(), {ns:?});
-        cljrs_env::callback::push_eval_context(&env);
-        let preamble = include_str!({preamble_file:?});
-        if !preamble.is_empty() {{
-            let mut parser = cljrs_reader::Parser::new(preamble.to_string(), {ns_label:?}.to_string());
-            let forms = parser.parse_all().map_err(cljrs_env::error::EvalError::Read)?;
-            for form in &forms {{
-                cljrs_eval::eval(form, &mut env)?;
-            }}
-        }}
-        // Re-push the eval context with the (possibly updated) namespace before
-        // running the compiled initializer.
-        cljrs_env::callback::pop_eval_context();
-        cljrs_env::callback::push_eval_context(&env);
-{init_call}        cljrs_env::callback::pop_eval_context();
-        Ok(())
-    }}));
-"#,
-        ));
-    }
+    let (ns_init_externs, compiled_ns_registration) =
+        write_compiled_ns_wiring(&harness_dir, compiled_namespaces)?;
 
     // Write main.rs — calls into the compiled __cljrs_main.
 
@@ -1814,9 +1829,10 @@ const HARNESS_RUNTIME_CRATES: &[&str] = &[
     "cljrs-base64",
 ];
 
-/// Runtime crates the AOT *test* harness links against.  The test runner
-/// interprets Clojure at runtime, so it needs neither the async/IO/net/charset
-/// stacks nor object-file linking.
+/// Runtime crates the AOT *test* harness links against.  The test harness
+/// links the compiled namespace initializers (so it needs `cljrs-compiler`
+/// for the `rt_*` ABI bridges) but not the async/IO/net/charset stacks —
+/// those namespaces are not registered by the generated test runner.
 const TEST_HARNESS_RUNTIME_CRATES: &[&str] = &[
     "cljrs-logging",
     "cljrs-types",
@@ -2063,19 +2079,44 @@ fn file_to_namespace(root: &Path, file: &Path) -> Option<String> {
 }
 
 /// Generate the Rust test harness code.
-fn generate_test_harness_code(namespaces: &[String], bundled_registration: &str) -> String {
+///
+/// `bundled_registration` registers interpreted-fallback namespace sources;
+/// `ns_init_externs` / `compiled_ns_registration` (from
+/// [`write_compiled_ns_wiring`]) declare and register the natively compiled
+/// namespace initializers linked in from the AOT object file.
+fn generate_test_harness_code(
+    namespaces: &[String],
+    bundled_registration: &str,
+    ns_init_externs: &str,
+    compiled_ns_registration: &str,
+) -> String {
     let mut code = String::new();
 
     code.push_str(
         r#"//! Auto-generated AOT test harness for clojurust.
 //!
-//! Discovers and runs all clojure.test tests in the bundled namespaces.
+//! Discovers and runs all clojure.test tests in the compiled/bundled
+//! namespaces.
+
+#![allow(improper_ctypes)]
 
 use cljrs_value::Value;
 
-fn run() {
+"#,
+    );
+
+    if !ns_init_externs.is_empty() {
+        code.push_str(&format!("unsafe extern \"C\" {{\n{ns_init_externs}}}\n\n"));
+    }
+
+    code.push_str(
+        r#"fn run() {
     // Set -X flags from environment.
     cljrs_logging::set_feature_levels_from_env().unwrap();
+
+    // Ensure all rt_* symbols are linked into the binary (the compiled
+    // namespace initializers call them).
+    cljrs_compiler::rt_abi::anchor_rt_symbols();
 
     // Initialize the standard environment without IR lowering.
     // The test harness interprets Clojure at runtime; there is no benefit to
@@ -2110,6 +2151,13 @@ fn run() {
     );
 
     code.push_str(bundled_registration);
+    if !compiled_ns_registration.is_empty() {
+        code.push_str(
+            "\n    // Register AOT-compiled namespace loaders so `require` runs their\n    \
+             // native initializers instead of interpreting source.\n",
+        );
+        code.push_str(compiled_ns_registration);
+    }
     code.push_str(
         r#"    let mut env = cljrs_eval::Env::new(globals, "user");
 
@@ -2162,13 +2210,15 @@ fn run() {
         // allocations from eval become eligible for collection immediately.
         {
             let _frame = cljrs_gc::push_alloc_frame();
-            let _ = cljrs_eval::eval(
+            if let Err(e) = cljrs_eval::eval(
                 &cljrs_reader::Parser::new(
                     format!("(require '{})", ns_str).to_string(),
                     "<test-harness>".to_string()
                 ).parse_all().unwrap()[0],
                 &mut env
-            );
+            ) {
+                eprintln!("[test-harness] failed to load {}: {:?}", ns_str, e);
+            }
         }
 
         // Run its tests.  Same alloc-frame scoping so transient test
@@ -2256,6 +2306,15 @@ fn main() {
 
 /// Compile a directory of test files to a standalone native binary.
 /// The resulting binary will discover and run all clojure.test tests found.
+///
+/// Each discovered namespace (sources first, then tests) is AOT-compiled with
+/// the same per-namespace pipeline `compile_file` uses for required
+/// namespaces ([`lower_namespace`]): top-level forms are partitioned into an
+/// interpreted preamble (`ns`/`require`, `defmacro`, `deftest` — anything the
+/// backend can't lower) and a compilable body that is Cranelift-compiled to a
+/// `__cljrs_ns_init_*` initializer linked into the binary.  A namespace that
+/// cannot be loaded, lowered, or compiled falls back to being bundled as
+/// interpreted source, so the harness always builds.
 pub fn compile_test_harness(
     test_dir: &Path,
     out_path: &Path,
@@ -2276,7 +2335,7 @@ pub fn compile_test_harness(
         test_namespaces.len()
     );
 
-    // Also discover source namespaces from src_dirs so they get bundled
+    // Also discover source namespaces from src_dirs so they get compiled
     let mut src_namespaces = Vec::new();
     for dir in src_dirs {
         if dir.is_dir() {
@@ -2299,15 +2358,109 @@ pub fn compile_test_harness(
         }
     }
 
-    // Generate registration code for bundled sources
-    let mut bundled_registration = String::new();
-    for (i, ns) in all_namespaces.iter().enumerate() {
-        bundled_registration.push_str(&format!(
-            "    globals.register_builtin_source(\"{ns}\", include_str!(\"bundled_{i}.cljrs\"));\n"
-        ));
-    }
+    // Include test_dir as a search path for test sources.
+    let mut search_dirs = src_dirs.to_vec();
+    search_dirs.push(test_dir.to_path_buf());
 
-    // Create the harness directory
+    // ── AOT-compile each namespace ──────────────────────────────────────
+    // Boot a compile-time environment rooted at the combined search path so
+    // each namespace (and the macros it defines or requires) can be loaded
+    // before lowering — `lower_namespace` macro-expands against `globals` and
+    // needs the namespace's own `require`s already resolved.
+    let globals = cljrs_stdlib::standard_env_with_paths(search_dirs.clone());
+    let mut env = cljrs_eval::Env::new(globals, "user");
+
+    let mut compiled_namespaces: Vec<CompiledNamespace> = Vec::new();
+    let mut ns_irs: Vec<(String, IrFunction)> = Vec::new();
+    let mut interpreted_bundled: Vec<(String, String)> = Vec::new();
+
+    for (i, ns) in all_namespaces.iter().enumerate() {
+        let rel_path = ns.replace('.', "/").replace('-', "_");
+        let Some(src) = find_user_source(&rel_path, &search_dirs) else {
+            return Err(AotError::Eval(format!(
+                "Could not find source for namespace {ns}"
+            )));
+        };
+
+        // Load the namespace so its macros and transitive requires are
+        // available during lowering.  A namespace that fails to load at
+        // compile time is bundled as interpreted source instead — the real
+        // error then resurfaces at runtime, where the harness reports it
+        // without aborting the remaining namespaces.
+        let required =
+            cljrs_reader::Parser::new(format!("(require '{ns})"), "<aot-test-harness>".to_string())
+                .parse_all()
+                .ok()
+                .map(|forms| cljrs_eval::eval(&forms[0], &mut env));
+        match required {
+            Some(Ok(_)) => {}
+            Some(Err(e)) => {
+                eprintln!(
+                    "[aot] {ns}: failed to load at compile time ({e:?}), bundling as interpreted source"
+                );
+                interpreted_bundled.push((ns.clone(), src));
+                continue;
+            }
+            None => {
+                eprintln!("[aot] {ns}: unparseable require, bundling as interpreted source");
+                interpreted_bundled.push((ns.clone(), src));
+                continue;
+            }
+        }
+
+        let init_symbol = format!("__cljrs_ns_init_{i}");
+        let globals = env.globals.clone();
+        match lower_namespace(ns, &src, &init_symbol, &globals) {
+            Ok((preamble, Some(ir))) if dep_codegen_ok(&ir, &init_symbol) => {
+                ns_irs.push((init_symbol.clone(), ir));
+                compiled_namespaces.push(CompiledNamespace {
+                    ns: Arc::from(ns.as_str()),
+                    init_symbol: Some(init_symbol),
+                    preamble,
+                });
+            }
+            // Lowered, but the body could not be compiled by the backend.
+            Ok((_, Some(_))) => {
+                eprintln!("[aot] {ns}: body could not be compiled, bundling as interpreted source");
+                interpreted_bundled.push((ns.clone(), src));
+            }
+            // No compilable body (e.g. only deftests/macros): a preamble-only
+            // loader is enough.
+            Ok((preamble, None)) => {
+                compiled_namespaces.push(CompiledNamespace {
+                    ns: Arc::from(ns.as_str()),
+                    init_symbol: None,
+                    preamble,
+                });
+            }
+            // Lowering failed outright (an unsupported form): interpret it.
+            Err(e) => {
+                eprintln!("[aot] {ns}: could not be lowered ({e}), bundling as interpreted source");
+                interpreted_bundled.push((ns.clone(), src));
+            }
+        }
+    }
+    eprintln!(
+        "[aot] compiled {} namespace(s) ({} with a native initializer), {} interpreted",
+        compiled_namespaces.len(),
+        ns_irs.len(),
+        interpreted_bundled.len()
+    );
+
+    // ── Cranelift codegen → .o ──────────────────────────────────────────
+    // All namespace initializers share one object module; subfunction symbols
+    // are globally unique, so there are no name collisions.
+    let mut compiler = Compiler::new()?;
+    for (init_symbol, ir) in &ns_irs {
+        declare_subfunctions(ir, &mut compiler)?;
+        compile_subfunctions(ir, &mut compiler)?;
+        let id = compiler.declare_function(init_symbol, 0)?;
+        compiler.compile_function(ir, id)?;
+    }
+    let obj_bytes = compiler.finish();
+    eprintln!("[aot] generated {} bytes of object code", obj_bytes.len());
+
+    // ── Generate harness project ────────────────────────────────────────
     let harness_dir = out_path
         .parent()
         .unwrap_or(Path::new("."))
@@ -2319,29 +2472,33 @@ pub fn compile_test_harness(
     }
     std::fs::create_dir_all(harness_dir.join("src"))?;
 
-    // Generate the main.rs file (only test namespaces get run-tests called)
-    let main_rs = generate_test_harness_code(&test_namespaces, &bundled_registration);
-    std::fs::write(harness_dir.join("src/main.rs"), &main_rs)?;
+    // Write the object file.
+    let obj_path = harness_dir.join("__cljrs_tests.o");
+    std::fs::write(&obj_path, &obj_bytes)?;
 
-    // Write all namespace sources for bundling
-    // Include test_dir as a search path for test sources
-    let mut search_dirs = src_dirs.to_vec();
-    search_dirs.push(test_dir.to_path_buf());
-
-    for (i, ns) in all_namespaces.iter().enumerate() {
-        let rel_path = ns.replace('.', "/").replace('-', "_");
-        if let Some(src) = find_user_source(&rel_path, &search_dirs) {
-            std::fs::write(
-                harness_dir.join("src").join(format!("bundled_{i}.cljrs")),
-                &src,
-            )?;
-            eprintln!("[aot] bundled {ns} → src/bundled_{i}.cljrs");
-        } else {
-            return Err(AotError::Eval(format!(
-                "Could not find source for namespace {ns}"
-            )));
-        }
+    // Write interpreted-fallback namespace sources and their registrations.
+    let mut bundled_registration = String::new();
+    for (i, (ns, src)) in interpreted_bundled.iter().enumerate() {
+        let filename = format!("bundled_{i}.cljrs");
+        std::fs::write(harness_dir.join("src").join(&filename), src)?;
+        eprintln!("[aot] bundled (interpreted) {ns} → src/{filename}");
+        bundled_registration.push_str(&format!(
+            "    globals.register_builtin_source({ns:?}, include_str!({filename:?}));\n"
+        ));
     }
+
+    // Write compiled-namespace preambles and their loader registrations.
+    let (ns_init_externs, compiled_ns_registration) =
+        write_compiled_ns_wiring(&harness_dir, &compiled_namespaces)?;
+
+    // Generate the main.rs file (only test namespaces get run-tests called)
+    let main_rs = generate_test_harness_code(
+        &test_namespaces,
+        &bundled_registration,
+        &ns_init_externs,
+        &compiled_ns_registration,
+    );
+    std::fs::write(harness_dir.join("src/main.rs"), &main_rs)?;
 
     // Write Cargo.toml.  Resolve deps the same way as the run harness: a local
     // checkout (path deps) when found, otherwise the published versions.
@@ -2354,7 +2511,7 @@ pub fn compile_test_harness(
         r#"[package]
 name = "cljrs-aot-harness"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 
 [workspace]
 
@@ -2363,10 +2520,16 @@ edition = "2021"
     );
     std::fs::write(harness_dir.join("Cargo.toml"), cargo_toml)?;
 
-    // Write build.rs - minimal, no object file linking needed
-    let build_rs = r#"fn main() {
-    // No special linking needed for test harness
-}"#;
+    // Write build.rs — tells Cargo to link the compiled namespace initializers.
+    let obj_abs = std::fs::canonicalize(&obj_path)?;
+    let build_rs = format!(
+        r#"fn main() {{
+    // Link the AOT-compiled object file.
+    println!("cargo:rustc-link-arg={obj}");
+    println!("cargo:rerun-if-changed={obj}");
+}}"#,
+        obj = obj_abs.display()
+    );
     std::fs::write(harness_dir.join("build.rs"), build_rs)?;
 
     // Build with cargo

@@ -314,6 +314,7 @@ via an inline signed-overflow branch matching `rt_add`/etc.), wrapping
 ```rust
 pub fn compile_file(src_path: &Path, out_path: &Path, src_dirs: &[PathBuf], rust_config: Option<&RustConfig>, verify_commit_signatures: bool) -> AotResult<()>;
 pub fn compile_file_to_wasm(src_path: &Path, out_path: &Path, src_dirs: &[PathBuf]) -> AotResult<()>;
+pub fn compile_test_harness(test_dir: &Path, out_path: &Path, src_dirs: &[PathBuf]) -> AotResult<()>;
 pub fn lower_via_clojure(name: Option<&str>, ns: &str, params: &[Arc<str>], forms: &[Form], env: &mut Env) -> AotResult<IrFunction>;
 
 pub enum AotError { Io, Parse, Codegen, Eval, Link, Wasm(WasmError), NoGcBlacklist(Vec<BlacklistViolation>) /* no-gc only */ }
@@ -371,6 +372,27 @@ exits normally; if `-main` throws, the binary prints the error and exits 1.
 The generated harness `main()` (and the `compile_test_harness` test runner)
 calls `cljrs_gc::dump_stats_from_env()` once at exit, so AOT binaries honor
 the `CLJRS_GC_STATS` env var (empty/`"-"` → stdout, otherwise a file path).
+
+**Test harness (`cljrs compile --test`).** `compile_test_harness` compiles a
+directory of clojure.test namespaces (plus every namespace found on
+`src_dirs`) to a standalone test-runner binary.  Each discovered namespace —
+sources first, then tests — is loaded into a compile-time environment and
+AOT-compiled with the same per-namespace pipeline `compile_file` uses for
+required namespaces (`lower_namespace`): top-level forms are partitioned into
+an interpreted preamble (`ns`/`require`, `defmacro`, `deftest` — which
+expands to `alter-meta!` — and anything else the backend can't lower) and a
+compilable body that is Cranelift-compiled to a `__cljrs_ns_init_*`
+initializer.  All initializers share one object module, linked into the
+harness binary; the generated `main()` registers each namespace's loader via
+`register_compiled_ns_loader`, so `require` runs the preamble plus the native
+initializer.  A namespace that fails to load, lower, or codegen at compile
+time falls back to being bundled as interpreted source
+(`register_builtin_source`), and a load failure at runtime is reported to
+stderr without aborting the remaining namespaces.  The runner then calls
+`clojure.test/run-tests` per test namespace (unloading each afterwards to
+bound peak memory), prints an aggregate summary, and exits 1 on any failure
+or error.  End-to-end coverage lives in `tests/test_harness_e2e.rs` (gated
+behind `aot_full_test`).
 
 **Harness dependency resolution.** The harness depends on the runtime crates,
 and `resolve_harness_deps()` decides *how*, independently of the current
