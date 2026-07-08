@@ -220,6 +220,9 @@ pub fn eval_call(func_form: &Form, arg_forms: &[Form], env: &mut Env) -> EvalRes
             "alter-var-root" => return handle_alter_var_root(arg_forms, env),
             "vary-meta" => return handle_vary_meta(arg_forms, env),
             "find-ns" | "the-ns" => return handle_find_ns(arg_forms, env),
+            "ns-interns" | "ns-publics" => return handle_ns_interns(arg_forms, env),
+            "ns-refers" => return handle_ns_refers(arg_forms, env),
+            "ns-map" => return handle_ns_map(arg_forms, env),
             "all-ns" => return handle_all_ns(arg_forms, env),
             "create-ns" => return handle_create_ns(arg_forms, env),
             "ns-aliases" => return handle_ns_aliases(arg_forms, env),
@@ -1492,6 +1495,68 @@ fn ns_name_from_val(v: &Value) -> Result<String, EvalError> {
             other.type_name()
         ))),
     }
+}
+
+/// Resolve an already-evaluated arg to a `Namespace`, matching Clojure's
+/// `the-ns`: pass a `Namespace` through unchanged, otherwise resolve a
+/// symbol/string/keyword name against the global namespace table, throwing
+/// if there's no such namespace (rather than a "wrong type" error).
+fn the_ns(v: &Value, env: &Env) -> Result<GcPtr<cljrs_value::Namespace>, EvalError> {
+    if let Value::Namespace(ns) = v {
+        return Ok(ns.clone());
+    }
+    let name = ns_name_from_val(v)?;
+    let map = env.globals.namespaces.read().unwrap();
+    match map.get(name.as_str()) {
+        Some(ns) => Ok(ns.clone()),
+        None => Err(EvalError::Runtime(format!("No namespace: {name} found"))),
+    }
+}
+
+/// `(ns-interns ns)` / `(ns-publics ns)` — map of unqualified Symbol → Var
+/// for all interned vars. Accepts a namespace, symbol, or string (via `the-ns`).
+fn handle_ns_interns(arg_forms: &[Form], env: &mut Env) -> EvalResult {
+    if arg_forms.is_empty() {
+        return Err(EvalError::Arity {
+            name: "ns-interns".into(),
+            expected: "1".into(),
+            got: 0,
+        });
+    }
+    let arg = eval(&arg_forms[0], env)?;
+    let ns = the_ns(&arg, env)?;
+    cljrs_builtins::builtins::builtin_ns_interns(&[Value::Namespace(ns)])
+        .map_err(cljrs_env::error::value_error_to_eval_error)
+}
+
+/// `(ns-refers ns)` — map of Symbol → Var for all referred vars.
+fn handle_ns_refers(arg_forms: &[Form], env: &mut Env) -> EvalResult {
+    if arg_forms.is_empty() {
+        return Err(EvalError::Arity {
+            name: "ns-refers".into(),
+            expected: "1".into(),
+            got: 0,
+        });
+    }
+    let arg = eval(&arg_forms[0], env)?;
+    let ns = the_ns(&arg, env)?;
+    cljrs_builtins::builtins::builtin_ns_refers(&[Value::Namespace(ns)])
+        .map_err(cljrs_env::error::value_error_to_eval_error)
+}
+
+/// `(ns-map ns)` — map of Symbol → Var for all visible names (interns + refers).
+fn handle_ns_map(arg_forms: &[Form], env: &mut Env) -> EvalResult {
+    if arg_forms.is_empty() {
+        return Err(EvalError::Arity {
+            name: "ns-map".into(),
+            expected: "1".into(),
+            got: 0,
+        });
+    }
+    let arg = eval(&arg_forms[0], env)?;
+    let ns = the_ns(&arg, env)?;
+    cljrs_builtins::builtins::builtin_ns_map(&[Value::Namespace(ns)])
+        .map_err(cljrs_env::error::value_error_to_eval_error)
 }
 
 /// `(find-ns sym)` / `(the-ns sym)` — look up a namespace by name; nil if not found.

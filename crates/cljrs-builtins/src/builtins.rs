@@ -1560,10 +1560,10 @@ pub fn register_all(globals: &Arc<GlobalEnv>, ns: &str) {
         // Namespace reflection
         ("namespace?", Arity::Fixed(1), builtin_namespace_q),
         ("ns-name", Arity::Fixed(1), builtin_ns_name),
-        ("ns-interns", Arity::Fixed(1), builtin_ns_interns),
-        ("ns-publics", Arity::Fixed(1), builtin_ns_interns), // alias: no private yet
-        ("ns-refers", Arity::Fixed(1), builtin_ns_refers),
-        ("ns-map", Arity::Fixed(1), builtin_ns_map),
+        ("ns-interns", Arity::Fixed(1), builtin_ns_interns_sentinel),
+        ("ns-publics", Arity::Fixed(1), builtin_ns_publics_sentinel), // alias: no private yet
+        ("ns-refers", Arity::Fixed(1), builtin_ns_refers_sentinel),
+        ("ns-map", Arity::Fixed(1), builtin_ns_map_sentinel),
         ("find-ns", Arity::Fixed(1), builtin_find_ns_sentinel),
         ("all-ns", Arity::Fixed(0), builtin_all_ns_sentinel),
         ("create-ns", Arity::Fixed(1), builtin_create_ns_sentinel),
@@ -8459,7 +8459,11 @@ fn builtin_ns_name(args: &[Value]) -> ValueResult<Value> {
 }
 
 /// `(ns-interns ns)` — map of unqualified Symbol → Var for all interned vars.
-fn builtin_ns_interns(args: &[Value]) -> ValueResult<Value> {
+///
+/// Public so `cljrs-interp::apply` can call it after resolving a namespace
+/// name/symbol to an actual `Namespace` (see `the-ns` semantics there);
+/// intercepted via a sentinel in the builtin dispatch table below.
+pub fn builtin_ns_interns(args: &[Value]) -> ValueResult<Value> {
     let ns = ns_from_arg(&args[0])?;
     let interns = ns.get().interns.lock().unwrap();
     let mut m = MapValue::empty();
@@ -8471,7 +8475,9 @@ fn builtin_ns_interns(args: &[Value]) -> ValueResult<Value> {
 }
 
 /// `(ns-refers ns)` — map of Symbol → Var for all referred vars.
-fn builtin_ns_refers(args: &[Value]) -> ValueResult<Value> {
+///
+/// Public for the same reason as [`builtin_ns_interns`].
+pub fn builtin_ns_refers(args: &[Value]) -> ValueResult<Value> {
     let ns = ns_from_arg(&args[0])?;
     let refers = ns.get().refers.lock().unwrap();
     let mut m = MapValue::empty();
@@ -8484,7 +8490,9 @@ fn builtin_ns_refers(args: &[Value]) -> ValueResult<Value> {
 
 /// `(ns-map ns)` — map of Symbol → Var for all visible names (interns + refers).
 /// Interns take priority over refers on name collision.
-fn builtin_ns_map(args: &[Value]) -> ValueResult<Value> {
+///
+/// Public for the same reason as [`builtin_ns_interns`].
+pub fn builtin_ns_map(args: &[Value]) -> ValueResult<Value> {
     let ns = ns_from_arg(&args[0])?;
     let mut m = MapValue::empty();
     // refers first (lower priority)
@@ -8504,6 +8512,39 @@ fn builtin_ns_map(args: &[Value]) -> ValueResult<Value> {
         }
     }
     Ok(Value::Map(m))
+}
+
+/// Sentinel — `ns-interns` accepts a namespace, symbol, or string (like
+/// `the-ns`) and needs GlobalEnv to resolve names; intercepted in `eval_call`.
+fn builtin_ns_interns_sentinel(_args: &[Value]) -> ValueResult<Value> {
+    Err(ValueError::WrongType {
+        expected: "intercepted",
+        got: "ns-interns sentinel should not be called directly".to_string(),
+    })
+}
+
+/// Sentinel — `ns-publics` needs GlobalEnv; intercepted in `eval_call`.
+fn builtin_ns_publics_sentinel(_args: &[Value]) -> ValueResult<Value> {
+    Err(ValueError::WrongType {
+        expected: "intercepted",
+        got: "ns-publics sentinel should not be called directly".to_string(),
+    })
+}
+
+/// Sentinel — `ns-refers` needs GlobalEnv; intercepted in `eval_call`.
+fn builtin_ns_refers_sentinel(_args: &[Value]) -> ValueResult<Value> {
+    Err(ValueError::WrongType {
+        expected: "intercepted",
+        got: "ns-refers sentinel should not be called directly".to_string(),
+    })
+}
+
+/// Sentinel — `ns-map` needs GlobalEnv; intercepted in `eval_call`.
+fn builtin_ns_map_sentinel(_args: &[Value]) -> ValueResult<Value> {
+    Err(ValueError::WrongType {
+        expected: "intercepted",
+        got: "ns-map sentinel should not be called directly".to_string(),
+    })
 }
 
 /// Sentinel — `find-ns` / `the-ns` need GlobalEnv; intercepted in `eval_call`.
