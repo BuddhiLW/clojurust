@@ -96,6 +96,19 @@ an attr-map (`(defn f {:async true} …)`); `^:async` marks the resulting `CljxF
 as async.  Under `no-gc`, wraps fn creation in `StaticCtxGuard` so the `CljxFn`
 object lands in the `StaticArena`.
 
+### Docstring / `:arglists` metadata (`def`, `defn`, `defmacro`)
+
+`eval_def`, `eval_defn`, and `eval_defmacro` all recognize an optional
+docstring positional arg (`(def name "doc" val)`, `(defn name "doc" [..] ..)`,
+`(defmacro name "doc" [..] ..)`) and store it as `{:doc "..."}` in the
+resulting Var's metadata, merged with any reader/attr-map metadata via
+`merge_meta`.  `defn`/`defmacro` additionally derive `{:arglists (...)}` from
+the evaluated `CljxFn`'s parsed arities (`arglists_meta`, in `special.rs`);
+for `defmacro` the implicit `&form`/`&env` params are elided from the shown
+signature.  This is what `clojure.core/doc` and `doc-data` (in
+`cljrs-builtins`) read back, and what `cljrs-nrepl`'s `op_lookup` surfaces to
+editors.
+
 ### `meta_form_is_async(meta: &Form) -> bool`
 
 Returns true when a `^meta` form (or attr-map literal) requests `:async` — either

@@ -1,8 +1,20 @@
-(defn identity [x] x)
-(defn constantly [x] (fn [& _] x))
-(defn complement [f] (fn [& args] (not (apply f args))))
+(defn identity
+  "Returns its argument."
+  [x] x)
+
+(defn constantly
+  "Returns a function that takes any number of arguments and always returns x."
+  [x] (fn [& _] x))
+
+(defn complement
+  "Takes a function f and returns a function that takes the same args as f,
+  and returns the opposite truth value."
+  [f] (fn [& args] (not (apply f args))))
 
 (defn some-fn
+  "Takes a set of predicates and returns a function f that returns the first
+  logical true value of applying one of its predicates to any of its
+  arguments, else nil."
   ([p] (fn [& args] (or (some p args) false)))
   ([p1 p2] (fn [& args] (or (some p1 args) (some p2 args) false)))
   ([p1 p2 p3] (fn [& args] (or (some p1 args) (some p2 args) (some p3 args) false)))
@@ -12,6 +24,8 @@
          (some (fn [p] (some p args)) ps) false))))
 
 (defn every-pred
+  "Takes a set of predicates and returns a function f that returns true if
+  all of its predicates are satisfied by all of its arguments, else false."
   ([p] (fn [& args] (every? p args)))
   ([p1 p2] (fn [& args] (and (every? p1 args) (every? p2 args))))
   ([p1 p2 p3] (fn [& args] (and (every? p1 args) (every? p2 args) (every? p3 args))))
@@ -20,16 +34,25 @@
      (and (every? p1 args) (every? p2 args) (every? p3 args)
           (every? (fn [p] (every? p args)) ps)))))
 
-(defn not= [& args] (not (apply = args)))
+(defn not=
+  "Same as (not (= obj1 obj2))."
+  [& args] (not (apply = args)))
 
 (defn comp
+  "Takes a set of functions and returns a fn that is the composition of
+  those fns. The returned fn takes any number of args, applies the
+  rightmost fn to the args, the next fn (right-to-left) to the result, etc."
   ([] identity)
   ([f] f)
   ([f g] (fn [& args] (f (apply g args))))
   ([f g & more]
    (reduce comp (cons f (cons g more)))))
 
-(defn partial [f & args]
+(defn partial
+  "Takes a function f and fewer than the normal arguments to f, and returns
+  a fn that takes a variable number of additional args and applies f to
+  args + additional args."
+  [f & args]
   (fn [& more] (apply f (concat args more))))
 
 ;; reduce is a native builtin (supports reduced/early-termination)
@@ -69,6 +92,10 @@
      (or (seq (if (reduced? result) (unreduced result) result)) ()))))
 
 (defn map
+  "Returns a lazy sequence consisting of the result of applying f to the
+  set of first items of each coll, followed by applying f to the set of
+  second items, until any one coll is exhausted. With one collection arg,
+  returns a transducer."
   ([f]
    (fn [rf]
      (fn
@@ -103,6 +130,8 @@
        (map-step all-colls)))))
 
 (defn filter
+  "Returns a lazy sequence of the items in coll for which (pred item)
+  returns logical true. With no coll, returns a transducer."
   ([pred]
    (fn [rf]
      (fn
@@ -121,10 +150,15 @@
        (or (seq acc) '())))))
 
 (defn remove
+  "Returns a lazy sequence of the items in coll for which (pred item)
+  returns logical false. With no coll, returns a transducer."
   ([pred] (filter (complement pred)))
   ([pred coll] (filter (complement pred) coll)))
 
 (defn keep
+  "Returns a lazy sequence of the non-nil results of (f item). Note, this
+  means false return values will be included. With no coll, returns a
+  transducer."
   ([f]
    (fn [rf]
      (fn
@@ -152,6 +186,9 @@
     ([result input] (reduce rf result input))))
 
 (defn mapcat
+  "Returns the result of applying concat to the result of applying map to f
+  and colls. Thus function f should return a collection. With no coll,
+  returns a transducer."
   ([f] (comp (map f) cat))
   ([f coll]
    (when-not (ifn? f) (throw (str "Argument must be a function: " f)))
@@ -201,6 +238,8 @@
     (walk root)))
 
 (defn take
+  "Returns a lazy sequence of the first n items in coll, or all items if
+  there are fewer than n. With no coll, returns a transducer."
   ([n]
    (fn [rf]
      (let [nv (volatile! n)]
@@ -224,6 +263,8 @@
            :else []))))
 
 (defn drop
+  "Returns a lazy sequence of all but the first n items in coll. With no
+  coll, returns a transducer."
   ([n]
    (fn [rf]
      (let [nv (volatile! n)]
@@ -242,6 +283,8 @@
        (or s '())))))
 
 (defn take-while
+  "Returns a lazy sequence of successive items from coll while
+  (pred item) returns logical true. With no coll, returns a transducer."
   ([pred]
    (fn [rf]
      (fn
@@ -259,6 +302,9 @@
            (cons x (take-while pred (rest s)))))))))
 
 (defn drop-while
+  "Returns a lazy sequence of the items in coll starting from the first
+  item for which (pred item) returns logical false. With no coll, returns
+  a transducer."
   ([pred]
    (fn [rf]
      (let [dv (volatile! true)]
@@ -276,26 +322,40 @@
        (recur (next s))
        (or s '())))))
 
-(defn dorun [coll]
+(defn dorun
+  "Walks through coll, realizing each lazy element, for side effects.
+  Returns nil."
+  [coll]
   (loop [s (seq coll)]
     (when s (recur (next s)))))
 
-(defn doall [coll]
+(defn doall
+  "Walks through coll, realizing every lazy element, for side effects.
+  Returns coll."
+  [coll]
   (dorun coll)
   coll)
 
 (defn run!
+  "Runs the supplied procedure (via reduce), for purposes of side effects,
+  on successive items in coll. Returns nil."
   [proc coll]
   (reduce #(proc %2) nil coll)
   nil)
 
-(defn some [pred coll]
+(defn some
+  "Returns the first logical true value of (pred x) for any x in coll,
+  else nil."
+  [pred coll]
   (loop [s (seq coll)]
     (when s
       (let [v (pred (first s))]
         (if v v (recur (next s)))))))
 
-(defn every? [pred coll]
+(defn every?
+  "Returns true if (pred x) is logical true for every x in coll, else
+  false."
+  [pred coll]
   (loop [s (seq coll)]
     (if s
       (if (pred (first s))
@@ -303,21 +363,44 @@
         false)
       true)))
 
-(defn not-any? [pred coll] (not (some pred coll)))
-(defn not-every? [pred coll] (not (every? pred coll)))
+(defn not-any?
+  "Returns true if (pred x) is logical false for every x in coll, else
+  false."
+  [pred coll] (not (some pred coll)))
 
-(defn mapv [f coll] (vec (map f coll)))
-(defn filterv [pred coll] (vec (filter pred coll)))
+(defn not-every?
+  "Returns true if (pred x) is logical false for at least one x in coll,
+  else false."
+  [pred coll] (not (every? pred coll)))
 
-(defn swap! [a f & args] (reset! a (apply f (deref a) args)))
+(defn mapv
+  "Returns a vector consisting of the result of applying f to the set of
+  first items of each coll, followed by applying f to the set of second
+  items, until any one coll is exhausted."
+  [f coll] (vec (map f coll)))
 
-(defmacro when [test & body]
+(defn filterv
+  "Returns a vector of the items in coll for which (pred item) returns
+  logical true."
+  [pred coll] (vec (filter pred coll)))
+
+(defn swap!
+  "Atomically swaps the value of atom to be (apply f current-value args)."
+  [a f & args] (reset! a (apply f (deref a) args)))
+
+(defmacro when
+  "Evaluates test. If logical true, evaluates body in an implicit do."
+  [test & body]
   (list 'if test (cons 'do body) nil))
 
-(defmacro when-not [test & body]
+(defmacro when-not
+  "Evaluates test. If logical false, evaluates body in an implicit do."
+  [test & body]
   (list 'if test nil (cons 'do body)))
 
 (defmacro if-not
+  "Evaluates test. If logical false, evaluates and returns then, otherwise
+  else (default nil)."
   ([test then] (list 'if test nil then))
   ([test then else] (list 'if test else then)))
 
@@ -327,6 +410,8 @@
   (cons 'do (map (fn [n] (list 'def n)) names)))
 
 (defmacro if-let
+  "bindings => binding-form test. If test is logical true, evaluates then
+  with binding-form bound to the value of test, otherwise else."
   ([bindings then] (list 'if-let bindings then nil))
   ([bindings then else]
    (let [form (nth bindings 0)
@@ -337,10 +422,18 @@
                  (list 'let (vector form temp) then)
                  else)))))
 
-(defmacro when-let [bindings & body]
+(defmacro when-let
+  "bindings => binding-form test. If test is logical true, evaluates body
+  with binding-form bound to the value of test."
+  [bindings & body]
   (list 'if-let bindings (cons 'do body)))
 
-(defmacro cond [& clauses]
+(defmacro cond
+  "Takes a set of test/expr pairs. Evaluates each test one at a time. If a
+  test returns logical true, evaluates and returns the value of the
+  corresponding expr and doesn't evaluate any of the other tests or exprs.
+  Returns nil if no test is true."
+  [& clauses]
   (when (seq clauses)
     (list 'if (first clauses)
           (if (next clauses)
@@ -348,7 +441,13 @@
             (throw (ex-info "cond requires even number of clauses" {})))
           (cons 'cond (next (next clauses))))))
 
-(defmacro condp [pred expr & clauses]
+(defmacro condp
+  "Takes a binary predicate, an expression, and a set of test-expr/result-expr
+  clauses. For each clause, (pred test-expr expr) is evaluated; the first
+  clause for which this is logical true has its result-expr evaluated and
+  returned. An odd trailing clause is a default expression evaluated if no
+  clause matches; otherwise throws."
+  [pred expr & clauses]
   (if (seq clauses)
     (if (next clauses)
       (list 'if (list pred (first clauses) expr)
@@ -357,7 +456,13 @@
       (first clauses))
     (throw (ex-info "condp: no matching clause" {}))))
 
-(defmacro case [expr & clauses]
+(defmacro case
+  "Takes an expression and a set of test-constant/result-expr clauses (test
+  constants may be lists of alternatives). Matches expr against the test
+  constants using an equality check and evaluates the corresponding
+  result-expr. An odd trailing clause is a default expression evaluated if
+  no clause matches; otherwise throws."
+  [expr & clauses]
   (let [e (gensym)
         quote-const (fn [c]
                       ;; Quote symbols and lists so they aren't evaluated.
@@ -394,6 +499,9 @@
           (build clauses))))
 
 (defmacro ->
+  "Threads x through the forms. Inserts x as the second item in the first
+  form, making a list of it if it is not a list already. If there are more
+  forms, inserts the first form as the second item in second form, etc."
   ([x] x)
   ([x form & more]
    (let [threaded (if (seq? form)
@@ -404,6 +512,9 @@
        threaded))))
 
 (defmacro ->>
+  "Threads x through the forms. Inserts x as the last item in the first
+  form, making a list of it if it is not a list already. If there are more
+  forms, inserts the first form as the last item in second form, etc."
   ([x] x)
   ([x form & more]
    (let [threaded (if (seq? form)
@@ -414,13 +525,19 @@
        threaded))))
 
 (defmacro as->
+  "Binds name to expr, evaluates the first form in the lexical context of
+  that binding, then binds name to that result, repeating for each
+  successive form, returning the result of the last form."
   [expr name & forms]
   (list 'let (vector name expr)
         (if (seq forms)
           (list* 'as-> name forms)
           name)))
 
-(defmacro doto [x & forms]
+(defmacro doto
+  "Evaluates x, then calls each of the forms with x as the first argument,
+  presumably for side effects. Returns the evaluated x."
+  [x & forms]
   (let [gx (gensym)]
     (list 'let (vector gx x)
           (cons 'do (map (fn [f]
@@ -429,7 +546,10 @@
                              (list f gx)))
                          forms)))))
 
-(defmacro dotimes [bindings & body]
+(defmacro dotimes
+  "bindings => name n. Repeatedly executes body (presumably for side
+  effects) with name bound to integers from 0 through n-1."
+  [bindings & body]
   (let [i (first bindings)
         n (second bindings)]
     (list 'loop (vector i 0)
@@ -437,7 +557,12 @@
                 (cons 'do body)
                 (list 'recur (list 'inc i))))))
 
-(defmacro doseq [bindings & body]
+(defmacro doseq
+  "bindings => binding-form coll-expr [modifier binding-form coll-expr]*.
+  Repeatedly executes body (presumably for side effects) with bindings and
+  filtering as provided by \"for\". Supports :let, :while, and :when
+  modifiers. Returns nil."
+  [bindings & body]
   (letfn [(emit [binds recur-form]
             (if (seq binds)
               (let [tag (first binds)]
@@ -473,18 +598,36 @@
               (list 'do (cons 'do body) recur-form)))]
     (emit (seq bindings) nil)))
 
-(defmacro for [binding & body]
+(defmacro for
+  "List comprehension. binding => [name coll-expr]. Returns a lazy sequence
+  of the results of evaluating body for each name bound to successive
+  elements of coll-expr."
+  [binding & body]
   (let [x (first binding)
         coll (second binding)]
     (list 'map (list 'fn (vector x) (cons 'do body)) coll)))
 
-(defn second [coll] (first (rest coll)))
-(defn third [coll] (first (rest (rest coll))))
-(defn ffirst [coll] (first (first coll)))
-(defn nfirst [coll] (next (first coll)))
-(defn fnext [coll] (first (next coll)))
-(defn nnext [coll] (next (next coll)))
-(defn nthnext [coll n]
+(defn second
+  "Same as (first (rest x))."
+  [coll] (first (rest coll)))
+(defn third
+  "Same as (first (rest (rest x)))."
+  [coll] (first (rest (rest coll))))
+(defn ffirst
+  "Same as (first (first x))."
+  [coll] (first (first coll)))
+(defn nfirst
+  "Same as (next (first x))."
+  [coll] (next (first coll)))
+(defn fnext
+  "Same as (first (next x))."
+  [coll] (first (next coll)))
+(defn nnext
+  "Same as (next (next x))."
+  [coll] (next (next coll)))
+(defn nthnext
+  "Returns the nth next of coll, (seq coll) when n is 0."
+  [coll n]
   (if (and (some? coll) (nil? n))
     (throw (str "arg 2 must not be nil"))
     (loop [s (seq coll) n n]
@@ -492,13 +635,16 @@
         (recur (next s) (dec n))
         s))))
 
-(defn butlast [coll]
+(defn butlast
+  "Returns a seq of all but the last item in coll."
+  [coll]
   (loop [s (seq coll) acc []]
     (if (next s)
       (recur (next s) (conj acc (first s)))
       (seq acc))))
 
 (defn drop-last
+  "Returns a seq of all but the last n (default 1) items in coll."
   ([coll] (drop-last 1 coll))
   ([n coll]
    (let [s (seq coll)]
@@ -506,28 +652,42 @@
        (take (- (count s) n) s)
        '()))))
 
-(defn take-last [n coll]
+(defn take-last
+  "Returns a seq of the last n items in coll."
+  [n coll]
   (let [s (seq coll)]
     (loop [s s lead (nthnext s n)]
       (if lead
         (recur (next s) (next lead))
         s))))
 
-(defmacro lazy-seq [& body]
+(defmacro lazy-seq
+  "Takes a body of expressions that returns an ISeq or nil, and yields a
+  seqable object that invokes the body only the first time seq is called,
+  caching the result and returning it on all subsequent seq calls."
+  [& body]
   (list 'make-lazy-seq (list 'fn [] (cons 'do body))))
 
-(defn iterate [f x]
+(defn iterate
+  "Returns a lazy sequence of x, (f x), (f (f x)), etc."
+  [f x]
   (cons x (lazy-seq (iterate f (f x)))))
 
 (defn repeat
+  "Returns a lazy (infinite, or length n if supplied) sequence of xs."
   ([x] (lazy-seq (cons x (repeat x))))
   ([n x] (take n (repeat x))))
 
 (defn repeatedly
+  "Takes a function of no args and returns a lazy (infinite, or length n
+  if supplied) sequence of calls to it."
   ([f] (lazy-seq (cons (f) (repeatedly f))))
   ([n f] (take n (repeatedly f))))
 
 (defn range
+  "Returns a lazy seq of nums from start (inclusive, default 0) to end
+  (exclusive) by step (default 1). Without end, returns an effectively
+  infinite sequence."
   ([] (range 0 9223372036854775807 1))
   ([end] (range 0 end 1))
   ([start end] (range start end 1))
@@ -536,7 +696,10 @@
      (when (if (pos? step) (< start end) (> start end))
        (cons start (range (+ start step) end step))))))
 
-(defn cycle [coll]
+(defn cycle
+  "Returns a lazy (infinite) sequence of repetitions of the items in
+  coll."
+  [coll]
   (letfn [(c [s]
             (lazy-seq
               (if (seq s)
@@ -544,14 +707,24 @@
                 (c coll))))]
     (when (seq coll) (c coll))))
 
-(defn counted? [x] (or (vector? x) (map? x) (set? x) (seq? x)))
-(defn reversible? [x] (or (vector? x) (sorted-map? x) (sorted-set? x)))
-(defn sequential? [x] (or (seq? x) (vector? x)))
-(defn associative? [x] (or (map? x) (vector? x)))
+(defn counted?
+  "Returns true if coll implements count in constant time."
+  [x] (or (vector? x) (map? x) (set? x) (seq? x)))
+(defn reversible?
+  "Returns true if coll implements rseq (reverse in constant time)."
+  [x] (or (vector? x) (sorted-map? x) (sorted-set? x)))
+(defn sequential?
+  "Returns true if coll implements the sequential interface (vector, seq)."
+  [x] (or (seq? x) (vector? x)))
+(defn associative?
+  "Returns true if coll implements the associative interface (map, vector)."
+  [x] (or (map? x) (vector? x)))
 
 ;; meta and vary-meta are native builtins (see builtins.rs)
 
-(defn seqable? [x]
+(defn seqable?
+  "Returns true if seq can be called on x."
+  [x]
   (or (nil? x) (seq? x) (vector? x) (map? x) (set? x) (string? x) (array? x)))
 
 (defn nthrest [coll n]
@@ -563,13 +736,21 @@
         (recur (next s) (dec n))
         (or s (quote ()))))))
 
-(defn split-at [n coll]
+(defn split-at
+  "Returns a vector of [(take n coll) (drop n coll)]."
+  [n coll]
   [(take n coll) (drop n coll)])
 
-(defn split-with [pred coll]
+(defn split-with
+  "Returns a vector of [(take-while pred coll) (drop-while pred coll)]."
+  [pred coll]
   [(take-while pred coll) (drop-while pred coll)])
 
 (defn partition
+  "Returns a seq of lists of n items each, at offsets step apart (default
+  step = n); drops a trailing partial partition unless pad is supplied, in
+  which case it's padded (and possibly still trailing-partial) with items
+  from pad."
   ([n coll]
    (partition n n coll))
   ([n step coll]
@@ -618,12 +799,17 @@
          (recur (nthnext s n) (conj acc part)))
        (seq acc)))))
 
-(defn flatten [x]
+(defn flatten
+  "Takes any nested combination of sequential things (lists, vectors,
+  etc.) and returns their contents as a single, flat sequence."
+  [x]
   (if (coll? x)
     (mapcat flatten x)
     (list x)))
 
 (defn distinct
+  "Returns a seq of the elements of coll with duplicates removed. Returns
+  a transducer when no collection is provided."
   ([]
    (fn [rf]
      (let [seen (volatile! #{})]
@@ -715,14 +901,18 @@
    (let [idx (volatile! -1)]
      (map (fn [x] (f (vswap! idx inc) x)) coll))))
 
-(defn max [& args] (reduce (fn [a b]
+(defn max
+  "Returns the greatest of the nums."
+  [& args] (reduce (fn [a b]
   (cond
     (NaN? a) a
     (NaN? b) b
     (>= a b) a
     :else b))
   args))
-(defn min [& args] (reduce (fn [a b]
+(defn min
+  "Returns the least of the nums."
+  [& args] (reduce (fn [a b]
   (cond
     (NaN? a) a
     (NaN? b) b
@@ -730,21 +920,34 @@
     :else b))
   args))
 
-(defmacro assert [test & args]
+(defmacro assert
+  "Evaluates test. If it does not return logical true, throws an
+  ex-info with an optional message."
+  [test & args]
   (let [msg (first args)]
     (list 'when (list 'not test)
           (list 'throw (list 'ex-info (or msg "assertion failed") {})))))
 
-(defn frequencies [coll]
+(defn frequencies
+  "Returns a map from distinct items in coll to the number of times they
+  appear."
+  [coll]
   (reduce (fn [m v] (assoc m v (inc (get m v 0)))) {} coll))
 
-(defn group-by [f coll]
+(defn group-by
+  "Returns a map of the elements of coll keyed by the result of f on each
+  element; the value at each key is a vector of the corresponding elements,
+  in the order they appeared in coll."
+  [f coll]
   (reduce (fn [m v]
             (let [k (f v)]
               (assoc m k (conj (get m k []) v))))
           {} coll))
 
-(defn index-of [coll v]
+(defn index-of
+  "Returns the index of the first occurrence of v in coll, or -1 if not
+  found."
+  [coll v]
   (loop [s (seq coll) i 0]
     (if s
       (if (= (first s) v) i (recur (next s) (inc i)))
@@ -777,20 +980,35 @@
 (defn reduce-kv [f init m]
   (reduce (fn [acc kv] (f acc (first kv) (second kv))) init m))
 
-(defn update [m k f & args]
+(defn update
+  "Returns a new structure with the value at key updated by applying f to
+  the existing value (get m k), plus any supplied args."
+  [m k f & args]
   (assoc m k (apply f (get m k) args)))
 
-(defn update-in [m ks f & args]
+(defn update-in
+  "Returns a new nested structure with the value at the given key sequence
+  updated by applying f to the existing value there, plus any supplied
+  args. Missing intermediate levels are created as maps."
+  [m ks f & args]
   (let [k (first ks)
         ks (rest ks)]
     (if (seq ks)
       (assoc m k (apply update-in (get m k {}) ks f args))
       (assoc m k (apply f (get m k) args)))))
 
-(defn juxt [& fns]
+(defn juxt
+  "Takes a set of functions and returns a fn that is the juxtaposition of
+  those fns. The returned fn takes a variable number of args, and returns
+  a vector containing the result of applying each fn to the args."
+  [& fns]
   (fn [& args] (mapv (fn [f] (apply f args)) fns)))
 
-(defn fnil [f default & defaults]
+(defn fnil
+  "Takes a function f and one or more default values, and returns a fn
+  that calls f, replacing any nil arguments with the corresponding
+  default value."
+  [f default & defaults]
   (let [all-defaults (cons default defaults)
         n (count all-defaults)
         patch (fn patch [args defs]
@@ -801,7 +1019,12 @@
     (fn [& args]
       (apply f (patch args all-defaults)))))
 
-(defn memoize [f]
+(defn memoize
+  "Returns a memoized version of a referentially transparent function f.
+  The memoized version caches the results of f keyed on the argument list,
+  and returns the cached result on subsequent calls with the same
+  arguments instead of calling f again."
+  [f]
   (let [cache (atom {})]
     (fn [& args]
       (if (contains? @cache args)
@@ -891,7 +1114,9 @@
      (when-let [s (seq coll)]
        (cons (first s) (take-nth n (drop n s)))))))
 
-(defn clojure-version [] "cljx-0.1.0")
+(defn clojure-version
+  "Returns the version string of this implementation."
+  [] "cljx-0.1.0")
 
 ;; ── Phase 7: Concurrency primitives ──────────────────────────────────────────
 
@@ -1025,41 +1250,52 @@
             (list 'finally (list 'pop-precision!))))))
 
 (defn simple-ident?
+  "Returns true if x is a symbol or keyword without a namespace."
   [v]
   (and (or (keyword? v) (symbol? v)) (nil? (namespace v))))
 
 (defn qualified-ident?
+  "Returns true if x is a symbol or keyword with a namespace."
   [v]
   (and (or (keyword? v) (symbol? v)) (not (nil? (namespace v)))))
 
 (defn key
+  "Returns the key of a map entry."
   [x]
   (if (map-entry? x)
     (first x)
     (throw (ex-info "not a map entry" {}))))
 
 (defn val
+  "Returns the value of a map entry."
   [x]
   (if (map-entry? x)
     (second x)
     (throw (ex-info "not a map entry" {}))))
 
 (defn inc'
+  "Returns a number one greater than x, promoting to BigInt on overflow."
   [x]
   (+' x 1))
 
 (defn dec'
+  "Returns a number one less than x, promoting to BigInt on overflow."
   [x]
   (+' x -1))
 
-(defn ident? [x] (or (symbol? x) (keyword? x)))
+(defn ident?
+  "Returns true if x is a symbol or keyword."
+  [x] (or (symbol? x) (keyword? x)))
 
 (defn rand-nth
+  "Return a random element of coll."
   [coll]
   (let [n (rand-int (count coll))]
     (nth coll n)))
 
 (defmacro when-first
+  "bindings => x xs. Roughly the same as (when (seq xs) (let [x (first
+  xs)] body)) but xs is evaluated only once."
   [bindings & body]
   (let [x (first bindings)
         xs (second bindings)]
@@ -1068,10 +1304,15 @@
         body))))
 
 (defmacro bound-fn
+  "Returns a function defined by the given fntail, which will preserve the
+  current values of all thread-local bindings when called."
   [& fntail]
   (list 'bound-fn* (cons 'fn fntail)))
 
 (defmacro cond->
+  "Takes an expression and a set of test/form pairs. Threads expr (via ->)
+  through each form for which the corresponding test expression is
+  logical true."
   [expr & clauses]
   (let [g (gensym)
         steps (map (fn [[test step]] (list (quote if) test (list (quote ->) g step) g))
@@ -1080,6 +1321,9 @@
       (if (empty? steps) g (last steps)))))
 
 (defmacro cond->>
+  "Takes an expression and a set of test/form pairs. Threads expr (via ->>)
+  through each form for which the corresponding test expression is
+  logical true."
   [expr & clauses]
   (let [g (gensym)
         steps (map (fn [[test step]] (list (quote if) test (list (quote ->>) g step) g))
@@ -1090,6 +1334,8 @@
         (last steps)))))
 
 (defmacro some->
+  "Threads expr through the forms (via ->), stopping and returning nil as
+  soon as a form returns nil."
   [expr & forms]
   (let [g (gensym)
         steps (map (fn [step] (list (quote if) (list (quote nil?) g) nil (list (quote ->) g step)))
@@ -1098,6 +1344,8 @@
       (if (empty? steps) g (last steps)))))
 
 (defmacro some->>
+  "Threads expr through the forms (via ->>), stopping and returning nil as
+  soon as a form returns nil."
   [expr & forms]
   (let [g (gensym)
         steps (map (fn [step] (list (quote if) (list (quote nil?) g) nil (list (quote ->>) g step)))
@@ -1106,7 +1354,17 @@
       (if (empty? steps) g (last steps)))))
 
 (defn re-seq
+  "Returns a lazy sequence of successive matches of pattern in string."
   [re s]
   (let [matcher (re-matcher re s)]
     (seq (take-while identity (repeatedly #(re-find matcher))))))
+
+(defmacro doc
+  "Returns the docstring of the given symbol (a var, macro, or special
+  form), or nil if it has none or doesn't resolve. See also `doc-data`,
+  which returns the docstring alongside the arglists."
+  [sym]
+  `(try
+     (:doc (doc-data (var ~sym)))
+     (catch Exception e# nil)))
 
