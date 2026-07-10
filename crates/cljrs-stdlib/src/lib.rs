@@ -121,7 +121,7 @@ pub fn standard_env_no_ir() -> Arc<GlobalEnv> {
     cljrs_gc::HEAP.register_root_tracer(move |visitor| {
         use cljrs_gc::GcVisitor as _;
         let namespaces = roots_gc.namespaces.read().unwrap();
-        for (_name, ns_ptr) in namespaces.iter() {
+        for ns_ptr in namespaces.values() {
             visitor.visit(ns_ptr);
         }
     });
@@ -147,7 +147,7 @@ pub fn standard_env() -> Arc<GlobalEnv> {
     cljrs_gc::HEAP.register_root_tracer(move |visitor| {
         use cljrs_gc::GcVisitor as _;
         let namespaces = roots_gc.namespaces.read().unwrap();
-        for (_name, ns_ptr) in namespaces.iter() {
+        for ns_ptr in namespaces.values() {
             visitor.visit(ns_ptr);
         }
     });

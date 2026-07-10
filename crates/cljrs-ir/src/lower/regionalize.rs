@@ -387,10 +387,9 @@ fn specialize(original: &IrFunction, targets: &HashSet<VarId>, suffix: &str) -> 
         return None;
     }
 
-    if let Some(entry) = clone.blocks.first_mut() {
+    {
+        let entry = clone.blocks.first_mut()?;
         entry.insts.insert(0, Inst::RegionParam(region_var));
-    } else {
-        return None;
     }
 
     // Inner closures cloned along with the body share names with the

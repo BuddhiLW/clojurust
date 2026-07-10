@@ -217,10 +217,8 @@ fn try_osr_enter(
 ) -> Option<EvalResult> {
     let mut call_args: Vec<Value> = Vec::with_capacity(slot.live_ins.len());
     for var in slot.live_ins.iter() {
-        match regs.values.get(var.0 as usize).and_then(|v| v.as_ref()) {
-            Some(v) => call_args.push(v.clone()),
-            None => return None,
-        }
+        let v = regs.values.get(var.0 as usize).and_then(|v| v.as_ref())?;
+        call_args.push(v.clone());
     }
     cljrs_logging::feat_debug!(
         "jit",

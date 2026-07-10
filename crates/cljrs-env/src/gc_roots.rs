@@ -315,14 +315,14 @@ fn trace_thread_env_roots(visitor: &mut cljrs_gc::MarkVisitor) {
 fn trace_globals(globals: &GlobalEnv, visitor: &mut cljrs_gc::MarkVisitor) {
     use cljrs_gc::{GcVisitor as _, Trace};
     let namespaces = globals.namespaces.read().unwrap();
-    for (_name, ns_ptr) in namespaces.iter() {
+    for ns_ptr in namespaces.values() {
         visitor.visit(ns_ptr);
     }
     drop(namespaces);
     // Values resolved at a pinned commit may live only in the version cache
     // (e.g. native HEAD fallbacks) — without this they would be collected.
     let version_cache = globals.version_cache.lock().unwrap();
-    for (_key, val) in version_cache.iter() {
+    for val in version_cache.values() {
         val.trace(visitor);
     }
 }
