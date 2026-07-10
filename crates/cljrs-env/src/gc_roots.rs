@@ -322,7 +322,7 @@ fn trace_globals(globals: &GlobalEnv, visitor: &mut cljrs_gc::MarkVisitor) {
     // Values resolved at a pinned commit may live only in the version cache
     // (e.g. native HEAD fallbacks) — without this they would be collected.
     let version_cache = globals.version_cache.lock().unwrap();
-    for (_key, val) in version_cache.iter() {
+    for val in version_cache.values() {
         val.trace(visitor);
     }
 }
