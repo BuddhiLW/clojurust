@@ -315,7 +315,7 @@ fn trace_thread_env_roots(visitor: &mut cljrs_gc::MarkVisitor) {
 fn trace_globals(globals: &GlobalEnv, visitor: &mut cljrs_gc::MarkVisitor) {
     use cljrs_gc::{GcVisitor as _, Trace};
     let namespaces = globals.namespaces.read().unwrap();
-    for (_name, ns_ptr) in namespaces.iter() {
+    for ns_ptr in namespaces.values() {
         visitor.visit(ns_ptr);
     }
     drop(namespaces);

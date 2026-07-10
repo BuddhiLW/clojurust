@@ -375,24 +375,31 @@ the `CLJRS_GC_STATS` env var (empty/`"-"` → stdout, otherwise a file path).
 
 **Test harness (`cljrs compile --test`).** `compile_test_harness` compiles a
 directory of clojure.test namespaces (plus every namespace found on
-`src_dirs`) to a standalone test-runner binary.  Each discovered namespace —
-sources first, then tests — is loaded into a compile-time environment and
+`src_dirs`) to a standalone test-runner binary.  Each **source** namespace —
+the code under test — is loaded into a compile-time environment and
 AOT-compiled with the same per-namespace pipeline `compile_file` uses for
 required namespaces (`lower_namespace`): top-level forms are partitioned into
-an interpreted preamble (`ns`/`require`, `defmacro`, `deftest` — which
-expands to `alter-meta!` — and anything else the backend can't lower) and a
-compilable body that is Cranelift-compiled to a `__cljrs_ns_init_*`
-initializer.  All initializers share one object module, linked into the
-harness binary; the generated `main()` registers each namespace's loader via
-`register_compiled_ns_loader`, so `require` runs the preamble plus the native
-initializer.  A namespace that fails to load, lower, or codegen at compile
-time falls back to being bundled as interpreted source
-(`register_builtin_source`), and a load failure at runtime is reported to
-stderr without aborting the remaining namespaces.  The runner then calls
-`clojure.test/run-tests` per test namespace (unloading each afterwards to
-bound peak memory), prints an aggregate summary, and exits 1 on any failure
-or error.  End-to-end coverage lives in `tests/test_harness_e2e.rs` (gated
-behind `aot_full_test`).
+an interpreted preamble (`ns`/`require`, `defmacro`, and anything else the
+backend can't lower) and a compilable body that is Cranelift-compiled to a
+`__cljrs_ns_init_*` initializer.  All initializers share one object module,
+linked into the harness binary; the generated `main()` registers each source
+namespace's loader via `register_compiled_ns_loader`, so `require` runs the
+preamble plus the native initializer.  A source namespace that fails to load,
+lower, or codegen at compile time falls back to being bundled as interpreted
+source (`register_builtin_source`), and a load failure at runtime is reported
+to stderr without aborting the remaining namespaces.
+
+**Test** namespaces are always bundled as interpreted source, never lowered:
+`deftest` expands to `alter-meta!`, which the backend can't lower, so every
+test would land in the interpreted preamble anyway — and the full
+`macroexpand_all` a lowering pass requires is prohibitively slow on
+macro-heavy test files (`are`/`is`/`testing` trees; on the 235-namespace
+`clojure-test-suite` it takes hours).  Calls from interpreted tests into
+compiled source namespaces still dispatch to native code, which is where AOT
+pays off.  The runner calls `clojure.test/run-tests` per test namespace
+(unloading each afterwards to bound peak memory), prints an aggregate
+summary, and exits 1 on any failure or error.  End-to-end coverage lives in
+`tests/test_harness_e2e.rs` (gated behind `aot_full_test`).
 
 **Harness dependency resolution.** The harness depends on the runtime crates,
 and `resolve_harness_deps()` decides *how*, independently of the current

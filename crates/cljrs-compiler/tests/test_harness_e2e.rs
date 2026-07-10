@@ -136,6 +136,17 @@ fn test_harness_passing_tests_are_natively_compiled() {
         !main_rs.contains("register_builtin_source(\"mylib.core\""),
         "mylib.core should not fall back to interpreted bundling:\n{main_rs}"
     );
+    // Test namespaces are never lowered — deftests stay interpreted, and
+    // macro-expanding them at compile time is the dominant cost on large
+    // suites — so the test namespace must be bundled as interpreted source.
+    assert!(
+        main_rs.contains("register_builtin_source(\"mylib.core-test\""),
+        "mylib.core-test should be bundled as interpreted source:\n{main_rs}"
+    );
+    assert!(
+        !main_rs.contains("register_compiled_ns_loader(\"mylib.core-test\""),
+        "mylib.core-test should not be lowered:\n{main_rs}"
+    );
     // The object file with the compiled initializers is linked in.
     assert!(
         Path::new(&project.harness_dir().join("__cljrs_tests.o")).exists(),

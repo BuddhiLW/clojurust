@@ -2307,14 +2307,23 @@ fn main() {
 /// Compile a directory of test files to a standalone native binary.
 /// The resulting binary will discover and run all clojure.test tests found.
 ///
-/// Each discovered namespace (sources first, then tests) is AOT-compiled with
-/// the same per-namespace pipeline `compile_file` uses for required
-/// namespaces ([`lower_namespace`]): top-level forms are partitioned into an
-/// interpreted preamble (`ns`/`require`, `defmacro`, `deftest` — anything the
-/// backend can't lower) and a compilable body that is Cranelift-compiled to a
-/// `__cljrs_ns_init_*` initializer linked into the binary.  A namespace that
-/// cannot be loaded, lowered, or compiled falls back to being bundled as
-/// interpreted source, so the harness always builds.
+/// Each discovered **source** namespace (the code under test, from
+/// `src_dirs`) is AOT-compiled with the same per-namespace pipeline
+/// `compile_file` uses for required namespaces ([`lower_namespace`]):
+/// top-level forms are partitioned into an interpreted preamble
+/// (`ns`/`require`, `defmacro` — anything the backend can't lower) and a
+/// compilable body that is Cranelift-compiled to a `__cljrs_ns_init_*`
+/// initializer linked into the binary.  A source namespace that cannot be
+/// loaded, lowered, or compiled falls back to being bundled as interpreted
+/// source, so the harness always builds.
+///
+/// **Test** namespaces are always bundled as interpreted source.  `deftest`
+/// expands to `alter-meta!`, which the backend can't lower, so every test
+/// would land in the interpreted preamble anyway — lowering a test namespace
+/// buys nothing at runtime, while the full macro-expansion it requires
+/// (`macroexpand_all` over `are`/`is`/`testing` trees) is expensive enough
+/// that a large suite would take hours to compile.  Calls from interpreted
+/// tests into compiled source namespaces still dispatch to native code.
 pub fn compile_test_harness(
     test_dir: &Path,
     out_path: &Path,
@@ -2362,7 +2371,7 @@ pub fn compile_test_harness(
     let mut search_dirs = src_dirs.to_vec();
     search_dirs.push(test_dir.to_path_buf());
 
-    // ── AOT-compile each namespace ──────────────────────────────────────
+    // ── AOT-compile each source namespace ───────────────────────────────
     // Boot a compile-time environment rooted at the combined search path so
     // each namespace (and the macros it defines or requires) can be loaded
     // before lowering — `lower_namespace` macro-expands against `globals` and
@@ -2370,6 +2379,8 @@ pub fn compile_test_harness(
     let globals = cljrs_stdlib::standard_env_with_paths(search_dirs.clone());
     let mut env = cljrs_eval::Env::new(globals, "user");
 
+    let test_ns_set: std::collections::HashSet<&str> =
+        test_namespaces.iter().map(|s| s.as_str()).collect();
     let mut compiled_namespaces: Vec<CompiledNamespace> = Vec::new();
     let mut ns_irs: Vec<(String, IrFunction)> = Vec::new();
     let mut interpreted_bundled: Vec<(String, String)> = Vec::new();
@@ -2381,6 +2392,14 @@ pub fn compile_test_harness(
                 "Could not find source for namespace {ns}"
             )));
         };
+
+        // Test namespaces stay interpreted (see the function doc): their
+        // deftests can't be lowered, and macro-expanding them here is the
+        // dominant compile-time cost on large suites.
+        if test_ns_set.contains(ns.as_str()) {
+            interpreted_bundled.push((ns.clone(), src));
+            continue;
+        }
 
         // Load the namespace so its macros and transitive requires are
         // available during lowering.  A namespace that fails to load at
