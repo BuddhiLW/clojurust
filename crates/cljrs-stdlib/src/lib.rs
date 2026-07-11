@@ -38,6 +38,8 @@ const CLOJURE_WALK_SRC: &str = include_str!("clojure/walk.cljrs");
 const CLOJURE_DATA_SRC: &str = include_str!("clojure/data.cljrs");
 const COLJURE_ZIP_SRC: &str = include_str!("clojure/zip.cljrs");
 const CLOJURE_SPEC_ALPHA_SRC: &str = include_str!("clojure/spec/alpha.cljrs");
+const CLOJURE_SPEC_GEN_ALPHA_SRC: &str = include_str!("clojure/spec/gen/alpha.cljrs");
+const CLOJURE_SPEC_TEST_ALPHA_SRC: &str = include_str!("clojure/spec/test/alpha.cljrs");
 
 // ── Macro: register a batch of native fns into a namespace ───────────────────
 
@@ -104,6 +106,12 @@ pub fn register(globals: &Arc<GlobalEnv>) {
 
     // clojure.spec.alpha ─ pure Clojure, no native helpers.
     globals.register_builtin_source("clojure.spec.alpha", CLOJURE_SPEC_ALPHA_SRC);
+
+    // clojure.spec.gen.alpha ─ pure Clojure, throwing generator stubs.
+    globals.register_builtin_source("clojure.spec.gen.alpha", CLOJURE_SPEC_GEN_ALPHA_SRC);
+
+    // clojure.spec.test.alpha ─ pure Clojure, instrument/unstrument.
+    globals.register_builtin_source("clojure.spec.test.alpha", CLOJURE_SPEC_TEST_ALPHA_SRC);
 }
 
 /// Create a `GlobalEnv` with all built-ins and stdlib registered, **without**
@@ -1326,6 +1334,191 @@ mod tests {
                 msg.contains("not implemented"),
                 "expected 'not implemented' in error, got: {msg}"
             );
+        });
+    }
+
+    // ── clojure.spec.alpha / .test.alpha / .gen.alpha (M5: fdef/instrument) ──
+
+    #[test]
+    fn test_spec_fdef_registers_qualified_symbol_and_get_spec() {
+        run_with_big_stack(|| {
+            let (_, mut env) = make_env();
+            run("(require '[clojure.spec.alpha :as s])", &mut env).unwrap();
+            run("(defn my-add [a b] (+ a b))", &mut env).unwrap();
+            assert_bool(
+                "(= 'user/my-add (s/fdef my-add :args (s/cat :a int? :b int?) :ret int?))",
+                true,
+                &mut env,
+            );
+            assert_bool("(s/fspec? (s/get-spec 'user/my-add))", true, &mut env);
+            assert_bool("(some? (:args (s/get-spec 'user/my-add)))", true, &mut env);
+            // syntax-quote auto-qualification against the current ns resolves
+            // to the same registry entry as the explicit qualified symbol.
+            assert_bool(
+                "(= (s/get-spec 'user/my-add) (s/get-spec `my-add))",
+                true,
+                &mut env,
+            );
+        });
+    }
+
+    #[test]
+    fn test_spec_instrument_valid_and_invalid_calls() {
+        run_with_big_stack(|| {
+            let (_, mut env) = make_env();
+            run("(require '[clojure.spec.alpha :as s])", &mut env).unwrap();
+            run("(require '[clojure.spec.test.alpha :as stest])", &mut env).unwrap();
+            run("(defn my-add [a b] (+ a b))", &mut env).unwrap();
+            run(
+                "(s/fdef my-add :args (s/cat :a int? :b int?) :ret int?)",
+                &mut env,
+            )
+            .unwrap();
+            run("(stest/instrument 'user/my-add)", &mut env).unwrap();
+            // valid call still returns the normal value through the wrapper.
+            assert_eq!(run("(my-add 2 3)", &mut env).unwrap(), Value::Long(5));
+            // invalid call throws with the expected message and ex-data.
+            run(
+                r#"(def caught
+                     (try (my-add 2 "x") :did-not-throw
+                          (catch Exception e {:msg (ex-message e) :data (ex-data e)})))"#,
+                &mut env,
+            )
+            .unwrap();
+            assert_bool(
+                r#"(= "Call to user/my-add did not conform to spec." (:msg caught))"#,
+                true,
+                &mut env,
+            );
+            assert_bool(
+                "(= :instrument (:clojure.spec.alpha/failure (:data caught)))",
+                true,
+                &mut env,
+            );
+            assert_bool(
+                "(contains? (:data caught) :clojure.spec.test.alpha/caller)",
+                true,
+                &mut env,
+            );
+        });
+    }
+
+    #[test]
+    fn test_spec_unstrument_restores_raw_fn() {
+        run_with_big_stack(|| {
+            let (_, mut env) = make_env();
+            run("(require '[clojure.spec.alpha :as s])", &mut env).unwrap();
+            run("(require '[clojure.spec.test.alpha :as stest])", &mut env).unwrap();
+            run("(defn my-pair [a b] [a b])", &mut env).unwrap();
+            run("(s/fdef my-pair :args (s/cat :a int? :b int?))", &mut env).unwrap();
+            run("(stest/instrument 'user/my-pair)", &mut env).unwrap();
+            assert!(run("(my-pair 1 \"x\")", &mut env).is_err());
+            run("(stest/unstrument 'user/my-pair)", &mut env).unwrap();
+            // no longer wrapped -- the raw fn has no type constraints, so an
+            // "invalid by spec" call now succeeds instead of throwing.
+            assert_bool("(= [1 \"x\"] (my-pair 1 \"x\"))", true, &mut env);
+        });
+    }
+
+    #[test]
+    fn test_spec_instrument_affects_call_sites_evaluated_before_instrument() {
+        run_with_big_stack(|| {
+            let (_, mut env) = make_env();
+            run("(require '[clojure.spec.alpha :as s])", &mut env).unwrap();
+            run("(require '[clojure.spec.test.alpha :as stest])", &mut env).unwrap();
+            run("(defn my-mul [a b] (* a b))", &mut env).unwrap();
+            run("(s/fdef my-mul :args (s/cat :a int? :b int?))", &mut env).unwrap();
+            // Warm up this call site (and any inline-cached/lowered code for
+            // it) BEFORE instrumenting.
+            assert_eq!(run("(my-mul 2 3)", &mut env).unwrap(), Value::Long(6));
+            run("(stest/instrument 'user/my-mul)", &mut env).unwrap();
+            // A stale inline cache pointing at the pre-instrument var root
+            // would silently skip the spec check here.
+            assert!(run("(my-mul 2 \"x\")", &mut env).is_err());
+        });
+    }
+
+    #[test]
+    fn test_spec_instrumentable_syms_and_idempotent_double_instrument() {
+        run_with_big_stack(|| {
+            let (_, mut env) = make_env();
+            run("(require '[clojure.spec.alpha :as s])", &mut env).unwrap();
+            run("(require '[clojure.spec.test.alpha :as stest])", &mut env).unwrap();
+            run("(defn my-pair2 [a b] [a b])", &mut env).unwrap();
+            run("(s/fdef my-pair2 :args (s/cat :a int? :b int?))", &mut env).unwrap();
+            assert_bool(
+                "(boolean (some #{'user/my-pair2} (stest/instrumentable-syms)))",
+                true,
+                &mut env,
+            );
+            run("(stest/instrument 'user/my-pair2)", &mut env).unwrap();
+            run("(stest/instrument 'user/my-pair2)", &mut env).unwrap(); // idempotent
+            assert!(run("(my-pair2 1 \"x\")", &mut env).is_err());
+            // A SINGLE unstrument must fully restore -- if double-instrument
+            // had double-wrapped, one layer would still be active and the
+            // call below would still throw.
+            run("(stest/unstrument 'user/my-pair2)", &mut env).unwrap();
+            assert_bool("(= [1 \"x\"] (my-pair2 1 \"x\"))", true, &mut env);
+        });
+    }
+
+    #[test]
+    fn test_spec_with_instrument_disabled_bypasses_checks() {
+        run_with_big_stack(|| {
+            let (_, mut env) = make_env();
+            run("(require '[clojure.spec.alpha :as s])", &mut env).unwrap();
+            run("(require '[clojure.spec.test.alpha :as stest])", &mut env).unwrap();
+            run("(defn my-pair3 [a b] [a b])", &mut env).unwrap();
+            run("(s/fdef my-pair3 :args (s/cat :a int? :b int?))", &mut env).unwrap();
+            run("(stest/instrument 'user/my-pair3)", &mut env).unwrap();
+            assert!(run("(my-pair3 1 \"x\")", &mut env).is_err());
+            assert_bool(
+                "(stest/with-instrument-disabled (= [1 \"x\"] (my-pair3 1 \"x\")))",
+                true,
+                &mut env,
+            );
+            // instrumentation resumes outside the dynamic extent.
+            assert!(run("(my-pair3 1 \"x\")", &mut env).is_err());
+        });
+    }
+
+    #[test]
+    fn test_spec_assert_happy_sad_and_check_asserts_toggle() {
+        run_with_big_stack(|| {
+            let (_, mut env) = make_env();
+            run("(require '[clojure.spec.alpha :as s])", &mut env).unwrap();
+            assert_eq!(run("(s/assert even? 4)", &mut env).unwrap(), Value::Long(4));
+            assert!(run("(s/assert even? 5)", &mut env).is_err());
+            run("(s/check-asserts false)", &mut env).unwrap();
+            // a freshly (re-)macroexpanded s/assert form reads
+            // *compile-asserts* at macroexpansion time and passes an invalid
+            // value through unchecked.
+            assert_eq!(run("(s/assert even? 5)", &mut env).unwrap(), Value::Long(5));
+            run("(s/check-asserts true)", &mut env).unwrap();
+            assert!(run("(s/assert even? 5)", &mut env).is_err());
+        });
+    }
+
+    #[test]
+    fn test_spec_gen_and_check_throw_not_implemented_and_gen_ns_loads() {
+        run_with_big_stack(|| {
+            let (_, mut env) = make_env();
+            run("(require '[clojure.spec.alpha :as s])", &mut env).unwrap();
+            run("(require '[clojure.spec.test.alpha :as stest])", &mut env).unwrap();
+            run("(require '[clojure.spec.gen.alpha :as gen])", &mut env).unwrap();
+            for src in [
+                "(s/gen even?)",
+                "(s/exercise even?)",
+                "(s/exercise-fn 'user/foo)",
+                "(stest/check)",
+                "(stest/check 'user/foo)",
+                "(stest/check-fn (fn [x] x) even?)",
+                "(gen/generate :whatever)",
+                "(gen/sample :whatever)",
+                "(gen/elements [1 2 3])",
+            ] {
+                assert!(run(src, &mut env).is_err(), "expected {src} to throw");
+            }
         });
     }
 }

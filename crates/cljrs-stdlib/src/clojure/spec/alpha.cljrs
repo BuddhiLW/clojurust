@@ -3,7 +3,13 @@
 ;;                      M3: derivative-based regex engine (cat/alt/*/+/?/&);
 ;;                      M4: collection specs (every/coll-of/map-of/every-kv),
 ;;                          tuple/nilable/multi-spec/conformer, leaf helpers
-;;                          (int-in/double-in/nonconforming).
+;;                          (int-in/double-in/nonconforming);
+;;                      M5: fspec/fdef (fn-specs registered into the same
+;;                          registry as s/def, keyed by qualified symbol),
+;;                          s/assert + check-asserts, with-gen/gen/exercise/
+;;                          exercise-fn (throwing stubs — see
+;;                          clojure.spec.gen.alpha). instrument/unstrument
+;;                          live in the sibling clojure.spec.test.alpha ns.
 ;;
 ;; This is a from-scratch, spec-compatible-in-spirit implementation for the
 ;; clojurust runtime. It does NOT use `reify` for spec objects (every `reify`
@@ -15,7 +21,8 @@
 ;; regex ops are upstream-style ::op-tagged plain maps given Spec behavior
 ;; via the Map type tag.
 ;;
-;; Next milestone adds: fdef/instrument + gen stub (M5).
+;; This is the final milestone for this file; clojure.spec.test.alpha and
+;; clojure.spec.gen.alpha (both new files) round out the M5 deliverable.
 
 (ns clojure.spec.alpha)
 
@@ -1728,3 +1735,159 @@
   success (::invalid on failure, as usual); unform is identity."
   [pred-form]
   `(nonconforming-impl ~pred-form))
+
+;; ── FSpec (s/fspec) + fdef / fn-specs registry ──────────────────────────────
+;;
+;; `s/fspec` describes a fn's shape via optional :args/:ret/:fn specs.
+;; Without generative testing (see clojure.spec.gen.alpha — a stub namespace
+;; whose fns all throw), the strongest `conform*` can do is check that x is
+;; callable; the child specs are stored (for `s/form`/`describe`, and for
+;; `clojure.spec.test.alpha/instrument`, which DOES check :args on every real
+;; call) but never exercised here.
+;;
+;; `s/fdef` registers an FSpec into the SAME registry `s/def` uses (fn-specs
+;; are not a separate table upstream either), keyed by the fn's
+;; FULLY-QUALIFIED symbol. An unqualified symbol as written is qualified
+;; against `*ns*` AT MACROEXPANSION TIME — safe because a macro body runs
+;; while evaluating the caller's form, so `*ns*` at that point is the
+;; caller's namespace. This is what makes `(s/get-spec sym)` and
+;; `clojure.spec.test.alpha/instrument` work off a plain symbol key.
+
+(defrecord FSpec [args ret fn form name])
+
+(extend-type FSpec Spec
+  (conform* [spec x]
+    (if (fn? x) x ::invalid))
+  (unform* [spec x] x)
+  (explain* [spec path via in x]
+    (when (not (fn? x))
+      [(problem path 'fn? x via in)]))
+  (describe* [spec] (:form spec)))
+
+(defn fspec-impl
+  "Impl fn for s/fspec. args/ret/fn are the evaluated :args/:ret/:fn specs
+  (nil if that option was omitted); form is the literal (fspec ...) call for
+  describe."
+  [args ret fn-spec form]
+  (->FSpec args ret fn-spec form nil))
+
+(defn fspec?
+  "True if x is an FSpec (created via s/fspec, including indirectly via
+  s/fdef)."
+  [x]
+  (instance? FSpec x))
+
+(defmacro fspec
+  "Returns a spec for a fn, described via optional :args/:ret/:fn specs
+  (each defaults to nil, meaning unconstrained). Without generators,
+  conform* can only check that a value is callable — see the FSpec doc
+  comment above. The :args/:ret/:fn specs are stored and available via
+  s/form / (:args ...) etc., and :args is used by
+  clojure.spec.test.alpha/instrument."
+  [& opts]
+  (let [o (apply hash-map opts)]
+    `(fspec-impl ~(:args o) ~(:ret o) ~(:fn o) '~(list* 'fspec opts))))
+
+(defmacro fdef
+  "Takes a symbol naming a fn (var) and the same options as s/fspec
+  (:args/:ret/:fn, each optional). Registers an FSpec into the spec
+  registry keyed by the fully-qualified symbol — an unqualified sym is
+  qualified against the CALLING ns's *ns* at macroexpansion time. Returns
+  the fully-qualified symbol."
+  [sym & opts]
+  (let [qsym (if (namespace sym) sym (symbol (str (ns-name *ns*)) (name sym)))]
+    `(def-impl '~qsym '(fspec ~@opts) (fspec ~@opts))))
+
+;; ── s/assert ─────────────────────────────────────────────────────────────────
+;;
+;; DEVIATION FROM UPSTREAM (documented): real clojure.spec.alpha reads
+;; *compile-asserts* once, at AOT/JVM compile time, baking the decision into
+;; the compiled bytecode. This interpreter has no separate compile phase —
+;; every top-level form is macroexpanded as part of evaluating it — so `assert`
+;; below reads *compile-asserts* at MACROEXPANSION time, which in practice
+;; means "current value at the moment this particular s/assert form is
+;; evaluated." The net effect (toggling `check-asserts` changes behavior of
+;; s/assert forms evaluated afterward, but not ones already macroexpanded and
+;; cached, e.g. inside a previously-defined fn body) is a harmless divergence
+;; but worth knowing about.
+
+(def ^:dynamic *compile-asserts* true)
+
+(defn check-asserts?
+  "Returns the current value of *compile-asserts*."
+  []
+  *compile-asserts*)
+
+(defn check-asserts
+  "Sets *compile-asserts* to flag (globally, via alter-var-root — this
+  interpreter has no compile-time-only phase to gate on, so the change is
+  visible immediately; see the s/assert doc comment above). Returns flag."
+  [flag]
+  (alter-var-root #'*compile-asserts* (fn [_] flag))
+  flag)
+
+(defn assert-spec
+  "Impl fn for s/assert. Returns x unchanged if it's valid? against spec;
+  otherwise throws an ex-info whose data is explain-data spec x, with
+  :clojure.spec.alpha/failure :assertion-failed assoc'd in, and whose
+  message includes the explain-str output."
+  [spec-form spec x]
+  (if (valid? spec x)
+    x
+    (let [ed (assoc (explain-data spec x) :clojure.spec.alpha/failure :assertion-failed)]
+      (throw (ex-info (str "Spec assertion failed\n" (explain-str spec x)) ed)))))
+
+(defmacro assert
+  "Like clojure.core/assert, but takes a spec (rather than a boolean test)
+  and checks x against it via s/valid?, returning x on success. A no-op
+  (expands to plain x-form, no check at all) when *compile-asserts* is false
+  at MACROEXPANSION time — see the s/assert doc comment above for how that
+  differs from upstream's true compile-time gating."
+  [spec-form x-form]
+  (if *compile-asserts*
+    `(assert-spec '~spec-form ~spec-form ~x-form)
+    x-form))
+
+;; ── with-gen / gen / exercise / exercise-fn ────────────────────────────────
+;;
+;; Generators are not implemented in this port — see clojure.spec.gen.alpha,
+;; a small stub namespace whose public fns all throw a clear ex-info.
+;; `s/with-gen` stores the supplied gen-fn without ever invoking it, which is
+;; harmless since nothing here ever calls :gen. Bare (non-record) specs
+;; (Fn/Set/Keyword/Symbol) have nowhere safe to stash a :gen — same
+;; "never with-meta on a dispatching value" rule as with-name — so with-gen
+;; on one of those is a documented no-op.
+
+(defn with-gen
+  "Takes a spec and a no-arg fn that would (in upstream) return a
+  generator. Stores gen-fn under :gen on record-based specs (assoc
+  preserves the record's type tag in this runtime); bare
+  predicate/set/keyword/symbol specs have no field to stash it on, so this
+  is a no-op for them. Since generators aren't implemented, :gen is never
+  actually invoked anywhere in this file."
+  [spec gen-fn]
+  (if (record? spec)
+    (assoc spec :gen gen-fn)
+    spec))
+
+(defn- gen-not-implemented
+  [spec]
+  (throw (ex-info "clojure.spec.gen.alpha generators are not implemented in clojurust"
+                  {:spec spec})))
+
+(defn gen
+  "NOT IMPLEMENTED: this port has no generative testing support (no
+  clojure.spec.gen.alpha generator engine)."
+  ([spec] (gen-not-implemented spec))
+  ([spec _overrides] (gen-not-implemented spec)))
+
+(defn exercise
+  "NOT IMPLEMENTED: this port has no generative testing support."
+  ([spec] (gen-not-implemented spec))
+  ([spec _n] (gen-not-implemented spec))
+  ([spec _n _overrides] (gen-not-implemented spec)))
+
+(defn exercise-fn
+  "NOT IMPLEMENTED: this port has no generative testing support."
+  ([sym] (gen-not-implemented sym))
+  ([sym _n] (gen-not-implemented sym)))

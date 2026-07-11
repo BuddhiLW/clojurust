@@ -1,0 +1,114 @@
+;; clojure.spec.gen.alpha — M5 stub.
+;;
+;; This runtime has no generative-testing engine (no test.check port), so
+;; every public fn here throws a clear ex-info instead of doing anything.
+;; The namespace exists purely so `(:require [clojure.spec.gen.alpha :as
+;; gen])` — idiomatic in specs that use `s/with-gen`, `s/gen`, or reference
+;; gen/elements etc. directly — loads cleanly instead of failing to resolve.
+;;
+;; CAUTION for anyone extending this file: several of these names
+;; (`int`/`string`/`keyword`/`boolean`/`double`) intentionally shadow
+;; clojure.core fns, exactly as upstream's real clojure.spec.gen.alpha does.
+;; That shadowing only applies to UNQUALIFIED references from this point
+;; onward within THIS namespace — every fn body below must stay trivial
+;; (call only `not-implemented`, itself defined before any shadowing occurs
+;; and using nothing but `str`/`ex-info`, neither of which is ever
+;; redefined here) so the shadowing can never cause accidental self-
+;; recursion or wrong-fn calls.
+
+(ns clojure.spec.gen.alpha)
+
+(defn- not-implemented
+  "Throws a clear, consistent ex-info for every stubbed generator fn in
+  this namespace. n is the unqualified fn name, as a string."
+  [n]
+  (throw (ex-info
+          (str "clojure.spec.gen.alpha/" n
+               " - generators are not implemented in clojurust")
+          {:fn n})))
+
+(defn generate
+  "NOT IMPLEMENTED: generative testing is not supported in clojurust."
+  [& _args]
+  (not-implemented "generate"))
+
+(defn sample
+  "NOT IMPLEMENTED: generative testing is not supported in clojurust."
+  [& _args]
+  (not-implemented "sample"))
+
+(defn gen-for-pred
+  "NOT IMPLEMENTED: generative testing is not supported in clojurust."
+  [& _args]
+  (not-implemented "gen-for-pred"))
+
+(defn choose
+  "NOT IMPLEMENTED: generative testing is not supported in clojurust."
+  [& _args]
+  (not-implemented "choose"))
+
+(defn such-that
+  "NOT IMPLEMENTED: generative testing is not supported in clojurust."
+  [& _args]
+  (not-implemented "such-that"))
+
+(defn fmap
+  "NOT IMPLEMENTED: generative testing is not supported in clojurust."
+  [& _args]
+  (not-implemented "fmap"))
+
+(defn one-of
+  "NOT IMPLEMENTED: generative testing is not supported in clojurust."
+  [& _args]
+  (not-implemented "one-of"))
+
+(defn return
+  "NOT IMPLEMENTED: generative testing is not supported in clojurust."
+  [& _args]
+  (not-implemented "return"))
+
+(defn elements
+  "NOT IMPLEMENTED: generative testing is not supported in clojurust."
+  [& _args]
+  (not-implemented "elements"))
+
+(defn int
+  "NOT IMPLEMENTED: generative testing is not supported in clojurust.
+  (Shadows clojure.core/int in this ns, matching upstream.)"
+  [& _args]
+  (not-implemented "int"))
+
+(defn string
+  "NOT IMPLEMENTED: generative testing is not supported in clojurust.
+  (Shadows clojure.core/string? co-family naming in this ns, matching
+  upstream's clojure.spec.gen.alpha/string.)"
+  [& _args]
+  (not-implemented "string"))
+
+(defn keyword
+  "NOT IMPLEMENTED: generative testing is not supported in clojurust.
+  (Shadows clojure.core/keyword in this ns, matching upstream.)"
+  [& _args]
+  (not-implemented "keyword"))
+
+(defn boolean
+  "NOT IMPLEMENTED: generative testing is not supported in clojurust.
+  (Shadows clojure.core/boolean in this ns, matching upstream.)"
+  [& _args]
+  (not-implemented "boolean"))
+
+(defn double
+  "NOT IMPLEMENTED: generative testing is not supported in clojurust.
+  (Shadows clojure.core/double in this ns, matching upstream.)"
+  [& _args]
+  (not-implemented "double"))
+
+(defn simple-type
+  "NOT IMPLEMENTED: generative testing is not supported in clojurust."
+  [& _args]
+  (not-implemented "simple-type"))
+
+(defn any
+  "NOT IMPLEMENTED: generative testing is not supported in clojurust."
+  [& _args]
+  (not-implemented "any"))

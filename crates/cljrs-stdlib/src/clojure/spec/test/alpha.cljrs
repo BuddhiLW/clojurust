@@ -1,0 +1,147 @@
+;; clojure.spec.test.alpha — M5: instrument/unstrument.
+;;
+;; `instrument` wraps a var's root fn (via `alter-var-root`, verified working
+;; in earlier milestones — see clojure.spec.alpha's doc comments) so every
+;; call conforms its argument list against the fn's fdef'd :args spec before
+;; delegating to the ORIGINAL (raw, pre-instrument) fn. Only :args is
+;; checked — never :ret or :fn — matching upstream's instrument semantics
+;; (those need generative testing to be useful, and `check`/`check-fn` below
+;; are honest stubs for exactly that reason: this runtime has no generator
+;; engine, see clojure.spec.gen.alpha).
+;;
+;; The raw (pre-instrument) fn for each instrumented symbol is kept in a
+;; private atom keyed by the qualified symbol, so `unstrument` can restore it
+;; and so a second `instrument` call on an already-instrumented symbol is a
+;; safe no-op (never double-wraps).
+
+(ns clojure.spec.test.alpha
+  (:require [clojure.spec.alpha :as s]))
+
+;; ── state ─────────────────────────────────────────────────────────────────
+
+(def ^:private instrumented-raw (atom {}))
+
+(def ^:dynamic *instrument-enabled*
+  "When bound to false (see with-instrument-disabled), every instrumented
+  fn calls straight through to its raw implementation without conforming
+  :args at all."
+  true)
+
+;; ── helpers ───────────────────────────────────────────────────────────────
+
+(defn- fn-spec-for
+  "Returns the FSpec registered under sym (via s/fdef), or nil if sym has
+  no registered spec or its spec isn't an fspec (e.g. it's a plain value
+  spec registered under a symbol some other way)."
+  [sym]
+  (let [spec (s/get-spec sym)]
+    (when (s/fspec? spec) spec)))
+
+(defn instrumentable-syms
+  "All symbols in the spec registry that name an fspec (fdef'd) AND resolve
+  to a var — i.e. every symbol instrument/unstrument (no-arg form) would
+  touch."
+  []
+  (vec (filter (fn [k]
+                 (and (symbol? k)
+                      (fn-spec-for k)
+                      (var? (resolve k))))
+               (keys (s/registry)))))
+
+(defn- instrument-1
+  "Wraps the var named by sym so every call conforms its argument list
+  against the fdef'd :args spec before delegating to the raw fn. Silently
+  no-ops if sym has no fspec, the fspec has no :args, or sym doesn't
+  resolve to a var. Idempotent: a symbol already in instrumented-raw is
+  left alone. Returns sym."
+  [sym]
+  (when-not (contains? @instrumented-raw sym)
+    (when-let [fspec (fn-spec-for sym)]
+      (when-let [v (resolve sym)]
+        (when (var? v)
+          (let [raw (var-get v)
+                args-spec (:args fspec)]
+            (swap! instrumented-raw assoc sym raw)
+            (alter-var-root
+             v
+             (fn [_]
+               (fn [& args]
+                 (if (not *instrument-enabled*)
+                   (apply raw args)
+                   (if (nil? args-spec)
+                     (apply raw args)
+                     (let [conformed (s/conform args-spec args)]
+                       (if (s/invalid? conformed)
+                         (throw (ex-info
+                                 (str "Call to " sym " did not conform to spec.")
+                                 (assoc (or (s/explain-data* args-spec [:args] [sym] [] args)
+                                            {})
+                                        :clojure.spec.alpha/failure :instrument
+                                        :clojure.spec.test.alpha/caller nil)))
+                         (apply raw args)))))))))))))
+  sym)
+
+(defn- unstrument-1
+  "Restores sym's original (pre-instrument) fn if currently instrumented;
+  no-op otherwise. Returns sym."
+  [sym]
+  (when (contains? @instrumented-raw sym)
+    (let [raw (get @instrumented-raw sym)
+          v (resolve sym)]
+      (when (var? v)
+        (alter-var-root v (fn [_] raw)))
+      (swap! instrumented-raw dissoc sym)))
+  sym)
+
+(defn- as-syms
+  "Normalizes the 1-arity instrument/unstrument argument into a vector of
+  symbols: a bare symbol becomes a single-element vector; any other
+  collection is used as-is (vec'd)."
+  [sym-or-syms]
+  (cond
+    (symbol? sym-or-syms) [sym-or-syms]
+    (coll? sym-or-syms) (vec sym-or-syms)
+    :else (throw (ex-info "expected a symbol or a collection of symbols"
+                          {:arg sym-or-syms}))))
+
+;; ── public API ────────────────────────────────────────────────────────────
+
+(defn instrument
+  "Instruments the named sym, or every sym in a collection of syms, or (with
+  no args) every instrumentable sym currently in the registry. Returns a
+  vector of the syms instrumented (in the same order given, or
+  instrumentable-syms' order for the 0-arity form)."
+  ([] (instrument (instrumentable-syms)))
+  ([sym-or-syms] (vec (map instrument-1 (as-syms sym-or-syms)))))
+
+(defn unstrument
+  "Un-instruments (restores the raw fn for) the named sym, or every sym in a
+  collection of syms, or (with no args) every currently-instrumented sym.
+  Returns a vector of the syms un-instrumented."
+  ([] (unstrument (vec (keys @instrumented-raw))))
+  ([sym-or-syms] (vec (map unstrument-1 (as-syms sym-or-syms)))))
+
+(defmacro with-instrument-disabled
+  "Evaluates body with instrumentation checks disabled: for the dynamic
+  extent of body, every currently-instrumented fn calls straight through to
+  its raw implementation without conforming :args."
+  [& body]
+  `(binding [*instrument-enabled* false]
+     ~@body))
+
+(defn check-fn
+  "NOT IMPLEMENTED: requires generative testing, which is not supported in
+  clojurust — see clojure.spec.gen.alpha."
+  [f spec & _opts]
+  (throw (ex-info
+          "clojure.spec.test.alpha/check-fn requires generators, which are not implemented in clojurust"
+          {:spec spec})))
+
+(defn check
+  "NOT IMPLEMENTED: requires generative testing, which is not supported in
+  clojurust — see clojure.spec.gen.alpha."
+  ([] (check nil))
+  ([sym-or-syms & _opts]
+   (throw (ex-info
+           "clojure.spec.test.alpha/check requires generators, which are not implemented in clojurust"
+           {:syms sym-or-syms}))))
