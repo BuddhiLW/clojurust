@@ -1,0 +1,418 @@
+;; clojure.spec.alpha — milestone 1: skeleton + predicate specs + and/or.
+;;
+;; This is a from-scratch, spec-compatible-in-spirit implementation for the
+;; clojurust runtime. It does NOT use `reify` for spec objects (every `reify`
+;; call here would permanently leak a fresh protocol-impl tag into the global
+;; `Protocol.impls` map — see `crates/cljrs-interp/src/special.rs`), so
+;; compound specs are `defrecord` instances extended with the `Spec` protocol
+;; instead. Bare predicates, sets, keywords, and symbols are made directly
+;; usable as specs (zero wrapping) by extending `Spec` onto their type tags.
+;;
+;; Later milestones add: explain-data/keys/merge (M2), regex ops — cat/alt/
+;; */+/?/& (M3), collection/leaf specs (M4), fdef/instrument + gen stub (M5).
+
+(ns clojure.spec.alpha)
+
+;; ── Spec protocol ─────────────────────────────────────────────────────────────
+;;
+;; Every spec — bare predicate, set, registry-keyword ref, var-symbol ref, or
+;; one of our defrecord-based compound specs — implements these four methods.
+
+(defprotocol Spec
+  (conform* [spec x])
+  (unform* [spec x])
+  (explain* [spec path via in x])
+  (describe* [spec]))
+
+;; ── Runtime workaround: polymorphic re-dispatch inside a method body ──────────
+;;
+;; DISCOVERED RUNTIME BUG (affects any protocol, not spec-specific): every
+;; extend-type method impl fn is named after its method (`build_impl_fn` in
+;; `crates/cljrs-interp/src/special.rs` sets the fn's `name` from the method
+;; symbol), and `call_cljrs_fn` (`crates/cljrs-interp/src/apply.rs:526-534`)
+;; unconditionally self-binds that name inside the fn body on every call (the
+;; mechanism that makes named `fn`/`letfn` self-recursion work). That
+;; self-binding shadows the *global* protocol fn var for the duration of the
+;; method body — so a method impl that calls its own method name again,
+;; intending ordinary polymorphic dispatch on a *different* value (e.g.
+;; `extend-type Keyword`'s `conform*` calling `(conform* resolved-spec x)`),
+;; instead re-enters the same impl. The observable symptom depends on body
+;; shape and tail position — anywhere from an infinite loop to side effects
+;; running twice to accidentally-correct results — confirmed with minimal
+;; defprotocol/extend-type repros outside this file. Calling a
+;; *different*-named protocol method recursively (e.g. `explain*` calling
+;; `conform*`) is unaffected — only same-name recursion is shadowed.
+;;
+;; Workaround (no Rust changes needed): capture each protocol fn under a
+;; private alias *before* any extend-type runs. The alias var's name never
+;; collides with any method impl fn's own self-bound name, so looking it up
+;; from inside a method body always finds the real polymorphic ProtocolFn
+;; value instead of the self-binding. Every same-name recursive call in the
+;; extend-type bodies below uses these aliases instead of calling
+;; conform*/unform*/explain*/describe* directly.
+(def ^:private conform*-dispatch conform*)
+(def ^:private unform*-dispatch unform*)
+(def ^:private explain*-dispatch explain*)
+(def ^:private describe*-dispatch describe*)
+
+;; ── Registry ──────────────────────────────────────────────────────────────────
+;;
+;; Children are stored UNRESOLVED (a bare keyword/symbol/set/fn, or a compound
+;; spec record) and re-resolved lazily every time they're conformed against —
+;; this is what makes forward references and re-`s/def`-ing a spec work with
+;; no `delay`/promise machinery: `extend-type Keyword Spec` below just looks
+;; the keyword back up in the registry on every `conform*` call.
+
+(def ^:private registry-ref (atom {}))
+
+(defn registry
+  "Returns a snapshot (a plain map) of the full spec registry: qualified
+  keyword/symbol name -> registered spec value."
+  []
+  @registry-ref)
+
+(defn get-spec
+  "Returns the spec registered for keyword/symbol k, or nil if unregistered."
+  [k]
+  (get @registry-ref k))
+
+;; ── invalid ───────────────────────────────────────────────────────────────────
+
+(def invalid ::invalid)
+
+(defn invalid?
+  "True if x is the ::invalid sentinel returned by a failed conform."
+  [x]
+  (= x ::invalid))
+
+;; ── explain-data problem helper ────────────────────────────────────────────────
+;;
+;; Full explain-data assembly (spec/via/in roll-ups, printable summaries) is
+;; M2. For M1, `explain*` on every spec kind returns a bare vector of these
+;; problem maps (or nil when the value is valid) so the shape is stable and
+;; ready for M2 to build on.
+
+(defn- problem
+  "Builds a single explain-data problem map."
+  [path pred val via in]
+  {:path path :pred pred :val val :via via :in in})
+
+;; ── Bare values as specs ────────────────────────────────────────────────────────
+;;
+;; `Fn` covers Fn/NativeFunction/ProtocolFn/MultiFn — all callables share the
+;; "Fn" dispatch tag (crates/cljrs-env/src/apply.rs). A predicate call is
+;; wrapped in try/catch so a predicate that throws on an unexpected shape of
+;; `x` (e.g. `even?` on a non-number) fails conform instead of blowing up the
+;; caller.
+
+(extend-type Fn Spec
+  (conform* [spec x]
+    (try
+      (if (spec x) x ::invalid)
+      (catch Exception _e ::invalid)))
+  (unform* [spec x] x)
+  (explain* [spec path via in x]
+    (when (invalid? (conform* spec x))
+      [(problem path spec x via in)]))
+  (describe* [spec] spec))
+
+;; A set used as a spec conforms/validates via set membership (enum spec).
+
+(extend-type Set Spec
+  (conform* [spec x]
+    (if (contains? spec x) x ::invalid))
+  (unform* [spec x] x)
+  (explain* [spec path via in x]
+    (when (invalid? (conform* spec x))
+      [(problem path spec x via in)]))
+  (describe* [spec] spec))
+
+;; A keyword used as a spec is a live reference into the registry, re-resolved
+;; on every call — this is what makes forward references and re-registration
+;; (re-`s/def`-ing a spec) work correctly with no extra bookkeeping.
+
+(extend-type Keyword Spec
+  (conform* [spec x]
+    (if-let [s (get-spec spec)]
+      (conform*-dispatch s x)
+      (throw (ex-info (str "Unable to resolve spec: " spec) {:spec spec}))))
+  (unform* [spec x]
+    (if-let [s (get-spec spec)]
+      (unform*-dispatch s x)
+      (throw (ex-info (str "Unable to resolve spec: " spec) {:spec spec}))))
+  (explain* [spec path via in x]
+    (if-let [s (get-spec spec)]
+      (explain*-dispatch s path (conj via spec) in x)
+      [(problem path spec x via in)]))
+  (describe* [spec]
+    (if-let [s (get-spec spec)]
+      (if (keyword? s) s (describe*-dispatch s))
+      spec)))
+
+;; A symbol used as a spec resolves to a var and delegates to its value —
+;; e.g. `(s/def ::x 'my.ns/my-pred)`.
+
+(extend-type Symbol Spec
+  (conform* [spec x] (conform*-dispatch @(resolve spec) x))
+  (unform* [spec x] (unform*-dispatch @(resolve spec) x))
+  (explain* [spec path via in x]
+    (explain*-dispatch @(resolve spec) path (conj via spec) in x))
+  (describe* [spec] spec))
+
+;; ── PredicateSpec ─────────────────────────────────────────────────────────────
+;;
+;; Wraps a predicate/spec together with its literal form, so `describe`/`form`
+;; can show `even?` instead of an opaque function value. `:pred` is usually a
+;; raw predicate fn, but `(s/spec (s/or ...))`-style wrapping of an
+;; already-compound spec is also supported: conform*/unform* delegate to the
+;; wrapped spec's own protocol methods whenever `:pred` isn't itself callable.
+
+(defrecord PredicateSpec [form pred name])
+
+(extend-type PredicateSpec Spec
+  (conform* [spec x]
+    (let [pred (:pred spec)]
+      (if (fn? pred)
+        (try
+          (if (pred x) x ::invalid)
+          (catch Exception _e ::invalid))
+        (conform*-dispatch pred x))))
+  (unform* [spec x]
+    (let [pred (:pred spec)]
+      (if (fn? pred) x (unform*-dispatch pred x))))
+  (explain* [spec path via in x]
+    (when (invalid? (conform* spec x))
+      [(problem path (:form spec) x via in)]))
+  (describe* [spec] (:form spec)))
+
+;; ── AndSpec ───────────────────────────────────────────────────────────────────
+;;
+;; conform* threads each pred's conformed result into the next, short-
+;; circuiting to ::invalid on the first failure. unform* mirrors upstream
+;; clojure.spec.alpha's simplification: only the *last* pred's unform matters
+;; (all earlier preds are assumed to be plain, non-transforming predicates).
+
+(defrecord AndSpec [form forms preds name])
+
+(extend-type AndSpec Spec
+  (conform* [spec x]
+    (loop [ret x preds (:preds spec)]
+      (if (empty? preds)
+        ret
+        (let [conformed (conform*-dispatch (first preds) ret)]
+          (if (invalid? conformed)
+            ::invalid
+            (recur conformed (rest preds)))))))
+  (unform* [spec x]
+    (if (empty? (:preds spec))
+      x
+      (unform*-dispatch (last (:preds spec)) x)))
+  (explain* [spec path via in x]
+    (loop [ret x preds (:preds spec) forms (:forms spec)]
+      (if (empty? preds)
+        nil
+        (let [conformed (conform* (first preds) ret)]
+          (if (invalid? conformed)
+            [(problem path (first forms) ret via in)]
+            (recur conformed (rest preds) (rest forms)))))))
+  (describe* [spec] (:form spec)))
+
+(defn and-spec-impl
+  "Impl fn for s/and. `forms` are the literal per-branch spec forms (a
+  vector); `preds` are their evaluated spec values in the same order — each
+  may be a bare predicate/set/keyword/symbol or another compound spec, since
+  all of those already implement Spec directly (no `specize` wrapping step
+  needed)."
+  [forms preds]
+  (->AndSpec (cons 'and forms) (vec forms) (vec preds) nil))
+
+;; ── OrSpec ────────────────────────────────────────────────────────────────────
+;;
+;; conform* returns `[tag conformed]` for the first matching branch, else
+;; ::invalid.
+
+(defrecord OrSpec [form keys forms preds name])
+
+(defn- or-pred-for
+  "Looks up the pred registered under tag k in an OrSpec."
+  [spec k]
+  (some (fn [[kk pred]] (when (= kk k) pred))
+        (map vector (:keys spec) (:preds spec))))
+
+(extend-type OrSpec Spec
+  (conform* [spec x]
+    (loop [ks (:keys spec) preds (:preds spec)]
+      (cond
+        (empty? preds) ::invalid
+        :else
+        (let [conformed (conform*-dispatch (first preds) x)]
+          (if (invalid? conformed)
+            (recur (rest ks) (rest preds))
+            [(first ks) conformed])))))
+  (unform* [spec x]
+    (let [[k v] x]
+      (unform*-dispatch (or-pred-for spec k) v)))
+  (explain* [spec path via in x]
+    (when (invalid? (conform* spec x))
+      (vec (map (fn [k form]
+                  (problem (conj path k) form x via in))
+                (:keys spec) (:forms spec)))))
+  (describe* [spec] (:form spec)))
+
+(defn or-spec-impl
+  "Impl fn for s/or. `keys` are the branch tag keywords, `forms` their literal
+  spec forms, `preds` their evaluated spec values — all parallel vectors."
+  [keys forms preds]
+  (->OrSpec (cons 'or (interleave keys forms)) (vec keys) (vec forms) (vec preds) nil))
+
+;; ── def-impl / naming ─────────────────────────────────────────────────────────
+
+(defn- with-name
+  "Attaches name (a qualified keyword or symbol) to spec, returning the
+  (possibly updated) spec. Bare Fn/Set/Keyword/Symbol specs are returned
+  unchanged: they already carry their own identity (a set prints itself, a
+  keyword/symbol re-resolves through the registry every time), and — per the
+  'never with-meta on a dispatching value' rule for this runtime — there is
+  nowhere safe to stash a name on them without breaking protocol dispatch.
+  Only our own defrecord-based spec objects (PredicateSpec/AndSpec/OrSpec,
+  ...) get an assoc'd :name field, since `assoc` on a record preserves its
+  type tag here."
+  [spec name]
+  (if (record? spec)
+    (assoc spec :name name)
+    spec))
+
+(defn spec-name
+  "Returns the registered name of spec, if it has one. Keyword refs report
+  their own keyword; record-based specs report their assoc'd :name (nil if
+  never named via s/def); anything else (bare fn/set/symbol) has none."
+  [spec]
+  (cond
+    (keyword? spec) spec
+    (record? spec) (:name spec)
+    :else nil))
+
+(defn spec-impl
+  "Wraps pred (a predicate fn, or another spec) together with its literal
+  form into a PredicateSpec, so describe/form can show the form as written."
+  ([form pred] (spec-impl form pred nil))
+  ([form pred name] (->PredicateSpec form pred name)))
+
+(defn def-impl
+  "Impl fn for s/def. k must be a qualified keyword or symbol. If spec is
+  already one of our record-based spec objects, or a bare keyword/symbol
+  (registry ref) or set (enum spec), it's stored as-is so live
+  re-resolution/forward-refs keep working; a bare predicate fn is wrapped in
+  a PredicateSpec first so describe/form can show its literal form. Returns
+  k."
+  [k form spec]
+  (when-not (and (ident? k) (namespace k))
+    (throw (ex-info (str "s/def requires a qualified keyword or symbol, got: " (pr-str k))
+                     {:key k})))
+  (let [s (cond
+            (spec? spec) spec
+            (keyword? spec) spec
+            (symbol? spec) spec
+            (set? spec) spec
+            :else (spec-impl form spec nil))]
+    (swap! registry-ref assoc k (with-name s k))
+    k))
+
+;; ── Macros ────────────────────────────────────────────────────────────────────
+;;
+;; NOTE: `def`/`and`/`or` are special forms in this runtime, dispatched on the
+;; raw head-symbol text — so unqualified `(def ...)`/`(and ...)`/`(or ...)`
+;; anywhere ABOVE this point always hits the special form, never these
+;; macros. External callers only reach these via an alias, e.g.
+;; `(s/def ::x even?)`, `(s/and int? even?)`, `(s/or :i int? :s string?)`.
+;;
+;; A second, more surprising consequence of special-form names being
+;; reserved: `defmacro` cannot itself be named `def`/`and`/`or` directly.
+;; `(defmacro def [...] ...)` builds the underlying fn via the same
+;; self-name-as-optional-first-arg logic as `fn*`, which explicitly skips
+;; treating the name as a self-reference when it's a special form
+;; (`crates/cljrs-interp/src/special.rs` — `!is_special_form(s)` guard) —
+;; but the fn-parsing code never falls back to "there's no self-name after
+;; all" in that case, so it misreads the name symbol itself as the arity
+;; clause and throws "fn* expects vector or arity clauses". Worked around by
+;; defining each macro under a `-form`-suffixed name and then re-binding the
+;; resulting `Macro` value onto the desired var with a plain `def` (`def` the
+;; special form just interns whatever value it's given — no such guard on
+;; the *target* name of a `def`, only on fn/macro self-reference names).
+
+(defmacro def-form
+  "Given a namespace-qualified keyword or symbol k, and a spec, predicate, or
+  regex-op form, makes an entry in the registry mapping k to the spec. Do NOT
+  put a def in a defn — spec kits should be at the top level. Returns k."
+  [k spec-form]
+  `(def-impl '~k '~spec-form ~spec-form))
+(def def def-form)
+
+(defmacro spec
+  "Takes a single predicate/spec form and returns a spec object wrapping it,
+  preserving the literal form for describe/form output."
+  [pred-form]
+  `(spec-impl '~pred-form ~pred-form nil))
+
+(defmacro and-form
+  "Takes predicate/spec-forms, e.g. (s/and int? even?), and returns a spec
+  that returns the conformed value of the last predicate if all pass, else
+  ::invalid."
+  [& pred-forms]
+  `(and-spec-impl '~(vec pred-forms) [~@pred-forms]))
+(def and and-form)
+
+(defmacro or-form
+  "Takes key/pred-form pairs, e.g. (s/or :i int? :s string?), and returns a
+  spec that returns [key conformed] for the first matching branch, else
+  ::invalid."
+  [& key-pred-forms]
+  (let [pairs (partition 2 key-pred-forms)
+        ks (mapv first pairs)
+        pred-forms (mapv second pairs)]
+    `(or-spec-impl '~ks '~pred-forms [~@pred-forms])))
+(def or or-form)
+
+;; ── Public API ────────────────────────────────────────────────────────────────
+
+(defn spec?
+  "Returns x if x is one of our own record-based spec objects (created by
+  spec-impl/and-spec-impl/or-spec-impl/...), else nil. Note: this diverges
+  from upstream clojure.spec.alpha, where spec? is true for anything
+  spec-conforming. Here bare predicates/sets/keywords/symbols all implement
+  the Spec protocol directly (via extend-type) but are NOT `spec?` — this is
+  what lets def-impl/with-name know precisely when a :name field can safely
+  be assoc'd, without special-casing every kind of value that can act as a
+  spec."
+  [x]
+  (when (and (record? x) (satisfies? Spec x))
+    x))
+
+(defn conform
+  "Given a spec and a value, returns :clojure.spec.alpha/invalid if the
+  value doesn't match the spec, else the (possibly destructured) conformed
+  value."
+  [spec x]
+  (conform* spec x))
+
+(defn unform
+  "Given a spec and a conformed value, returns the unconformed (original
+  form) value."
+  [spec x]
+  (unform* spec x))
+
+(defn valid?
+  "Returns true if x is valid according to spec."
+  [spec x]
+  (not (invalid? (conform spec x))))
+
+(defn form
+  "Returns the spec as data, in a form suitable for re-parsing."
+  [spec]
+  (describe* spec))
+
+(defn describe
+  "Returns an abbreviated description of the spec, suitable for presenting
+  to a user."
+  [spec]
+  (describe* spec))

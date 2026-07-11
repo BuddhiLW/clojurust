@@ -37,6 +37,7 @@ const CLOJURE_EDN_SRC: &str = include_str!("clojure/edn.cljrs");
 const CLOJURE_WALK_SRC: &str = include_str!("clojure/walk.cljrs");
 const CLOJURE_DATA_SRC: &str = include_str!("clojure/data.cljrs");
 const COLJURE_ZIP_SRC: &str = include_str!("clojure/zip.cljrs");
+const CLOJURE_SPEC_ALPHA_SRC: &str = include_str!("clojure/spec/alpha.cljrs");
 
 // ── Macro: register a batch of native fns into a namespace ───────────────────
 
@@ -100,6 +101,9 @@ pub fn register(globals: &Arc<GlobalEnv>) {
 
     // clojure.zip
     globals.register_builtin_source("clojure.zip", COLJURE_ZIP_SRC);
+
+    // clojure.spec.alpha ─ pure Clojure, no native helpers.
+    globals.register_builtin_source("clojure.spec.alpha", CLOJURE_SPEC_ALPHA_SRC);
 }
 
 /// Create a `GlobalEnv` with all built-ins and stdlib registered, **without**
@@ -188,7 +192,7 @@ mod tests {
     use super::*;
     use cljrs_eval::{Env, EvalResult, eval};
     use cljrs_reader::Parser;
-    use cljrs_value::Value;
+    use cljrs_value::{Keyword, Value};
 
     fn make_env() -> (Arc<GlobalEnv>, Env) {
         let globals = standard_env();
@@ -429,5 +433,164 @@ mod tests {
             .unwrap()
             .join()
             .unwrap();
+    }
+
+    // ── clojure.spec.alpha (M1: skeleton + predicate specs + and/or) ─────────
+
+    /// Runs `body` on a thread with a 16MB stack (macro-heavy `spec` loading
+    /// triggers eager IR lowering, which recurses deeply — see
+    /// `test_clojure_test_lazy_load` above for the same pattern).
+    fn run_with_big_stack<F: FnOnce() + Send + 'static>(body: F) {
+        std::thread::Builder::new()
+            .stack_size(16 * 1024 * 1024)
+            .spawn(body)
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[test]
+    fn test_spec_def_and_valid_conform() {
+        run_with_big_stack(|| {
+            let (_, mut env) = make_env();
+            run("(require '[clojure.spec.alpha :as s])", &mut env).unwrap();
+            assert_eq!(
+                run("(s/def ::x even?)", &mut env).unwrap(),
+                Value::keyword(Keyword::qualified("user", "x"))
+            );
+            assert_eq!(
+                run("(s/valid? ::x 4)", &mut env).unwrap(),
+                Value::Bool(true)
+            );
+            assert_eq!(
+                run("(s/valid? ::x 3)", &mut env).unwrap(),
+                Value::Bool(false)
+            );
+            assert_eq!(run("(s/conform ::x 4)", &mut env).unwrap(), Value::Long(4));
+            assert_eq!(
+                run("(s/invalid? (s/conform ::x 3))", &mut env).unwrap(),
+                Value::Bool(true)
+            );
+        });
+    }
+
+    #[test]
+    fn test_spec_set_and_keyword_ref() {
+        run_with_big_stack(|| {
+            let (_, mut env) = make_env();
+            run("(require '[clojure.spec.alpha :as s])", &mut env).unwrap();
+            run("(s/def ::color #{:red :green})", &mut env).unwrap();
+            assert_eq!(
+                run("(s/valid? ::color :red)", &mut env).unwrap(),
+                Value::Bool(true)
+            );
+            assert_eq!(
+                run("(s/valid? ::color :blue)", &mut env).unwrap(),
+                Value::Bool(false)
+            );
+
+            // keyword-registry-ref spec: ::y re-resolves ::x live.
+            run("(s/def ::x even?)", &mut env).unwrap();
+            run("(s/def ::y ::x)", &mut env).unwrap();
+            assert_eq!(
+                run("(s/valid? ::y 4)", &mut env).unwrap(),
+                Value::Bool(true)
+            );
+            assert_eq!(
+                run("(s/valid? ::y 3)", &mut env).unwrap(),
+                Value::Bool(false)
+            );
+        });
+    }
+
+    #[test]
+    fn test_spec_forward_reference() {
+        run_with_big_stack(|| {
+            let (_, mut env) = make_env();
+            run("(require '[clojure.spec.alpha :as s])", &mut env).unwrap();
+            // ::a refers to ::b before ::b is defined.
+            run("(s/def ::a ::b)", &mut env).unwrap();
+            run("(s/def ::b string?)", &mut env).unwrap();
+            assert_eq!(
+                run(r#"(s/conform ::a "hi")"#, &mut env).unwrap(),
+                Value::string("hi")
+            );
+            assert_eq!(
+                run("(s/invalid? (s/conform ::a 5))", &mut env).unwrap(),
+                Value::Bool(true)
+            );
+        });
+    }
+
+    #[test]
+    fn test_spec_and_or() {
+        run_with_big_stack(|| {
+            let (_, mut env) = make_env();
+            run("(require '[clojure.spec.alpha :as s])", &mut env).unwrap();
+            assert_eq!(
+                run("(s/valid? (s/and int? even?) 4)", &mut env).unwrap(),
+                Value::Bool(true)
+            );
+            assert_eq!(
+                run("(s/valid? (s/and int? even?) 3)", &mut env).unwrap(),
+                Value::Bool(false)
+            );
+            let v = run("(s/conform (s/or :i int? :s string?) 5)", &mut env).unwrap();
+            match v {
+                Value::Vector(vec) => {
+                    let items = vec.get().iter().cloned().collect::<Vec<_>>();
+                    assert_eq!(items.len(), 2);
+                    assert_eq!(items[0], Value::keyword(Keyword::simple("i")));
+                    assert_eq!(items[1], Value::Long(5));
+                }
+                other => panic!("expected [:i 5], got {other:?}"),
+            }
+        });
+    }
+
+    #[test]
+    fn test_spec_spec_and_registry_introspection() {
+        run_with_big_stack(|| {
+            let (_, mut env) = make_env();
+            run("(require '[clojure.spec.alpha :as s])", &mut env).unwrap();
+            // Bare predicates are directly usable but not `spec?`; our own
+            // record-based compound specs are.
+            assert_eq!(run("(s/spec? even?)", &mut env).unwrap(), Value::Nil);
+            let is_spec = run("(s/spec? (s/and int? even?))", &mut env).unwrap();
+            assert!(
+                !matches!(is_spec, Value::Nil),
+                "expected a truthy spec object"
+            );
+
+            run("(s/def ::x even?)", &mut env).unwrap();
+            assert!(!matches!(
+                run("(s/get-spec ::x)", &mut env).unwrap(),
+                Value::Nil
+            ));
+            assert!(matches!(
+                run("(s/get-spec ::does-not-exist)", &mut env).unwrap(),
+                Value::Nil
+            ));
+
+            run("(s/def ::pos-even (s/and int? even? pos?))", &mut env).unwrap();
+            let form_v = run("(s/form ::pos-even)", &mut env).unwrap();
+            assert_eq!(format!("{form_v}"), "(and int? even? pos?)");
+            let describe_v = run("(s/describe ::pos-even)", &mut env).unwrap();
+            assert_eq!(format!("{describe_v}"), "(and int? even? pos?)");
+        });
+    }
+
+    #[test]
+    fn test_spec_conform_unregistered_keyword_throws() {
+        run_with_big_stack(|| {
+            let (_, mut env) = make_env();
+            run("(require '[clojure.spec.alpha :as s])", &mut env).unwrap();
+            let err = run("(s/conform ::does-not-exist 1)", &mut env).unwrap_err();
+            let msg = format!("{err}");
+            assert!(
+                msg.contains("Unable to resolve spec"),
+                "expected 'Unable to resolve spec' in error, got: {msg}"
+            );
+        });
     }
 }
