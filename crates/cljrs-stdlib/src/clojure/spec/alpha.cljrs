@@ -1,5 +1,6 @@
 ;; clojure.spec.alpha — M1: skeleton + predicate specs + and/or;
-;;                      M2: explain machinery + keys/merge.
+;;                      M2: explain machinery + keys/merge;
+;;                      M3: derivative-based regex engine (cat/alt/*/+/?/&).
 ;;
 ;; This is a from-scratch, spec-compatible-in-spirit implementation for the
 ;; clojurust runtime. It does NOT use `reify` for spec objects (every `reify`
@@ -7,10 +8,12 @@
 ;; `Protocol.impls` map — see `crates/cljrs-interp/src/special.rs`), so
 ;; compound specs are `defrecord` instances extended with the `Spec` protocol
 ;; instead. Bare predicates, sets, keywords, and symbols are made directly
-;; usable as specs (zero wrapping) by extending `Spec` onto their type tags.
+;; usable as specs (zero wrapping) by extending `Spec` onto their type tags;
+;; regex ops are upstream-style ::op-tagged plain maps given Spec behavior
+;; via the Map type tag.
 ;;
-;; Later milestones add: regex ops — cat/alt/*/+/?/& (M3), collection/leaf
-;; specs (M4), fdef/instrument + gen stub (M5).
+;; Later milestones add: collection/leaf specs (M4), fdef/instrument + gen
+;; stub (M5).
 
 (ns clojure.spec.alpha)
 
@@ -110,7 +113,7 @@
   (cond
     (keyword? pred)
     (explain*-dispatch pred path via in v)
-    (spec? pred)
+    (or (spec? pred) (regex? pred))
     (explain*-dispatch pred path
                        (if-let [n (spec-name pred)] (conj via n) via)
                        in v)
@@ -472,6 +475,471 @@
   [forms preds]
   (->MergeSpec (cons 'merge forms) (vec forms) (vec preds) nil))
 
+;; ── Regex engine (s/cat, s/alt, s/*, s/+, s/?, s/&) ──────────────────────────
+;;
+;; Port of upstream clojure.spec.alpha's derivative-based regex engine. Regex
+;; ops are plain data — maps tagged with the namespaced ::op key (so user
+;; maps can't collide) — NOT record-wrapped specs. This preserves upstream's
+;; composition semantics: nesting a regex op inside another describes a
+;; SINGLE flat sequence (in `(s/cat :a (s/* int?) :b string?)` the s/*
+;; splices into the cat), and a keyword ref that resolves to a registered
+;; regex ALSO splices (upstream reg-resolve! semantics: after
+;; `(s/def ::r (s/* int?))`, `(s/cat :a ::r :b string?)` conforms [1 2 "x"]
+;; to {:a [1 2] :b "x"}). To match a nested sub-sequence as one element
+;; instead, wrap it with `(s/spec (s/* ...))` — the PredicateSpec boundary
+;; consumes exactly one element. A keyword ref to a NON-regex spec likewise
+;; consumes exactly one element via ordinary protocol dispatch.
+;;
+;; Ops: ::accept ::pcat ::alt ::rep ::amp. nil op = a plain pred (fn / set /
+;; keyword / symbol / spec record) consuming one element.
+;;
+;; The engine fns are mutually recursive; vars resolve at call time in this
+;; runtime, so plain defn- order works without `declare`.
+
+(defn regex?
+  "Returns x if x is a regex op (a map produced by cat/alt/*/+/?/&), else
+  nil/false."
+  [x]
+  (and (map? x) (get x ::op) x))
+
+(defn- op-of
+  "The ::op tag of a regex map; nil for anything else (plain preds)."
+  [p]
+  (when (map? p) (get p ::op)))
+
+(defn- reg-resolve
+  "Resolves an ident through the registry alias chain to the underlying spec
+  or regex value; returns non-idents unchanged; nil if unregistered."
+  [k]
+  (if (ident? k)
+    (let [reg @registry-ref
+          s (get reg k)]
+      (when s
+        (loop [s s]
+          (if (ident? s)
+            (recur (get reg s))
+            s))))
+    k))
+
+(defn- reg-resolve!
+  "Like reg-resolve but throws on an unresolvable ident."
+  [k]
+  (if (ident? k)
+    (or (reg-resolve k)
+        (throw (ex-info (str "Unable to resolve spec: " k) {:spec k})))
+    k))
+
+(defn- accept [x] {::op ::accept :ret x})
+
+(defn- accept? [p] (= ::accept (op-of p)))
+
+(defn- pcat*
+  "Core cat constructor/normalizer over {:ps :ks :forms :ret :rep+}. Any nil
+  in :ps kills the whole branch (returns nil) — that is how failed
+  derivatives propagate."
+  [m]
+  (let [ps (:ps m) ks (:ks m) forms (:forms m) ret (:ret m) rep+form (:rep+ m)
+        p1 (first ps) pr (next ps)
+        k1 (first ks) kr (next ks)
+        fr (next forms)]
+    (when (every? identity ps)
+      (if (accept? p1)
+        (let [r1 (:ret p1)
+              ret (conj ret (if ks {k1 r1} r1))]
+          (if pr
+            (pcat* {:ps pr :ks kr :forms fr :ret ret})
+            (accept ret)))
+        {::op ::pcat :ps ps :ret ret :ks ks :forms forms :rep+ rep+form}))))
+
+(defn cat-impl
+  "Impl fn for s/cat. ks/ps/forms are parallel: tag keywords, evaluated
+  preds, literal pred forms."
+  [ks ps forms]
+  (pcat* {:ks ks :ps ps :forms forms :ret {}}))
+
+(defn- rep* [p1 p2 ret splice form]
+  (when p1
+    (let [r {::op ::rep :p2 p2 :splice splice :forms form}]
+      (if (accept? p1)
+        (assoc r :p1 p2 :ret (conj ret (:ret p1)))
+        (assoc r :p1 p1 :ret ret)))))
+
+(defn rep-impl
+  "Impl fn for s/*."
+  [form p]
+  (rep* p p [] false form))
+
+(defn rep+impl
+  "Impl fn for s/+ — a pcat of one mandatory pred followed by a splicing
+  rep."
+  [form p]
+  (pcat* {:ps [p (rep* p p [] true form)]
+          :forms [form (list '* form)]
+          :ret []
+          :rep+ form}))
+
+(defn amp-impl
+  "Impl fn for s/& — regex re further constrained by preds applied to the
+  conformed result."
+  [re re-form preds pred-forms]
+  {::op ::amp :p1 re :amp re-form :ps preds :forms pred-forms})
+
+(defn- filter-alt [ps ks forms f]
+  (if (or ks forms)
+    (let [pks (filter (fn [t] (f (first t)))
+                      (map vector ps
+                           (or (seq ks) (repeat nil))
+                           (or (seq forms) (repeat nil))))]
+      [(seq (map first pks))
+       (when ks (seq (map second pks)))
+       (when forms (seq (map (fn [t] (nth t 2)) pks)))])
+    [(seq (filter f ps)) ks forms]))
+
+(defn- alt* [ps ks forms]
+  (let [res (filter-alt ps ks forms identity)
+        ps (nth res 0) ks (nth res 1) forms (nth res 2)
+        p1 (first ps) pr (next ps) k1 (first ks)]
+    (when ps
+      (let [ret {::op ::alt :ps ps :ks ks :forms forms}]
+        (if (nil? pr)
+          (if k1
+            (if (accept? p1)
+              (accept [k1 (:ret p1)])
+              ret)
+            p1)
+          ret)))))
+
+(defn- alt2 [p1 p2]
+  (if (and p1 p2)
+    (alt* [p1 p2] nil nil)
+    (or p1 p2)))
+
+(defn alt-impl
+  "Impl fn for s/alt. ks/ps/forms parallel as in cat-impl."
+  [ks ps forms]
+  (alt* ps ks forms))
+
+(defn maybe-impl
+  "Impl fn for s/?."
+  [p form]
+  (assoc (alt* [p (accept ::nil)] nil [form ::nil]) :maybe form))
+
+(defn- and-preds
+  "Threads x through preds (conforming at each step), short-circuiting to
+  ::invalid. forms are display-only (kept for upstream parity)."
+  [x preds forms]
+  (loop [ret x preds (seq preds) forms (seq forms)]
+    (cond
+      (invalid? ret) ::invalid
+      preds (let [nret (conform*-dispatch (first preds) ret)]
+              (if (invalid? nret)
+                ::invalid
+                (recur nret (next preds) (next forms))))
+      :else ret)))
+
+(defn- explain-pred-list
+  [forms preds path via in x]
+  (loop [ret x forms (seq forms) preds (seq preds)]
+    (when preds
+      (let [nret (conform*-dispatch (first preds) ret)]
+        (if (invalid? nret)
+          (explain-1 (first forms) (first preds) path via in ret)
+          (recur nret (next forms) (next preds)))))))
+
+(defn- noret? [p1 pret]
+  (or (= pret ::nil)
+      (and (contains? #{::rep ::pcat}
+                      (op-of (if (ident? p1) (reg-resolve! p1) p1)))
+           (empty? pret))))
+
+(defn- accept-nil? [p]
+  (let [rp (if (ident? p) (reg-resolve! p) p)
+        op (op-of rp)]
+    (cond
+      (= op ::accept) true
+      (nil? op) nil
+      (= op ::amp) (and (accept-nil? (:p1 rp))
+                        (let [ret (and-preds (preturn (:p1 rp)) (:ps rp) (:forms rp))]
+                          (not (invalid? ret))))
+      (= op ::rep) (or (identical? (:p1 rp) (:p2 rp)) (accept-nil? (:p1 rp)))
+      (= op ::pcat) (every? accept-nil? (:ps rp))
+      (= op ::alt) (boolean (some accept-nil? (:ps rp))))))
+
+(defn- preturn [p]
+  (let [rp (if (ident? p) (reg-resolve! p) p)
+        op (op-of rp)]
+    (cond
+      (= op ::accept) (:ret rp)
+      (nil? op) nil
+      (= op ::amp) (let [pret (preturn (:p1 rp))]
+                     (if (noret? (:p1 rp) pret)
+                       ::nil
+                       (and-preds pret (:ps rp) (:forms rp))))
+      (= op ::rep) (add-ret (:p1 rp) (:ret rp) nil)
+      (= op ::pcat) (add-ret (first (:ps rp)) (:ret rp) (first (:ks rp)))
+      (= op ::alt)
+      (let [res (filter-alt (:ps rp) (:ks rp) (:forms rp) accept-nil?)
+            p0 (first (nth res 0))
+            k0 (first (nth res 1))
+            r (if (nil? p0) ::nil (preturn p0))]
+        (if k0 [k0 r] r)))))
+
+(defn- add-ret [p r k]
+  (let [rp (if (ident? p) (reg-resolve! p) p)
+        op (op-of rp)]
+    (cond
+      (nil? op) r
+      (contains? #{::alt ::accept ::amp} op)
+      (let [ret (preturn rp)]
+        (if (= ret ::nil) r (conj r (if k {k ret} ret))))
+      :else ;; ::rep / ::pcat
+      (let [ret (preturn rp)]
+        (if (empty? ret)
+          r
+          ((if (:splice rp) into conj) r (if k {k ret} ret)))))))
+
+(defn- deriv
+  "The derivative of regex p with respect to one input element x — the regex
+  matching the rest of the input — or nil if x can't begin a match."
+  [p x]
+  (let [rp (if (ident? p) (reg-resolve! p) p)]
+    (when rp
+      (let [op (op-of rp)]
+        (cond
+          (= op ::accept) nil
+
+          ;; Plain pred: consumes exactly one element. Dispatches on the
+          ;; ORIGINAL p (not rp) so keyword refs stay live and push
+          ;; themselves onto via during explain.
+          (nil? op)
+          (let [ret (conform*-dispatch p x)]
+            (when (not (invalid? ret)) (accept ret)))
+
+          (= op ::amp)
+          (when-let [p1 (deriv (:p1 rp) x)]
+            (if (= ::accept (op-of p1))
+              (let [ret (and-preds (preturn p1) (:ps rp) (:forms rp))]
+                (when (not (invalid? ret))
+                  (accept ret)))
+              (amp-impl p1 (:amp rp) (:ps rp) (:forms rp))))
+
+          (= op ::pcat)
+          (let [ps (:ps rp) ks (:ks rp) forms (:forms rp) ret (:ret rp)
+                p0 (first ps) pr (next ps) k0 (first ks) kr (next ks)]
+            (alt2 (pcat* {:ps (cons (deriv p0 x) pr) :ks ks :forms forms :ret ret})
+                  (when (accept-nil? p0)
+                    (deriv (pcat* {:ps pr :ks kr :forms (next forms)
+                                   :ret (add-ret p0 ret k0)})
+                           x))))
+
+          (= op ::alt)
+          (alt* (map (fn [q] (deriv q x)) (:ps rp)) (:ks rp) (:forms rp))
+
+          (= op ::rep)
+          (alt2 (rep* (deriv (:p1 rp) x) (:p2 rp) (:ret rp) (:splice rp) (:forms rp))
+                (when (accept-nil? (:p1 rp))
+                  (deriv (rep* (:p2 rp) (:p2 rp) (add-ret (:p1 rp) (:ret rp) nil)
+                               (:splice rp) (:forms rp))
+                         x))))))))
+
+(defn- op-describe [p]
+  (let [rp (if (ident? p) (reg-resolve! p) p)
+        op (op-of rp)]
+    (when rp
+      (cond
+        (= op ::accept) nil
+        (nil? op) (if (ident? p) p (describe*-dispatch p))
+        (= op ::amp) (cons '& (cons (:amp rp) (:forms rp)))
+        (= op ::pcat) (if (:rep+ rp)
+                        (list '+ (:rep+ rp))
+                        (if (:ks rp)
+                          (cons 'cat (interleave (:ks rp) (:forms rp)))
+                          (cons 'cat (:forms rp))))
+        (= op ::alt) (if (:maybe rp)
+                       (list '? (:maybe rp))
+                       (cons 'alt (interleave (:ks rp) (:forms rp))))
+        (= op ::rep) (list (if (:splice rp) '+ '*) (:forms rp))))))
+
+(defn- op-unform
+  "Inverse of the conform machinery for one regex op; returns a SEQ of
+  original input elements."
+  [p x]
+  (let [rp (if (ident? p) (reg-resolve! p) p)
+        op (op-of rp)]
+    (cond
+      (= op ::accept) [(:ret rp)]
+      (nil? op) [(unform*-dispatch p x)]
+      (= op ::amp)
+      (let [px (reduce (fn [acc pred] (unform*-dispatch pred acc))
+                       x (reverse (:ps rp)))]
+        (op-unform (:p1 rp) px))
+      (= op ::rep) (mapcat (fn [v] (op-unform (:p1 rp) v)) x)
+      (= op ::pcat)
+      (if (:rep+ rp)
+        (mapcat (fn [v] (op-unform (first (:ps rp)) v)) x)
+        (let [kps (zipmap (:ks rp) (:ps rp))]
+          (mapcat (fn [k]
+                    (when (contains? x k)
+                      (op-unform (get kps k) (get x k))))
+                  (:ks rp))))
+      (= op ::alt)
+      (if (:maybe rp)
+        ;; conform of an empty ? is nil — unform back to no elements.
+        ;; (Deviation from upstream, which unforms nil through the child
+        ;; pred; ours round-trips (s/? p) on [] correctly instead.)
+        (if (nil? x)
+          []
+          [(unform*-dispatch (first (:ps rp)) x)])
+        (let [k (nth x 0)
+              v (nth x 1)
+              kps (zipmap (:ks rp) (:ps rp))]
+          (op-unform (get kps k) v))))))
+
+(defn- re-conform [p data]
+  (loop [p p data (seq data)]
+    (if (nil? data)
+      (if (accept-nil? p)
+        (let [ret (preturn p)]
+          (if (= ret ::nil)
+            nil
+            ret))
+        ::invalid)
+      (if-let [dp (deriv p (first data))]
+        (recur dp (next data))
+        ::invalid))))
+
+(defn- pad-to
+  "coll as an n-element vector, right-padded with nils."
+  [coll n]
+  (let [v (vec (or coll []))]
+    (mapv (fn [i] (get v i)) (range n))))
+
+(defn- op-explain [form p path via in input]
+  (let [rp (if (ident? p) (reg-resolve! p) p)
+        x (first input)
+        via (if-let [n (when (map? rp) (get rp ::name))] (conj via n) via)
+        op (op-of rp)
+        insufficient (fn [path form]
+                       [{:path path
+                         :reason "Insufficient input"
+                         :pred form
+                         :val ()
+                         :via via
+                         :in in}])]
+    (when rp
+      (cond
+        (= op ::accept) nil
+
+        (nil? op)
+        (if (empty? input)
+          (insufficient path form)
+          (explain-1 form p path via in x))
+
+        (= op ::amp)
+        (if (empty? input)
+          (if (accept-nil? (:p1 rp))
+            (explain-pred-list (:forms rp) (:ps rp) path via in (preturn (:p1 rp)))
+            (insufficient path (:amp rp)))
+          (if-let [p1 (deriv (:p1 rp) x)]
+            (explain-pred-list (:forms rp) (:ps rp) path via in (preturn p1))
+            (op-explain (:amp rp) (:p1 rp) path via in input)))
+
+        (= op ::pcat)
+        (let [ps (vec (:ps rp))
+              n (count ps)
+              ks (pad-to (:ks rp) n)
+              forms (pad-to (:forms rp) n)
+              pkfs (map vector ps ks forms)
+              pkf (if (= 1 n)
+                    (first pkfs)
+                    (first (remove (fn [t] (accept-nil? (first t))) pkfs)))
+              pred (first pkf)
+              k (second pkf)
+              f (nth pkf 2)
+              path (if k (conj path k) path)
+              form (or f (op-describe pred))]
+          (if (and (empty? input) (not pred))
+            (insufficient path form)
+            (op-explain form pred path via in input)))
+
+        (= op ::alt)
+        (if (empty? input)
+          (insufficient path (op-describe rp))
+          (let [ps (vec (:ps rp))
+                n (count ps)
+                ks (pad-to (:ks rp) n)
+                forms (pad-to (:forms rp) n)]
+            (apply concat
+                   (map (fn [k f pred]
+                          (op-explain (or f (op-describe pred))
+                                      pred
+                                      (if k (conj path k) path)
+                                      via in input))
+                        ks forms ps))))
+
+        (= op ::rep)
+        (op-explain (if (identical? (:p1 rp) (:p2 rp))
+                      (:forms rp)
+                      (op-describe (:p1 rp)))
+                    (:p1 rp) path via in input)))))
+
+(defn- re-explain [path via in re input]
+  (loop [p re data (seq input) i 0]
+    (if (nil? data)
+      (if (accept-nil? p)
+        nil
+        (op-explain (op-describe p) p path via in nil))
+      (let [x (first data)
+            dp (deriv p x)]
+        (if dp
+          (recur dp (next data) (inc i))
+          (if (accept? p)
+            [{:path path
+              :reason "Extra input"
+              :pred (op-describe re)
+              :val data
+              :via via
+              :in (conj in i)}]
+            (or (op-explain (op-describe p) p path via (conj in i) data)
+                [{:path path
+                  :reason "Extra input"
+                  :pred (op-describe re)
+                  :val data
+                  :via via
+                  :in (conj in i)}])))))))
+
+;; Regex maps get their Spec behavior via the Map type tag. A plain map that
+;; is NOT a regex op is not a valid spec (upstream: maps are not specs) —
+;; using one as a spec throws an informative error.
+
+(defn- not-a-spec! [m]
+  (throw (ex-info "map is not a valid spec (only regex-op maps produced by cat/alt/*/+/?/& are)"
+                  {:map m})))
+
+(extend-type Map Spec
+  (conform* [spec x]
+    (if (regex? spec)
+      (if (or (nil? x) (sequential? x))
+        (re-conform spec (seq x))
+        ::invalid)
+      (not-a-spec! spec)))
+  (unform* [spec x]
+    (if (regex? spec)
+      (if (nil? x)
+        nil
+        (op-unform spec x))
+      (not-a-spec! spec)))
+  (explain* [spec path via in x]
+    (if (regex? spec)
+      (if (or (nil? x) (sequential? x))
+        (re-explain path via in spec (seq x))
+        [(problem path (op-describe spec) x via in)])
+      (not-a-spec! spec)))
+  (describe* [spec]
+    (if (regex? spec)
+      (op-describe spec)
+      (not-a-spec! spec))))
+
 ;; ── def-impl / naming ─────────────────────────────────────────────────────────
 
 (defn- with-name
@@ -483,20 +951,24 @@
   nowhere safe to stash a name on them without breaking protocol dispatch.
   Only our own defrecord-based spec objects (PredicateSpec/AndSpec/OrSpec,
   ...) get an assoc'd :name field, since `assoc` on a record preserves its
-  type tag here."
+  type tag here; regex-op maps carry their name under the namespaced ::name
+  key (plain assoc keeps them regex maps)."
   [spec name]
-  (if (record? spec)
-    (assoc spec :name name)
-    spec))
+  (cond
+    (record? spec) (assoc spec :name name)
+    (regex? spec) (assoc spec ::name name)
+    :else spec))
 
 (defn spec-name
   "Returns the registered name of spec, if it has one. Keyword refs report
-  their own keyword; record-based specs report their assoc'd :name (nil if
-  never named via s/def); anything else (bare fn/set/symbol) has none."
+  their own keyword; record-based specs report their assoc'd :name; regex
+  maps their ::name (nil if never named via s/def); anything else (bare
+  fn/set/symbol) has none."
   [spec]
   (cond
     (keyword? spec) spec
     (record? spec) (:name spec)
+    (regex? spec) (get spec ::name)
     :else nil))
 
 (defn spec-impl
@@ -518,6 +990,7 @@
                      {:key k})))
   (let [s (cond
             (spec? spec) spec
+            (regex? spec) spec
             (keyword? spec) spec
             (symbol? spec) spec
             (set? spec) spec
@@ -606,6 +1079,65 @@
   returns a spec that returns a conformed map satisfying all of the specs."
   [& pred-forms]
   `(merge-spec-impl '~(vec pred-forms) [~@pred-forms]))
+
+;; Regex-op macros. `cat`/`alt` are plain names; `*` and `+` shadow
+;; clojure.core arithmetic and `cat` shadows the core transducer for
+;; unqualified references in THIS namespace from here on (external callers
+;; are unaffected — they go through the `s/` alias). No code in this file
+;; uses bare `*`, `+`, or `cat` as core fns; if a later milestone needs
+;; arithmetic, it must write clojure.core/+ etc. `?` and `&` occupy otherwise
+;; unused names (`&` is only special inside params vectors).
+
+(defmacro cat
+  "Takes key+pred pairs, e.g. (s/cat :a int? :b string?), and returns a
+  regex op that matches (all) values in sequence, returning a map with the
+  keys of each pred and the corresponding conformed value."
+  [& key-pred-forms]
+  (let [pairs (partition 2 key-pred-forms)
+        ks (mapv first pairs)
+        pred-forms (mapv second pairs)]
+    (when (odd? (count key-pred-forms))
+      (throw (ex-info "s/cat expects an even number of key/pred forms"
+                      {:forms key-pred-forms})))
+    `(cat-impl '~ks [~@pred-forms] '~pred-forms)))
+
+(defmacro alt
+  "Takes key+pred pairs, e.g. (s/alt :i int? :s string?), and returns a
+  regex op that returns a [key conformed-value] vector for the first
+  matching alternative."
+  [& key-pred-forms]
+  (let [pairs (partition 2 key-pred-forms)
+        ks (mapv first pairs)
+        pred-forms (mapv second pairs)]
+    (when (odd? (count key-pred-forms))
+      (throw (ex-info "s/alt expects an even number of key/pred forms"
+                      {:forms key-pred-forms})))
+    `(alt-impl '~ks [~@pred-forms] '~pred-forms)))
+
+(defmacro *
+  "Returns a regex op that matches zero or more values matching pred,
+  conforming to a vector."
+  [pred-form]
+  `(rep-impl '~pred-form ~pred-form))
+
+(defmacro +
+  "Returns a regex op that matches one or more values matching pred,
+  conforming to a vector."
+  [pred-form]
+  `(rep+impl '~pred-form ~pred-form))
+
+(defmacro ?
+  "Returns a regex op that matches zero or one value matching pred,
+  conforming to the single conformed value (or nil when absent)."
+  [pred-form]
+  `(maybe-impl ~pred-form '~pred-form))
+
+(defmacro &
+  "Takes a regex op re and one or more predicates; returns a regex op that
+  matches re and whose conformed result must additionally satisfy all the
+  preds (threaded left to right, like s/and)."
+  [re & preds]
+  `(amp-impl ~re '~re [~@preds] '~(vec preds)))
 
 ;; ── Public API ────────────────────────────────────────────────────────────────
 

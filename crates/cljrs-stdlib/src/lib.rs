@@ -791,4 +791,229 @@ mod tests {
             );
         });
     }
+
+    // ── clojure.spec.alpha (M3: regex engine — cat/alt/*/+/?/&) ─────────────
+
+    #[test]
+    fn test_spec_regex_cat_and_nesting() {
+        run_with_big_stack(|| {
+            let (_, mut env) = make_env();
+            run("(require '[clojure.spec.alpha :as s])", &mut env).unwrap();
+            assert_bool(
+                "(= {:a 1 :b \"x\"} (s/conform (s/cat :a int? :b string?) [1 \"x\"]))",
+                true,
+                &mut env,
+            );
+            // Nested regex splices into the same flat sequence.
+            assert_bool(
+                "(= {:a 1 :b [\"x\" \"y\"]}
+                    (s/conform (s/cat :a int? :b (s/* string?)) [1 \"x\" \"y\"]))",
+                true,
+                &mut env,
+            );
+            // Wrong element type / too short / too long are all invalid.
+            assert_bool(
+                "(s/invalid? (s/conform (s/cat :a int? :b string?) [1 2]))",
+                true,
+                &mut env,
+            );
+            assert_bool(
+                "(s/invalid? (s/conform (s/cat :a int? :b string?) [1]))",
+                true,
+                &mut env,
+            );
+            assert_bool(
+                "(s/invalid? (s/conform (s/cat :a int?) [1 2]))",
+                true,
+                &mut env,
+            );
+            // Non-sequential input is invalid, not an error.
+            assert_bool("(s/invalid? (s/conform (s/cat :a int?) 5))", true, &mut env);
+        });
+    }
+
+    #[test]
+    fn test_spec_regex_alt_star_plus_maybe() {
+        run_with_big_stack(|| {
+            let (_, mut env) = make_env();
+            run("(require '[clojure.spec.alpha :as s])", &mut env).unwrap();
+            // alt tags its branch.
+            assert_bool(
+                "(= [:i 5] (s/conform (s/alt :i int? :s string?) [5]))",
+                true,
+                &mut env,
+            );
+            assert_bool(
+                "(s/invalid? (s/conform (s/alt :i int? :s string?) [:kw]))",
+                true,
+                &mut env,
+            );
+            // * matches empty and many; fails on a bad element.
+            assert_bool("(= [] (s/conform (s/* int?) []))", true, &mut env);
+            assert_bool("(s/valid? (s/* int?) [])", true, &mut env);
+            assert_bool("(= [1 2 3] (s/conform (s/* int?) [1 2 3]))", true, &mut env);
+            assert_bool(
+                "(s/invalid? (s/conform (s/* int?) [1 :a 3]))",
+                true,
+                &mut env,
+            );
+            // + requires at least one.
+            assert_bool("(= [1] (s/conform (s/+ int?) [1]))", true, &mut env);
+            assert_bool("(s/invalid? (s/conform (s/+ int?) []))", true, &mut env);
+            // ? is optional: value when present, nil when absent.
+            assert_bool("(= 5 (s/conform (s/? int?) [5]))", true, &mut env);
+            assert_bool("(nil? (s/conform (s/? int?) []))", true, &mut env);
+            assert_bool("(s/valid? (s/? int?) [])", true, &mut env);
+            assert_bool("(s/invalid? (s/conform (s/? int?) [1 2]))", true, &mut env);
+        });
+    }
+
+    #[test]
+    fn test_spec_regex_amp_and_regex_inside_and() {
+        run_with_big_stack(|| {
+            let (_, mut env) = make_env();
+            run("(require '[clojure.spec.alpha :as s])", &mut env).unwrap();
+            run("(def even-count? (fn [xs] (even? (count xs))))", &mut env).unwrap();
+            // & applies post-predicates to the conformed regex result.
+            assert_bool(
+                "(= [1 2] (s/conform (s/& (s/* int?) even-count?) [1 2]))",
+                true,
+                &mut env,
+            );
+            assert_bool(
+                "(s/invalid? (s/conform (s/& (s/* int?) even-count?) [1 2 3]))",
+                true,
+                &mut env,
+            );
+            // A regex op nested in s/and conforms the whole seq first, then
+            // threads the conformed value through the remaining preds.
+            run("(def all-even? (fn [xs] (every? even? xs)))", &mut env).unwrap();
+            assert_bool(
+                "(= [2 4] (s/conform (s/and (s/* int?) all-even?) [2 4]))",
+                true,
+                &mut env,
+            );
+            assert_bool(
+                "(s/valid? (s/and (s/* int?) all-even?) [1 2])",
+                false,
+                &mut env,
+            );
+        });
+    }
+
+    #[test]
+    fn test_spec_regex_keyword_ref_children() {
+        run_with_big_stack(|| {
+            let (_, mut env) = make_env();
+            run("(require '[clojure.spec.alpha :as s])", &mut env).unwrap();
+            // A keyword ref to a NON-regex spec consumes exactly one element.
+            run("(s/def ::a int?)", &mut env).unwrap();
+            assert_bool(
+                "(= {:x 1 :y \"x\"} (s/conform (s/cat :x ::a :y string?) [1 \"x\"]))",
+                true,
+                &mut env,
+            );
+            // A keyword ref to a REGEX spec splices (upstream reg-resolve!
+            // semantics).
+            run("(s/def ::r (s/* int?))", &mut env).unwrap();
+            assert_bool(
+                "(= {:nums [1 2] :tail \"x\"}
+                    (s/conform (s/cat :nums ::r :tail string?) [1 2 \"x\"]))",
+                true,
+                &mut env,
+            );
+            // s/spec wrapping forces a nested one-element boundary instead.
+            assert_bool(
+                "(= {:nums [1 2] :tail \"x\"}
+                    (s/conform (s/cat :nums (s/spec (s/* int?)) :tail string?)
+                               [[1 2] \"x\"]))",
+                true,
+                &mut env,
+            );
+            // Registered regex works at top level via the keyword.
+            assert_bool("(= [1 2 3] (s/conform ::r [1 2 3]))", true, &mut env);
+        });
+    }
+
+    #[test]
+    fn test_spec_regex_explain_reasons() {
+        run_with_big_stack(|| {
+            let (_, mut env) = make_env();
+            run("(require '[clojure.spec.alpha :as s])", &mut env).unwrap();
+            // Premature end of input → "Insufficient input" at the missing key.
+            run(
+                "(def p-insuff (first (:clojure.spec.alpha/problems
+                                       (s/explain-data (s/cat :a int? :b string?) [1]))))",
+                &mut env,
+            )
+            .unwrap();
+            assert_bool(
+                "(= \"Insufficient input\" (:reason p-insuff))",
+                true,
+                &mut env,
+            );
+            assert_bool("(= [:b] (:path p-insuff))", true, &mut env);
+            // Leftover input → "Extra input" with :in pointing at the index.
+            run(
+                "(def p-extra (first (:clojure.spec.alpha/problems
+                                      (s/explain-data (s/cat :a int?) [1 2]))))",
+                &mut env,
+            )
+            .unwrap();
+            assert_bool("(= \"Extra input\" (:reason p-extra))", true, &mut env);
+            assert_bool("(= [1] (:in p-extra))", true, &mut env);
+            // Element failure mid-sequence: path names the cat key, in the index.
+            run(
+                "(def p-elem (first (:clojure.spec.alpha/problems
+                                     (s/explain-data (s/cat :a int? :b string?) [1 :bad]))))",
+                &mut env,
+            )
+            .unwrap();
+            assert_bool("(= [:b] (:path p-elem))", true, &mut env);
+            assert_bool("(= [1] (:in p-elem))", true, &mut env);
+            assert_bool("(= :bad (:val p-elem))", true, &mut env);
+        });
+    }
+
+    #[test]
+    fn test_spec_regex_unform_roundtrips() {
+        run_with_big_stack(|| {
+            let (_, mut env) = make_env();
+            run("(require '[clojure.spec.alpha :as s])", &mut env).unwrap();
+            run("(def even-count? (fn [xs] (even? (count xs))))", &mut env).unwrap();
+            for (spec, input) in [
+                ("(s/cat :a int? :b string?)", "[1 \"x\"]"),
+                ("(s/cat :a int? :b (s/* string?))", "[1 \"x\" \"y\"]"),
+                ("(s/alt :i int? :s string?)", "[5]"),
+                ("(s/* int?)", "[1 2 3]"),
+                ("(s/* int?)", "[]"),
+                ("(s/+ int?)", "[1 2]"),
+                ("(s/? int?)", "[5]"),
+                ("(s/? int?)", "[]"),
+                ("(s/& (s/* int?) even-count?)", "[1 2]"),
+            ] {
+                assert_bool(
+                    &format!(
+                        "(let [re {spec}] (= {input} (vec (s/unform re (s/conform re {input})))))"
+                    ),
+                    true,
+                    &mut env,
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn test_spec_plain_map_is_not_a_spec() {
+        run_with_big_stack(|| {
+            let (_, mut env) = make_env();
+            run("(require '[clojure.spec.alpha :as s])", &mut env).unwrap();
+            let err = run("(s/conform {:a 1} 5)", &mut env).unwrap_err();
+            let msg = format!("{err}");
+            assert!(
+                msg.contains("not a valid spec"),
+                "expected 'not a valid spec' in error, got: {msg}"
+            );
+        });
+    }
 }
