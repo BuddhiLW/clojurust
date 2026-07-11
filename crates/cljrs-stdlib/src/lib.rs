@@ -1016,4 +1016,316 @@ mod tests {
             );
         });
     }
+
+    // ── clojure.spec.alpha (M4: collections + leaf specs) ────────────────────
+
+    #[test]
+    fn test_spec_coll_of_options() {
+        run_with_big_stack(|| {
+            let (_, mut env) = make_env();
+            run("(require '[clojure.spec.alpha :as s])", &mut env).unwrap();
+            // happy / sad
+            assert_bool(
+                "(= [1 2 3] (s/conform (s/coll-of int?) [1 2 3]))",
+                true,
+                &mut env,
+            );
+            assert_bool(
+                "(s/invalid? (s/conform (s/coll-of int?) [1 \"x\"]))",
+                true,
+                &mut env,
+            );
+            // :kind
+            assert_bool(
+                "(s/invalid? (s/conform (s/coll-of int? :kind vector?) '(1 2 3)))",
+                true,
+                &mut env,
+            );
+            // :min-count / :max-count
+            assert_bool(
+                "(s/invalid? (s/conform (s/coll-of int? :min-count 3) [1 2]))",
+                true,
+                &mut env,
+            );
+            assert_bool(
+                "(s/invalid? (s/conform (s/coll-of int? :max-count 2) [1 2 3]))",
+                true,
+                &mut env,
+            );
+            // :distinct
+            assert_bool(
+                "(= [1 2 3] (s/conform (s/coll-of int? :distinct true) [1 2 3]))",
+                true,
+                &mut env,
+            );
+            assert_bool(
+                "(s/invalid? (s/conform (s/coll-of int? :distinct true) [1 1 2]))",
+                true,
+                &mut env,
+            );
+            // :into
+            assert_bool(
+                "(= #{1 2 3} (s/conform (s/coll-of int? :into #{}) [1 2 3]))",
+                true,
+                &mut env,
+            );
+            // default (no :into) preserves order for list input; explicit
+            // :into '() conjes raw (reverses) — see EverySpec doc comment.
+            assert_bool(
+                "(= '(1 2 3) (s/conform (s/coll-of int?) '(1 2 3)))",
+                true,
+                &mut env,
+            );
+            assert_bool(
+                "(= '(3 2 1) (s/conform (s/coll-of int? :into '()) '(1 2 3)))",
+                true,
+                &mut env,
+            );
+        });
+    }
+
+    #[test]
+    fn test_spec_map_of_key_handling() {
+        run_with_big_stack(|| {
+            let (_, mut env) = make_env();
+            run("(require '[clojure.spec.alpha :as s])", &mut env).unwrap();
+            // default: keys must be valid but ORIGINAL keys are kept
+            assert_bool(
+                "(= {:a 1 :b 2} (s/conform (s/map-of keyword? int?) {:a 1 :b 2}))",
+                true,
+                &mut env,
+            );
+            assert_bool(
+                "(s/invalid? (s/conform (s/map-of keyword? int?) {:a \"x\"}))",
+                true,
+                &mut env,
+            );
+            assert_bool(
+                "(s/invalid? (s/conform (s/map-of keyword? int?) {\"not-kw\" 1}))",
+                true,
+                &mut env,
+            );
+            // :conform-keys true swaps in the conformed key
+            assert_bool(
+                r#"(= {"a" 1} (s/conform (s/map-of (s/conformer name) int? :conform-keys true) {:a 1}))"#,
+                true,
+                &mut env,
+            );
+        });
+    }
+
+    #[test]
+    fn test_spec_every_vs_coll_of_conform_difference() {
+        run_with_big_stack(|| {
+            let (_, mut env) = make_env();
+            run("(require '[clojure.spec.alpha :as s])", &mut env).unwrap();
+            run("(def elem (s/or :i int? :s string?))", &mut env).unwrap();
+            // coll-of conforms every element (tagged vectors)
+            assert_bool(
+                "(= [[:i 1] [:s \"x\"]] (s/conform (s/coll-of elem) [1 \"x\"]))",
+                true,
+                &mut env,
+            );
+            // every only validates — returns x unchanged
+            assert_bool(
+                "(= [1 \"x\"] (s/conform (s/every elem) [1 \"x\"]))",
+                true,
+                &mut env,
+            );
+            assert_bool(
+                "(s/invalid? (s/conform (s/every elem) [1 :bad]))",
+                true,
+                &mut env,
+            );
+            // every-kv validates both k/v but never rebuilds
+            assert_bool(
+                "(= {:a 1} (s/conform (s/every-kv keyword? int?) {:a 1}))",
+                true,
+                &mut env,
+            );
+            assert_bool(
+                "(s/invalid? (s/conform (s/every-kv keyword? int?) {:a \"x\"}))",
+                true,
+                &mut env,
+            );
+        });
+    }
+
+    #[test]
+    fn test_spec_tuple_conform_and_explain() {
+        run_with_big_stack(|| {
+            let (_, mut env) = make_env();
+            run("(require '[clojure.spec.alpha :as s])", &mut env).unwrap();
+            assert_bool(
+                "(= [1 \"x\"] (s/conform (s/tuple int? string?) [1 \"x\"]))",
+                true,
+                &mut env,
+            );
+            assert_bool(
+                "(s/invalid? (s/conform (s/tuple int? string?) [1]))",
+                true,
+                &mut env,
+            );
+            assert_bool(
+                "(s/invalid? (s/conform (s/tuple int? string?) 5))",
+                true,
+                &mut env,
+            );
+            run(
+                "(def tp (first (:clojure.spec.alpha/problems (s/explain-data (s/tuple int? string?) [1 :bad]))))",
+                &mut env,
+            )
+            .unwrap();
+            assert_bool("(= [1] (:path tp))", true, &mut env);
+            assert_bool("(= [1] (:in tp))", true, &mut env);
+            assert_bool("(= :bad (:val tp))", true, &mut env);
+            // round-trip unform
+            assert_bool(
+                "(= [1 \"x\"] (s/unform (s/tuple int? string?) (s/conform (s/tuple int? string?) [1 \"x\"])))",
+                true,
+                &mut env,
+            );
+        });
+    }
+
+    #[test]
+    fn test_spec_nilable_both_branches_and_explain_shape() {
+        run_with_big_stack(|| {
+            let (_, mut env) = make_env();
+            run("(require '[clojure.spec.alpha :as s])", &mut env).unwrap();
+            assert_bool("(= nil (s/conform (s/nilable int?) nil))", true, &mut env);
+            assert_bool("(= 5 (s/conform (s/nilable int?) 5))", true, &mut env);
+            assert_bool(
+                "(s/invalid? (s/conform (s/nilable int?) \"x\"))",
+                true,
+                &mut env,
+            );
+            run(
+                "(def np (:clojure.spec.alpha/problems (s/explain-data (s/nilable int?) \"x\")))",
+                &mut env,
+            )
+            .unwrap();
+            assert_bool("(= 2 (count np))", true, &mut env);
+            assert_bool(
+                "(some (fn [p] (= [:clojure.spec.alpha/nil] (:path p))) np)",
+                true,
+                &mut env,
+            );
+            assert_bool(
+                "(some (fn [p] (= [:clojure.spec.alpha/pred] (:path p))) np)",
+                true,
+                &mut env,
+            );
+        });
+    }
+
+    #[test]
+    fn test_spec_multi_spec_conform_and_no_method() {
+        run_with_big_stack(|| {
+            let (_, mut env) = make_env();
+            run("(require '[clojure.spec.alpha :as s])", &mut env).unwrap();
+            run("(defmulti event-type :type)", &mut env).unwrap();
+            run("(s/def :evt/type keyword?)", &mut env).unwrap();
+            run("(s/def :evt/a (s/keys :req-un [:evt/type]))", &mut env).unwrap();
+            run("(defmethod event-type :a [_] :evt/a)", &mut env).unwrap();
+            run(
+                "(s/def :evt/event (s/multi-spec event-type :type))",
+                &mut env,
+            )
+            .unwrap();
+            assert_bool(
+                "(= {:type :a} (s/conform :evt/event {:type :a}))",
+                true,
+                &mut env,
+            );
+            assert_bool(
+                "(s/invalid? (s/conform :evt/event {:type :unknown}))",
+                true,
+                &mut env,
+            );
+            run(
+                "(def mp (first (:clojure.spec.alpha/problems (s/explain-data :evt/event {:type :unknown}))))",
+                &mut env,
+            )
+            .unwrap();
+            assert_bool("(= \"no method\" (:reason mp))", true, &mut env);
+        });
+    }
+
+    #[test]
+    fn test_spec_conformer_transforms_and_threads_through_and() {
+        run_with_big_stack(|| {
+            let (_, mut env) = make_env();
+            run("(require '[clojure.spec.alpha :as s])", &mut env).unwrap();
+            assert_bool(
+                "(= 10 (s/conform (s/conformer #(* 2 %)) 5))",
+                true,
+                &mut env,
+            );
+            // threads the transformed value through the rest of s/and
+            assert_bool(
+                "(= 10 (s/conform (s/and int? (s/conformer #(* 2 %))) 5))",
+                true,
+                &mut env,
+            );
+            assert_bool(
+                "(= 5 (s/unform (s/conformer #(* 2 %) #(/ % 2)) 10))",
+                true,
+                &mut env,
+            );
+            // no unf given -> unform is identity
+            assert_bool(
+                "(= 10 (s/unform (s/conformer #(* 2 %)) 10))",
+                true,
+                &mut env,
+            );
+        });
+    }
+
+    #[test]
+    fn test_spec_int_in_and_double_in_bounds() {
+        run_with_big_stack(|| {
+            let (_, mut env) = make_env();
+            run("(require '[clojure.spec.alpha :as s])", &mut env).unwrap();
+            assert_bool("(s/valid? (s/int-in 0 10) 5)", true, &mut env);
+            assert_bool("(s/valid? (s/int-in 0 10) 10)", false, &mut env); // end exclusive
+            assert_bool("(s/valid? (s/int-in 0 10) 5.0)", false, &mut env); // not an int?
+            assert_bool(
+                "(s/valid? (s/double-in :min 0.0 :max 10.0) 5.0)",
+                true,
+                &mut env,
+            );
+            assert_bool(
+                "(s/valid? (s/double-in :min 0.0 :max 10.0) 20.0)",
+                false,
+                &mut env,
+            );
+            // NaN produced via arithmetic (NOT the ##NaN reader literal — that
+            // literal hangs this runtime indefinitely on eval, a pre-existing
+            // bug unrelated to spec.alpha; see M4 report).
+            run("(def nan (/ 0.0 0.0))", &mut env).unwrap();
+            run("(def pos-inf (/ 1.0 0.0))", &mut env).unwrap();
+            assert_bool("(s/valid? (s/double-in :NaN? false) nan)", false, &mut env);
+            assert_bool("(s/valid? (s/double-in) nan)", true, &mut env);
+            assert_bool(
+                "(s/valid? (s/double-in :infinite? false) pos-inf)",
+                false,
+                &mut env,
+            );
+            assert_bool("(s/valid? (s/double-in) pos-inf)", true, &mut env);
+            // nonconforming: validates but returns x unconformed
+            assert_bool(
+                "(= [1 \"x\"] (s/conform (s/nonconforming (s/cat :a int? :b string?)) [1 \"x\"]))",
+                true,
+                &mut env,
+            );
+            // inst-in: not implemented, throws clearly
+            let err = run("(s/inst-in 0 1)", &mut env).unwrap_err();
+            let msg = format!("{err}");
+            assert!(
+                msg.contains("not implemented"),
+                "expected 'not implemented' in error, got: {msg}"
+            );
+        });
+    }
 }

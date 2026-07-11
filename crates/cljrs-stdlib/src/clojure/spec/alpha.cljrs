@@ -1,6 +1,9 @@
 ;; clojure.spec.alpha — M1: skeleton + predicate specs + and/or;
 ;;                      M2: explain machinery + keys/merge;
-;;                      M3: derivative-based regex engine (cat/alt/*/+/?/&).
+;;                      M3: derivative-based regex engine (cat/alt/*/+/?/&);
+;;                      M4: collection specs (every/coll-of/map-of/every-kv),
+;;                          tuple/nilable/multi-spec/conformer, leaf helpers
+;;                          (int-in/double-in/nonconforming).
 ;;
 ;; This is a from-scratch, spec-compatible-in-spirit implementation for the
 ;; clojurust runtime. It does NOT use `reify` for spec objects (every `reify`
@@ -12,8 +15,7 @@
 ;; regex ops are upstream-style ::op-tagged plain maps given Spec behavior
 ;; via the Map type tag.
 ;;
-;; Later milestones add: collection/leaf specs (M4), fdef/instrument + gen
-;; stub (M5).
+;; Next milestone adds: fdef/instrument + gen stub (M5).
 
 (ns clojure.spec.alpha)
 
@@ -1247,3 +1249,482 @@
   "Like explain, but returns the explanation as a string."
   [spec x]
   (with-out-str (explain spec x)))
+
+;; ── EverySpec (s/every, s/coll-of, s/map-of, s/every-kv) ────────────────────
+;;
+;; Options (all literal at the macro call site): :kind (a whole-collection
+;; predicate, e.g. vector?), :count, :min-count, :max-count, :distinct,
+;; :into ([] () {} #{} — the target shape to conform INTO). :gen-max/:gen are
+;; accepted and silently ignored (generators are not implemented in this
+;; port). `s/coll-of`/`s/map-of` conform every element/entry and rebuild the
+;; collection; `s/every`/`s/every-kv` only VALIDATE elements/entries and
+;; return x unchanged when valid (mirroring upstream's every/every-kv, which
+;; exist so large/infinite collections don't have to be fully conformed).
+;;
+;; `s/map-of` conforms keys with the key-spec only when :conform-keys true;
+;; by default keys must be VALID (checked against the key-spec) but the
+;; ORIGINAL key is kept in the conformed result. `s/every-kv` validates both
+;; keys and values but, like `every`, never rebuilds.
+;;
+;; DEVIATION FROM UPSTREAM: upstream's every-impl always builds the
+;; conformed result via `(reduce conj (empty into-target-or-x) ...)`, even
+;; when :into is omitted — which means a *list* input with no :into would
+;; silently come back element-reversed (conj on a list prepends). We only
+;; replicate that raw conj-onto-empty behavior when :into is given
+;; EXPLICITLY (so `:into '()` still reverses, matching upstream's
+;; well-documented gotcha and plain `into` semantics). When :into is
+;; omitted, we preserve input order for all four kinds — vector/map/set
+;; conj naturally preserves the order that matters for each, and list/seq
+;; input is rebuilt via `map`/`seq` (order-preserving) rather than raw conj
+;; onto `()`. This is judged friendlier and closer to what most callers
+;; actually rely on; documented here since it's an intentional divergence.
+;;
+;; Explain reports only the FIRST failing element/entry (a simplification of
+;; upstream's `*coll-error-limit*`, which defaults to 1 anyway but is a
+;; rebindable dynamic var upstream — not implemented here).
+
+(defrecord EverySpec [form pred kfn kind kind-form
+                       cnt min-count max-count distinct
+                       into-given? into-target conform-all conform-keys name])
+
+(defn- every-kind-ok? [spec x]
+  (let [k (:kind spec)]
+    (or (nil? k) (boolean (k x)))))
+
+(defn- every-count-ok? [spec x]
+  (let [c (count x)
+        cnt (:cnt spec) mn (:min-count spec) mx (:max-count spec)]
+    (and (or (nil? cnt) (= c cnt))
+         (or (nil? mn) (<= mn c))
+         (or (nil? mx) (<= c mx)))))
+
+(defn- every-distinct-ok? [spec x]
+  (or (not (:distinct spec)) (empty? x) (apply distinct? (seq x))))
+
+(defn- every-shape-ok? [spec x]
+  (try
+    (and (every-kind-ok? spec x) (every-count-ok? spec x) (every-distinct-ok? spec x))
+    (catch Exception _e false)))
+
+(defn- every-count-pred-form [spec]
+  (let [cnt (:cnt spec) mn (:min-count spec) mx (:max-count spec)]
+    (cond
+      cnt (list '= (list 'count '%) cnt)
+      (and mn mx) (list '<= mn (list 'count '%) mx)
+      mn (list '<= mn (list 'count '%))
+      mx (list '<= (list 'count '%) mx)
+      :else 'true)))
+
+(defn- every-shape-problem [spec path via in x]
+  (try
+    (cond
+      (not (every-kind-ok? spec x))
+      [(problem path (or (:kind-form spec) (:kind spec)) x via in)]
+      (not (every-count-ok? spec x))
+      [(problem path (every-count-pred-form spec) x via in)]
+      (not (every-distinct-ok? spec x))
+      [(problem path 'distinct? x via in)]
+      :else nil)
+    (catch Exception _e
+      [(problem path (or (:kind-form spec) (:kind spec) 'coll?) x via in)])))
+
+(defn- every-default-empty
+  "The empty accumulator to conj conformed elements/entries onto when no
+  :into was given — chosen so vector/map/set inputs conj back into their
+  own kind directly; list/seq inputs accumulate into a vector (converted to
+  a seq by `every-build-finish` below, to preserve order)."
+  [x]
+  (cond
+    (vector? x) []
+    (map? x) {}
+    (set? x) #{}
+    :else []))
+
+(defn- every-build-empty [spec x]
+  (if (:into-given? spec) (empty (:into-target spec)) (every-default-empty x)))
+
+(defn- every-build-finish [spec x ret]
+  (if (or (:into-given? spec) (vector? x) (map? x) (set? x))
+    ret
+    (seq ret)))
+
+(defn- every-conform-seq [spec x]
+  (loop [ret (every-build-empty spec x) items (seq x)]
+    (if (nil? items)
+      (every-build-finish spec x ret)
+      (let [cv (conform*-dispatch (:pred spec) (first items))]
+        (if (invalid? cv)
+          ::invalid
+          (recur (conj ret cv) (next items)))))))
+
+(defn- every-validate-seq [spec x]
+  (if (every? (fn [v] (not (invalid? (conform*-dispatch (:pred spec) v)))) x)
+    x
+    ::invalid))
+
+(defn- every-conform-map [spec x]
+  (loop [ret (every-build-empty spec x) entries (seq x)]
+    (if (nil? entries)
+      (every-build-finish spec x ret)
+      (let [e (first entries)
+            k (key e)
+            v (val e)
+            ck (conform*-dispatch (:kfn spec) k)
+            vc (conform*-dispatch (:pred spec) v)]
+        (if (or (invalid? ck) (invalid? vc))
+          ::invalid
+          (recur (conj ret [(if (:conform-keys spec) ck k) vc]) (next entries)))))))
+
+(defn- every-validate-map [spec x]
+  (if (every? (fn [e] (and (not (invalid? (conform*-dispatch (:kfn spec) (key e))))
+                           (not (invalid? (conform*-dispatch (:pred spec) (val e))))))
+              (seq x))
+    x
+    ::invalid))
+
+(defn- every-unform-coll [spec x]
+  (let [items (map (fn [v] (unform*-dispatch (:pred spec) v)) x)]
+    (cond
+      (vector? x) (vec items)
+      (set? x) (set items)
+      :else (seq items))))
+
+(defn- every-unform-map [spec x]
+  (into (empty x)
+        (map (fn [e]
+               (let [k (key e)
+                     v (val e)
+                     uk (if (:conform-keys spec) (unform*-dispatch (:kfn spec) k) k)]
+                 [uk (unform*-dispatch (:pred spec) v)]))
+             x)))
+
+(defn- every-explain-seq [spec path via in x]
+  (or (every-shape-problem spec path via in x)
+      (loop [items (seq x) idx 0]
+        (when items
+          (let [probs (explain-1 (:form spec) (:pred spec) path via (conj in idx) (first items))]
+            (if (seq probs)
+              (vec probs)
+              (recur (next items) (inc idx))))))))
+
+(defn- every-explain-map [spec path via in x]
+  (or (every-shape-problem spec path via in x)
+      (loop [entries (seq x)]
+        (when entries
+          (let [e (first entries)
+                k (key e)
+                v (val e)
+                kprobs (explain-1 (:form spec) (:kfn spec) path via (conj in k) k)]
+            (if (seq kprobs)
+              (vec kprobs)
+              (let [vprobs (explain-1 (:form spec) (:pred spec) path via (conj in k) v)]
+                (if (seq vprobs)
+                  (vec vprobs)
+                  (recur (next entries))))))))))
+
+(extend-type EverySpec Spec
+  (conform* [spec x]
+    (if (:kfn spec)
+      (if (or (not (map? x)) (not (every-shape-ok? spec x)))
+        ::invalid
+        (if (:conform-all spec) (every-conform-map spec x) (every-validate-map spec x)))
+      (if (or (not (coll? x)) (not (every-shape-ok? spec x)))
+        ::invalid
+        (if (:conform-all spec) (every-conform-seq spec x) (every-validate-seq spec x)))))
+  (unform* [spec x]
+    (if (:conform-all spec)
+      (if (:kfn spec) (every-unform-map spec x) (every-unform-coll spec x))
+      x))
+  (explain* [spec path via in x]
+    (if (:kfn spec)
+      (if (not (map? x))
+        [(problem path 'map? x via in)]
+        (every-explain-map spec path via in x))
+      (if (not (coll? x))
+        [(problem path 'coll? x via in)]
+        (every-explain-seq spec path via in x))))
+  (describe* [spec] (:form spec)))
+
+(defn every-impl
+  "Shared impl fn for s/every, s/coll-of, s/map-of, s/every-kv. `form` is the
+  literal macro call (for describe/form). `pred` is the evaluated value
+  spec; `kfn` the evaluated key spec (nil unless map-of/every-kv). `kind` is
+  the evaluated :kind predicate (or nil); `kind-form` its literal form.
+  `cnt`/`min-count`/`max-count`/`distinct` are the evaluated option values.
+  `into-given?`/`into-target` record whether :into was supplied and its
+  evaluated value. `conform-all?` is true for coll-of/map-of (rebuild),
+  false for every/every-kv (validate only). `conform-keys?` is only
+  meaningful for map-of."
+  [form pred kfn kind kind-form cnt min-count max-count distinct
+   into-given? into-target conform-all? conform-keys?]
+  (->EverySpec form pred kfn kind kind-form cnt min-count max-count distinct
+               into-given? into-target conform-all? conform-keys? nil))
+
+(defmacro every
+  "Returns a spec that VALIDATES (but does not conform) every element of a
+  collection against pred-form; conform returns x unchanged when valid.
+  Options: :kind :count :min-count :max-count :distinct :into (accepted for
+  describe parity though every never rebuilds) :gen-max :gen (ignored)."
+  [pred-form & opts]
+  (let [o (apply hash-map opts)]
+    `(every-impl '~(list* 'every pred-form opts) ~pred-form nil
+                 ~(:kind o) '~(:kind o)
+                 ~(:count o) ~(:min-count o) ~(:max-count o) ~(:distinct o)
+                 ~(contains? o :into) ~(:into o) false false)))
+
+(defmacro coll-of
+  "Returns a spec that conforms every element of a collection against
+  pred-form and rebuilds the collection (into :into if given, else
+  preserving the input's own kind — see EverySpec doc comment above).
+  Options as per s/every."
+  [pred-form & opts]
+  (let [o (apply hash-map opts)]
+    `(every-impl '~(list* 'coll-of pred-form opts) ~pred-form nil
+                 ~(:kind o) '~(:kind o)
+                 ~(:count o) ~(:min-count o) ~(:max-count o) ~(:distinct o)
+                 ~(contains? o :into) ~(:into o) true false)))
+
+(defmacro every-kv
+  "Returns a spec that VALIDATES every key/value pair of a map against
+  kpred-form/vpred-form; conform returns x unchanged when valid."
+  [kpred-form vpred-form & opts]
+  (let [o (apply hash-map opts)]
+    `(every-impl '~(list* 'every-kv kpred-form vpred-form opts) ~vpred-form ~kpred-form
+                 ~(:kind o) '~(:kind o)
+                 ~(:count o) ~(:min-count o) ~(:max-count o) ~(:distinct o)
+                 ~(contains? o :into) ~(:into o) false false)))
+
+(defmacro map-of
+  "Returns a spec that conforms every key/value pair of a map against
+  kpred-form/vpred-form and rebuilds the map. Keys must be valid against
+  kpred-form always; they are only replaced with their conformed value when
+  :conform-keys true (default false, matching upstream)."
+  [kpred-form vpred-form & opts]
+  (let [o (apply hash-map opts)]
+    `(every-impl '~(list* 'map-of kpred-form vpred-form opts) ~vpred-form ~kpred-form
+                 ~(:kind o) '~(:kind o)
+                 ~(:count o) ~(:min-count o) ~(:max-count o) ~(:distinct o)
+                 ~(contains? o :into) ~(:into o) true ~(:conform-keys o))))
+
+;; ── TupleSpec (s/tuple) ───────────────────────────────────────────────────
+
+(defrecord TupleSpec [form preds forms name])
+
+(extend-type TupleSpec Spec
+  (conform* [spec x]
+    (let [preds (:preds spec) n (count preds)]
+      (if (or (not (vector? x)) (not (= (count x) n)))
+        ::invalid
+        (loop [ret [] i 0]
+          (if (= i n)
+            ret
+            (let [cv (conform*-dispatch (nth preds i) (nth x i))]
+              (if (invalid? cv)
+                ::invalid
+                (recur (conj ret cv) (inc i)))))))))
+  (unform* [spec x]
+    (let [preds (:preds spec) n (count preds)]
+      (loop [ret [] i 0]
+        (if (= i n)
+          ret
+          (recur (conj ret (unform*-dispatch (nth preds i) (nth x i))) (inc i))))))
+  (explain* [spec path via in x]
+    (let [preds (:preds spec) forms (:forms spec) n (count preds)]
+      (cond
+        (not (vector? x)) [(problem path 'vector? x via in)]
+        (not (= (count x) n)) [(problem path (list '= (list 'count '%) n) x via in)]
+        :else
+        (loop [i 0]
+          (when (< i n)
+            (let [cv (conform*-dispatch (nth preds i) (nth x i))]
+              (if (invalid? cv)
+                (explain-1 (nth forms i) (nth preds i) (conj path i) via (conj in i) (nth x i))
+                (recur (inc i)))))))))
+  (describe* [spec] (:form spec)))
+
+(defn tuple-impl
+  "Impl fn for s/tuple. forms/preds parallel: literal per-index spec forms,
+  their evaluated spec values."
+  [forms preds]
+  (->TupleSpec (cons 'tuple forms) (vec preds) (vec forms) nil))
+
+(defmacro tuple
+  "Returns a spec for a fixed-length vector, positionally conforming each
+  element against the corresponding pred-form."
+  [& pred-forms]
+  `(tuple-impl '~(vec pred-forms) [~@pred-forms]))
+
+;; ── NilableSpec (s/nilable) ───────────────────────────────────────────────
+
+(defrecord NilableSpec [form pred name])
+
+(extend-type NilableSpec Spec
+  (conform* [spec x]
+    (if (nil? x) nil (conform*-dispatch (:pred spec) x)))
+  (unform* [spec x]
+    (if (nil? x) nil (unform*-dispatch (:pred spec) x)))
+  (explain* [spec path via in x]
+    ;; Upstream shape: on a non-nil invalid value, report the WRAPPED
+    ;; spec's own problems at path+[::pred] AND a synthetic nil? problem at
+    ;; path+[::nil] (`::pred`/`::nil` auto-resolve to
+    ;; :clojure.spec.alpha/pred and :clojure.spec.alpha/nil in this ns).
+    (when (and (not (nil? x)) (invalid? (conform*-dispatch (:pred spec) x)))
+      (vec (concat (explain-1 (:form spec) (:pred spec) (conj path ::pred) via in x)
+                   [(problem (conj path ::nil) 'nil? x via in)]))))
+  (describe* [spec] (list 'nilable (:form spec))))
+
+(defn nilable-impl
+  [form pred]
+  (->NilableSpec form pred nil))
+
+(defmacro nilable
+  "Returns a spec that accepts nil (conforming to nil) or delegates to
+  pred-form."
+  [pred-form]
+  `(nilable-impl '~pred-form ~pred-form))
+
+;; ── MultiSpec (s/multi-spec) ──────────────────────────────────────────────
+;;
+;; conform*/explain* call `(mm x)` to get the spec registered for x's
+;; dispatch branch, then delegate. A dispatch miss throws in this runtime
+;; (`crates/cljrs-env/src/apply.rs`: "No method in multimethod ... for
+;; dispatch value ..."), caught here via `(catch Exception ...)` — same
+;; pattern already used for predicate-spec calls above. We deliberately do
+;; NOT enumerate `(methods mm)` — its keys are Display strings in this
+;; runtime, not the original dispatch values, so it can't be used to
+;; reconstruct or validate the dispatch table.
+;;
+;; SIMPLIFICATION vs upstream: real clojure.spec.alpha's `retag` re-tags the
+;; conformed value with the dispatch value before unforming, so unform can
+;; work even when the conformed shape no longer carries a natural dispatch
+;; value. We accept and store `retag` (a keyword or fn, per upstream) for
+;; API compatibility but don't apply it: our unform* instead re-dispatches
+;; `(mm x)` directly off the CONFORMED value x. This works whenever the
+;; conformed shape still carries whatever `mm`'s dispatch fn inspects (true
+;; for the common case of a keys-spec branch preserving the dispatch key);
+;; it can misbehave for specs whose conform strips the dispatch value
+;; entirely — a known, documented gap.
+
+(defrecord MultiSpec [form mm retag name])
+
+(extend-type MultiSpec Spec
+  (conform* [spec x]
+    (try
+      (conform*-dispatch ((:mm spec) x) x)
+      (catch Exception _e ::invalid)))
+  (unform* [spec x]
+    (try
+      (unform*-dispatch ((:mm spec) x) x)
+      (catch Exception _e x)))
+  (explain* [spec path via in x]
+    (try
+      (explain*-dispatch ((:mm spec) x) path via in x)
+      (catch Exception _e
+        [{:path path :pred (:form spec) :val x :via via :in in :reason "no method"}])))
+  (describe* [spec] (:form spec)))
+
+(defn multi-spec-impl
+  [form mm retag]
+  (->MultiSpec form mm retag nil))
+
+(defmacro multi-spec
+  "Takes mm-form (a multimethod, e.g. a symbol naming one defined via
+  defmulti/defmethod) and retag-form (a keyword or fn — see doc comment on
+  MultiSpec above for how this runtime's unform* simplifies retagging).
+  Returns a spec whose conform*/explain* delegate to whichever spec
+  `(mm x)` returns."
+  [mm-form retag-form]
+  `(multi-spec-impl '~(list 'multi-spec mm-form retag-form) ~mm-form ~retag-form))
+
+;; ── ConformerSpec (s/conformer) ───────────────────────────────────────────
+
+(defrecord ConformerSpec [form f unf name])
+
+(extend-type ConformerSpec Spec
+  (conform* [spec x]
+    ((:f spec) x))
+  (unform* [spec x]
+    (if (:unf spec) ((:unf spec) x) x))
+  (explain* [spec path via in x]
+    (when (invalid? (conform*-dispatch spec x))
+      [(problem path (:form spec) x via in)]))
+  (describe* [spec] (:form spec)))
+
+(defn conformer-impl
+  ([form f] (conformer-impl form f nil))
+  ([form f unf] (->ConformerSpec form f unf nil)))
+
+(defmacro conformer
+  "Takes a fn f of one arg (returning the conformed value, or ::invalid to
+  fail) and an optional inverse unf for unform. Threads transformed values
+  through s/and like any other predicate/spec."
+  ([f-form] `(conformer-impl '~f-form ~f-form))
+  ([f-form unf-form] `(conformer-impl '~f-form ~f-form ~unf-form)))
+
+;; ── Leaf helpers: int-in / double-in / inst-in / nonconforming ──────────────
+
+(defn int-in-range?
+  "True if x is an int? in the range [start, end) — start inclusive, end
+  exclusive."
+  [start end x]
+  (and (int? x) (>= x start) (< x end)))
+
+(defn int-in
+  "Returns a spec validating ints in the range [start, end)."
+  [start end]
+  (spec-impl (list 'int-in start end) (fn [x] (int-in-range? start end x)) nil))
+
+(defn double-in
+  "Returns a spec validating doubles. Options (all optional, keyword args):
+  :min :max (inclusive bounds), :infinite? (default true — whether ##Inf/
+  ##-Inf are accepted), :NaN? (default true — whether ##NaN is accepted).
+  Reuses this runtime's existing NaN?/infinite? bootstrap predicates
+  (crates/cljrs-builtins/src/bootstrap.cljrs) rather than reimplementing
+  IEEE-754 checks."
+  [& opts]
+  (let [o (apply hash-map opts)
+        mn (:min o)
+        mx (:max o)
+        inf-opt (get o :infinite? true)
+        nan-opt (get o :NaN? true)]
+    (spec-impl (list* 'double-in opts)
+               (fn [x]
+                 (and (double? x)
+                      (cond
+                        (NaN? x) nan-opt
+                        (infinite? x) inf-opt
+                        :else (and (or (nil? mn) (>= x mn))
+                                  (or (nil? mx) (<= x mx))))))
+               nil)))
+
+(defn inst-in
+  "NOT IMPLEMENTED: this runtime has no Instant/Date value type and no real
+  #inst support — the reader parses the #inst tag but
+  `crates/cljrs-interp/src/eval.rs`'s `eval_tagged_literal` just returns the
+  inner string unchanged (TODO there), and there is no `inst?` predicate
+  anywhere in builtins/bootstrap. Throws immediately with a clear message
+  rather than silently misbehaving."
+  [start end]
+  (throw (ex-info
+          "s/inst-in is not implemented: this runtime has no Instant/Date value type or #inst support"
+          {:start start :end end})))
+
+(defrecord NonconformingSpec [pred name])
+
+(extend-type NonconformingSpec Spec
+  (conform* [spec x]
+    (if (invalid? (conform*-dispatch (:pred spec) x)) ::invalid x))
+  (unform* [spec x] x)
+  (explain* [spec path via in x]
+    (explain*-dispatch (:pred spec) path via in x))
+  (describe* [spec] (list 'nonconforming (describe*-dispatch (:pred spec)))))
+
+(defn nonconforming-impl
+  [pred]
+  (->NonconformingSpec pred nil))
+
+(defmacro nonconforming
+  "Wraps pred-form so conform validates but returns x UNCONFORMED on
+  success (::invalid on failure, as usual); unform is identity."
+  [pred-form]
+  `(nonconforming-impl ~pred-form))
