@@ -593,4 +593,202 @@ mod tests {
             );
         });
     }
+
+    // ── clojure.spec.alpha (M2: explain + keys/merge) ────────────────────────
+
+    /// Asserts that a Clojure expression evaluates to exactly `true`/`false`.
+    #[track_caller]
+    fn assert_bool(src: &str, expected: bool, env: &mut Env) {
+        assert_eq!(
+            run(src, env).unwrap(),
+            Value::Bool(expected),
+            "expression: {src}"
+        );
+    }
+
+    #[test]
+    fn test_spec_keys_req_opt() {
+        run_with_big_stack(|| {
+            let (_, mut env) = make_env();
+            run("(require '[clojure.spec.alpha :as s])", &mut env).unwrap();
+            run("(s/def ::a int?) (s/def ::b string?)", &mut env).unwrap();
+            run("(s/def ::m (s/keys :req [::a] :opt [::b]))", &mut env).unwrap();
+            assert_bool("(s/valid? ::m {::a 1})", true, &mut env);
+            assert_bool("(s/valid? ::m {::a 1 ::b \"x\"})", true, &mut env);
+            assert_bool("(s/valid? ::m {::b \"x\"})", false, &mut env); // missing req
+            assert_bool("(s/valid? ::m {::a \"no\"})", false, &mut env); // bad req value
+            assert_bool("(s/valid? ::m {::a 1 ::b 2})", false, &mut env); // bad opt value
+            assert_bool("(s/valid? ::m 42)", false, &mut env); // not a map
+            // undeclared-but-registered key is still validated (upstream semantics)
+            assert_bool(
+                "(s/valid? (s/keys :req [::a]) {::a 1 ::b :not-a-string})",
+                false,
+                &mut env,
+            );
+            // connectives in :req
+            run("(s/def ::c boolean?)", &mut env).unwrap();
+            run(
+                "(s/def ::conn (s/keys :req [(or ::a (and ::b ::c))]))",
+                &mut env,
+            )
+            .unwrap();
+            assert_bool("(s/valid? ::conn {::a 1})", true, &mut env);
+            assert_bool("(s/valid? ::conn {::b \"x\" ::c true})", true, &mut env);
+            assert_bool("(s/valid? ::conn {::b \"x\"})", false, &mut env);
+            assert_bool("(s/valid? ::conn {})", false, &mut env);
+        });
+    }
+
+    #[test]
+    fn test_spec_keys_un_variants() {
+        run_with_big_stack(|| {
+            let (_, mut env) = make_env();
+            run("(require '[clojure.spec.alpha :as s])", &mut env).unwrap();
+            run("(s/def ::a int?) (s/def ::b string?)", &mut env).unwrap();
+            run(
+                "(s/def ::mu (s/keys :req-un [::a] :opt-un [::b]))",
+                &mut env,
+            )
+            .unwrap();
+            assert_bool("(s/valid? ::mu {:a 1})", true, &mut env);
+            assert_bool("(s/valid? ::mu {:a 1 :b \"x\"})", true, &mut env);
+            assert_bool("(s/valid? ::mu {:b \"x\"})", false, &mut env); // missing req-un
+            assert_bool("(s/valid? ::mu {:a \"no\"})", false, &mut env); // bad value
+            assert_bool("(s/valid? ::mu {:a 1 :b 2})", false, &mut env); // bad opt-un value
+            assert_bool("(= {:a 1} (s/conform ::mu {:a 1}))", true, &mut env);
+        });
+    }
+
+    #[test]
+    fn test_spec_keys_record() {
+        run_with_big_stack(|| {
+            let (_, mut env) = make_env();
+            run("(require '[clojure.spec.alpha :as s])", &mut env).unwrap();
+            run("(defrecord Point [x y])", &mut env).unwrap();
+            run("(s/def ::x number?) (s/def ::y number?)", &mut env).unwrap();
+            run("(s/def ::point (s/keys :req-un [::x ::y]))", &mut env).unwrap();
+            assert_bool("(s/valid? ::point (->Point 1 2))", true, &mut env);
+            assert_bool("(s/valid? ::point (->Point \"a\" 2))", false, &mut env);
+            // conform on a record returns a record (assoc preserves type tag)
+            assert_bool(
+                "(record? (s/conform ::point (->Point 1 2)))",
+                true,
+                &mut env,
+            );
+        });
+    }
+
+    #[test]
+    fn test_spec_explain_data_shape() {
+        run_with_big_stack(|| {
+            let (_, mut env) = make_env();
+            run("(require '[clojure.spec.alpha :as s])", &mut env).unwrap();
+            run("(s/def ::a int?) (s/def ::b string?)", &mut env).unwrap();
+            run("(s/def ::m (s/keys :req [::a] :opt [::b]))", &mut env).unwrap();
+
+            // Missing-req problem: (contains? % :user/a)-style pred, path/in [].
+            run("(def ed1 (s/explain-data ::m {::b \"x\"}))", &mut env).unwrap();
+            assert_bool(
+                "(pos? (count (:clojure.spec.alpha/problems ed1)))",
+                true,
+                &mut env,
+            );
+            let pred = run(
+                "(pr-str (:pred (first (:clojure.spec.alpha/problems ed1))))",
+                &mut env,
+            )
+            .unwrap();
+            assert_eq!(pred, Value::string("(contains? % :user/a)"));
+            assert_bool(
+                "(= [] (:path (first (:clojure.spec.alpha/problems ed1))))",
+                true,
+                &mut env,
+            );
+
+            // Bad-value problem: path/in extended by the key, via extended by
+            // both the named keys spec and the failing key's spec.
+            run("(def ed2 (s/explain-data ::m {::a \"no\"}))", &mut env).unwrap();
+            run(
+                "(def p2 (first (:clojure.spec.alpha/problems ed2)))",
+                &mut env,
+            )
+            .unwrap();
+            assert_bool("(= [::a] (:path p2))", true, &mut env);
+            assert_bool("(= [::a] (:in p2))", true, &mut env);
+            assert_bool("(= [::m ::a] (:via p2))", true, &mut env);
+            assert_bool("(= \"no\" (:val p2))", true, &mut env);
+
+            // Valid value → nil.
+            assert_bool("(nil? (s/explain-data ::m {::a 4}))", true, &mut env);
+
+            // Whole-map value and spec recorded on the explain-data map.
+            assert_bool(
+                "(= {::a \"no\"} (:clojure.spec.alpha/value ed2))",
+                true,
+                &mut env,
+            );
+        });
+    }
+
+    #[test]
+    fn test_spec_merge() {
+        run_with_big_stack(|| {
+            let (_, mut env) = make_env();
+            run("(require '[clojure.spec.alpha :as s])", &mut env).unwrap();
+            run("(s/def ::a int?) (s/def ::b string?)", &mut env).unwrap();
+            run("(s/def ::ma (s/keys :req [::a]))", &mut env).unwrap();
+            run("(s/def ::mb (s/keys :req [::b]))", &mut env).unwrap();
+            run("(s/def ::mab (s/merge ::ma ::mb))", &mut env).unwrap();
+            assert_bool("(s/valid? ::mab {::a 1 ::b \"x\"})", true, &mut env);
+            assert_bool("(s/valid? ::mab {::a 1})", false, &mut env);
+            assert_bool(
+                "(= {::a 1 ::b \"x\"} (s/conform ::mab {::a 1 ::b \"x\"}))",
+                true,
+                &mut env,
+            );
+            assert_bool(
+                "(pos? (count (:clojure.spec.alpha/problems
+                               (s/explain-data ::mab {::a 1}))))",
+                true,
+                &mut env,
+            );
+        });
+    }
+
+    #[test]
+    fn test_spec_explain_str_and_printer() {
+        run_with_big_stack(|| {
+            let (_, mut env) = make_env();
+            run("(require '[clojure.spec.alpha :as s])", &mut env).unwrap();
+            run("(s/def ::a int?)", &mut env).unwrap();
+            run("(s/def ::m (s/keys :req [::a]))", &mut env).unwrap();
+            let estr = match run("(s/explain-str ::m {::a \"no\"})", &mut env).unwrap() {
+                Value::Str(s) => s.get().clone(),
+                other => panic!("expected string from explain-str, got {other:?}"),
+            };
+            assert!(
+                estr.contains("failed") && estr.contains("int?"),
+                "unexpected explain-str output: {estr}"
+            );
+            let ok = run("(s/explain-str ::m {::a 1})", &mut env).unwrap();
+            assert_eq!(ok, Value::string("Success!\n"));
+        });
+    }
+
+    #[test]
+    fn test_spec_keys_unform_roundtrip() {
+        run_with_big_stack(|| {
+            let (_, mut env) = make_env();
+            run("(require '[clojure.spec.alpha :as s])", &mut env).unwrap();
+            run("(s/def ::id (s/or :i int? :s string?))", &mut env).unwrap();
+            run("(s/def ::rm (s/keys :req-un [::id]))", &mut env).unwrap();
+            // conform tags the or-valued key; unform untags it.
+            assert_bool("(= {:id [:i 5]} (s/conform ::rm {:id 5}))", true, &mut env);
+            assert_bool(
+                "(= {:id 5} (s/unform ::rm (s/conform ::rm {:id 5})))",
+                true,
+                &mut env,
+            );
+        });
+    }
 }

@@ -1,4 +1,5 @@
-;; clojure.spec.alpha — milestone 1: skeleton + predicate specs + and/or.
+;; clojure.spec.alpha — M1: skeleton + predicate specs + and/or;
+;;                      M2: explain machinery + keys/merge.
 ;;
 ;; This is a from-scratch, spec-compatible-in-spirit implementation for the
 ;; clojurust runtime. It does NOT use `reify` for spec objects (every `reify`
@@ -8,8 +9,8 @@
 ;; instead. Bare predicates, sets, keywords, and symbols are made directly
 ;; usable as specs (zero wrapping) by extending `Spec` onto their type tags.
 ;;
-;; Later milestones add: explain-data/keys/merge (M2), regex ops — cat/alt/
-;; */+/?/& (M3), collection/leaf specs (M4), fdef/instrument + gen stub (M5).
+;; Later milestones add: regex ops — cat/alt/*/+/?/& (M3), collection/leaf
+;; specs (M4), fdef/instrument + gen stub (M5).
 
 (ns clojure.spec.alpha)
 
@@ -85,17 +86,36 @@
   [x]
   (= x ::invalid))
 
-;; ── explain-data problem helper ────────────────────────────────────────────────
+;; ── explain problem helpers ───────────────────────────────────────────────────
 ;;
-;; Full explain-data assembly (spec/via/in roll-ups, printable summaries) is
-;; M2. For M1, `explain*` on every spec kind returns a bare vector of these
-;; problem maps (or nil when the value is valid) so the shape is stable and
-;; ready for M2 to build on.
+;; `explain*` on every spec kind returns a vector of these problem maps, or
+;; nil when the value is valid. `explain-data`/`explain`/`explain-str` (below,
+;; in the public API section) assemble them into the upstream-shaped
+;; explain-data map and printable output.
 
 (defn- problem
   "Builds a single explain-data problem map."
   [path pred val via in]
   {:path path :pred pred :val val :via via :in in})
+
+(defn- explain-1
+  "Upstream-shaped single-child explain: if pred is a keyword (registry ref)
+  or one of our record-based spec objects, delegate to its explain* — the
+  Keyword impl pushes itself onto via; a named record spec pushes its
+  registered name. Bare predicates/sets report a single problem carrying the
+  literal form. (References spec?/spec-name defined later in this file — fine,
+  since vars resolve at call time; and uses the *-dispatch aliases so this
+  helper is safe to call from inside any protocol method body.)"
+  [form pred path via in v]
+  (cond
+    (keyword? pred)
+    (explain*-dispatch pred path via in v)
+    (spec? pred)
+    (explain*-dispatch pred path
+                       (if-let [n (spec-name pred)] (conj via n) via)
+                       in v)
+    :else
+    [(problem path form v via in)]))
 
 ;; ── Bare values as specs ────────────────────────────────────────────────────────
 ;;
@@ -213,7 +233,7 @@
         nil
         (let [conformed (conform* (first preds) ret)]
           (if (invalid? conformed)
-            [(problem path (first forms) ret via in)]
+            (explain-1 (first forms) (first preds) path via in ret)
             (recur conformed (rest preds) (rest forms)))))))
   (describe* [spec] (:form spec)))
 
@@ -254,9 +274,12 @@
       (unform*-dispatch (or-pred-for spec k) v)))
   (explain* [spec path via in x]
     (when (invalid? (conform* spec x))
-      (vec (map (fn [k form]
-                  (problem (conj path k) form x via in))
-                (:keys spec) (:forms spec)))))
+      (let [probs (apply concat
+                         (map (fn [k form pred]
+                                (explain-1 form pred (conj path k) via in x))
+                              (:keys spec) (:forms spec) (:preds spec)))]
+        (when (seq probs)
+          (vec probs)))))
   (describe* [spec] (:form spec)))
 
 (defn or-spec-impl
@@ -264,6 +287,190 @@
   spec forms, `preds` their evaluated spec values — all parallel vectors."
   [keys forms preds]
   (->OrSpec (cons 'or (interleave keys forms)) (vec keys) (vec forms) (vec preds) nil))
+
+;; ── KeysSpec ──────────────────────────────────────────────────────────────────
+;;
+;; `s/keys` with :req/:opt/:req-un/:opt-un. :req and :req-un accept nested
+;; `(and ...)`/`(or ...)` connective forms per upstream (presence logic only —
+;; value validation is per-key regardless). Upstream semantics for values:
+;; EVERY map entry whose (qualified) key has a registered spec is
+;; validated/conformed — even keys never mentioned in the keys spec. For
+;; un-variants the map key is `(keyword (name k))` and the validating spec is
+;; the qualified k; `un-map` below carries that unqualified→qualified mapping.
+;;
+;; Records (TypeInstance) are supported as maps: `seq` yields their fields as
+;; map entries, `assoc` preserves their type tag, and presence checks go
+;; through `get` with a sentinel because `contains?` has no record support in
+;; this runtime.
+
+(def ^:private sentinel ::not-found)
+
+(defn- has-key?
+  "Presence check that works on maps AND records — `contains?` has no
+  TypeInstance arm in this runtime, `get` does."
+  [m k]
+  (not= (get m k sentinel) sentinel))
+
+(defn- map-like?
+  [x]
+  (or (map? x) (record? x)))
+
+(defn- key-present?
+  "Evaluates a :req/:req-un element — a qualified keyword or a nested
+  (and ...)/(or ...) connective form — as a presence check against map m.
+  un? true means check the unqualified (name-only) form of each keyword."
+  [m form un?]
+  (cond
+    (keyword? form)
+    (has-key? m (if un? (keyword (name form)) form))
+
+    (seq? form)
+    (let [op (name (first form))]
+      (cond
+        (= op "and") (every? (fn [f] (key-present? m f un?)) (rest form))
+        (= op "or") (boolean (some (fn [f] (key-present? m f un?)) (rest form)))
+        :else (throw (ex-info (str "s/keys: unsupported connective " (pr-str form))
+                              {:form form}))))
+
+    :else
+    (throw (ex-info (str "s/keys: unsupported :req element " (pr-str form))
+                    {:form form}))))
+
+(defn- req-pred-form
+  "Builds the reportable pred form for a missing-req problem, upstream-style:
+  a keyword k becomes (contains? % k); connectives wrap recursively, e.g.
+  (or (contains? % ::a) (contains? % ::b))."
+  [form un?]
+  (if (keyword? form)
+    (list 'contains? '% (if un? (keyword (name form)) form))
+    (cons (first form) (map (fn [f] (req-pred-form f un?)) (rest form)))))
+
+(defn- req-spec-keys
+  "All qualified keywords mentioned in a :req/:req-un element (a bare keyword
+  or a nested connective form)."
+  [form]
+  (if (keyword? form)
+    [form]
+    (mapcat req-spec-keys (rest form))))
+
+(defrecord KeysSpec [form req opt req-un opt-un un-map name])
+
+(extend-type KeysSpec Spec
+  (conform* [spec x]
+    (if (not (map-like? x))
+      ::invalid
+      (if (not (and (every? (fn [f] (key-present? x f false)) (:req spec))
+                    (every? (fn [f] (key-present? x f true)) (:req-un spec))))
+        ::invalid
+        (loop [ret x entries (seq x)]
+          (if entries
+            (let [e (first entries)
+                  k (key e)
+                  v (val e)
+                  sname (get (:un-map spec) k k)]
+              (if (get-spec sname)
+                (let [cv (conform*-dispatch sname v)]
+                  (if (invalid? cv)
+                    ::invalid
+                    (recur (assoc ret k cv) (next entries))))
+                (recur ret (next entries))))
+            ret)))))
+  (unform* [spec x]
+    (if (not (map-like? x))
+      x
+      (loop [ret x entries (seq x)]
+        (if entries
+          (let [e (first entries)
+                k (key e)
+                v (val e)
+                sname (get (:un-map spec) k k)]
+            (if (get-spec sname)
+              (recur (assoc ret k (unform*-dispatch sname v)) (next entries))
+              (recur ret (next entries))))
+          ret))))
+  (explain* [spec path via in x]
+    (if (not (map-like? x))
+      [(problem path 'map? x via in)]
+      (let [req-probs (keep (fn [f]
+                              (when (not (key-present? x f false))
+                                (problem path (req-pred-form f false) x via in)))
+                            (:req spec))
+            req-un-probs (keep (fn [f]
+                                 (when (not (key-present? x f true))
+                                   (problem path (req-pred-form f true) x via in)))
+                               (:req-un spec))
+            val-probs (mapcat (fn [e]
+                                (let [k (key e)
+                                      v (val e)
+                                      sname (get (:un-map spec) k k)]
+                                  (when (get-spec sname)
+                                    (when (invalid? (conform*-dispatch sname v))
+                                      (explain*-dispatch sname (conj path k) via
+                                                         (conj in k) v)))))
+                              (seq x))
+            probs (concat req-probs req-un-probs val-probs)]
+        (when (seq probs)
+          (vec probs)))))
+  (describe* [spec] (:form spec)))
+
+(defn keys-impl
+  "Impl fn for s/keys. req/opt/req-un/opt-un are the literal (unevaluated)
+  option vectors — req and req-un may contain (and ...)/(or ...) connective
+  forms; opt and opt-un are plain qualified keywords. form is the literal
+  (keys ...) form for describe."
+  [req opt req-un opt-un form]
+  (let [req (vec (or req []))
+        opt (vec (or opt []))
+        req-un (vec (or req-un []))
+        opt-un (vec (or opt-un []))
+        all-ks (concat (mapcat req-spec-keys req) opt
+                       (mapcat req-spec-keys req-un) opt-un)]
+    (when (not (every? (fn [k] (and (keyword? k) (namespace k))) all-ks))
+      (throw (ex-info "s/keys: all key specs must be namespace-qualified keywords"
+                      {:input all-ks})))
+    (let [un-map (into {}
+                       (map (fn [k] [(keyword (name k)) k])
+                            (concat (mapcat req-spec-keys req-un) opt-un)))]
+      (->KeysSpec form req opt req-un opt-un un-map nil))))
+
+;; ── MergeSpec ─────────────────────────────────────────────────────────────────
+;;
+;; `s/merge` — each child (usually a keys spec or a keyword ref to one) is
+;; conformed against the whole value; valid iff all children are valid;
+;; conform returns the clojure.core/merge of the children's conformed maps
+;; (upstream semantics). NOTE: internal uses of core merge below must stay
+;; qualified — this ns shadows `merge` with the s/merge macro.
+
+(defrecord MergeSpec [form forms preds name])
+
+(extend-type MergeSpec Spec
+  (conform* [spec x]
+    (loop [ms [] preds (:preds spec)]
+      (if (empty? preds)
+        (apply clojure.core/merge ms)
+        (let [cv (conform*-dispatch (first preds) x)]
+          (if (invalid? cv)
+            ::invalid
+            (recur (conj ms cv) (rest preds)))))))
+  (unform* [spec x]
+    (apply clojure.core/merge
+           (map (fn [pred] (unform*-dispatch pred x))
+                (reverse (:preds spec)))))
+  (explain* [spec path via in x]
+    (let [probs (apply concat
+                       (map (fn [form pred]
+                              (when (invalid? (conform*-dispatch pred x))
+                                (explain-1 form pred path via in x)))
+                            (:forms spec) (:preds spec)))]
+      (when (seq probs)
+        (vec probs))))
+  (describe* [spec] (:form spec)))
+
+(defn merge-spec-impl
+  "Impl fn for s/merge. `forms` are the literal child spec forms, `preds`
+  their evaluated spec values — parallel vectors."
+  [forms preds]
+  (->MergeSpec (cons 'merge forms) (vec forms) (vec preds) nil))
 
 ;; ── def-impl / naming ─────────────────────────────────────────────────────────
 
@@ -373,6 +580,33 @@
     `(or-spec-impl '~ks '~pred-forms [~@pred-forms])))
 (def or or-form)
 
+;; `keys`/`merge` are NOT special forms, so they can be defmacro'd under their
+;; own names directly — but doing so shadows clojure.core/keys and
+;; clojure.core/merge for ALL unqualified references in this namespace
+;; (interned vars beat refers). Any internal use of the core fns in this file
+;; must be written clojure.core/keys / clojure.core/merge.
+
+(defmacro keys
+  "Creates and returns a map validating spec. :req and :opt are vectors of
+  namespace-qualified keywords (in :req, `(and ...)`/`(or ...)` connective
+  forms are also accepted for presence logic). :req-un/:opt-un use the
+  qualified keyword's spec to validate the UNqualified key in the map.
+  Regardless of options, every map entry whose (qualified) key has a
+  registered spec is conformed/validated."
+  [& kspecs]
+  (let [opts (apply hash-map kspecs)
+        req (get opts :req [])
+        opt (get opts :opt [])
+        req-un (get opts :req-un [])
+        opt-un (get opts :opt-un [])]
+    `(keys-impl '~req '~opt '~req-un '~opt-un '~(cons 'keys kspecs))))
+
+(defmacro merge
+  "Takes map-validating specs (e.g. keys specs or keyword refs to them) and
+  returns a spec that returns a conformed map satisfying all of the specs."
+  [& pred-forms]
+  `(merge-spec-impl '~(vec pred-forms) [~@pred-forms]))
+
 ;; ── Public API ────────────────────────────────────────────────────────────────
 
 (defn spec?
@@ -416,3 +650,68 @@
   to a user."
   [spec]
   (describe* spec))
+
+;; ── explain ───────────────────────────────────────────────────────────────────
+
+(defn explain-data*
+  "Like explain-data but with explicit path/via/in seeds. Returns the
+  explain-data map, or nil when x is valid."
+  [spec path via in x]
+  (let [probs (explain* spec path via in x)]
+    (when (seq probs)
+      {:clojure.spec.alpha/problems (vec probs)
+       :clojure.spec.alpha/spec spec
+       :clojure.spec.alpha/value x})))
+
+(defn explain-data
+  "Given a spec and a value x that fails to conform, returns a map with at
+  least :clojure.spec.alpha/problems (a vector of problem maps with keys
+  :path :pred :val :via :in), plus :clojure.spec.alpha/spec and
+  :clojure.spec.alpha/value. Returns nil when x conforms. (Explicit qualified
+  keywords — the reader has no #:ns{...} literal support.)
+
+  via seeding: only a NAMED record-based spec seeds via with its registered
+  name here. A keyword spec pushes itself onto via inside the Keyword
+  explain* impl, so seeding it here too would double it."
+  [spec x]
+  (explain-data* spec []
+                 (if-let [n (and (record? spec) (spec-name spec))] [n] [])
+                 [] x))
+
+(defn explain-printer
+  "Default printer for explain-data. Prints one line per problem, upstream-ish:
+  <val> - failed: <pred> in: <in> at: <path> spec: <last-via>. Prints
+  Success! when ed is nil."
+  [ed]
+  (if ed
+    (doseq [p (:clojure.spec.alpha/problems ed)]
+      (let [path (:path p)
+            pred (:pred p)
+            v (:val p)
+            via (:via p)
+            in (:in p)]
+        (println (str (pr-str v)
+                      " - failed: " (pr-str pred)
+                      (if (empty? in) "" (str " in: " (pr-str in)))
+                      (if (empty? path) "" (str " at: " (pr-str path)))
+                      (if (empty? via) "" (str " spec: " (pr-str (last via))))))))
+    (println "Success!")))
+
+(def ^:dynamic *explain-out* explain-printer)
+
+(defn explain-out
+  "Prints explanation data (per *explain-out*, default explain-printer) to
+  *out*."
+  [ed]
+  (*explain-out* ed))
+
+(defn explain
+  "Given a spec and a value that fails to conform, prints an explanation to
+  *out*; prints Success! otherwise."
+  [spec x]
+  (explain-out (explain-data spec x)))
+
+(defn explain-str
+  "Like explain, but returns the explanation as a string."
+  [spec x]
+  (with-out-str (explain spec x)))
