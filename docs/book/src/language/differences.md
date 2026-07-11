@@ -109,7 +109,13 @@ my-app.utils  →  my_app/utils.cljrs
 
 The following `clojure.*` namespaces are available:
 `clojure.string`, `clojure.set`, `clojure.test`, `clojure.walk`,
-`clojure.edn`, `clojure.data`.
+`clojure.edn`, `clojure.data`, `clojure.spec.alpha`,
+`clojure.spec.test.alpha`, and `clojure.spec.gen.alpha`. `clojure.core.async`
+is also available (as the `cljrs-async` crate — see the
+[Async & I/O](../async-io/index.md) chapter).
 
-`clojure.zip` and `clojure.pprint` exist as stubs. `clojure.spec.alpha`,
-`clojure.core.async`, and `clojure.core.match` are not available.
+`clojure.zip` and `clojure.pprint` exist as stubs. `clojure.spec.alpha` has
+no generators: `clojure.spec.gen.alpha` and every generative-testing entry
+point (`s/gen`, `s/exercise`, `s/exercise-fn`, `stest/check`) throw a clear
+`ex-info` instead of generating values. `clojure.core.match` is not
+available.

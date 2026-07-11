@@ -20,7 +20,9 @@ implemented.
 - `clojure.core` — arithmetic, comparison, collection operations, lazy
   sequences, transducers, I/O, concurrency primitives.
 - Standard library namespaces: `clojure.string`, `clojure.set`, `clojure.test`,
-  `clojure.walk`, `clojure.edn`, `clojure.zip`, `clojure.data`.
+  `clojure.walk`, `clojure.edn`, `clojure.zip`, `clojure.data`,
+  `clojure.spec.alpha` (no generators — see
+  [Differences from Clojure](differences.md)).
 - Protocols (`defprotocol`, `extend-type`, `extend-protocol`), multimethods
   (`defmulti`, `defmethod`), records (`defrecord`), and `reify`.
 - Concurrency: `atom`, `future`, `promise`, `delay`, `volatile!`, `agent`.

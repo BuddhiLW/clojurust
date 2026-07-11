@@ -520,7 +520,7 @@ inference, `typeinfer`, the `rt_abi` contract) are reused unchanged.
 - [ ] Clojure-style exception hierarchy (`ExceptionInfo`, `ex-info`, `ex-data`, `ex-message`, `ex-cause`)
 - [ ] Stack traces that include both Clojure source locations and Rust frames
 - [ ] `tap>` / `tap` system for non-intrusive value inspection
-- [ ] `clojure.spec.alpha` compatible spec/validation library (stretch goal)
+- [x] `clojure.spec.alpha` compatible spec/validation library (stretch goal) (implemented in cljrs-stdlib; generators/`clojure.spec.gen.alpha` stubbed, deferred)
 - [ ] Debug build mode: retain all source locations and disable JIT optimizations
 
 ---
