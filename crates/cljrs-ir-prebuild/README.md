@@ -4,8 +4,8 @@ Pre-lowers Clojure namespaces to IR and serializes the result to a bundle file
 that can be loaded at startup to skip re-lowering already-compiled functions.
 
 **Status:** Phase 10 (IR tiering) support tooling — implemented. Both a
-library (consumed by the `cljrs ir-prebuild` subcommand of the main `cljrs`
-binary) and a standalone `cljrs-ir-prebuild` binary.
+library (consumed by the `cljrs ir build`/`cljrs ir dump` subcommands of the
+main `cljrs` binary) and a standalone `cljrs-ir-prebuild` binary.
 
 ---
 
@@ -69,8 +69,8 @@ matches against live function vars when loading a bundle back in.
 Via the main `cljrs` binary (see `crates/cljrs`):
 
 ```bash
-cljrs ir-prebuild build --ns clojure.core -o core.ir.bin
-cljrs ir-prebuild dump core.ir.bin
+cljrs ir build --ns clojure.core -o core.ir.bin
+cljrs ir dump core.ir.bin
 ```
 
 Or the standalone binary:

@@ -8,8 +8,8 @@
 //! cold-start latency on targets that can't run the background lowering
 //! worker, such as an embedder built for `wasm32`.
 //!
-//! This crate is both a library (used by the `cljrs ir-prebuild` subcommand)
-//! and a standalone `cljrs-ir-prebuild` binary.
+//! This crate is both a library (used by the `cljrs ir build`/`cljrs ir dump`
+//! subcommands) and a standalone `cljrs-ir-prebuild` binary.
 
 use std::path::PathBuf;
 use std::sync::Arc;

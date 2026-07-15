@@ -25,9 +25,9 @@ src/
 | `repl`        | Start an interactive REPL                                              |
 | `compile`     | AOT-compile a source file or project (via `cljrs.edn`) to a native binary, or a `.wasm` module with `--target wasm` |
 | `eval`        | Evaluate a single Clojure expression and print the result              |
-| `ir-viz`      | Render the optimized IR + source as a self-contained HTML visualizer   |
-| `ir-prebuild build` | Pre-lower namespaces to IR and write a serialized bundle          |
-| `ir-prebuild dump`  | Print a human-readable dump of a serialized IR bundle             |
+| `ir build`    | Pre-lower namespaces to IR and write a serialized bundle               |
+| `ir dump`     | Print a human-readable dump of a serialized IR bundle                  |
+| `ir viz`      | Render the optimized IR + source as a self-contained HTML visualizer   |
 | `test`        | Run `clojure.test` namespaces (named on the CLI or auto-discovered)    |
 | `deps fetch`  | Clone / update git dependencies declared in `cljrs.edn`                |
 | `deps status` | Show which dependencies are cached and which are missing               |
@@ -70,18 +70,18 @@ run to completion. A synchronous `-main` is awaited as a no-op pass-through.
 - `--main <NS>` — namespace containing `-main`; overrides `:main` in `cljrs.edn` and auto-detection
 - `--test` — compile a test harness that runs every test in the given file/directory
 
-`ir-viz` accepts:
-- `-o, --out <PATH>` — output HTML path (defaults to `<file>.ir.html`)
-- `--src-path <DIR>` — repeatable
-- `--quiet` — suppress the `[aot] …` progress output
-
-`ir-prebuild build` accepts:
+`ir build` accepts:
 - `-n, --ns <NS>` — repeatable; namespaces to lower (default `clojure.core`)
 - `-o, --output <PATH>` — output bundle path (default `ir_bundle.bin`)
 - `--src-path <DIR>` — repeatable; source directories for `require`-ing non-`clojure.core` namespaces
 - `-v, --verbose` — print per-arity lowering progress
 
-`ir-prebuild dump` takes a single positional bundle path and prints the IR of every function it contains.
+`ir dump` takes a single positional bundle path and prints the IR of every function it contains.
+
+`ir viz` accepts:
+- `-o, --out <PATH>` — output HTML path (defaults to `<file>.ir.html`)
+- `--src-path <DIR>` — repeatable
+- `--quiet` — suppress the `[aot] …` progress output
 
 `test` additionally accepts:
 - `[namespaces…]` — positional list; if empty, namespaces are auto-discovered under `--src-path`
@@ -163,13 +163,13 @@ cljrs compile tests/ -o run-tests --test --src-path src
 cljrs eval '(+ 1 2)'
 
 # Render IR visualizer (writes samples/graph.cljrs.ir.html, open in any browser)
-cljrs ir-viz samples/graph.cljrs
-cljrs ir-viz samples/graph.cljrs -o /tmp/graph.html --quiet
+cljrs ir viz samples/graph.cljrs
+cljrs ir viz samples/graph.cljrs -o /tmp/graph.html --quiet
 
 # Pre-lower namespaces to IR for fast startup loading (cljrs_eval::load_prebuilt_ir)
-cljrs ir-prebuild build --ns clojure.core -o core.ir.bin
-cljrs ir-prebuild build --ns my.app.core --src-path src -o app.ir.bin -v
-cljrs ir-prebuild dump app.ir.bin
+cljrs ir build --ns clojure.core -o core.ir.bin
+cljrs ir build --ns my.app.core --src-path src -o app.ir.bin -v
+cljrs ir dump app.ir.bin
 
 # Tests
 cljrs test --src-path src/ --src-path test/ my-ns.my-tests
@@ -210,7 +210,7 @@ Build with e.g. `cargo build --release --features enable-rustyline,no-gc`.
 - A worker thread is spawned with the configured stack size to run the actual command; the main thread only handles signal/exit setup.
 - The REPL prints results, paginates errors via `miette`, and persists multi-line input across blank prompts.
 - **Top-level async (with the `async` feature).** `main` builds a single-threaded Tokio runtime + `LocalSet` and stashes it in a thread-local `AsyncDriver` rather than wrapping the whole session in one `block_on`. Each top-level form is then evaluated through `cljrs_async::eval_async` via `LocalSet::block_on` in `eval_form`, so spawned tasks (core.async producers, `^:async` calls, `clojure.rust.io.async` readers/writers) make progress and a top-level `await` resolves. Tasks that outlive a form — e.g. a channel `def`d at one REPL prompt and consumed at the next — stay queued on the shared `LocalSet` and continue on the next form's drive. Note: blocking ops (`<!!`/`>!!`) still park the single executor thread and so are not usable at the top level; use `(await (take! ch))` / `go` instead.
-- `ir-viz` runs the AOT pipeline through region optimization (via `cljrs_compiler::aot::lower_file_to_ir`) and hands the resulting `IrFunction` to `cljrs_ir_viz::render_html`.
+- `ir viz` runs the AOT pipeline through region optimization (via `cljrs_compiler::aot::lower_file_to_ir`) and hands the resulting `IrFunction` to `cljrs_ir_viz::render_html`.
 
 ---
 
@@ -226,9 +226,9 @@ Build with e.g. `cargo build --release --features enable-rustyline,no-gc`.
 | `cljrs-stdlib` (workspace)  | Bootstrapped standard library (`standard_env*`)                   |
 | `cljrs-runtime` (workspace) | Concurrency primitives consumed by stdlib                         |
 | `cljrs-compiler` (workspace)| AOT pipeline (`compile_file`, `compile_test_harness`, `lower_file_to_ir`) |
-| `cljrs-ir-viz` (workspace)  | HTML IR visualizer used by `ir-viz`                                |
-| `cljrs-ir` (workspace)      | `IrBundle`, `deserialize_bundle` — used by `ir-prebuild dump`      |
-| `cljrs-ir-prebuild` (workspace) | `run_prebuild` — used by `ir-prebuild build`                  |
+| `cljrs-ir-viz` (workspace)  | HTML IR visualizer used by `ir viz`                                |
+| `cljrs-ir` (workspace)      | `IrBundle`, `deserialize_bundle` — used by `ir dump`               |
+| `cljrs-ir-prebuild` (workspace) | `run_prebuild` — used by `ir build`                            |
 | `cljrs-interop` (workspace) | Rust ↔ Clojure FFI                                                |
 | `cljrs-async` (workspace, optional) | `clojure.core.async` runtime + `eval_async`; enabled by `async`  |
 | `cljrs-io` (workspace, optional) | `clojure.rust.io.async` async file I/O; enabled by `async`       |
