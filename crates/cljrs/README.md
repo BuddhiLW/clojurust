@@ -26,6 +26,8 @@ src/
 | `compile`     | AOT-compile a source file or project (via `cljrs.edn`) to a native binary, or a `.wasm` module with `--target wasm` |
 | `eval`        | Evaluate a single Clojure expression and print the result              |
 | `ir-viz`      | Render the optimized IR + source as a self-contained HTML visualizer   |
+| `ir-prebuild build` | Pre-lower namespaces to IR and write a serialized bundle          |
+| `ir-prebuild dump`  | Print a human-readable dump of a serialized IR bundle             |
 | `test`        | Run `clojure.test` namespaces (named on the CLI or auto-discovered)    |
 | `deps fetch`  | Clone / update git dependencies declared in `cljrs.edn`                |
 | `deps status` | Show which dependencies are cached and which are missing               |
@@ -72,6 +74,14 @@ run to completion. A synchronous `-main` is awaited as a no-op pass-through.
 - `-o, --out <PATH>` — output HTML path (defaults to `<file>.ir.html`)
 - `--src-path <DIR>` — repeatable
 - `--quiet` — suppress the `[aot] …` progress output
+
+`ir-prebuild build` accepts:
+- `-n, --ns <NS>` — repeatable; namespaces to lower (default `clojure.core`)
+- `-o, --output <PATH>` — output bundle path (default `ir_bundle.bin`)
+- `--src-path <DIR>` — repeatable; source directories for `require`-ing non-`clojure.core` namespaces
+- `-v, --verbose` — print per-arity lowering progress
+
+`ir-prebuild dump` takes a single positional bundle path and prints the IR of every function it contains.
 
 `test` additionally accepts:
 - `[namespaces…]` — positional list; if empty, namespaces are auto-discovered under `--src-path`
@@ -156,6 +166,11 @@ cljrs eval '(+ 1 2)'
 cljrs ir-viz samples/graph.cljrs
 cljrs ir-viz samples/graph.cljrs -o /tmp/graph.html --quiet
 
+# Pre-lower namespaces to IR for fast startup loading (cljrs_eval::load_prebuilt_ir)
+cljrs ir-prebuild build --ns clojure.core -o core.ir.bin
+cljrs ir-prebuild build --ns my.app.core --src-path src -o app.ir.bin -v
+cljrs ir-prebuild dump app.ir.bin
+
 # Tests
 cljrs test --src-path src/ --src-path test/ my-ns.my-tests
 cljrs test --src-path src/ -v       # auto-discover, verbose
@@ -212,6 +227,8 @@ Build with e.g. `cargo build --release --features enable-rustyline,no-gc`.
 | `cljrs-runtime` (workspace) | Concurrency primitives consumed by stdlib                         |
 | `cljrs-compiler` (workspace)| AOT pipeline (`compile_file`, `compile_test_harness`, `lower_file_to_ir`) |
 | `cljrs-ir-viz` (workspace)  | HTML IR visualizer used by `ir-viz`                                |
+| `cljrs-ir` (workspace)      | `IrBundle`, `deserialize_bundle` — used by `ir-prebuild dump`      |
+| `cljrs-ir-prebuild` (workspace) | `run_prebuild` — used by `ir-prebuild build`                  |
 | `cljrs-interop` (workspace) | Rust ↔ Clojure FFI                                                |
 | `cljrs-async` (workspace, optional) | `clojure.core.async` runtime + `eval_async`; enabled by `async`  |
 | `cljrs-io` (workspace, optional) | `clojure.rust.io.async` async file I/O; enabled by `async`       |

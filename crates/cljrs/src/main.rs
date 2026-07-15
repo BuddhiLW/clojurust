@@ -199,6 +199,20 @@ enum Commands {
         #[arg(long)]
         quiet: bool,
     },
+    /// Pre-lower Clojure namespaces to IR and manage serialized IR bundles.
+    ///
+    /// A bundle produced by `build` is loaded back at startup with the public
+    /// `cljrs_eval::load_prebuilt_ir` API, which matches bundle entries to the
+    /// live `ir_arity_id`s assigned when the target functions are defined and
+    /// populates the IR cache directly, so the functions execute at Tier 1
+    /// (IR interpreter) from their very first call — skipping the warmup that
+    /// background lowering normally needs. Most useful for cutting cold-start
+    /// latency on targets that can't run the background lowering worker, such
+    /// as an embedder built for `wasm32`.
+    IrPrebuild {
+        #[command(subcommand)]
+        command: IrPrebuildCommands,
+    },
     /// Run clojure.test tests for one or more namespaces.
     ///
     /// If no namespaces are given, discovers and runs all test namespaces
@@ -271,6 +285,30 @@ enum Commands {
         /// GC hard memory limit in MB (forces collection when exceeded).
         #[arg(long)]
         gc_hard_limit_mb: Option<usize>,
+    },
+}
+
+#[derive(Subcommand)]
+enum IrPrebuildCommands {
+    /// Lower namespaces to IR and write a serialized bundle.
+    Build {
+        /// Namespaces to lower (e.g. "clojure.core"). If none given, defaults to clojure.core.
+        #[arg(short, long)]
+        ns: Vec<String>,
+        /// Output file path for the serialized IR bundle.
+        #[arg(short, long, default_value = "ir_bundle.bin")]
+        output: PathBuf,
+        /// Additional source paths for namespace resolution.
+        #[arg(long = "src-path", value_name = "DIR")]
+        src_paths: Vec<PathBuf>,
+        /// Print verbose progress information.
+        #[arg(short, long)]
+        verbose: bool,
+    },
+    /// Print a human-readable dump of a serialized IR bundle.
+    Dump {
+        /// Path to a bundle written by `ir-prebuild build`.
+        input: PathBuf,
     },
 }
 
@@ -626,6 +664,7 @@ fn run_command(command: Commands, versioning: VersioningFlags) -> miette::Result
             src_paths,
             quiet,
         } => run_ir_viz(file, out, src_paths, quiet),
+        Commands::IrPrebuild { command } => run_ir_prebuild(command),
         Commands::Test {
             namespaces,
             src_paths,
@@ -715,6 +754,41 @@ fn run_ir_viz(
         eprintln!("[ir-viz] wrote {}", out_path.display());
     }
     Ok(0)
+}
+
+/// Lower namespaces to IR and write a bundle, or dump an existing one.
+fn run_ir_prebuild(command: IrPrebuildCommands) -> miette::Result<i32> {
+    match command {
+        IrPrebuildCommands::Build {
+            ns,
+            output,
+            src_paths,
+            verbose,
+        } => {
+            let namespaces = if ns.is_empty() {
+                vec!["clojure.core".to_string()]
+            } else {
+                ns
+            };
+            let stats = cljrs_ir_prebuild::run_prebuild(&namespaces, &output, &src_paths, verbose)
+                .map_err(|e| miette::miette!("{e}"))?;
+            eprintln!(
+                "Wrote {} functions ({} unsupported) to {}",
+                stats.lowered,
+                stats.unsupported,
+                stats.output.display()
+            );
+            Ok(0)
+        }
+        IrPrebuildCommands::Dump { input } => {
+            let bytes =
+                std::fs::read(&input).map_err(|e| miette::miette!("{}: {}", input.display(), e))?;
+            let bundle = cljrs_ir::deserialize_bundle(&bytes)
+                .map_err(|e| miette::miette!("failed to deserialize {}: {e}", input.display()))?;
+            println!("{}", bundle);
+            Ok(0)
+        }
+    }
 }
 
 /// Write a snapshot of `cljrs_gc::GC_STATS` to `target`.

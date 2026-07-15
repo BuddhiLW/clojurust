@@ -104,7 +104,7 @@ See [`TODO.md`](TODO.md) for the full itemised roadmap.
 | [`cljrs-interp`](crates/cljrs-interp) | Tree-walking Clojure interpreter: eval, special forms, macros, destructuring | complete |
 | [`cljrs-ir`](crates/cljrs-ir) | IR types (ANF/SSA) with serialization (postcard); ANF lowering, escape analysis, OSR | complete |
 | [`cljrs-eval`](crates/cljrs-eval) | IR-accelerated evaluation: IR interpreter, IR cache, tiering/JIT state, lower worker, prebuilt IR loading | complete |
-| [`cljrs-ir-prebuild`](crates/cljrs-ir-prebuild) | CLI tool to pre-lower Clojure namespaces to serialized IR bundles | complete |
+| [`cljrs-ir-prebuild`](crates/cljrs-ir-prebuild) | Pre-lowers Clojure namespaces to serialized IR bundles; library backing `cljrs ir-prebuild` and the standalone `cljrs-ir-prebuild` binary | complete |
 | [`cljrs-stdlib`](crates/cljrs-stdlib) | Embedded stdlib: clojure.string, clojure.set, clojure.test, clojure.walk, clojure.edn, clojure.zip, clojure.data | complete |
 | [`cljrs-logging`](crates/cljrs-logging) | Feature-gated logging (`-X debug:ir`, `-X trace:gc`, etc.) | complete |
 | [`cljrs-runtime`](crates/cljrs-runtime) | Runtime support placeholder | stub |
@@ -150,7 +150,7 @@ See [`TODO.md`](TODO.md) for the full itemised roadmap.
 
 | Crate | Description | Status |
 |-------|-------------|--------|
-| [`cljrs`](crates/cljrs) | `cljrs` CLI: `run`, `repl`, `eval`, `test`, `compile`, `ir-viz`, `deps`, `lsp`, `nrepl`, `build-native` (clap-based) | functional |
+| [`cljrs`](crates/cljrs) | `cljrs` CLI: `run`, `repl`, `eval`, `test`, `compile`, `ir-viz`, `ir-prebuild`, `deps`, `lsp`, `nrepl`, `build-native` (clap-based) | functional |
 
 Each crate has its own `README.md` with purpose, status, file layout, and public API.
 
@@ -175,6 +175,7 @@ cljrs eval '(+ 1 2 3)'            # evaluate expression from shell
 cljrs test --src-path test/ <ns>   # run clojure.test namespaces
 cljrs compile app.cljrs -o app     # AOT-compile to a standalone binary
 cljrs ir-viz <file> -o ir.html     # render optimized IR + source to HTML
+cljrs ir-prebuild build -o bundle.bin --ns clojure.core  # pre-lower namespaces to a serialized IR bundle
 cljrs deps fetch                  # fetch git deps declared in cljrs.edn
 cljrs lsp                         # start an LSP server (stdio)
 cljrs nrepl --port 7888           # start an nREPL server
