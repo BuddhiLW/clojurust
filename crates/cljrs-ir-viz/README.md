@@ -12,7 +12,7 @@ obvious why the optimizer left it on the GC heap.
 
 **Status:** Phase-2 tooling crate.  Implemented and tested against
 hand-written snippets; not yet integrated with the AOT compiler's
-`--emit-ir-html` flag (the CLI exposes it as a separate `cljrs ir-viz`
+`--emit-ir-html` flag (the CLI exposes it as the `cljrs ir viz`
 subcommand instead).
 
 ---
@@ -43,9 +43,9 @@ examples/
 ### CLI
 
 ```sh
-cljrs ir-viz path/to/file.cljrs        # writes path/to/file.cljrs.ir.html
-cljrs ir-viz path/to/file.cljrs -o out.html
-cljrs ir-viz path/to/file.cljrs --src-path src/    # for require resolution
+cljrs ir viz path/to/file.cljrs        # writes path/to/file.cljrs.ir.html
+cljrs ir viz path/to/file.cljrs -o out.html
+cljrs ir viz path/to/file.cljrs --src-path src/    # for require resolution
 ```
 
 ### Library
