@@ -782,18 +782,21 @@ impl<'a, 'b, M: Module> FunctionTranslator<'a, 'b, M> {
 
             Inst::CallKnown(dst, known_fn, args) => {
                 let val = self.emit_known_call(*dst, known_fn, args)?;
+                self.emit_gas_checkpoint(0)?;
                 let var = self.ensure_var(*dst);
                 self.builder.def_var(var, val);
             }
 
             Inst::Call(dst, callee, args) => {
                 let val = self.emit_unknown_call(*callee, args)?;
+                self.emit_gas_checkpoint(0)?;
                 let var = self.ensure_var(*dst);
                 self.builder.def_var(var, val);
             }
 
             Inst::CallDirect(dst, fn_name, args) => {
                 let val = self.emit_direct_call(fn_name, args)?;
+                self.emit_gas_checkpoint(0)?;
                 let var = self.ensure_var(*dst);
                 self.builder.def_var(var, val);
             }
@@ -1097,6 +1100,7 @@ impl<'a, 'b, M: Module> FunctionTranslator<'a, 'b, M> {
                 // opportunistic rt_abi allocation and GC root tracing).
                 let region_val = self.use_var(*region);
                 let val = self.emit_direct_call_with_extra(fn_name, args, region_val)?;
+                self.emit_gas_checkpoint(0)?;
                 let var = self.ensure_var(*dst);
                 self.builder.def_var(var, val);
             }
@@ -1215,8 +1219,27 @@ impl<'a, 'b, M: Module> FunctionTranslator<'a, 'b, M> {
                     .iconst(types::I32, cljrs_async::state_machine::POLL_THREW as i64);
                 self.builder.ins().return_(&[threw]);
 
-                // Ready → bind the resolved value; the continuation emits here.
+                // Gas exhaustion is not a catchable thrown value.
                 self.builder.switch_to_block(cont2);
+                let gas_block = self.builder.create_block();
+                let ready_block = self.builder.create_block();
+                let is_gas = self.builder.ins().icmp_imm(
+                    cranelift_codegen::ir::condcodes::IntCC::Equal,
+                    code,
+                    cljrs_async::state_machine::POLL_GAS_EXHAUSTED as i64,
+                );
+                self.builder
+                    .ins()
+                    .brif(is_gas, gas_block, &[], ready_block, &[]);
+                self.builder.switch_to_block(gas_block);
+                let exhausted = self.builder.ins().iconst(
+                    types::I32,
+                    cljrs_async::state_machine::POLL_GAS_EXHAUSTED as i64,
+                );
+                self.builder.ins().return_(&[exhausted]);
+
+                // Ready → bind the resolved value; the continuation emits here.
+                self.builder.switch_to_block(ready_block);
                 let result = self.call_rt_1(self.rt.rt_async_take_result, sm)?;
                 let var = self.ensure_var(*dst);
                 self.builder.def_var(var, result);

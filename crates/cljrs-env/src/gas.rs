@@ -1,13 +1,13 @@
 //! Cooperative execution-credit metering shared by every evaluation tier.
 //!
 //! Meter installation is thread-local; compiled async state machines explicitly
-//! capture and reinstall the active meter when they are spawned. Nested meters
+//! capture and reinstall the active meter stack when they are spawned. Nested meters
 //! are charged together so inner evaluations cannot escape an outer budget.
-//! Native code reports exhaustion through a sticky thread-local flag that is
-//! cleared only when a top-level gas guard is installed or the final guard is
-//! dropped, allowing the signal to survive callback/JIT bridge boundaries.
+//! Native code reports exhaustion through per-scope sticky thread-local flags,
+//! allowing the signal to survive callback/JIT bridge boundaries without
+//! contaminating a healthy enclosing or subsequent scope.
 
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -41,7 +41,7 @@ impl GasMeter {
 
 thread_local! {
     static ACTIVE: RefCell<Vec<Arc<GasMeter>>> = const { RefCell::new(Vec::new()) };
-    static EXHAUSTED: Cell<bool> = const { Cell::new(false) };
+    static EXHAUSTED: RefCell<Vec<bool>> = const { RefCell::new(Vec::new()) };
 }
 
 /// Installs a meter for the dynamic extent of an evaluation.
@@ -50,13 +50,8 @@ pub struct GasGuard;
 
 impl GasGuard {
     pub fn install(meter: Arc<GasMeter>) -> Self {
-        ACTIVE.with(|active| {
-            let mut active = active.borrow_mut();
-            if active.is_empty() {
-                EXHAUSTED.with(|exhausted| exhausted.set(false));
-            }
-            active.push(meter);
-        });
+        ACTIVE.with(|active| active.borrow_mut().push(meter));
+        EXHAUSTED.with(|exhausted| exhausted.borrow_mut().push(false));
         Self
     }
 }
@@ -66,15 +61,18 @@ impl Drop for GasGuard {
         ACTIVE.with(|active| {
             let mut active = active.borrow_mut();
             active.pop();
-            if active.is_empty() {
-                EXHAUSTED.with(|exhausted| exhausted.set(false));
-            }
+        });
+        EXHAUSTED.with(|exhausted| {
+            exhausted.borrow_mut().pop();
         });
     }
 }
 
 /// Charge the active evaluation, or succeed at no cost when unmetered.
 pub fn charge(cost: u64) -> bool {
+    if is_exhausted() {
+        return false;
+    }
     let charged = ACTIVE.with(|active| {
         let active = active.borrow();
         if active.is_empty() {
@@ -86,19 +84,33 @@ pub fn charge(cost: u64) -> bool {
         active.iter().all(|meter| meter.charge(cost))
     });
     if !charged {
-        EXHAUSTED.with(|exhausted| exhausted.set(true));
+        ACTIVE.with(|active| {
+            let active = active.borrow();
+            EXHAUSTED.with(|exhausted| {
+                for (index, meter) in active.iter().enumerate() {
+                    if meter.remaining() < cost {
+                        exhausted.borrow_mut()[index] = true;
+                    }
+                }
+            });
+        });
     }
     charged
 }
 
 /// Peek at the native-tier exhaustion signal set by a failed charge.
 pub fn is_exhausted() -> bool {
-    EXHAUSTED.with(|exhausted| exhausted.get())
+    EXHAUSTED.with(|exhausted| exhausted.borrow().iter().any(|value| *value))
 }
 
-/// Return the innermost active meter, if any, for async task propagation.
-pub fn active_meter() -> Option<Arc<GasMeter>> {
-    ACTIVE.with(|active| active.borrow().last().cloned())
+/// Clone the complete active meter stack for async task propagation.
+pub fn active_meters() -> Vec<Arc<GasMeter>> {
+    ACTIVE.with(|active| active.borrow().clone())
+}
+
+/// Install a captured meter stack in outer-to-inner order.
+pub fn install_meters(meters: &[Arc<GasMeter>]) -> Vec<GasGuard> {
+    meters.iter().cloned().map(GasGuard::install).collect()
 }
 
 /// Take the native-tier exhaustion signal set by a failed charge.
@@ -106,7 +118,12 @@ pub fn active_meter() -> Option<Arc<GasMeter>> {
 /// Prefer [`is_exhausted`] at dispatch boundaries; this remains available for
 /// tests and rare code that intentionally owns the current gas scope.
 pub fn take_exhausted() -> bool {
-    EXHAUSTED.with(|exhausted| exhausted.replace(false))
+    EXHAUSTED.with(|exhausted| {
+        let mut exhausted = exhausted.borrow_mut();
+        let was_exhausted = exhausted.iter().any(|value| *value);
+        exhausted.fill(false);
+        was_exhausted
+    })
 }
 
 #[cfg(test)]
@@ -132,5 +149,20 @@ mod tests {
         assert_eq!(outer.remaining(), 1);
         assert_eq!(inner.remaining(), 0);
         assert!(!charge(1));
+    }
+
+    #[test]
+    fn inner_exhaustion_does_not_poison_healthy_outer_scope() {
+        let outer = GasMeter::new(10);
+        let _outer_guard = GasGuard::install(outer.clone());
+        {
+            let inner = GasMeter::new(0);
+            let _inner_guard = GasGuard::install(inner);
+            assert!(!charge(1));
+            assert!(is_exhausted());
+        }
+        assert!(!is_exhausted());
+        assert!(charge(1));
+        assert_eq!(outer.remaining(), 9);
     }
 }

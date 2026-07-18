@@ -156,6 +156,11 @@ an in-band error value, so a pipeline of channels propagates errors automaticall
 **Error-value fidelity:** a failed future stores the thrown Clojure value
 (`FutureState::Failed(Value)`), and `await`/`deref` re-raise it as `EvalError::Thrown`, so
 `ex-message`/`ex-data`/`ex-cause` survive across an `await` boundary (and through `<?`/`go-try`).
+Gas exhaustion uses the distinct `FutureState::GasExhausted` state and is
+re-raised as `EvalError::GasExhausted`, so it cannot be intercepted by a
+user-level catch. Every `spawn_future` captures the complete active meter stack
+and reinstalls it only for each task poll, preserving nested budgets without
+leaking thread-local state across sibling `LocalSet` tasks.
 
 **Known limitation:** `eval_async` does not yet evaluate `try`/`catch` with *yielding* — it
 delegates them to the synchronous evaluator — so an `await`/`<?` inside a `try` (and therefore

@@ -12,7 +12,8 @@ fn env() -> cljrs_eval::Env {
 }
 
 #[test]
-fn tier1_function_exhausts_meter() {
+fn ir_function_exhausts_meter() {
+    cljrs_eval::force_eager_lowering();
     let mut env = env();
     for form in forms("(defn spin [n] (if (= n 0) 0 (spin (dec n))))") {
         cljrs_eval::eval(&form, &mut env).expect("defn");
