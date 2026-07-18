@@ -1005,6 +1005,10 @@ fn eval_try(args: &[Form], env: &mut Env) -> EvalResult {
             result = Err(EvalError::Recur(args));
             None
         }
+        Err(EvalError::GasExhausted) => {
+            result = Err(EvalError::GasExhausted);
+            None
+        }
         Err(other) => Some(other),
     };
 

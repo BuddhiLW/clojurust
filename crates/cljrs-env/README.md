@@ -2,6 +2,15 @@
 
 Environments for running programs in.
 
+## gas module
+
+Cooperative execution-credit metering shared dynamically across tree-walker,
+IR-interpreter, and JIT callbacks. `GasMeter::new(credits)` creates a shared
+budget, `GasGuard::install(meter)` scopes it to the current evaluation thread,
+`charge(cost) -> bool` consumes an all-or-nothing checkpoint, and
+`take_exhausted() -> bool` transfers a native-tier exhaustion signal back to
+the evaluator. `EvalError::GasExhausted` is the dedicated caller-facing error.
+
 ## versioned module (non-WASM)
 
 Shared versioned-symbol/namespace resolution service used by **every**

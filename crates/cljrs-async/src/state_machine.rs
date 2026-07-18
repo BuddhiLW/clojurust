@@ -8,7 +8,8 @@
 //! extern "C" fn(*mut CljxStateMachine, *mut *const Value) -> i32
 //! ```
 //!
-//! returning [`POLL_PENDING`] / [`POLL_READY`] / [`POLL_THREW`].  This module
+//! returning [`POLL_PENDING`] / [`POLL_READY`] / [`POLL_THREW`] /
+//! [`POLL_GAS_EXHAUSTED`].  This module
 //! supplies the runtime side: the [`CljxStateMachine`] that holds the resume
 //! state and the spilled live values, the [`CompiledAsyncTask`] `Future`
 //! adapter that drives the poll function on the existing `LocalSet` executor,
@@ -43,6 +44,7 @@ use std::task::{Context, Poll};
 
 use cljrs_env::env::GlobalEnv;
 use cljrs_env::error::{EvalError, EvalResult};
+use cljrs_env::gas::{GasGuard, GasMeter};
 use cljrs_env::gc_roots::{ValueRootGuard, root_value, root_values};
 use cljrs_value::{FutureState, Value};
 
@@ -59,6 +61,8 @@ pub const POLL_PENDING: i32 = 0;
 pub const POLL_READY: i32 = 1;
 /// Poll-function return code: the task threw; the thrown value is in `pending`.
 pub const POLL_THREW: i32 = 2;
+/// Poll-function return code: the active gas meter was exhausted.
+pub const POLL_GAS_EXHAUSTED: i32 = 3;
 
 /// The C-ABI signature of a compiled poll function.  The result/thrown value is
 /// returned in-band (`CljxStateMachine::pending`), not through an out-pointer.
@@ -82,6 +86,8 @@ pub struct CljxStateMachine {
     pub pending: Value,
     /// The compiled poll function.
     pub poll_fn: PollFn,
+    /// Meter captured from the spawning evaluation, reinstalled around polls.
+    pub gas_meter: Option<Arc<GasMeter>>,
     /// Eval context installed on the executor thread around each poll, so the
     /// poll function's global-lookup / call bridges resolve correctly.  `None`
     /// for hand-written poll functions in tests that need no global resolution.
@@ -101,6 +107,7 @@ impl CljxStateMachine {
             slots,
             pending: Value::Nil,
             poll_fn,
+            gas_meter: None,
             eval_ctx: None,
         }
     }
@@ -184,6 +191,11 @@ impl Future for CompiledAsyncTask {
         let _ctx_guard = this.sm.eval_ctx.as_ref().map(|(globals, ns)| {
             cljrs_env::callback::install_eval_context_guard(globals.clone(), ns.clone())
         });
+        let _gas_guard = this
+            .sm
+            .gas_meter
+            .as_ref()
+            .map(|meter| GasGuard::install(meter.clone()));
         let code = (this.sm.poll_fn)(sm_ptr);
         // The poll function reports its result in-band via `pending` (a plain,
         // GC-rooted `Value`), so completion is a safe field read — no raw
@@ -197,6 +209,7 @@ impl Future for CompiledAsyncTask {
             }
             POLL_READY => Poll::Ready(Ok(this.sm.pending.clone())),
             POLL_THREW => Poll::Ready(Err(EvalError::Thrown(this.sm.pending.clone()))),
+            POLL_GAS_EXHAUSTED => Poll::Ready(Err(EvalError::GasExhausted)),
             other => Poll::Ready(Err(EvalError::Runtime(format!(
                 "compiled async poll returned invalid code {other}"
             )))),
@@ -218,6 +231,7 @@ pub fn spawn_state_machine(
     eval_ctx: Option<EvalCtx>,
 ) -> Value {
     let mut sm = CljxStateMachine::new(poll_fn, n_slots, args);
+    sm.gas_meter = cljrs_env::gas::active_meter();
     sm.eval_ctx = eval_ctx;
     spawn_future(CompiledAsyncTask::new(sm))
 }
