@@ -218,7 +218,9 @@ walk directly, preserving full semantics.
   `rt_value_tag(v) -> i64` (tag classes `TAG_LONG`/`TAG_DOUBLE`/`TAG_BOOL`/`TAG_NIL`/`TAG_OTHER`,
   `pub const`s) — entry-guard type test; `rt_unbox_long(v) -> i64` / `rt_unbox_double(v) -> f64` —
   payload extraction after a successful guard; `rt_box_bool(u8)` — interned bool boxing for
-  unboxed `i8` booleans; `rt_deopt()` — counts a guard failure and returns the deopt sentinel
+  unboxed `i8` booleans; `rt_gas_charge(cost)` — charges the active weighted
+  basic-block meter and tells generated code to return early on exhaustion;
+  `rt_deopt()` — counts a guard failure and returns the deopt sentinel
   (a `Box::leak`ed non-GC address; `deopt_sentinel_addr() -> usize` exposes it to the dispatch
   seam via a `cljrs_eval::jit_state` hook); `rt_kw_ic_fill(ptr, len, slot)` — keyword-constant
   inline-cache fill: interns the keyword into a permanently rooted global table and stores the

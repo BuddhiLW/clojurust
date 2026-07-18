@@ -4311,6 +4311,7 @@ pub fn anchor_rt_symbols() {
     std::hint::black_box(rt_coerce_long as *const () as usize);
     std::hint::black_box(rt_coerce_double as *const () as usize);
     std::hint::black_box(rt_box_bool as *const () as usize);
+    std::hint::black_box(rt_gas_charge as *const () as usize);
     std::hint::black_box(rt_deopt as *const () as usize);
     std::hint::black_box(rt_kw_ic_fill as *const () as usize);
     std::hint::black_box(rt_load_global_versioned_ic as *const () as usize);
@@ -4421,6 +4422,12 @@ pub unsafe extern "C" fn rt_coerce_double(v: *const Value) -> f64 {
 #[unsafe(no_mangle)]
 pub extern "C" fn rt_box_bool(b: u8) -> *const Value {
     intern_bool(b != 0)
+}
+
+/// Charge a weighted compiled basic-block checkpoint.
+#[unsafe(no_mangle)]
+pub extern "C" fn rt_gas_charge(cost: u64) -> u8 {
+    u8::from(cljrs_env::gas::charge(cost))
 }
 
 /// The deoptimization sentinel: a unique, process-lifetime `Value` address

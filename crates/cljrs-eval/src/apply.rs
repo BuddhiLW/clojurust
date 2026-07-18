@@ -391,6 +391,10 @@ fn call_jit_native(
     // in ALLOC_ROOTS.  Clone it before the alloc frame drops.
     let result = unsafe { (*result_ptr).clone() };
 
+    if cljrs_env::gas::take_exhausted() {
+        return Err(cljrs_env::error::EvalError::GasExhausted);
+    }
+
     // An uncaught `(throw …)` inside native code stashes the thrown value in a
     // thread-local and returns the nil sentinel.  Surface it as an error here
     // (while the alloc frame still roots it), exactly as Tier-1 would have

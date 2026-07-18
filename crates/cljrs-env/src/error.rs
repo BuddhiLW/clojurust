@@ -8,6 +8,10 @@ pub enum EvalError {
     #[error("runtime error: {0}")]
     Runtime(String),
 
+    /// The cooperative execution-credit budget was exhausted.
+    #[error("gas exhausted")]
+    GasExhausted,
+
     #[error("unbound symbol: {0}")]
     UnboundSymbol(String),
 

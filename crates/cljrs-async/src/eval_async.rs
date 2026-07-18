@@ -291,6 +291,10 @@ async fn eval_try_async(args: &[Form], env: &mut Env) -> EvalResult {
             result = Err(EvalError::Recur(recur_args));
             None
         }
+        Err(EvalError::GasExhausted) => {
+            result = Err(EvalError::GasExhausted);
+            None
+        }
         Err(other) => Some(other),
     };
 

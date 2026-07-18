@@ -63,6 +63,7 @@ src/
 pub use cljrs_interp::eval::eval;
 pub use cljrs_env::env::{Env, GlobalEnv};
 pub use cljrs_env::error::{EvalError, EvalResult};
+pub use cljrs_interp::eval::{eval, eval_with_gas};
 pub use cljrs_env::callback::invoke;
 pub use cljrs_env::loader::load_ns;
 

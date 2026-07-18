@@ -75,6 +75,13 @@ tests/
 
 Evaluate a single `Form` in `env`.  Entry point for the interpreter.
 
+### `eval_with_gas(form, env, credits) -> EvalResult`
+
+Evaluate a form with a cooperative execution-credit budget. Tree-walker form
+entries cost one credit; Tier-1 IR and JIT basic blocks use the same weighted
+`phis + instructions + terminator` approximation. Exhaustion returns
+`EvalError::GasExhausted`; ordinary `eval` calls remain unmetered.
+
 ### `eval_call(func_form, arg_forms, env) -> EvalResult`
 
 Evaluate a function-call form.  Handles macros, native-function special cases,
