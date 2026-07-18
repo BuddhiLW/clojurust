@@ -622,6 +622,8 @@ impl<'a, 'b, M: Module> FunctionTranslator<'a, 'b, M> {
                 }
             }
 
+            self.emit_gas_checkpoint((ir_block.phis.len() + ir_block.insts.len() + 1) as u64)?;
+
             for inst in &ir_block.insts {
                 self.translate_inst(inst)?;
             }
@@ -1374,7 +1376,8 @@ impl<'a, 'b, M: Module> FunctionTranslator<'a, 'b, M> {
         self.builder.ins().call(func_ref, &[]);
     }
 
-    /// Charge a weighted basic block and return nil immediately on exhaustion.
+    /// Charge a weighted basic block and return a type-correct exhaustion
+    /// sentinel immediately when the active gas meter is exhausted.
     fn emit_gas_checkpoint(&mut self, cost: u64) -> CodegenResult<()> {
         let cost = self.builder.ins().iconst(types::I64, cost as i64);
         let charged = self.call_rt_1(self.rt.rt_gas_charge, cost)?;
@@ -1384,8 +1387,16 @@ impl<'a, 'b, M: Module> FunctionTranslator<'a, 'b, M> {
             .ins()
             .brif(charged, continue_block, &[], exhausted_block, &[]);
         self.builder.switch_to_block(exhausted_block);
-        let nil = self.call_rt_0(self.rt.rt_const_nil)?;
-        self.builder.ins().return_(&[nil]);
+        if self.is_poll_fn {
+            let exhausted = self.builder.ins().iconst(
+                types::I32,
+                cljrs_async::state_machine::POLL_GAS_EXHAUSTED as i64,
+            );
+            self.builder.ins().return_(&[exhausted]);
+        } else {
+            let nil = self.call_rt_0(self.rt.rt_const_nil)?;
+            self.builder.ins().return_(&[nil]);
+        }
         self.builder.switch_to_block(continue_block);
         Ok(())
     }
