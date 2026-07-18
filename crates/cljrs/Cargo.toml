@@ -46,6 +46,8 @@ cljrs-lsp      = { workspace = true }
 cljrs-nrepl    = { workspace = true }
 cljrs-jit      = { workspace = true }
 cljrs-dylib    = { workspace = true }
+cljrs-ir       = { workspace = true }
+cljrs-ir-prebuild = { workspace = true }
 clap          = { workspace = true }
 miette        = { workspace = true }
 tracing-subscriber = "0.3.23"

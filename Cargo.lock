@@ -735,6 +735,8 @@ dependencies = [
  "cljrs-gc",
  "cljrs-interop",
  "cljrs-io",
+ "cljrs-ir",
+ "cljrs-ir-prebuild",
  "cljrs-ir-viz",
  "cljrs-jit",
  "cljrs-logging",

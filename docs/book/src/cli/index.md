@@ -18,7 +18,7 @@ cljrs [GLOBAL OPTIONS] <SUBCOMMAND> [SUBCOMMAND OPTIONS]
 | [`compile`](compile.md) | AOT-compile a source file to a native binary |
 | [`test`](test.md) | Run `clojure.test` namespaces |
 | [`deps`](deps.md) | Manage project dependencies declared in `cljrs.edn` |
-| [`ir-viz`](ir-viz.md) | Render the optimised IR for a source file to HTML |
+| [`ir`](ir.md) | Inspect, pre-lower, and visualize the IR (`build`/`dump`/`viz`) |
 
 ## Global options
 

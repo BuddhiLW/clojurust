@@ -55,7 +55,7 @@ Tooling:
 
 - **LSP server** — `cljrs lsp`: parse diagnostics + document-symbol outline (`cljrs-lsp`)
 - **nREPL server** — `cljrs nrepl`: bencode-over-TCP for CIDER/Calva/Conjure (`cljrs-nrepl`)
-- **IR visualizer** — `cljrs ir-viz`: HTML view of optimized IR + region allocation (`cljrs-ir-viz`)
+- **IR visualizer** — `cljrs ir viz`: HTML view of optimized IR + region allocation (`cljrs-ir-viz`)
 - **Dependencies** — `cljrs deps fetch/status`: git-hosted deps from `cljrs.edn` (`cljrs-deps`, `cljrs-vcs`)
 - **WASM REPL** — browser REPL compiled to `wasm32-unknown-unknown` (`cljrs-wasm`)
 
@@ -104,7 +104,7 @@ See [`TODO.md`](TODO.md) for the full itemised roadmap.
 | [`cljrs-interp`](crates/cljrs-interp) | Tree-walking Clojure interpreter: eval, special forms, macros, destructuring | complete |
 | [`cljrs-ir`](crates/cljrs-ir) | IR types (ANF/SSA) with serialization (postcard); ANF lowering, escape analysis, OSR | complete |
 | [`cljrs-eval`](crates/cljrs-eval) | IR-accelerated evaluation: IR interpreter, IR cache, tiering/JIT state, lower worker, prebuilt IR loading | complete |
-| [`cljrs-ir-prebuild`](crates/cljrs-ir-prebuild) | CLI tool to pre-lower Clojure namespaces to serialized IR bundles | complete |
+| [`cljrs-ir-prebuild`](crates/cljrs-ir-prebuild) | Pre-lowers Clojure namespaces to serialized IR bundles; library backing `cljrs ir build` and the standalone `cljrs-ir-prebuild` binary | complete |
 | [`cljrs-stdlib`](crates/cljrs-stdlib) | Embedded stdlib: clojure.string, clojure.set, clojure.test, clojure.walk, clojure.edn, clojure.zip, clojure.data | complete |
 | [`cljrs-logging`](crates/cljrs-logging) | Feature-gated logging (`-X debug:ir`, `-X trace:gc`, etc.) | complete |
 | [`cljrs-runtime`](crates/cljrs-runtime) | Runtime support placeholder | stub |
@@ -115,7 +115,7 @@ See [`TODO.md`](TODO.md) for the full itemised roadmap.
 |-------|-------------|--------|
 | [`cljrs-compiler`](crates/cljrs-compiler) | Cranelift codegen (generic over `Module`), type inference, AOT object/binary emission, C-ABI runtime bridge | working |
 | [`cljrs-jit`](crates/cljrs-jit) | In-process JIT: hot-arity native compilation, type specialization + inline caches, OSR, code unloading, region threading | working |
-| [`cljrs-ir-viz`](crates/cljrs-ir-viz) | HTML visualizer for optimized IR + region allocation (`cljrs ir-viz`) | implemented |
+| [`cljrs-ir-viz`](crates/cljrs-ir-viz) | HTML visualizer for optimized IR + region allocation (`cljrs ir viz`) | implemented |
 
 ### Interop
 
@@ -150,7 +150,7 @@ See [`TODO.md`](TODO.md) for the full itemised roadmap.
 
 | Crate | Description | Status |
 |-------|-------------|--------|
-| [`cljrs`](crates/cljrs) | `cljrs` CLI: `run`, `repl`, `eval`, `test`, `compile`, `ir-viz`, `deps`, `lsp`, `nrepl`, `build-native` (clap-based) | functional |
+| [`cljrs`](crates/cljrs) | `cljrs` CLI: `run`, `repl`, `eval`, `test`, `compile`, `ir` (`build`/`dump`/`viz`), `deps`, `lsp`, `nrepl`, `build-native` (clap-based) | functional |
 
 Each crate has its own `README.md` with purpose, status, file layout, and public API.
 
@@ -174,7 +174,8 @@ cljrs repl                        # start interactive REPL
 cljrs eval '(+ 1 2 3)'            # evaluate expression from shell
 cljrs test --src-path test/ <ns>   # run clojure.test namespaces
 cljrs compile app.cljrs -o app     # AOT-compile to a standalone binary
-cljrs ir-viz <file> -o ir.html     # render optimized IR + source to HTML
+cljrs ir viz <file> -o ir.html     # render optimized IR + source to HTML
+cljrs ir build -o bundle.bin --ns clojure.core  # pre-lower namespaces to a serialized IR bundle
 cljrs deps fetch                  # fetch git deps declared in cljrs.edn
 cljrs lsp                         # start an LSP server (stdio)
 cljrs nrepl --port 7888           # start an nREPL server

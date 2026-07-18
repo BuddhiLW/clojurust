@@ -180,24 +180,10 @@ enum Commands {
         /// The expression to evaluate.
         expr: String,
     },
-    /// Render the optimized IR for a source file to a self-contained HTML
-    /// page (source ↔ IR with region color-coding and escape annotations).
-    ///
-    /// Useful for debugging the bump-allocation optimizer: any allocation
-    /// that didn't make it into a region is flagged with its escape
-    /// verdict and a representative blamed use.
-    IrViz {
-        /// Path to the source file.
-        file: PathBuf,
-        /// Output HTML path.  If omitted, writes to <file>.ir.html alongside the source.
-        #[arg(short, long)]
-        out: Option<PathBuf>,
-        /// Source directories to search when resolving `require`.
-        #[arg(long = "src-path", value_name = "DIR")]
-        src_paths: Vec<PathBuf>,
-        /// Suppress the `[aot] ...` progress output.
-        #[arg(long)]
-        quiet: bool,
+    /// Inspect, pre-lower, and visualize clojurust's intermediate representation.
+    Ir {
+        #[command(subcommand)]
+        command: IrCommands,
     },
     /// Run clojure.test tests for one or more namespaces.
     ///
@@ -271,6 +257,58 @@ enum Commands {
         /// GC hard memory limit in MB (forces collection when exceeded).
         #[arg(long)]
         gc_hard_limit_mb: Option<usize>,
+    },
+}
+
+#[derive(Subcommand)]
+enum IrCommands {
+    /// Lower namespaces to IR and write a serialized bundle.
+    ///
+    /// A bundle produced by `build` is loaded back at startup with the public
+    /// `cljrs_eval::load_prebuilt_ir` API, which matches bundle entries to the
+    /// live `ir_arity_id`s assigned when the target functions are defined and
+    /// populates the IR cache directly, so the functions execute at Tier 1
+    /// (IR interpreter) from their very first call — skipping the warmup that
+    /// background lowering normally needs. Most useful for cutting cold-start
+    /// latency on targets that can't run the background lowering worker, such
+    /// as an embedder built for `wasm32`.
+    Build {
+        /// Namespaces to lower (e.g. "clojure.core"). If none given, defaults to clojure.core.
+        #[arg(short, long)]
+        ns: Vec<String>,
+        /// Output file path for the serialized IR bundle.
+        #[arg(short, long, default_value = "ir_bundle.bin")]
+        output: PathBuf,
+        /// Additional source paths for namespace resolution.
+        #[arg(long = "src-path", value_name = "DIR")]
+        src_paths: Vec<PathBuf>,
+        /// Print verbose progress information.
+        #[arg(short, long)]
+        verbose: bool,
+    },
+    /// Print a human-readable dump of a serialized IR bundle.
+    Dump {
+        /// Path to a bundle written by `ir build`.
+        input: PathBuf,
+    },
+    /// Render the optimized IR for a source file to a self-contained HTML
+    /// page (source ↔ IR with region color-coding and escape annotations).
+    ///
+    /// Useful for debugging the bump-allocation optimizer: any allocation
+    /// that didn't make it into a region is flagged with its escape
+    /// verdict and a representative blamed use.
+    Viz {
+        /// Path to the source file.
+        file: PathBuf,
+        /// Output HTML path.  If omitted, writes to <file>.ir.html alongside the source.
+        #[arg(short, long)]
+        out: Option<PathBuf>,
+        /// Source directories to search when resolving `require`.
+        #[arg(long = "src-path", value_name = "DIR")]
+        src_paths: Vec<PathBuf>,
+        /// Suppress the `[aot] ...` progress output.
+        #[arg(long)]
+        quiet: bool,
     },
 }
 
@@ -620,12 +658,7 @@ fn run_command(command: Commands, versioning: VersioningFlags) -> miette::Result
             }
             Ok(0)
         }
-        Commands::IrViz {
-            file,
-            out,
-            src_paths,
-            quiet,
-        } => run_ir_viz(file, out, src_paths, quiet),
+        Commands::Ir { command } => run_ir(command),
         Commands::Test {
             namespaces,
             src_paths,
@@ -682,6 +715,47 @@ fn run_command(command: Commands, versioning: VersioningFlags) -> miette::Result
     }
 }
 
+/// Dispatch the `ir` subcommands: `build`, `dump`, `viz`.
+fn run_ir(command: IrCommands) -> miette::Result<i32> {
+    match command {
+        IrCommands::Build {
+            ns,
+            output,
+            src_paths,
+            verbose,
+        } => {
+            let namespaces = if ns.is_empty() {
+                vec!["clojure.core".to_string()]
+            } else {
+                ns
+            };
+            let stats = cljrs_ir_prebuild::run_prebuild(&namespaces, &output, &src_paths, verbose)
+                .map_err(|e| miette::miette!("{e}"))?;
+            eprintln!(
+                "Wrote {} functions ({} unsupported) to {}",
+                stats.lowered,
+                stats.unsupported,
+                stats.output.display()
+            );
+            Ok(0)
+        }
+        IrCommands::Dump { input } => {
+            let bytes =
+                std::fs::read(&input).map_err(|e| miette::miette!("{}: {}", input.display(), e))?;
+            let bundle = cljrs_ir::deserialize_bundle(&bytes)
+                .map_err(|e| miette::miette!("failed to deserialize {}: {e}", input.display()))?;
+            println!("{}", bundle);
+            Ok(0)
+        }
+        IrCommands::Viz {
+            file,
+            out,
+            src_paths,
+            quiet,
+        } => run_ir_viz(file, out, src_paths, quiet),
+    }
+}
+
 /// Lower a source file through the AOT pipeline (up to region optimization)
 /// and write a self-contained HTML visualizer to disk.
 fn run_ir_viz(
@@ -712,7 +786,7 @@ fn run_ir_viz(
     std::fs::write(&out_path, html)
         .map_err(|e| miette::miette!("writing {}: {e}", out_path.display()))?;
     if !quiet {
-        eprintln!("[ir-viz] wrote {}", out_path.display());
+        eprintln!("[ir viz] wrote {}", out_path.display());
     }
     Ok(0)
 }
