@@ -1250,6 +1250,9 @@ fn format_eval_error(e: EvalError) -> miette::Report {
         EvalError::NotCallable(s) => miette::miette!("Not a function: {}", s),
         EvalError::Runtime(msg) => miette::miette!("{}", msg),
         EvalError::GasExhausted => miette::miette!("gas exhausted"),
+        EvalError::ForbiddenEffect(operation) => {
+            miette::miette!("effect forbidden in transaction function: {operation}")
+        }
         EvalError::Read(e) => miette::Report::from(e),
         EvalError::Recur(_) => miette::miette!("recur outside of loop/fn"),
         EvalError::CommitSignatureVerificationFailed { commit, reason } => {

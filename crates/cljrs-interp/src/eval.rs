@@ -207,6 +207,7 @@ fn eval_symbol(s: &str, env: &mut Env) -> EvalResult {
     // namespace-level lookup — no local-frame fallback.
     #[cfg(not(target_arch = "wasm32"))]
     if let Some(ref commit) = sym.version.clone() {
+        cljrs_env::policy::check_versioned_lookup()?;
         return crate::versioned::resolve_versioned_symbol(&sym, commit, env);
     }
     #[cfg(target_arch = "wasm32")]

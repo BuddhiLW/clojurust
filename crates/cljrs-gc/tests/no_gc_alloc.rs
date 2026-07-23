@@ -10,7 +10,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use cljrs_gc::alloc_ctx::{ScratchGuard, StaticCtxGuard};
+use cljrs_gc::alloc_ctx::{InvocationGuard, ScratchGuard, StaticCtxGuard};
 use cljrs_gc::{GcPtr, MarkVisitor, Trace};
 
 // ── Helper ────────────────────────────────────────────────────────────────────
@@ -273,4 +273,31 @@ fn return_value_protocol_allocates_in_caller_context() {
     };
 
     assert_eq!(*return_value.get(), 42);
+}
+
+#[test]
+fn invocation_uses_one_region_across_nested_guards() {
+    let invocation = InvocationGuard::new(4096);
+    let before = invocation.object_count();
+    {
+        let mut scratch = ScratchGuard::new();
+        let _static_ctx = StaticCtxGuard::new();
+        let _a = GcPtr::new(1i64);
+        scratch.pop_for_return();
+        let _b = GcPtr::new(2i64);
+    }
+    assert_eq!(invocation.object_count(), before + 2);
+}
+
+#[test]
+fn invocation_runs_all_destructors_at_boundary() {
+    let dropped = Arc::new(Mutex::new(false));
+    {
+        let _invocation = InvocationGuard::new(4096);
+        let _value = GcPtr::new(DropTracked {
+            dropped: dropped.clone(),
+        });
+        assert!(!*dropped.lock().unwrap());
+    }
+    assert!(*dropped.lock().unwrap());
 }

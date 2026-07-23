@@ -12,6 +12,11 @@ pub enum EvalError {
     #[error("gas exhausted")]
     GasExhausted,
 
+    /// An operation attempted to use a capability unavailable to an isolated
+    /// transaction function.
+    #[error("effect forbidden in transaction function: {0}")]
+    ForbiddenEffect(String),
+
     #[error("unbound symbol: {0}")]
     UnboundSymbol(String),
 

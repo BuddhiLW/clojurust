@@ -409,7 +409,7 @@ impl<T: Trace + 'static> GcPtr<T> {
     /// region-local values being stored in program-lifetime containers.
     #[cfg(all(feature = "no-gc", debug_assertions))]
     pub fn is_static_alloc(&self) -> bool {
-        static_arena::is_static_addr(self.0.as_ptr() as usize)
+        alloc_ctx::invocation_is_active() || static_arena::is_static_addr(self.0.as_ptr() as usize)
     }
 }
 

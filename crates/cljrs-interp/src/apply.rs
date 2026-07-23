@@ -204,6 +204,7 @@ pub fn eval_call(func_form: &Form, arg_forms: &[Form], env: &mut Env) -> EvalRes
 
     // Special case: `apply` native fn — spread last arg.
     if let Value::NativeFunction(nf) = &callee {
+        cljrs_env::policy::check_native(&nf.get().name)?;
         match nf.get().name.as_ref() {
             "apply" => return handle_apply_call(arg_forms, env),
             "atom" => return handle_atom_call(arg_forms, env),
