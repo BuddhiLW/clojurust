@@ -28,6 +28,19 @@ use crate::{GcBox, GcPtr, Trace};
 /// Default chunk size (4 KiB).  Chunks grow if a single allocation is larger.
 const DEFAULT_CHUNK_SIZE: usize = 4096;
 
+/// Raised when a bounded region cannot satisfy an allocation.
+///
+/// `GcPtr::new` is intentionally infallible throughout the runtime, so a
+/// bounded invocation reports exhaustion by unwinding with this typed payload.
+/// Execution boundaries can catch it with `catch_unwind` and turn it into a
+/// normal transaction error without confusing it with a user panic.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RegionLimitExceeded {
+    pub limit: usize,
+    pub used: usize,
+    pub requested: usize,
+}
+
 // ── Internal: chunk of raw memory ───────────────────────────────────────────
 
 struct Chunk {
@@ -79,6 +92,12 @@ pub struct Region {
     drops: Vec<DropEntry>,
     /// Cumulative bytes consumed by objects (excludes alignment padding).
     bytes_used: usize,
+    /// Managed bytes charged to this region, including out-of-line storage
+    /// reported by `Trace::gc_size_extra`.
+    accounted_bytes: usize,
+    /// Optional hard ceiling for managed bytes. A bounded region is backed by
+    /// one fixed-size chunk and never grows.
+    byte_limit: Option<usize>,
     /// Number of objects allocated.
     object_count: usize,
 }
@@ -100,6 +119,32 @@ impl Region {
             end: base + cap,
             drops: Vec::new(),
             bytes_used: 0,
+            accounted_bytes: 0,
+            byte_limit: None,
+            object_count: 0,
+        }
+    }
+
+    /// Create a region with a fixed managed-memory budget.
+    ///
+    /// The region allocates one `limit`-byte chunk and will never grow it.
+    /// Object boxes, alignment, and out-of-line bytes reported through
+    /// [`Trace::gc_size_extra`] are charged to the limit. Allocations made by
+    /// ordinary Rust containers that are not owned by a traced value are not
+    /// visible here; callers that require a process-wide hard RSS ceiling must
+    /// add an outer sandbox (for example a WASM linear-memory limit).
+    pub fn with_limit(limit: usize) -> Self {
+        assert!(limit >= 64, "Region: byte limit must be at least 64");
+        let chunk = Chunk::new(limit, 16);
+        let base = chunk.data.as_ptr() as usize;
+        Self {
+            chunks: vec![chunk],
+            ptr: base,
+            end: base + limit,
+            drops: Vec::new(),
+            bytes_used: 0,
+            accounted_bytes: 0,
+            byte_limit: Some(limit),
             object_count: 0,
         }
     }
@@ -110,6 +155,8 @@ impl Region {
     /// The object is **not** registered in the global GC heap.
     pub fn alloc<T: Trace + 'static>(&mut self, value: T) -> GcPtr<T> {
         let layout = Layout::new::<GcBox<T>>();
+        let requested = layout.size().saturating_add(value.gc_size_extra());
+        self.charge(requested);
         let raw = self.bump_alloc(layout);
 
         let gc_box = raw as *mut GcBox<T>;
@@ -187,6 +234,7 @@ impl Region {
         }
 
         self.bytes_used = 0;
+        self.accounted_bytes = 0;
         self.object_count = 0;
     }
 
@@ -198,6 +246,16 @@ impl Region {
     /// Number of objects currently in the region.
     pub fn object_count(&self) -> usize {
         self.object_count
+    }
+
+    /// Managed bytes charged against this region's optional limit.
+    pub fn accounted_bytes(&self) -> usize {
+        self.accounted_bytes
+    }
+
+    /// Configured managed-memory limit, if this is a bounded region.
+    pub fn byte_limit(&self) -> Option<usize> {
+        self.byte_limit
     }
 
     // ── internal ────────────────────────────────────────────────────────────
@@ -220,9 +278,29 @@ impl Region {
         }
     }
 
+    fn charge(&mut self, requested: usize) {
+        if let Some(limit) = self.byte_limit
+            && self.accounted_bytes.saturating_add(requested) > limit
+        {
+            std::panic::panic_any(RegionLimitExceeded {
+                limit,
+                used: self.accounted_bytes,
+                requested,
+            });
+        }
+        self.accounted_bytes = self.accounted_bytes.saturating_add(requested);
+    }
+
     /// Allocate a new chunk large enough, then bump-allocate from it.
     fn grow_and_alloc(&mut self, layout: Layout) -> *mut u8 {
         let size = layout.size();
+        if let Some(limit) = self.byte_limit {
+            std::panic::panic_any(RegionLimitExceeded {
+                limit,
+                used: self.accounted_bytes.saturating_sub(size),
+                requested: size,
+            });
+        }
         let chunk_size = DEFAULT_CHUNK_SIZE.max(size * 2);
         let chunk = Chunk::new(chunk_size, layout.align());
         let base = chunk.data.as_ptr() as usize;

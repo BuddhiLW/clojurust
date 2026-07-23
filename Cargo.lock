@@ -1156,6 +1156,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "cljrs-tx"
+version = "0.1.0"
+dependencies = [
+ "cljrs-env",
+ "cljrs-gc",
+ "cljrs-interp",
+ "cljrs-reader",
+ "cljrs-types",
+ "cljrs-value",
+ "thiserror",
+]
+
+[[package]]
 name = "cljrs-types"
 version = "0.1.0"
 dependencies = [

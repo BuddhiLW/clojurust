@@ -41,6 +41,11 @@ and `recur` arguments are evaluated in the caller's context (the
 and live for the program lifetime.
 No `GcHeap`, no stop-the-world pauses, no `Trace` overhead at runtime.
 
+An isolated invocation can instead install `alloc_ctx::InvocationGuard`. In
+that profile every allocation uses one bounded region; nested `ScratchGuard`
+and `StaticCtxGuard` values become no-ops, so arbitrary internal graphs share
+the invocation lifetime and are reclaimed together at the boundary.
+
 **Phase 7 (debug provenance):** in `debug_assertions` builds with `no-gc`,
 `StaticArena` tracks chunk ranges and exposes `is_static_addr(usize) -> bool`.
 `GcPtr::is_static_alloc()` uses this to check pointer provenance at O(chunks)
@@ -62,7 +67,7 @@ src/
   static_arena.rs — (no-gc mode) global program-lifetime bump allocator;
                     in debug builds, tracks chunk ranges for is_static_addr()
   alloc_ctx.rs    — (no-gc mode) thread-local allocation context stack;
-                    ScratchGuard, StaticCtxGuard
+                    ScratchGuard, StaticCtxGuard, InvocationGuard
   region.rs       — Region bump allocator, RegionGuard, thread-local region
                     stack; trace_active_regions() (GC-root scan of live regions);
                     poison/retire protocol (Phase 10.5 heap-promotion fallback):
@@ -76,8 +81,8 @@ src/
                     isolate-boundary crossings (bytes copied + serialize time)
 tests/
   no_gc_alloc.rs  — (no-gc mode) integration tests for the allocation context stack:
-                    ScratchGuard, StaticCtxGuard, pop_for_return protocol,
-                    nested guards, destructor ordering
+                    ScratchGuard, StaticCtxGuard, InvocationGuard,
+                    pop_for_return protocol, nested guards, destructor ordering
 ```
 
 ---
@@ -238,12 +243,35 @@ pub struct Region { /* chunks, bump pointer, drop registry */ }
 impl Region {
     pub fn new() -> Self
     pub fn with_capacity(cap: usize) -> Self
+    pub fn with_limit(limit: usize) -> Self
     pub fn alloc<T: Trace + 'static>(&mut self, value: T) -> GcPtr<T>
     pub fn reset(&mut self)
     pub fn bytes_used(&self) -> usize
+    pub fn accounted_bytes(&self) -> usize
+    pub fn byte_limit(&self) -> Option<usize>
     pub fn object_count(&self) -> usize
 }
 ```
+
+`with_limit` raises the typed `RegionLimitExceeded` panic payload when the
+managed allocation budget is exhausted. It charges boxes plus
+`Trace::gc_size_extra`; it is not a process-wide RSS limiter.
+
+### `alloc_ctx::InvocationGuard` (`no-gc` only)
+
+```rust
+pub struct InvocationGuard { /* one bounded Region */ }
+impl InvocationGuard {
+    pub fn new(byte_limit: usize) -> Self;
+    pub fn accounted_bytes(&self) -> usize;
+    pub fn object_count(&self) -> usize;
+}
+pub fn invocation_is_active() -> bool;
+```
+
+All `GcPtr::new` calls within the guard use its single arena, including calls
+made beneath evaluator scratch/static guards. Copy or serialize results before
+the guard drops.
 
 Bump allocator for short-lived objects. ~2.6x faster than `GcHeap::alloc`
 (no mutex, no `Box::new`). Objects are NOT in the GC heap linked list.

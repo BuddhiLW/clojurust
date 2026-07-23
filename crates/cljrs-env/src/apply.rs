@@ -133,6 +133,7 @@ pub fn apply_value(callee: &Value, args: Vec<Value>, env: &mut Env) -> EvalResul
 
     match callee {
         Value::NativeFunction(nf) => {
+            crate::policy::check_native(&nf.get().name)?;
             check_arity(&nf.get().arity, args.len(), &nf.get().name)?;
             // Register the caller's env as a GC root: native functions may
             // call back into Clojure (via invoke()), which creates a fresh Env

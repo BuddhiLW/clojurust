@@ -209,7 +209,8 @@ fn qualify_symbol(
     // Auto-gensym: `foo#`.
     if let Some(base) = s.strip_suffix('#') {
         let generated = gensyms.entry(s.to_string()).or_insert_with(|| {
-            let n = GENSYM_COUNTER.fetch_add(1, Ordering::Relaxed);
+            let n = cljrs_env::policy::next_transaction_gensym()
+                .unwrap_or_else(|| GENSYM_COUNTER.fetch_add(1, Ordering::Relaxed));
             Arc::from(format!("{base}__{n}__auto__"))
         });
         return generated.as_ref().to_string();

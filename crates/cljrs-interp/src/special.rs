@@ -20,6 +20,7 @@ use cljrs_value::{
 
 /// Dispatch to the right special-form handler.
 pub fn eval_special(head: &str, args: &[Form], env: &mut Env) -> EvalResult {
+    cljrs_env::policy::check_special(head)?;
     match head {
         "def" => eval_def(args, env),
         "fn*" | "fn" => eval_fn(args, env),

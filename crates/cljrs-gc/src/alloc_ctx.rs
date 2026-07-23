@@ -27,6 +27,10 @@ pub(crate) enum AllocCtx {
     Static,
     /// Allocate in the given bump region.
     Region(*mut Region),
+    /// One arena owns every allocation made during an isolated invocation.
+    /// Nested function/loop scratch guards and static-sink guards become
+    /// no-ops while this entry is active.
+    Invocation(*mut Region),
 }
 
 // SAFETY: AllocCtx values are only accessed from their owning thread.
@@ -44,12 +48,69 @@ pub(crate) fn alloc_in_ctx<T: Trace + 'static>(value: T) -> GcPtr<T> {
         let ctx = ctx.borrow();
         match ctx.last() {
             None | Some(AllocCtx::Static) => static_arena().alloc(value),
-            Some(AllocCtx::Region(ptr)) => {
+            Some(AllocCtx::Region(ptr) | AllocCtx::Invocation(ptr)) => {
                 // SAFETY: The Region pointer is valid while the owning ScratchGuard is live.
                 unsafe { &mut **ptr }.alloc(value)
             }
         }
     })
+}
+
+pub fn invocation_is_active() -> bool {
+    ALLOC_CTX.with(|ctx| {
+        ctx.borrow()
+            .iter()
+            .any(|entry| matches!(entry, AllocCtx::Invocation(_)))
+    })
+}
+
+/// Owns the single bounded arena used by a GC-less isolated invocation.
+///
+/// Every `GcPtr::new` within the guard's dynamic extent lands in this arena.
+/// Existing evaluator scratch/static guards deliberately do not change that
+/// routing, which gives every value the same lifetime and permits arbitrary
+/// internal object graphs. Values must be serialized or otherwise copied out
+/// before this guard drops.
+pub struct InvocationGuard {
+    region: Box<Region>,
+    in_ctx: bool,
+}
+
+impl InvocationGuard {
+    pub fn new(byte_limit: usize) -> Self {
+        assert!(
+            !invocation_is_active(),
+            "nested isolated allocation invocations are not supported"
+        );
+        let mut region = Box::new(Region::with_limit(byte_limit));
+        let ptr = region.as_mut() as *mut Region;
+        ALLOC_CTX.with(|ctx| ctx.borrow_mut().push(AllocCtx::Invocation(ptr)));
+        Self {
+            region,
+            in_ctx: true,
+        }
+    }
+
+    pub fn accounted_bytes(&self) -> usize {
+        self.region.accounted_bytes()
+    }
+
+    pub fn object_count(&self) -> usize {
+        self.region.object_count()
+    }
+}
+
+impl Drop for InvocationGuard {
+    fn drop(&mut self) {
+        if self.in_ctx {
+            ALLOC_CTX.with(|ctx| {
+                let popped = ctx.borrow_mut().pop();
+                debug_assert!(matches!(popped, Some(AllocCtx::Invocation(_))));
+            });
+            self.in_ctx = false;
+        }
+        self.region.reset();
+    }
 }
 
 // ── ScratchGuard ──────────────────────────────────────────────────────────────
@@ -67,18 +128,24 @@ pub(crate) fn alloc_in_ctx<T: Trace + 'static>(value: T) -> GcPtr<T> {
 /// 4. Evaluate the tail (return) expression → lands in the caller's context.
 /// 5. `ScratchGuard` drops → scratch memory is reset (intermediates freed).
 pub struct ScratchGuard {
-    region: Box<Region>,
+    region: Option<Box<Region>>,
     /// Whether the ctx entry is currently on the stack.
     in_ctx: bool,
 }
 
 impl ScratchGuard {
     pub fn new() -> Self {
+        if invocation_is_active() {
+            return Self {
+                region: None,
+                in_ctx: false,
+            };
+        }
         let mut region = Box::new(Region::new());
         let ptr = region.as_mut() as *mut Region;
         ALLOC_CTX.with(|ctx| ctx.borrow_mut().push(AllocCtx::Region(ptr)));
         Self {
-            region,
+            region: Some(region),
             in_ctx: true,
         }
     }
@@ -110,7 +177,9 @@ impl Drop for ScratchGuard {
         }
         // Reset the region: runs destructors on all contained values and
         // reclaims bump-allocator memory for reuse.
-        self.region.reset();
+        if let Some(region) = &mut self.region {
+            region.reset();
+        }
     }
 }
 
@@ -124,12 +193,17 @@ impl Drop for ScratchGuard {
 /// - `atom` / `Var` initializers
 /// - `reset!` / `vreset!` new-value expressions
 /// - the function passed to `swap!` / `vswap!`
-pub struct StaticCtxGuard;
+pub struct StaticCtxGuard {
+    pushed: bool,
+}
 
 impl StaticCtxGuard {
     pub fn new() -> Self {
+        if invocation_is_active() {
+            return Self { pushed: false };
+        }
         ALLOC_CTX.with(|ctx| ctx.borrow_mut().push(AllocCtx::Static));
-        Self
+        Self { pushed: true }
     }
 }
 
@@ -141,6 +215,8 @@ impl Default for StaticCtxGuard {
 
 impl Drop for StaticCtxGuard {
     fn drop(&mut self) {
-        ALLOC_CTX.with(|ctx| ctx.borrow_mut().pop());
+        if self.pushed {
+            ALLOC_CTX.with(|ctx| ctx.borrow_mut().pop());
+        }
     }
 }

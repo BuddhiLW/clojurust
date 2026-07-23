@@ -15,6 +15,17 @@ the evaluator. `EvalError::GasExhausted` is the dedicated caller-facing error.
 Exhaustion state is scoped per guard, so an exhausted inner evaluation cannot
 poison a healthy outer evaluation after the inner guard drops.
 
+## policy module
+
+Dynamic capability policy used by isolated transaction functions.
+`TransactionPolicyGuard::install()` denies filesystem and output operations,
+clocks, randomness, process-global mutable facilities, blocking/concurrency,
+versioned namespace loading, and Rust object construction. `check_native`,
+`check_special`, and `check_versioned_lookup` are enforced at the interpreter's
+final dispatch seams. `next_transaction_gensym()` supplies an invocation-local
+deterministic sequence for syntax-quote hygiene. Violations return
+`EvalError::ForbiddenEffect(String)`.
+
 ## versioned module (non-WASM)
 
 Shared versioned-symbol/namespace resolution service used by **every**

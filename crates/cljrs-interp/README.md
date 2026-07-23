@@ -22,6 +22,9 @@ interval (GC fires only at explicit safepoints, with a one-cycle grace period â€
 see `cljrs-gc`). Under the `no-gc` Cargo feature the same scoping is achieved
 with the allocation-context stack protocol (scratch regions for function/loop
 scopes; `StaticArena` for static-sink expressions).
+When `cljrs-env`'s transaction policy and `InvocationGuard` are active, the
+same tree walker denies external capabilities and routes all allocations into
+one invocation-lifetime region instead.
 
 ---
 

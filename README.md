@@ -102,6 +102,7 @@ See [`TODO.md`](TODO.md) for the full itemised roadmap.
 | [`cljrs-env`](crates/cljrs-env) | Shared runtime environment: `GlobalEnv`, `Env`, dynamic bindings, namespace loader, GC roots | complete |
 | [`cljrs-builtins`](crates/cljrs-builtins) | Native Clojure core functions (~300 builtins), transients, regex, bitops | complete |
 | [`cljrs-interp`](crates/cljrs-interp) | Tree-walking Clojure interpreter: eval, special forms, macros, destructuring | complete |
+| [`cljrs-tx`](crates/cljrs-tx) | Pure tree-walked transaction functions in a bounded, invocation-lifetime no-GC arena | initial |
 | [`cljrs-ir`](crates/cljrs-ir) | IR types (ANF/SSA) with serialization (postcard); ANF lowering, escape analysis, OSR | complete |
 | [`cljrs-eval`](crates/cljrs-eval) | IR-accelerated evaluation: IR interpreter, IR cache, tiering/JIT state, lower worker, prebuilt IR loading | complete |
 | [`cljrs-ir-prebuild`](crates/cljrs-ir-prebuild) | Pre-lowers Clojure namespaces to serialized IR bundles; library backing `cljrs ir build` and the standalone `cljrs-ir-prebuild` binary | complete |
