@@ -29,6 +29,9 @@ pub enum AotError {
     Link(String),
     /// The wasm backend could not lower a construct in the program.
     Wasm(crate::wasm::WasmError),
+    /// The opacity policy forbids embedded Clojure source and the binary would
+    /// still carry some.
+    SourceEmbedded(SourceAudit),
     /// One or more no-gc memory-safety violations were found by the blacklist
     /// analysis.  Only emitted when the `no-gc` Cargo feature is active.
     #[cfg(feature = "no-gc")]
@@ -44,6 +47,23 @@ impl std::fmt::Display for AotError {
             AotError::Eval(e) => write!(f, "eval/lowering error: {e}"),
             AotError::Link(e) => write!(f, "link error: {e}"),
             AotError::Wasm(e) => write!(f, "wasm backend error: {e}"),
+            AotError::SourceEmbedded(audit) => {
+                writeln!(
+                    f,
+                    "--require-fully-compiled: {} source fragment(s) ({} bytes) would be \
+                     embedded in the binary as readable Clojure text:",
+                    audit.leaks().len(),
+                    audit.total_bytes()
+                )?;
+                for l in audit.leaks() {
+                    writeln!(f, "  • {l}")?;
+                }
+                write!(
+                    f,
+                    "Only plain `defn` bodies are compiled to machine code. Move the forms above \
+                     out of the compiled unit, or drop --require-fully-compiled."
+                )
+            }
             #[cfg(feature = "no-gc")]
             AotError::NoGcBlacklist(vs) => {
                 writeln!(f, "no-gc blacklist violations:")?;
@@ -546,13 +566,16 @@ pub fn compile_file_to_wasm(
 /// before loading any Clojure code.  `verify_commit_signatures` enables
 /// `git verify-commit` on every versioned pin resolved during compilation
 /// (the produced binary trusts its embedded sources, so verification happens
-/// here, at compile time).
+/// here, at compile time).  `opacity` decides what happens when the binary
+/// would still carry readable Clojure source; [`audit_source`] reports the same
+/// set without applying any policy.
 pub fn compile_file(
     src_path: &Path,
     out_path: &Path,
     src_dirs: &[PathBuf],
     rust_config: Option<&cljrs_deps::RustConfig>,
     verify_commit_signatures: bool,
+    opacity: OpacityPolicy,
 ) -> AotResult<()> {
     eprintln!("[aot] reading {}", src_path.display());
     let source = std::fs::read_to_string(src_path)?;
@@ -816,6 +839,23 @@ pub fn compile_file(
     let obj_bytes = compiler.finish();
     eprintln!("[aot] generated {} bytes of object code", obj_bytes.len());
 
+    // ── 4b. Opacity gate (before the harness is written) ────────────────
+    let audit = audit_source(
+        &interpreted_source,
+        &compiled_namespaces,
+        &versioned_bundled,
+    );
+    match audit.verdict(opacity) {
+        OpacityVerdict::Clean => {}
+        OpacityVerdict::Tolerated => eprintln!(
+            "[aot] {} source fragment(s) ({} bytes) embedded as readable text \
+             (--require-fully-compiled makes this an error)",
+            audit.leaks().len(),
+            audit.total_bytes()
+        ),
+        OpacityVerdict::Rejected => return Err(AotError::SourceEmbedded(audit)),
+    }
+
     // ── 5. Generate harness project & build ─────────────────────────────
     let (harness_dir, offline) = build_harness(
         out_path,
@@ -830,6 +870,139 @@ pub fn compile_file(
 
     eprintln!("[aot] wrote {}", out_path.display());
     Ok(())
+}
+
+/// One place the produced binary would carry Clojure source text verbatim.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceLeak {
+    /// Which bundling channel would carry the text.
+    pub channel: SourceLeakChannel,
+    /// The namespace it belongs to, when one is known.
+    pub ns: Option<String>,
+    /// Size of the embedded text in bytes.
+    pub bytes: usize,
+}
+
+/// The channel a [`SourceLeak`] travels through.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SourceLeakChannel {
+    /// The entry file's own interpreted preamble (`src/preamble.cljrs`).
+    EntryPreamble,
+    /// A required namespace's interpreted preamble (`src/ns_<n>_preamble.cljrs`).
+    NamespacePreamble,
+    /// A whole namespace bundled as source: a pinned versioned dependency, or
+    /// one that fell back to interpretation.
+    BundledNamespace,
+}
+
+impl std::fmt::Display for SourceLeakChannel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SourceLeakChannel::EntryPreamble => write!(f, "entry preamble"),
+            SourceLeakChannel::NamespacePreamble => write!(f, "namespace preamble"),
+            SourceLeakChannel::BundledNamespace => write!(f, "bundled namespace"),
+        }
+    }
+}
+
+impl std::fmt::Display for SourceLeak {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.ns {
+            Some(ns) => write!(f, "{} ({ns}): {} bytes", self.channel, self.bytes),
+            None => write!(f, "{}: {} bytes", self.channel, self.bytes),
+        }
+    }
+}
+
+/// What the caller will accept in the produced binary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum OpacityPolicy {
+    /// Embedded source is noted on stderr and the build proceeds.
+    #[default]
+    Report,
+    /// Any embedded source fails the build.
+    RequireFullyCompiled,
+}
+
+/// Outcome of applying an [`OpacityPolicy`] to a [`SourceAudit`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OpacityVerdict {
+    /// No readable program text would ship.
+    Clean,
+    /// Source would ship; the policy tolerates it.
+    Tolerated,
+    /// Source would ship; the policy forbids it.
+    Rejected,
+}
+
+/// Every fragment of Clojure source the harness would embed, as one value.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SourceAudit {
+    leaks: Vec<SourceLeak>,
+}
+
+impl SourceAudit {
+    pub fn leaks(&self) -> &[SourceLeak] {
+        &self.leaks
+    }
+
+    /// True when the binary would carry object code and no readable text.
+    pub fn is_clean(&self) -> bool {
+        self.leaks.is_empty()
+    }
+
+    pub fn total_bytes(&self) -> usize {
+        self.leaks.iter().map(|l| l.bytes).sum()
+    }
+
+    pub fn verdict(&self, policy: OpacityPolicy) -> OpacityVerdict {
+        match (self.is_clean(), policy) {
+            (true, _) => OpacityVerdict::Clean,
+            (false, OpacityPolicy::Report) => OpacityVerdict::Tolerated,
+            (false, OpacityPolicy::RequireFullyCompiled) => OpacityVerdict::Rejected,
+        }
+    }
+}
+
+/// Collect: the source-carrying channels of the harness, as raw fragments.
+/// A new channel is one entry here and nothing else.
+fn embedded_fragments<'a>(
+    interpreted_source: &'a str,
+    compiled_namespaces: &'a [CompiledNamespace],
+    versioned_bundled: &'a [(Arc<str>, String)],
+) -> impl Iterator<Item = (SourceLeakChannel, Option<&'a str>, &'a str)> {
+    std::iter::once((SourceLeakChannel::EntryPreamble, None, interpreted_source))
+        .chain(compiled_namespaces.iter().map(|cns| {
+            (
+                SourceLeakChannel::NamespacePreamble,
+                Some(cns.ns.as_ref()),
+                cns.preamble.as_str(),
+            )
+        }))
+        .chain(versioned_bundled.iter().map(|(ns, src)| {
+            (
+                SourceLeakChannel::BundledNamespace,
+                Some(ns.as_ref()),
+                src.as_str(),
+            )
+        }))
+}
+
+/// Promote: raw fragments to a [`SourceAudit`], dropping the empty ones.
+pub fn audit_source(
+    interpreted_source: &str,
+    compiled_namespaces: &[CompiledNamespace],
+    versioned_bundled: &[(Arc<str>, String)],
+) -> SourceAudit {
+    let leaks = embedded_fragments(interpreted_source, compiled_namespaces, versioned_bundled)
+        .filter(|(_, _, text)| !text.is_empty())
+        .map(|(channel, ns, text)| SourceLeak {
+            channel,
+            ns: ns.map(str::to_owned),
+            bytes: text.len(),
+        })
+        .collect();
+    SourceAudit { leaks }
 }
 
 /// Check if a top-level form needs the interpreter (can't be AOT-compiled yet).
@@ -1087,10 +1260,11 @@ fn find_user_source(rel: &str, src_dirs: &[PathBuf]) -> Option<String> {
 /// definitions that must run through the interpreter) and the symbol of its
 /// natively compiled initializer (`None` when the namespace has no compilable
 /// top-level forms — e.g. a namespace consisting only of `defmacro`s).
-struct CompiledNamespace {
-    ns: Arc<str>,
-    init_symbol: Option<String>,
-    preamble: String,
+#[derive(Debug, Clone)]
+pub struct CompiledNamespace {
+    pub ns: Arc<str>,
+    pub init_symbol: Option<String>,
+    pub preamble: String,
 }
 
 /// Write each compiled namespace's interpreted preamble into `harness_dir/src`

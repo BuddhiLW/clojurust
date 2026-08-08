@@ -168,6 +168,10 @@ enum Commands {
         /// Compile a test harness that runs all tests in the given file/directory.
         #[arg(long)]
         test: bool,
+        /// Fail the build if the binary would embed readable Clojure source
+        /// text (interpreted preambles, bundled namespaces).
+        #[arg(long = "require-fully-compiled")]
+        require_fully_compiled: bool,
         /// GC soft memory limit in MB (triggers collection when exceeded).
         #[arg(long)]
         gc_soft_limit_mb: Option<usize>,
@@ -533,6 +537,7 @@ fn run_command(command: Commands, versioning: VersioningFlags) -> miette::Result
             src_paths,
             main_ns,
             test,
+            require_fully_compiled,
             gc_soft_limit_mb,
             gc_hard_limit_mb,
         } => {
@@ -643,6 +648,11 @@ fn run_command(command: Commands, versioning: VersioningFlags) -> miette::Result
                         &all_src_paths,
                         rust_config.as_ref(),
                         versioning.verify_commit_signatures,
+                        if require_fully_compiled {
+                            cljrs_compiler::aot::OpacityPolicy::RequireFullyCompiled
+                        } else {
+                            cljrs_compiler::aot::OpacityPolicy::Report
+                        },
                     )
                     .map_err(|e| miette::miette!("{e}"))?;
                 }

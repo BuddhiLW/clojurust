@@ -317,13 +317,56 @@ via an inline signed-overflow branch matching `rt_add`/etc.), wrapping
 ### AOT driver (`aot.rs`)
 
 ```rust
-pub fn compile_file(src_path: &Path, out_path: &Path, src_dirs: &[PathBuf], rust_config: Option<&RustConfig>, verify_commit_signatures: bool) -> AotResult<()>;
+pub fn compile_file(src_path: &Path, out_path: &Path, src_dirs: &[PathBuf], rust_config: Option<&RustConfig>, verify_commit_signatures: bool, opacity: OpacityPolicy) -> AotResult<()>;
 pub fn compile_file_to_wasm(src_path: &Path, out_path: &Path, src_dirs: &[PathBuf]) -> AotResult<()>;
 pub fn compile_test_harness(test_dir: &Path, out_path: &Path, src_dirs: &[PathBuf]) -> AotResult<()>;
 pub fn lower_via_clojure(name: Option<&str>, ns: &str, params: &[Arc<str>], forms: &[Form], env: &mut Env) -> AotResult<IrFunction>;
+pub fn audit_source(interpreted_source: &str, compiled_namespaces: &[CompiledNamespace], versioned_bundled: &[(Arc<str>, String)]) -> SourceAudit;
 
-pub enum AotError { Io, Parse, Codegen, Eval, Link, Wasm(WasmError), NoGcBlacklist(Vec<BlacklistViolation>) /* no-gc only */ }
+pub enum AotError { Io, Parse, Codegen, Eval, Link, Wasm(WasmError), SourceEmbedded(SourceAudit), NoGcBlacklist(Vec<BlacklistViolation>) /* no-gc only */ }
+
+pub struct CompiledNamespace { pub ns: Arc<str>, pub init_symbol: Option<String>, pub preamble: String }
+pub struct SourceLeak { pub channel: SourceLeakChannel, pub ns: Option<String>, pub bytes: usize }
+pub enum SourceLeakChannel { EntryPreamble, NamespacePreamble, BundledNamespace }
+
+pub struct SourceAudit { /* private */ }
+impl SourceAudit {
+    pub fn leaks(&self) -> &[SourceLeak];
+    pub fn is_clean(&self) -> bool;
+    pub fn total_bytes(&self) -> usize;
+    pub fn verdict(&self, policy: OpacityPolicy) -> OpacityVerdict;
+}
+
+pub enum OpacityPolicy { Report /* default */, RequireFullyCompiled }
+pub enum OpacityVerdict { Clean, Tolerated, Rejected }
 ```
+
+### Source-embedding audit (`--require-fully-compiled`)
+
+Only plain `defn` bodies reach machine code. Forms that `needs_interpreter`
+reports - `ns`, `require`, `defmacro`, `defonce`, `defprotocol`, `defrecord`,
+`defmulti`, `defmethod`, `extend-type`, `extend-protocol` - are written to the
+harness as `.cljrs` files and pulled in with `include_str!`, method bodies
+included, even when the enclosing namespace compiles successfully. A namespace
+that fails lowering or codegen falls back to source the same way, and pinned
+versioned dependencies always do.
+
+Four steps, each usable on its own:
+
+| step | function | purity |
+|---|---|---|
+| collect | `embedded_fragments` - the source-carrying channels as raw `(channel, ns, text)` | pure |
+| promote | `audit_source` - fragments to a `SourceAudit`, empties dropped | pure |
+| decide  | `SourceAudit::verdict(OpacityPolicy)` | pure |
+| apply   | `compile_file` - errors, warns, or proceeds | effectful |
+
+A new source-carrying channel is one entry in `embedded_fragments`; a new
+policy is one `OpacityPolicy` variant. `OpacityPolicy::Report` is the default
+and preserves existing behaviour.
+
+Property tests: `tests/source_leak_audit.rs`; end-to-end:
+`require_fully_compiled_{rejects_embedded_source,accepts_plain_defn}` in
+`tests/aot_e2e.rs`.
 
 `compile_file_to_wasm` is the `cljrs compile --target wasm` entry point: it lowers
 the source **and its transitively-required user namespaces** to a bundle of IR
