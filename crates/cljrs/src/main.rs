@@ -357,7 +357,7 @@ fn main() -> miette::Result<()> {
         } else if cli.debug {
             tracing::Level::DEBUG
         } else {
-            tracing::Level::INFO
+            tracing::Level::WARN
         })
         .try_init();
 
