@@ -14,6 +14,7 @@
 
 use std::future::Future;
 
+use cljrs_builtins::form::expand_reader_conds_cow;
 use cljrs_env::env::Env;
 use cljrs_env::error::{EvalError, EvalResult};
 use cljrs_gc::GcPtr;
@@ -25,7 +26,8 @@ use cljrs_reader::Form;
 use cljrs_reader::form::FormKind;
 use cljrs_value::value::SetValue;
 use cljrs_value::{
-    CljxFnArity, CljxFuture, FutureState, MapValue, PersistentHashSet, PersistentVector, Value,
+    CljxFnArity, CljxFuture, FutureState, MapValue, PersistentHashSet, PersistentList,
+    PersistentVector, Value,
 };
 
 /// Spawn `task` on the current `LocalSet` and return a `Value::Future` that the
@@ -141,7 +143,7 @@ pub async fn eval_async(form: &Form, env: &mut Env) -> EvalResult {
     // blocking the LocalSet thread via the sync condvar path.
     match &form.kind {
         FormKind::Vector(elems) => {
-            let elems = elems.clone();
+            let elems = expand_reader_conds_cow(elems).into_owned();
             let mut vals: Vec<Value> = Vec::with_capacity(elems.len());
             for f in &elems {
                 vals.push(Box::pin(eval_async(f, env)).await?);
@@ -149,12 +151,12 @@ pub async fn eval_async(form: &Form, env: &mut Env) -> EvalResult {
             return Ok(Value::Vector(GcPtr::new(PersistentVector::from_iter(vals))));
         }
         FormKind::Map(elems) => {
-            if elems.len() % 2 != 0 {
+            let elems = expand_reader_conds_cow(elems).into_owned();
+            if !elems.len().is_multiple_of(2) {
                 return Err(EvalError::Runtime(
                     "map literal must have an even number of forms".into(),
                 ));
             }
-            let elems = elems.clone();
             let mut pairs: Vec<Value> = Vec::with_capacity(elems.len());
             for f in &elems {
                 pairs.push(Box::pin(eval_async(f, env)).await?);
@@ -166,7 +168,7 @@ pub async fn eval_async(form: &Form, env: &mut Env) -> EvalResult {
             return Ok(Value::Map(MapValue::from_pairs(kv_pairs)));
         }
         FormKind::Set(elems) => {
-            let elems = elems.clone();
+            let elems = expand_reader_conds_cow(elems).into_owned();
             let mut vals: Vec<Value> = Vec::with_capacity(elems.len());
             for f in &elems {
                 vals.push(Box::pin(eval_async(f, env)).await?);
@@ -186,6 +188,12 @@ pub async fn eval_async(form: &Form, env: &mut Env) -> EvalResult {
         FormKind::List(forms) if !forms.is_empty() => forms,
         _ => return eval(&expanded, env),
     };
+
+    let forms_cow = expand_reader_conds_cow(forms);
+    if forms_cow.is_empty() {
+        return Ok(Value::List(GcPtr::new(PersistentList::empty())));
+    }
+    let forms: &[Form] = &forms_cow;
 
     if let FormKind::Symbol(s) = &forms[0].kind {
         match s.as_str() {
