@@ -71,6 +71,14 @@ pub enum Token {
     Symbolic(String),
     /// `#tag` — tagged literal; stores the symbol name without the leading `#`.
     TaggedLiteral(String),
+    /// The `#:ns` / `#::` / `#::alias` prefix of a namespaced map literal. The
+    /// following `{` is lexed as an ordinary `LBrace`. `auto` distinguishes the
+    /// auto-resolved spellings (`#::`, `#::alias`), whose `ns` is the alias or
+    /// `""` for "the current namespace".
+    NamespacedMap {
+        ns: String,
+        auto: bool,
+    },
 
     /// End-of-file sentinel.
     Eof,

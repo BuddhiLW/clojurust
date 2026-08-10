@@ -16,6 +16,7 @@ src/
   lexer.rs    — Lexer struct: byte-oriented, UTF-8-safe tokenizer
   form.rs     — Form struct + FormKind enum: the reader AST
   parser.rs   — Parser struct: recursive-descent parser + Iterator impl
+  namespaced_map.rs — pure key qualification for #:ns{…} / #::{…} literals
 ```
 
 ---
@@ -58,6 +59,7 @@ Every distinct lexical form the reader can produce:
 | `ReaderCondSplice` | `#?@` | |
 | `Symbolic(String)` | `##Inf`, `##NaN` | stores suffix after `##` |
 | `TaggedLiteral(String)` | `#inst`, `#uuid` | stores tag name without `#` |
+| `NamespacedMap { ns, auto }` | `#:ns{`, `#::{`, `#::alias{` | prefix only; the `{` lexes as `LBrace`. `auto` marks the `#::` spellings |
 | `Eof` | — | end-of-file sentinel |
 
 ### `lexer::Lexer`
@@ -226,6 +228,34 @@ leaving `2` and `3`).
 All branches of `#?(…)` and `#?@(…)` are parsed and stored as
 `FormKind::ReaderCond { splicing, clauses }` with a flat `clauses` vec.  The
 evaluator is responsible for filtering by `:rust`.
+
+---
+
+### `namespaced_map`
+
+```rust
+pub fn qualify_keys(ns: &str, auto: bool, forms: Vec<Form>) -> Result<Vec<Form>, String>
+```
+
+Rewrites the keys of a namespaced map literal's body — the whole of `#:ns{…}`,
+`#::{…}` and `#::alias{…}` is this one pure function over an already-parsed
+map, so it holds no reader state.
+
+| Key in source | `#:adt{…}` | `#::{…}` | `#::al{…}` |
+|---------------|-----------|---------|-----------|
+| `:a` | `:adt/a` | `AutoKeyword("a")` | `AutoKeyword("al/a")` |
+| `:other/a` | unchanged | unchanged | unchanged |
+| `:_/a` | `:a` | `:a` | `:a` |
+| `a` (symbol) | `adt/a` | read error | read error |
+| `1`, `"s"`, … | unchanged | unchanged | unchanged |
+
+Values are never touched — only even indices of the flat key/value vec.
+
+The auto-resolved spellings lower to `FormKind::AutoKeyword` rather than being
+resolved here, so `*ns*` and its aliases stay the evaluator's business
+(`cljrs-interp`'s `resolve_auto_keyword`) and namespace resolution lives in one
+place. There is no auto-resolved *symbol* form to lower to, so an auto-resolved
+map with a symbol key is a read error rather than a silently-unqualified key.
 
 ---
 
