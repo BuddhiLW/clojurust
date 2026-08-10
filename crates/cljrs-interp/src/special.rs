@@ -1270,9 +1270,14 @@ fn eval_defmacro(args: &[Form], env: &mut Env) -> EvalResult {
 // ── defonce ───────────────────────────────────────────────────────────────────
 
 fn eval_defonce(args: &[Form], env: &mut Env) -> EvalResult {
-    let name = require_sym(args, 0, "defonce")?;
+    if args.is_empty() {
+        return Err(EvalError::Runtime("defonce requires a name".into()));
+    }
+    // Share `def`'s name extraction so a metadata-carrying symbol such as
+    // `(defonce ^:private registry (atom {}))` is accepted here too.
+    let (name, _meta) = extract_def_name(&args[0], env)?;
     // If already bound, return immediately.
-    if let Some(var) = env.globals.lookup_var(&env.current_ns, name)
+    if let Some(var) = env.globals.lookup_var(&env.current_ns, &name)
         && var.get().is_bound()
     {
         return Ok(Value::Var(var));
