@@ -11,6 +11,7 @@ use cljrs_types::span::Span;
 
 use crate::form::{Form, FormKind};
 use crate::lexer::Lexer;
+use crate::namespaced_map;
 use crate::token::Token;
 
 // ─── Parser ───────────────────────────────────────────────────────────────────
@@ -216,6 +217,26 @@ impl Parser {
                 }
                 Ok(Some(Form::new(
                     FormKind::Map(forms),
+                    self.merged_span(&span, &close),
+                )))
+            }
+            Token::NamespacedMap { ns, auto } => {
+                self.bump()?;
+                // The lexer guarantees a `{` follows, so this reads the body
+                // through the ordinary map path and then rewrites the keys.
+                let open = self.peek_span()?;
+                self.bump()?;
+                let (forms, close) =
+                    self.parse_seq_forms(Token::RBrace, open.clone(), "namespaced map")?;
+                if forms.len() % 2 != 0 {
+                    return Err(
+                        self.make_error("map literal must have an even number of forms", span)
+                    );
+                }
+                let qualified = namespaced_map::qualify_keys(&ns, auto, forms)
+                    .map_err(|msg| self.make_error(&msg, span.clone()))?;
+                Ok(Some(Form::new(
+                    FormKind::Map(qualified),
                     self.merged_span(&span, &close),
                 )))
             }
@@ -598,6 +619,75 @@ mod tests {
                 f(FormKind::Int(1)),
             ])
         );
+    }
+
+    #[test]
+    fn test_namespaced_map_literal_ns() {
+        assert_eq!(
+            parse1("#:adt{:a 1 :b 2}").kind,
+            FormKind::Map(vec![
+                f(FormKind::Keyword("adt/a".to_string())),
+                f(FormKind::Int(1)),
+                f(FormKind::Keyword("adt/b".to_string())),
+                f(FormKind::Int(2)),
+            ])
+        );
+    }
+
+    #[test]
+    fn test_namespaced_map_leaves_values_and_explicit_keys_alone() {
+        assert_eq!(
+            parse1("#:adt{:a :b other/c 1 :_/d 2}").kind,
+            FormKind::Map(vec![
+                f(FormKind::Keyword("adt/a".to_string())),
+                // A value that looks like a bare key stays bare.
+                f(FormKind::Keyword("b".to_string())),
+                // An explicitly-namespaced key wins over the map's namespace.
+                f(FormKind::Symbol("other/c".to_string())),
+                f(FormKind::Int(1)),
+                // `_` opts a key out of the map's namespace.
+                f(FormKind::Keyword("d".to_string())),
+                f(FormKind::Int(2)),
+            ])
+        );
+    }
+
+    #[test]
+    fn test_namespaced_map_auto_resolved_lowers_to_auto_keyword() {
+        assert_eq!(
+            parse1("#::{:a 1}").kind,
+            FormKind::Map(vec![
+                f(FormKind::AutoKeyword("a".to_string())),
+                f(FormKind::Int(1)),
+            ])
+        );
+        assert_eq!(
+            parse1("#::al{:a 1}").kind,
+            FormKind::Map(vec![
+                f(FormKind::AutoKeyword("al/a".to_string())),
+                f(FormKind::Int(1)),
+            ])
+        );
+    }
+
+    #[test]
+    fn test_namespaced_map_nests() {
+        assert_eq!(
+            parse1("#:a{:x #:b{:y 1}}").kind,
+            FormKind::Map(vec![
+                f(FormKind::Keyword("a/x".to_string())),
+                f(FormKind::Map(vec![
+                    f(FormKind::Keyword("b/y".to_string())),
+                    f(FormKind::Int(1)),
+                ])),
+            ])
+        );
+    }
+
+    #[test]
+    fn test_namespaced_map_odd_form_count_is_an_error() {
+        let err = parse_err("#:a{:x}");
+        assert!(err.contains("even number of forms"), "{err}");
     }
 
     #[test]

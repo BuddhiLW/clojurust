@@ -1,5 +1,6 @@
 pub mod form;
 pub mod lexer;
+pub mod namespaced_map;
 pub mod parser;
 pub mod token;
 

@@ -258,6 +258,7 @@ impl Lexer {
                 }
             }
             Some('#') => self.lex_symbolic(start_pos, start_line, start_col),
+            Some(':') => self.lex_namespaced_map(start_pos, start_line, start_col),
             Some(c) if is_symbol_start(c) => {
                 let name = self.read_symbol_chars();
                 Ok((
@@ -503,6 +504,36 @@ impl Lexer {
 
         Ok((
             Token::Char(ch),
+            self.span_from(start_pos, start_line, start_col),
+        ))
+    }
+
+    /// Lex the `#:ns` / `#::` / `#::alias` prefix of a namespaced map. `#` is
+    /// already consumed and the next char is `:`. The `{` is left in the stream
+    /// so the parser reads the body through the ordinary map path.
+    fn lex_namespaced_map(
+        &mut self,
+        start_pos: usize,
+        start_line: u32,
+        start_col: u32,
+    ) -> CljxResult<(Token, Span)> {
+        self.advance(); // consume first ':'
+        let auto = self.peek() == Some(':');
+        if auto {
+            self.advance(); // consume second ':'
+        }
+        let ns = self.read_symbol_chars();
+        // `#:{…}` has no namespace to qualify with; only `#::` may be bare.
+        if ns.is_empty() && !auto {
+            let span = self.span_from(start_pos, start_line, start_col);
+            return Err(self.make_error("namespaced map literal requires a namespace", span));
+        }
+        if self.peek() != Some('{') {
+            let span = self.span_from(start_pos, start_line, start_col);
+            return Err(self.make_error("namespaced map literal must be followed by a map", span));
+        }
+        Ok((
+            Token::NamespacedMap { ns, auto },
             self.span_from(start_pos, start_line, start_col),
         ))
     }
@@ -1175,6 +1206,39 @@ mod tests {
             lex_one("::ns/alias"),
             Token::AutoKeyword("ns/alias".to_string())
         );
+    }
+
+    #[test]
+    fn test_namespaced_map_prefix() {
+        // The `{` is deliberately NOT consumed — the parser reads the body
+        // through the ordinary map path.
+        assert_eq!(
+            lex_one("#:adt{:a 1}"),
+            Token::NamespacedMap {
+                ns: "adt".to_string(),
+                auto: false
+            }
+        );
+        assert_eq!(
+            lex_one("#::{:a 1}"),
+            Token::NamespacedMap {
+                ns: String::new(),
+                auto: true
+            }
+        );
+        assert_eq!(
+            lex_one("#::al{:a 1}"),
+            Token::NamespacedMap {
+                ns: "al".to_string(),
+                auto: true
+            }
+        );
+    }
+
+    #[test]
+    fn test_namespaced_map_prefix_errors() {
+        assert!(lex_err("#:{:a 1}").contains("requires a namespace"));
+        assert!(lex_err("#:adt [1]").contains("must be followed by a map"));
     }
 
     // ── Delimiters ───────────────────────────────────────────────────────
