@@ -3,7 +3,7 @@
 //!
 //! Pure: the whole feature is a source-level rewrite of the keys of an
 //! already-parsed map, so it is expressed as a function over `Form` with no
-//! reader state. Auto-resolved spellings are NOT resolved here — they lower to
+//! reader state. Auto-resolved spellings are NOT resolved here - they lower to
 //! `AutoKeyword`, which the evaluator already resolves against the current
 //! namespace and its aliases. That keeps namespace resolution in exactly one
 //! place instead of teaching the reader about `*ns*`.
@@ -30,7 +30,7 @@ pub fn qualify_keys(ns: &str, auto: bool, forms: Vec<Form>) -> Result<Vec<Form>,
 }
 
 /// Qualify one key. Keys that already carry a namespace, and key forms that are
-/// neither a keyword nor a symbol, pass through untouched — matching the JVM
+/// neither a keyword nor a symbol, pass through untouched - matching the JVM
 /// reader.
 fn qualify_key(ns: &str, auto: bool, key: Form) -> Result<Form, String> {
     let span = key.span.clone();
@@ -45,12 +45,12 @@ fn qualify_key(ns: &str, auto: bool, key: Form) -> Result<Form, String> {
             Qualified::Literal(full) => FormKind::Symbol(full),
             // There is no auto-resolved SYMBOL form to lower to: `::sym` is not
             // Clojure syntax, so nothing downstream knows how to resolve one.
-            // Refusing is the honest answer — silently leaving the key bare
+            // Refusing is the honest answer - silently leaving the key bare
             // would read as success and produce the wrong map.
             Qualified::Auto(_) => {
                 return Err(format!(
                     "auto-resolved namespaced map cannot qualify the symbol key '{name}' \
-                     — write the namespace explicitly (#:my.ns{{{name} …}})"
+                     - write the namespace explicitly (#:my.ns{{{name} …}})"
                 ));
             }
         },
@@ -61,7 +61,7 @@ fn qualify_key(ns: &str, auto: bool, key: Form) -> Result<Form, String> {
 
 /// What qualifying a bare key name yields.
 enum Qualified {
-    /// Already namespaced (or not qualifiable) — leave the key alone.
+    /// Already namespaced (or not qualifiable) - leave the key alone.
     Unchanged,
     /// A fully-spelled `ns/name`.
     Literal(String),

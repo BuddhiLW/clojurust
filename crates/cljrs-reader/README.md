@@ -16,7 +16,7 @@ src/
   lexer.rs    — Lexer struct: byte-oriented, UTF-8-safe tokenizer
   form.rs     — Form struct + FormKind enum: the reader AST
   parser.rs   — Parser struct: recursive-descent parser + Iterator impl
-  namespaced_map.rs — pure key qualification for #:ns{…} / #::{…} literals
+  namespaced_map.rs - pure key qualification for #:ns{…} / #::{…} literals
 ```
 
 ---
@@ -237,7 +237,7 @@ evaluator is responsible for filtering by `:rust`.
 pub fn qualify_keys(ns: &str, auto: bool, forms: Vec<Form>) -> Result<Vec<Form>, String>
 ```
 
-Rewrites the keys of a namespaced map literal's body — the whole of `#:ns{…}`,
+Rewrites the keys of a namespaced map literal's body - the whole of `#:ns{…}`,
 `#::{…}` and `#::alias{…}` is this one pure function over an already-parsed
 map, so it holds no reader state.
 
@@ -249,7 +249,7 @@ map, so it holds no reader state.
 | `a` (symbol) | `adt/a` | read error | read error |
 | `1`, `"s"`, … | unchanged | unchanged | unchanged |
 
-Values are never touched — only even indices of the flat key/value vec.
+Values are never touched - only even indices of the flat key/value vec.
 
 The auto-resolved spellings lower to `FormKind::AutoKeyword` rather than being
 resolved here, so `*ns*` and its aliases stay the evaluator's business

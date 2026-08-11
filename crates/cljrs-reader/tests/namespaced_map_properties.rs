@@ -52,7 +52,7 @@ fn body() -> impl Strategy<Value = Vec<Form>> {
     })
 }
 
-/// A body whose keys are keywords only — the case that can never error, so
+/// A body whose keys are keywords only - the case that can never error, so
 /// properties about the Ok value can be stated unconditionally.
 ///
 /// The `:_/k` opt-out is excluded: it is a one-shot escape, so it is the one
@@ -111,7 +111,7 @@ proptest! {
 
     /// The exception to the law above, pinned so it stays a decision rather
     /// than a surprise: `:_/k` yields a bare `:k`, which a second pass would
-    /// qualify. That is correct — the JVM reader qualifies a map literal once,
+    /// qualify. That is correct - the JVM reader qualifies a map literal once,
     /// at read time, and never re-qualifies the map it produced. The property
     /// exists so anyone who later makes qualification re-entrant sees this
     /// case fail rather than silently turning `:_/a` into `:ns/a`.
@@ -130,7 +130,7 @@ proptest! {
     }
 
     /// Under a literal namespace every bare keyword key gains exactly that
-    /// namespace — the feature's whole point, stated over arbitrary names.
+    /// namespace - the feature's whole point, stated over arbitrary names.
     #[test]
     fn bare_keyword_keys_gain_the_literal_namespace(ns in ns_name(), name in bare_name()) {
         let out = qualify_keys(
@@ -155,7 +155,7 @@ proptest! {
         prop_assert_eq!(&out[0].kind, &FormKind::Keyword(name));
     }
 
-    /// A key that already names a namespace keeps it — the map's namespace
+    /// A key that already names a namespace keeps it - the map's namespace
     /// never overrides an explicit one.
     #[test]
     fn explicit_namespace_always_wins(
@@ -199,7 +199,7 @@ proptest! {
     }
 
     /// There is no auto-resolved symbol syntax, so a symbol key under an
-    /// auto-resolved map is refused for every name — never silently left bare.
+    /// auto-resolved map is refused for every name - never silently left bare.
     #[test]
     fn auto_always_refuses_symbol_keys(name in bare_name()) {
         prop_assume!(name != "/");

@@ -1210,7 +1210,7 @@ mod tests {
 
     #[test]
     fn test_namespaced_map_prefix() {
-        // The `{` is deliberately NOT consumed — the parser reads the body
+        // The `{` is deliberately NOT consumed - the parser reads the body
         // through the ordinary map path.
         assert_eq!(
             lex_one("#:adt{:a 1}"),
