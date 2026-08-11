@@ -2,7 +2,7 @@
 //! namespace slot.
 //!
 //! `[#?(:clj clojure.core :cljs cljs.core) :as core]` is the idiom every
-//! clj+cljs `.cljc` library uses to alias the host core — `clojure.test.check`
+//! clj+cljs `.cljc` library uses to alias the host core. `clojure.test.check`
 //! opens with it. The option loop already resolved conditionals in the trailing
 //! `:as` / `:refer` positions, but the first element did not get the same
 //! treatment, so the spec read as `[:as core]` and was rejected with "require
@@ -26,12 +26,12 @@ fn make_env() -> (Arc<GlobalEnv>, Env) {
     (globals, env)
 }
 
-/// Assert `result` is `42` — the marker every positive case evaluates to
+/// Assert `result` is `42`, the marker every positive case evaluates to
 /// through the alias, proving the aliased namespace actually resolved.
 ///
 /// The aliased namespace is `clojure.core`, which is exactly the shape
 /// test.check uses (`[#?(:clj clojure.core :cljs cljs.core) :as core]`) and
-/// the only one guaranteed present in a bare interpreter env — this harness
+/// the only one guaranteed present in a bare interpreter env: this harness
 /// has no source path, so nothing loadable from disk can be relied on.
 fn assert_marker(result: Value) {
     match result {

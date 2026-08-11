@@ -73,7 +73,7 @@ tests/
   versioned_resolution.rs — end-to-end versioned resolution against a real git
                    fixture: pinned symbols, HEAD-clobber regression, versioned
                    require, GC survival of versioned values
-  require_spec_reader_conditional.rs — `ns` require specs carrying a reader
+  require_spec_reader_conditional.rs - `ns` require specs carrying a reader
                    conditional in the namespace slot; each case goes through an
                    `ns` form, since a quoted `require` resolves the conditional
                    before the spec parser sees it
