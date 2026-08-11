@@ -16,6 +16,14 @@ use crate::token::Token;
 
 // ─── Parser ───────────────────────────────────────────────────────────────────
 
+/// True when a map's key/value parity is decidable at read time and violated.
+fn map_arity_is_statically_odd(forms: &[Form]) -> bool {
+    let has_splice = forms
+        .iter()
+        .any(|f| matches!(f.kind, FormKind::ReaderCond { splicing: true, .. }));
+    !has_splice && !forms.len().is_multiple_of(2)
+}
+
 pub struct Parser {
     lexer: Lexer,
     peeked: Option<(Token, Span)>,
@@ -210,7 +218,7 @@ impl Parser {
             Token::LBrace => {
                 self.bump()?;
                 let (forms, close) = self.parse_seq_forms(Token::RBrace, span.clone(), "map")?;
-                if forms.len() % 2 != 0 {
+                if map_arity_is_statically_odd(&forms) {
                     return Err(
                         self.make_error("map literal must have an even number of forms", span)
                     );
@@ -938,6 +946,22 @@ mod tests {
     #[test]
     fn test_err_odd_map() {
         let msg = parse_err("{:a}");
+        assert!(msg.contains("even") || msg.contains("map"), "{msg}");
+    }
+
+    #[test]
+    fn test_map_with_splice_defers_parity_check() {
+        let mut p = Parser::new(
+            "{:a 1 #?@(:rust [:b 2]) :c 3}".to_string(),
+            "<test>".to_string(),
+        );
+        let form = p.parse_one().unwrap().unwrap();
+        assert!(matches!(form.kind, FormKind::Map(_)));
+    }
+
+    #[test]
+    fn test_map_odd_without_splice_still_errors() {
+        let msg = parse_err("{:a 1 :b}");
         assert!(msg.contains("even") || msg.contains("map"), "{msg}");
     }
 

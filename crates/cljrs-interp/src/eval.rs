@@ -5,7 +5,7 @@ use std::sync::Arc;
 use crate::apply::eval_call;
 use crate::special::eval_special;
 use crate::syntax_quote::syntax_quote;
-use cljrs_builtins::form::expand_reader_conds;
+use cljrs_builtins::form::{expand_reader_conds, expand_reader_conds_cow};
 use cljrs_builtins::special::SPECIAL_FORMS;
 use cljrs_env::env::Env;
 use cljrs_env::error::{EvalError, EvalResult};
@@ -58,31 +58,23 @@ pub fn eval(form: &Form, env: &mut Env) -> EvalResult {
         // ── Collections ───────────────────────────────────────────────────
         FormKind::List(forms) => eval_list(forms, env),
         FormKind::Vector(forms) => {
-            let expanded_forms;
-            let forms: &[Form] = if forms
-                .iter()
-                .any(|f| matches!(f.kind, FormKind::ReaderCond { .. }))
-            {
-                expanded_forms = expand_reader_conds(forms);
-                &expanded_forms
-            } else {
-                forms
-            };
+            let forms = expand_reader_conds_cow(forms);
             let mut vals: Vec<Value> = Vec::with_capacity(forms.len());
-            for f in forms {
+            for f in forms.iter() {
                 let _root = cljrs_env::gc_roots::root_values(&vals);
                 vals.push(eval(f, env)?);
             }
             Ok(Value::Vector(GcPtr::new(PersistentVector::from_iter(vals))))
         }
         FormKind::Map(forms) => {
-            if forms.len() % 2 != 0 {
+            let forms = expand_reader_conds_cow(forms);
+            if !forms.len().is_multiple_of(2) {
                 return Err(EvalError::Runtime(
                     "map literal must have an even number of forms".into(),
                 ));
             }
             let mut pairs: Vec<Value> = Vec::with_capacity(forms.len());
-            for f in forms {
+            for f in forms.iter() {
                 let _root = cljrs_env::gc_roots::root_values(&pairs);
                 pairs.push(eval(f, env)?);
             }
@@ -93,8 +85,9 @@ pub fn eval(form: &Form, env: &mut Env) -> EvalResult {
             Ok(Value::Map(MapValue::from_pairs(kv_pairs)))
         }
         FormKind::Set(forms) => {
+            let forms = expand_reader_conds_cow(forms);
             let mut vals: Vec<Value> = Vec::with_capacity(forms.len());
-            for f in forms {
+            for f in forms.iter() {
                 let _root = cljrs_env::gc_roots::root_values(&vals);
                 vals.push(eval(f, env)?);
             }
@@ -844,6 +837,80 @@ mod tests {
     fn test_reader_cond_default() {
         // No :rust; fall through to :default.
         assert_eq!(eval_str("#?(:clj 2 :default 99)").unwrap(), long(99));
+    }
+
+    #[test]
+    fn test_reader_cond_splice_in_vector() {
+        assert_eq!(
+            eval_str("[1 #?@(:rust [:a :b]) 2]").unwrap(),
+            eval_str("[1 :a :b 2]").unwrap()
+        );
+    }
+
+    #[test]
+    fn test_reader_cond_splice_in_set() {
+        assert_eq!(
+            eval_str("#{1 #?@(:rust [2 3]) 4}").unwrap(),
+            eval_str("#{1 2 3 4}").unwrap()
+        );
+    }
+
+    #[test]
+    fn test_reader_cond_splice_in_map() {
+        assert_eq!(
+            eval_str("{:a 1 #?@(:rust [:b 2]) :c 3}").unwrap(),
+            eval_str("{:a 1 :b 2 :c 3}").unwrap()
+        );
+    }
+
+    #[test]
+    fn test_reader_cond_splice_in_call_args() {
+        assert_eq!(
+            eval_str("(vector 1 #?@(:rust [2 3]) 4)").unwrap(),
+            eval_str("[1 2 3 4]").unwrap()
+        );
+    }
+
+    #[test]
+    fn test_reader_cond_splice_no_match_removed() {
+        assert_eq!(
+            eval_str("[1 #?@(:clj [:a :b]) 2]").unwrap(),
+            eval_str("[1 2]").unwrap()
+        );
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(48))]
+        /// Splicing `#?@(:rust mid)` into any container evaluates to the same
+        /// value as inlining `mid` literally — for vector, set, data-list, and
+        /// call arguments. Elements are distinct so set literals stay legal.
+        #[test]
+        fn prop_splice_evals_as_inline_in_every_container(
+            np in 0usize..3, nm in 0usize..3, ns in 0usize..3,
+        ) {
+            let kw_run = |start: usize, n: usize| {
+                (start..start + n)
+                    .map(|i| format!(":v{i}"))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            };
+            let p = kw_run(0, np);
+            let m = kw_run(np, nm);
+            let s = kw_run(np + nm, ns);
+            for (open, close, quote) in
+                [("[", "]", ""), ("#{", "}", ""), ("(", ")", "'"), ("(vector ", ")", "")]
+            {
+                let spliced = format!("{quote}{open}{p} #?@(:rust [{m}]) {s}{close}");
+                let inlined = format!("{quote}{open}{p} {m} {s}{close}");
+                proptest::prop_assert_eq!(
+                    eval_str(&spliced).unwrap(),
+                    eval_str(&inlined).unwrap(),
+                    "container {}{}",
+                    open,
+                    close
+                );
+            }
+        }
     }
 
     // ── Error cases ───────────────────────────────────────────────────────

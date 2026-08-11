@@ -277,14 +277,13 @@ pub fn form_to_value(form: &Form) -> Value {
 /// `None` if no `:rust` or `:default` clause is present.
 pub fn select_reader_cond(clauses: &[Form]) -> Option<&Form> {
     let mut default: Option<&Form> = None;
-    let mut i = 0;
-    while i + 1 < clauses.len() {
-        match &clauses[i].kind {
-            FormKind::Keyword(k) if k == "rust" => return Some(&clauses[i + 1]),
-            FormKind::Keyword(k) if k == "default" => default = Some(&clauses[i + 1]),
+    for pair in clauses.chunks_exact(2) {
+        let (feature, branch) = (&pair[0], &pair[1]);
+        match &feature.kind {
+            FormKind::Keyword(k) if k == "rust" => return Some(branch),
+            FormKind::Keyword(k) if k == "default" => default = Some(branch),
             _ => {}
         }
-        i += 2;
     }
     default
 }
@@ -329,6 +328,22 @@ pub fn expand_reader_conds(forms: &[Form]) -> Vec<Form> {
         }
     }
     out
+}
+
+/// Expand `#?`/`#?@` reader conditionals in a sibling-form slice, borrowing the
+/// input unchanged when none are present.
+///
+/// Callers that validate element structure (e.g. map key/value parity) must do
+/// so on the returned slice.
+pub fn expand_reader_conds_cow(forms: &[Form]) -> std::borrow::Cow<'_, [Form]> {
+    if forms
+        .iter()
+        .any(|f| matches!(f.kind, FormKind::ReaderCond { .. }))
+    {
+        std::borrow::Cow::Owned(expand_reader_conds(forms))
+    } else {
+        std::borrow::Cow::Borrowed(forms)
+    }
 }
 
 #[cfg(test)]
@@ -379,5 +394,254 @@ mod tests {
         assert_eq!(arity(&parse_anon_fn("#(#'%)")), 1);
         assert_eq!(arity(&parse_anon_fn("#(^:x %)")), 1);
         assert_eq!(arity(&parse_anon_fn("#('%)")), 1);
+    }
+
+    // ── reader-conditional expansion (#?@ splice) ───────────────────────────
+
+    fn parse_one_form(src: &str) -> Form {
+        let mut p = Parser::new(src.to_string(), "<test>".to_string());
+        p.parse_one().unwrap().unwrap()
+    }
+
+    fn vec_elems(src: &str) -> Vec<Form> {
+        match parse_one_form(src).kind {
+            FormKind::Vector(v) => v,
+            other => panic!("expected vector literal, got {other:?}"),
+        }
+    }
+
+    fn kinds(forms: &[Form]) -> Vec<FormKind> {
+        forms.iter().map(|f| f.kind.clone()).collect()
+    }
+
+    /// Expand the elements of a `[...]` literal and return their kinds.
+    fn expand_src(src: &str) -> Vec<FormKind> {
+        kinds(&expand_reader_conds(&vec_elems(src)))
+    }
+
+    #[test]
+    fn splice_rust_branch_flattens_into_parent() {
+        assert_eq!(
+            expand_src("[:x #?@(:rust [:a :b]) :y]"),
+            kinds(&vec_elems("[:x :a :b :y]"))
+        );
+    }
+
+    #[test]
+    fn splice_falls_back_to_default_branch() {
+        assert_eq!(
+            expand_src("[:x #?@(:default [:a :b]) :y]"),
+            kinds(&vec_elems("[:x :a :b :y]"))
+        );
+    }
+
+    #[test]
+    fn splice_with_no_matching_branch_is_removed_not_nil() {
+        // `:clj` does not match under cljrs; the splice contributes nothing.
+        // Regression: eval'ing the conditional on its own used to leave a `nil`.
+        assert_eq!(
+            expand_src("[:x #?@(:clj [:a :b]) :y]"),
+            kinds(&vec_elems("[:x :y]"))
+        );
+    }
+
+    #[test]
+    fn non_splicing_conditional_selects_single_form() {
+        assert_eq!(
+            expand_src("[:x #?(:rust :a :default :b) :y]"),
+            kinds(&vec_elems("[:x :a :y]"))
+        );
+    }
+
+    #[test]
+    fn nested_conditionals_inside_spliced_branch_expand() {
+        assert_eq!(
+            expand_src("[#?@(:rust [#?(:rust :a :default :z) :b])]"),
+            kinds(&vec_elems("[:a :b]"))
+        );
+    }
+
+    #[test]
+    fn cow_borrows_when_no_conditional_present() {
+        let forms = vec_elems("[:x :y :z]");
+        assert!(matches!(
+            expand_reader_conds_cow(&forms),
+            std::borrow::Cow::Borrowed(_)
+        ));
+    }
+
+    #[test]
+    fn cow_owns_when_conditional_present() {
+        let forms = vec_elems("[:x #?@(:rust [:a]) :y]");
+        assert!(matches!(
+            expand_reader_conds_cow(&forms),
+            std::borrow::Cow::Owned(_)
+        ));
+    }
+
+    fn kw_list(names: &[String]) -> String {
+        names
+            .iter()
+            .map(|n| format!(":{n}"))
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    // Model-based oracle. An `Item` is one position in a form sequence: a plain
+    // keyword, a non-splicing conditional, or a splicing conditional. Each knows
+    // both how to render itself as source and what it must contribute after
+    // expansion under the `:rust` selection rule — an independent reimplementation
+    // of `select_reader_cond` the production code is checked against.
+
+    #[derive(Clone, Debug)]
+    enum Item {
+        Plain(String),
+        NonSplice(Vec<(String, String)>),
+        Splice(Vec<(String, Vec<String>)>),
+    }
+
+    fn select_model<T>(branches: &[(String, T)]) -> Option<&T> {
+        let mut default = None;
+        for (k, v) in branches {
+            if k == "rust" {
+                return Some(v);
+            }
+            if k == "default" {
+                default = Some(v);
+            }
+        }
+        default
+    }
+
+    fn item_src(it: &Item) -> String {
+        match it {
+            Item::Plain(n) => format!(":{n}"),
+            Item::NonSplice(brs) => {
+                let inner = brs
+                    .iter()
+                    .map(|(k, n)| format!(":{k} :{n}"))
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                format!("#?({inner})")
+            }
+            Item::Splice(brs) => {
+                let inner = brs
+                    .iter()
+                    .map(|(k, vs)| format!(":{k} [{}]", kw_list(vs)))
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                format!("#?@({inner})")
+            }
+        }
+    }
+
+    fn item_expected(it: &Item) -> Vec<String> {
+        match it {
+            Item::Plain(n) => vec![n.clone()],
+            Item::NonSplice(brs) => select_model(brs).cloned().into_iter().collect(),
+            Item::Splice(brs) => select_model(brs).cloned().unwrap_or_default(),
+        }
+    }
+
+    fn key_strat() -> impl proptest::strategy::Strategy<Value = String> {
+        proptest::prop_oneof![
+            proptest::strategy::Just("rust".to_string()),
+            proptest::strategy::Just("clj".to_string()),
+            proptest::strategy::Just("cljs".to_string()),
+            proptest::strategy::Just("default".to_string()),
+        ]
+    }
+
+    fn item_strat() -> impl proptest::strategy::Strategy<Value = Item> {
+        use proptest::collection::vec as pvec;
+        use proptest::strategy::Strategy;
+        proptest::prop_oneof![
+            "[a-z]{1,4}".prop_map(Item::Plain),
+            pvec((key_strat(), "[a-z]{1,4}".prop_map(|s| s)), 1..4).prop_map(Item::NonSplice),
+            pvec((key_strat(), pvec("[a-z]{1,4}", 0..3)), 1..4).prop_map(Item::Splice),
+        ]
+    }
+
+    fn seq_src(items: &[Item]) -> String {
+        format!(
+            "[{}]",
+            items.iter().map(item_src).collect::<Vec<_>>().join(" ")
+        )
+    }
+
+    fn seq_expected_src(items: &[Item]) -> String {
+        let names: Vec<String> = items.iter().flat_map(|it| item_expected(it)).collect();
+        format!("[{}]", kw_list(&names))
+    }
+
+    proptest::proptest! {
+        /// Splicing `#?@(:rust xs)` at a position equals inlining `xs` there.
+        #[test]
+        fn prop_splice_equals_inline(
+            pre in proptest::collection::vec("[a-z]{1,4}", 0..4),
+            mid in proptest::collection::vec("[a-z]{1,4}", 0..4),
+            suf in proptest::collection::vec("[a-z]{1,4}", 0..4),
+        ) {
+            let spliced = format!("[{} #?@(:rust [{}]) {}]",
+                                  kw_list(&pre), kw_list(&mid), kw_list(&suf));
+            let inlined = format!("[{} {} {}]",
+                                  kw_list(&pre), kw_list(&mid), kw_list(&suf));
+            proptest::prop_assert_eq!(expand_src(&spliced), kinds(&vec_elems(&inlined)));
+        }
+
+        /// Expansion is idempotent: a second pass changes nothing.
+        #[test]
+        fn prop_expand_idempotent(
+            pre in proptest::collection::vec("[a-z]{1,4}", 0..4),
+            mid in proptest::collection::vec("[a-z]{1,4}", 0..4),
+        ) {
+            let src = format!("[{} #?@(:rust [{}])]", kw_list(&pre), kw_list(&mid));
+            let once = expand_reader_conds(&vec_elems(&src));
+            let twice = expand_reader_conds(&once);
+            proptest::prop_assert_eq!(kinds(&once), kinds(&twice));
+        }
+
+        /// With no reader conditionals, expansion is the identity.
+        #[test]
+        fn prop_no_conditional_is_identity(
+            xs in proptest::collection::vec("[a-z]{1,4}", 0..8),
+        ) {
+            let src = format!("[{}]", kw_list(&xs));
+            proptest::prop_assert_eq!(expand_src(&src), kinds(&vec_elems(&src)));
+        }
+
+        /// Expansion of an arbitrary interleaving of plain / non-splicing /
+        /// splicing conditionals (mixed keys) equals the model's expected output.
+        #[test]
+        fn prop_model_matches_expand(
+            items in proptest::collection::vec(item_strat(), 0..6),
+        ) {
+            proptest::prop_assert_eq!(
+                expand_src(&seq_src(&items)),
+                kinds(&vec_elems(&seq_expected_src(&items)))
+            );
+        }
+
+        /// No `ReaderCond` node survives expansion at the top level.
+        #[test]
+        fn prop_no_reader_cond_survives(
+            items in proptest::collection::vec(item_strat(), 0..6),
+        ) {
+            let expanded = expand_reader_conds(&vec_elems(&seq_src(&items)));
+            let none_survive = expanded
+                .iter()
+                .all(|f| !matches!(f.kind, FormKind::ReaderCond { .. }));
+            proptest::prop_assert!(none_survive);
+        }
+
+        /// The expanded length equals the sum of each item's contributed count.
+        #[test]
+        fn prop_length_law(
+            items in proptest::collection::vec(item_strat(), 0..6),
+        ) {
+            let expected_len: usize = items.iter().map(|it| item_expected(it).len()).sum();
+            let got = expand_reader_conds(&vec_elems(&seq_src(&items)));
+            proptest::prop_assert_eq!(got.len(), expected_len);
+        }
     }
 }
