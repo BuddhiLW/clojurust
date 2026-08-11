@@ -364,6 +364,12 @@ A new source-carrying channel is one entry in `embedded_fragments`; a new
 policy is one `OpacityPolicy` variant. `OpacityPolicy::Report` is the default
 and preserves existing behaviour.
 
+The audit is reached through `compile_file` only. `compile_test_harness`
+(`--test`) and `compile_file_to_wasm` (`--target wasm`) do not run it, so the
+CLI rejects `--require-fully-compiled` in combination with either
+(`resolve_opacity_policy` in `crates/cljrs/src/main.rs`) rather than accept a
+flag it would not honour.
+
 Property tests: `tests/source_leak_audit.rs`; end-to-end:
 `require_fully_compiled_{rejects_embedded_source,accepts_plain_defn}` in
 `tests/aot_e2e.rs`.
