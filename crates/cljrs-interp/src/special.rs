@@ -1426,7 +1426,21 @@ fn parse_require_spec_form(form: &Form) -> Result<RequireSpec, String> {
             if items.is_empty() {
                 return Err("require spec vector must not be empty".into());
             }
-            let (ns, version) = match &items[0].kind {
+            // The namespace slot may itself be a reader conditional:
+            // `[#?(:clj clojure.core :cljs cljs.core) :as core]` is the idiom
+            // every clj+cljs `.cljc` library uses to alias the host core. The
+            // option loop below already resolves conditionals; without the same
+            // treatment here the spec reads as `[:as core]` and is rejected.
+            let head = match &items[0].kind {
+                FormKind::ReaderCond { clauses, .. } => {
+                    select_reader_cond(clauses).ok_or_else(|| {
+                        "require spec: no reader-conditional branch matched for the namespace"
+                            .to_string()
+                    })?
+                }
+                _ => &items[0],
+            };
+            let (ns, version) = match &head.kind {
                 FormKind::Symbol(s) => {
                     let sym = cljrs_value::Symbol::parse(s);
                     (sym.name.clone(), sym.version.clone())
