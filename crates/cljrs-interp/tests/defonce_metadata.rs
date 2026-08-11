@@ -57,3 +57,24 @@ fn defonce_still_rejects_a_non_symbol_name() {
     let forms = parser.parse_all().expect("parse error");
     assert!(cljrs_interp::eval::eval(&forms[0], &mut env).is_err());
 }
+
+/// Stacked metadata: `extract_def_name` unwrapped only one `Meta` layer.
+#[test]
+fn def_accepts_stacked_metadata() {
+    let result =
+        eval_fresh("(def ^:private ^{:doc \"d\"} x 1) [(:private (meta #'x)) (:doc (meta #'x))]");
+    assert_eq!(format!("{result:?}").contains("true"), true, "{result:?}");
+}
+
+#[test]
+fn defonce_accepts_stacked_metadata() {
+    let result = eval_fresh("(defonce ^:private ^{:doc \"d\"} y 1) (:private (meta #'y))");
+    assert_eq!(result, Value::Bool(true));
+}
+
+/// Outer mark wins on conflict.
+#[test]
+fn outer_metadata_wins_on_conflict() {
+    let result = eval_fresh("(def ^{:a 1} ^{:a 2} z 1) (:a (meta #'z))");
+    assert_eq!(format!("{result:?}"), format!("{:?}", Value::Long(1)));
+}

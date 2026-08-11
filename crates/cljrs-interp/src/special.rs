@@ -138,12 +138,11 @@ fn arglists_meta(fn_val: &Value, skip: usize) -> Option<Value> {
 fn extract_def_name(form: &Form, env: &mut Env) -> EvalResult<(String, Option<Value>)> {
     match &form.kind {
         FormKind::Symbol(s) => Ok((s.clone(), None)),
+        // `^:a ^:b x` nests `Meta` forms; unwrap all, outer mark winning.
         FormKind::Meta(meta_form, inner) => {
             let meta_val = compile_meta_form(meta_form, env)?;
-            match &inner.kind {
-                FormKind::Symbol(s) => Ok((s.clone(), Some(meta_val))),
-                _ => Err(EvalError::Runtime("def name must be a symbol".into())),
-            }
+            let (name, inner_meta) = extract_def_name(inner, env)?;
+            Ok((name, merge_meta(inner_meta, Some(meta_val))))
         }
         _ => Err(EvalError::Runtime("def name must be a symbol".into())),
     }
