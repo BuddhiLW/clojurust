@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use miette::IntoDiagnostic as _;
 
 use cljrs_eval::{Env, EvalError, GlobalEnv, eval};
@@ -105,6 +105,15 @@ struct Cli {
     command: Commands,
 }
 
+/// Code-generation target for `cljrs compile`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, ValueEnum)]
+enum CompileTarget {
+    /// Standalone binary via Cranelift.
+    Native,
+    /// WebAssembly module via the AOT wasm backend.
+    Wasm,
+}
+
 #[derive(Subcommand)]
 enum Commands {
     /// Interpret a .cljrs or .cljc source file.
@@ -156,8 +165,8 @@ enum Commands {
         /// binary via Cranelift; `wasm` produces a WebAssembly module via the
         /// AOT wasm backend (the entry namespace's functions; the `"rt"` imports
         /// are satisfied by the runtime built for `wasm32-unknown-unknown`).
-        #[arg(long, default_value = "native", value_name = "TARGET")]
-        target: String,
+        #[arg(long, value_enum, default_value_t = CompileTarget::Native, value_name = "TARGET")]
+        target: CompileTarget,
         /// Source directories to search when resolving `require`.
         #[arg(long = "src-path", value_name = "DIR")]
         src_paths: Vec<PathBuf>,
@@ -561,13 +570,7 @@ fn run_command(command: Commands, versioning: VersioningFlags) -> miette::Result
                 }
             }
 
-            // Validate the code-gen target up front.
-            if target != "native" && target != "wasm" {
-                return Err(miette::miette!(
-                    "unknown --target {target:?} (expected `native` or `wasm`)"
-                ));
-            }
-            if test && target == "wasm" {
+            if test && target == CompileTarget::Wasm {
                 return Err(miette::miette!(
                     "--test is not supported with --target wasm yet"
                 ));
@@ -633,7 +636,7 @@ fn run_command(command: Commands, versioning: VersioningFlags) -> miette::Result
                     }
                 };
 
-                if target == "wasm" {
+                if target == CompileTarget::Wasm {
                     cljrs_compiler::aot::compile_file_to_wasm(&entry_file, &out, &all_src_paths)
                         .map_err(|e| miette::miette!("{e}"))?;
                 } else {
