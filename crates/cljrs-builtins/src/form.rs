@@ -490,7 +490,7 @@ mod tests {
     // Model-based oracle. An `Item` is one position in a form sequence: a plain
     // keyword, a non-splicing conditional, or a splicing conditional. Each knows
     // both how to render itself as source and what it must contribute after
-    // expansion under the `:rust` selection rule — an independent reimplementation
+    // expansion under the `:rust` selection rule - an independent reimplementation
     // of `select_reader_cond` the production code is checked against.
 
     #[derive(Clone, Debug)]

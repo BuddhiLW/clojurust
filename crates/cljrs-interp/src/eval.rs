@@ -882,7 +882,7 @@ mod tests {
     proptest::proptest! {
         #![proptest_config(proptest::prelude::ProptestConfig::with_cases(48))]
         /// Splicing `#?@(:rust mid)` into any container evaluates to the same
-        /// value as inlining `mid` literally — for vector, set, data-list, and
+        /// value as inlining `mid` literally - for vector, set, data-list, and
         /// call arguments. Elements are distinct so set literals stay legal.
         #[test]
         fn prop_splice_evals_as_inline_in_every_container(
