@@ -874,6 +874,7 @@ dependencies = [
  "cranelift-module",
  "cranelift-native",
  "cranelift-object",
+ "serde_json",
  "target-lexicon",
  "tempfile",
  "wasm-encoder",
