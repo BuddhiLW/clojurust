@@ -43,11 +43,11 @@ src/
                    hints are stripped via bind_pattern's Meta arm (destructure.rs);
                    desugar_pre_post_conditions rewrites {:pre [...] :post [...]} maps
                    into assertion forms (binds % to return value in :post conditions);
-                   parse_require_spec_form resolves reader conditionals in EVERY
-                   slot of an `ns` require spec, the namespace included, so
-                   `[#?(:clj clojure.core :cljs cljs.core) :as core]` reads — a
-                   spec whose conditional selects no branch on `:rust` is refused
-                   by that name rather than as a malformed first element
+                   spec_element resolves a reader conditional in ANY slot of an
+                   `ns` require spec, namespace included, so
+                   `[#?(:clj clojure.core :cljs cljs.core) :as core]` reads; an
+                   option selecting no branch is dropped, a namespace selecting
+                   none is an error
   apply.rs       — eval_call: macro expansion, native-fn dispatch, CljxFn
                    application, recur trampoline; special env-needing handlers
                    (apply, atom, reset!, swap!, volatile!, vreset!, vswap!,
