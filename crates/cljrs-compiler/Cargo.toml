@@ -40,3 +40,4 @@ wasm-encoder       = "0.244"
 [dev-dependencies]
 tempfile = "3"
 wasmparser = "0.244"
+proptest = "1"

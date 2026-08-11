@@ -874,6 +874,7 @@ dependencies = [
  "cranelift-module",
  "cranelift-native",
  "cranelift-object",
+ "proptest",
  "target-lexicon",
  "tempfile",
  "wasm-encoder",
