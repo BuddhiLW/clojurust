@@ -137,6 +137,13 @@ These appear before the subcommand and apply to every command:
 - `--stack-size-mb <MB>` — thread stack size (default 64).  Raise if you hit stack overflows in deeply recursive code.
 - `--debug` — enable debug logging
 - `--trace` — enable trace logging (implies `--debug`)
+
+  Codegen crates (`cranelift_*`, `regalloc2`) are pinned to `warn` at all
+  verbosity levels — `cranelift-jit`/`cranelift-object` log every compiled
+  function's whole CLIF body at `info`, which otherwise buries real output.
+  Set `RUST_LOG` (`tracing` target=level syntax) to replace the defaults and
+  get them back, e.g. `RUST_LOG=info,cranelift_jit=info cljrs run app.cljrs`.
+
 - `-X <LEVEL:FEATURES>` — feature-level logging, repeatable.  Format: `<level>:<feat1>,<feat2>,…`.  Levels: `debug`, `trace`.  Example: `-X debug:gc,jit`.
 - `--gc-stats [FILE]` — print a `cljrs_gc::GC_STATS` snapshot at program exit (allocations, region/bump usage, GC pause count + total duration, freed objects/bytes).  No value → stdout; with a path → that file.  Honoured by `run`, `eval`, and `test`.
 - `--jit-stats [FILE]` — print a JIT specialization / inline-cache counter snapshot at program exit (boxed arithmetic bridge calls, entry-guard deopts, keyword IC fills, protocol IC hits/misses; Phase 10.6, `cljrs_compiler::rt_abi::jit_stats`).  No value → stdout; with a path → that file.  Honoured by `run`, `eval`, and `test`.

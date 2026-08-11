@@ -5,6 +5,9 @@ use std::time::Instant;
 
 use clap::{Parser, Subcommand};
 use miette::IntoDiagnostic as _;
+use tracing_subscriber::filter::Targets;
+use tracing_subscriber::layer::SubscriberExt as _;
+use tracing_subscriber::util::SubscriberInitExt as _;
 
 use cljrs_eval::{Env, EvalError, GlobalEnv, eval};
 use cljrs_gc::GcConfig;
@@ -344,6 +347,56 @@ fn build_gc_config(soft_limit_mb: Option<usize>, hard_limit_mb: Option<usize>) -
     }
 }
 
+/// Crates whose logging is noisy enough to drown out everything else.
+///
+/// Cranelift (and its register allocator) log whole function bodies of IR at
+/// `info`/`debug` through the `log` crate, which `tracing-subscriber`'s
+/// `tracing-log` bridge forwards into our subscriber.  A single JIT compile
+/// therefore buries any real message.  These stay at `warn` regardless of
+/// `--debug`/`--trace`; set `RUST_LOG` to see them.
+const NOISY_TARGETS: &[&str] = &[
+    "cranelift_codegen",
+    "cranelift_frontend",
+    "cranelift_jit",
+    "cranelift_module",
+    "cranelift_native",
+    "cranelift_object",
+    "regalloc2",
+];
+
+/// Install the global tracing subscriber.
+///
+/// The default verbosity comes from `--debug`/`--trace`, with the noisy
+/// codegen crates pinned to `warn`.  `RUST_LOG` (in `tracing` target=level
+/// syntax, e.g. `RUST_LOG=info,cranelift_codegen=debug`) replaces those
+/// defaults entirely, so the IR dumps are still reachable when wanted.
+fn init_tracing(cli: &Cli) {
+    let default_level = if cli.trace {
+        tracing::Level::TRACE
+    } else if cli.debug {
+        tracing::Level::DEBUG
+    } else {
+        tracing::Level::INFO
+    };
+
+    let mut filter = Targets::new().with_default(default_level);
+    for target in NOISY_TARGETS {
+        filter = filter.with_target(*target, tracing::Level::WARN);
+    }
+
+    if let Ok(spec) = std::env::var("RUST_LOG")
+        && !spec.trim().is_empty()
+        && let Ok(from_env) = spec.parse::<Targets>()
+    {
+        filter = from_env;
+    }
+
+    let _ = tracing_subscriber::registry()
+        .with(filter)
+        .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
+        .try_init();
+}
+
 fn main() -> miette::Result<()> {
     miette::set_hook(Box::new(|_| {
         Box::new(
@@ -355,16 +408,7 @@ fn main() -> miette::Result<()> {
     .into_diagnostic()?;
 
     let cli = Cli::parse();
-    let _ = tracing_subscriber::fmt()
-        .with_writer(std::io::stderr)
-        .with_max_level(if cli.trace {
-            tracing::Level::TRACE
-        } else if cli.debug {
-            tracing::Level::DEBUG
-        } else {
-            tracing::Level::INFO
-        })
-        .try_init();
+    init_tracing(&cli);
 
     // Parse -X feature logging flags
     for flag in &cli.x_flags {
