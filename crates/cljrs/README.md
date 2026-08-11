@@ -69,6 +69,7 @@ run to completion. A synchronous `-main` is awaited as a no-op pass-through.
 - `--target <native|wasm>` — code-generation target (default `native`). `wasm` emits a WebAssembly module via the AOT wasm backend (the entry namespace's functions; the `"rt"` imports are satisfied by the runtime built for `wasm32-unknown-unknown`). `--test` is not yet supported with `wasm`.
 - `--main <NS>` — namespace containing `-main`; overrides `:main` in `cljrs.edn` and auto-detection
 - `--test` — compile a test harness that runs every test in the given file/directory
+- `--require-fully-compiled` - fail the build if the binary would embed readable Clojure source text (interpreted preambles, bundled namespaces).  The audit runs in `compile_file`, so the flag is an error with `--test` and with `--target wasm`, whose paths do not audit; it is rejected there rather than accepted and ignored.
 
 `ir build` accepts:
 - `-n, --ns <NS>` — repeatable; namespaces to lower (default `clojure.core`)

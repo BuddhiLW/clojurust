@@ -37,7 +37,16 @@ fn compile_and_run(name: &str, source: &str) -> String {
         .spawn({
             let src = src_path.clone();
             let bin = bin_path.clone();
-            move || cljrs_compiler::aot::compile_file(&src, &bin, &[], None, false)
+            move || {
+                cljrs_compiler::aot::compile_file(
+                    &src,
+                    &bin,
+                    &[],
+                    None,
+                    false,
+                    cljrs_compiler::aot::OpacityPolicy::Report,
+                )
+            }
         })
         .unwrap()
         .join()
@@ -1200,7 +1209,16 @@ fn compile_and_run_multi(name: &str, main_source: &str, deps: &[(&str, &str)]) -
             let src = src_path.clone();
             let bin = bin_path.clone();
             let src_dir = src_dir.clone();
-            move || cljrs_compiler::aot::compile_file(&src, &bin, &[src_dir], None, false)
+            move || {
+                cljrs_compiler::aot::compile_file(
+                    &src,
+                    &bin,
+                    &[src_dir],
+                    None,
+                    false,
+                    cljrs_compiler::aot::OpacityPolicy::Report,
+                )
+            }
         })
         .unwrap()
         .join()
@@ -2473,7 +2491,16 @@ fn test_versioned_snapshot_is_self_contained() {
             let src = src_path.clone();
             let bin = bin_path.clone();
             let src_dir = src_dir.clone();
-            move || cljrs_compiler::aot::compile_file(&src, &bin, &[src_dir], None, false)
+            move || {
+                cljrs_compiler::aot::compile_file(
+                    &src,
+                    &bin,
+                    &[src_dir],
+                    None,
+                    false,
+                    cljrs_compiler::aot::OpacityPolicy::Report,
+                )
+            }
         })
         .unwrap()
         .join()
@@ -2571,7 +2598,16 @@ fn test_versioned_bad_commit_fails_at_compile_time() {
             let src = src_path.clone();
             let bin = bin_path.clone();
             let src_dir = src_dir.clone();
-            move || cljrs_compiler::aot::compile_file(&src, &bin, &[src_dir], None, false)
+            move || {
+                cljrs_compiler::aot::compile_file(
+                    &src,
+                    &bin,
+                    &[src_dir],
+                    None,
+                    false,
+                    cljrs_compiler::aot::OpacityPolicy::Report,
+                )
+            }
         })
         .unwrap()
         .join()
@@ -2636,4 +2672,71 @@ fn test_auto_kw_qualified_keyword_aot() {
 "#,
         ":acme.core/status",
     );
+}
+
+/// Compile `source` with the opacity gate on, returning the compile result.
+#[allow(clippy::result_large_err)]
+fn compile_gated(name: &str, source: &str) -> cljrs_compiler::aot::AotResult<()> {
+    let _guard = AOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+    let dir = std::env::temp_dir().join("cljrs_aot_tests");
+    std::fs::create_dir_all(&dir).unwrap();
+    let src_path = dir.join(format!("{name}.cljrs"));
+    let bin_path = dir.join(format!("{name}_bin"));
+    std::fs::write(&src_path, source).unwrap();
+
+    std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn({
+            let src = src_path.clone();
+            let bin = bin_path.clone();
+            move || {
+                cljrs_compiler::aot::compile_file(
+                    &src,
+                    &bin,
+                    &[],
+                    None,
+                    false,
+                    cljrs_compiler::aot::OpacityPolicy::RequireFullyCompiled,
+                )
+            }
+        })
+        .unwrap()
+        .join()
+        .unwrap()
+}
+
+#[test]
+fn require_fully_compiled_rejects_embedded_source() {
+    let err = compile_gated(
+        "gate_rejects",
+        r#"
+(defprotocol IWeigh (weigh [this x]))
+(defrecord Weigher [bias] IWeigh (weigh [this x] (+ (* x 31) (:bias this))))
+(defn -main [& _] (println (weigh (->Weigher 7) 10)))
+"#,
+    )
+    .expect_err("gate must reject a program whose forms ship as source");
+
+    let cljrs_compiler::aot::AotError::SourceEmbedded(audit) = &err else {
+        panic!("expected SourceEmbedded, got {err:?}");
+    };
+    assert!(!audit.is_clean());
+    assert!(audit.total_bytes() > 0);
+
+    let rendered = err.to_string();
+    assert!(rendered.contains("--require-fully-compiled"), "{rendered}");
+    assert!(rendered.contains("defn"), "{rendered}");
+}
+
+#[test]
+fn require_fully_compiled_accepts_plain_defn() {
+    compile_gated(
+        "gate_accepts",
+        r#"
+(defn weigh [x] (+ (* x 31) 7))
+(defn total [n] (reduce + (map weigh (range n))))
+"#,
+    )
+    .expect("a defn-only program must pass the gate");
 }
