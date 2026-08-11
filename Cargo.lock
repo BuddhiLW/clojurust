@@ -874,6 +874,7 @@ dependencies = [
  "cranelift-module",
  "cranelift-native",
  "cranelift-object",
+ "proptest",
  "serde_json",
  "target-lexicon",
  "tempfile",
