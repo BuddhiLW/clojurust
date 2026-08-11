@@ -29,6 +29,9 @@ pub enum AotError {
     Link(String),
     /// The wasm backend could not lower a construct in the program.
     Wasm(crate::wasm::WasmError),
+    /// The opacity policy forbids embedded Clojure source and the binary would
+    /// still carry some.
+    SourceEmbedded(SourceAudit),
     /// One or more no-gc memory-safety violations were found by the blacklist
     /// analysis.  Only emitted when the `no-gc` Cargo feature is active.
     #[cfg(feature = "no-gc")]
@@ -44,6 +47,23 @@ impl std::fmt::Display for AotError {
             AotError::Eval(e) => write!(f, "eval/lowering error: {e}"),
             AotError::Link(e) => write!(f, "link error: {e}"),
             AotError::Wasm(e) => write!(f, "wasm backend error: {e}"),
+            AotError::SourceEmbedded(audit) => {
+                writeln!(
+                    f,
+                    "--require-fully-compiled: {} source fragment(s) ({} bytes) would be \
+                     embedded in the binary as readable Clojure text:",
+                    audit.leaks().len(),
+                    audit.total_bytes()
+                )?;
+                for l in audit.leaks() {
+                    writeln!(f, "  • {l}")?;
+                }
+                write!(
+                    f,
+                    "Only plain `defn` bodies are compiled to machine code. Move the forms above \
+                     out of the compiled unit, or drop --require-fully-compiled."
+                )
+            }
             #[cfg(feature = "no-gc")]
             AotError::NoGcBlacklist(vs) => {
                 writeln!(f, "no-gc blacklist violations:")?;
@@ -546,13 +566,16 @@ pub fn compile_file_to_wasm(
 /// before loading any Clojure code.  `verify_commit_signatures` enables
 /// `git verify-commit` on every versioned pin resolved during compilation
 /// (the produced binary trusts its embedded sources, so verification happens
-/// here, at compile time).
+/// here, at compile time).  `opacity` decides what happens when the binary
+/// would still carry readable Clojure source; [`audit_source`] reports the same
+/// set without applying any policy.
 pub fn compile_file(
     src_path: &Path,
     out_path: &Path,
     src_dirs: &[PathBuf],
     rust_config: Option<&cljrs_deps::RustConfig>,
     verify_commit_signatures: bool,
+    opacity: OpacityPolicy,
 ) -> AotResult<()> {
     eprintln!("[aot] reading {}", src_path.display());
     let source = std::fs::read_to_string(src_path)?;
@@ -816,6 +839,23 @@ pub fn compile_file(
     let obj_bytes = compiler.finish();
     eprintln!("[aot] generated {} bytes of object code", obj_bytes.len());
 
+    // ── 4b. Opacity gate (before the harness is written) ────────────────
+    let audit = audit_source(
+        &interpreted_source,
+        &compiled_namespaces,
+        &versioned_bundled,
+    );
+    match audit.verdict(opacity) {
+        OpacityVerdict::Clean => {}
+        OpacityVerdict::Tolerated => eprintln!(
+            "[aot] {} source fragment(s) ({} bytes) embedded as readable text \
+             (--require-fully-compiled makes this an error)",
+            audit.leaks().len(),
+            audit.total_bytes()
+        ),
+        OpacityVerdict::Rejected => return Err(AotError::SourceEmbedded(audit)),
+    }
+
     // ── 5. Generate harness project & build ─────────────────────────────
     let (harness_dir, offline) = build_harness(
         out_path,
@@ -830,6 +870,139 @@ pub fn compile_file(
 
     eprintln!("[aot] wrote {}", out_path.display());
     Ok(())
+}
+
+/// One place the produced binary would carry Clojure source text verbatim.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceLeak {
+    /// Which bundling channel would carry the text.
+    pub channel: SourceLeakChannel,
+    /// The namespace it belongs to, when one is known.
+    pub ns: Option<String>,
+    /// Size of the embedded text in bytes.
+    pub bytes: usize,
+}
+
+/// The channel a [`SourceLeak`] travels through.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SourceLeakChannel {
+    /// The entry file's own interpreted preamble (`src/preamble.cljrs`).
+    EntryPreamble,
+    /// A required namespace's interpreted preamble (`src/ns_<n>_preamble.cljrs`).
+    NamespacePreamble,
+    /// A whole namespace bundled as source: a pinned versioned dependency, or
+    /// one that fell back to interpretation.
+    BundledNamespace,
+}
+
+impl std::fmt::Display for SourceLeakChannel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SourceLeakChannel::EntryPreamble => write!(f, "entry preamble"),
+            SourceLeakChannel::NamespacePreamble => write!(f, "namespace preamble"),
+            SourceLeakChannel::BundledNamespace => write!(f, "bundled namespace"),
+        }
+    }
+}
+
+impl std::fmt::Display for SourceLeak {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.ns {
+            Some(ns) => write!(f, "{} ({ns}): {} bytes", self.channel, self.bytes),
+            None => write!(f, "{}: {} bytes", self.channel, self.bytes),
+        }
+    }
+}
+
+/// What the caller will accept in the produced binary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum OpacityPolicy {
+    /// Embedded source is noted on stderr and the build proceeds.
+    #[default]
+    Report,
+    /// Any embedded source fails the build.
+    RequireFullyCompiled,
+}
+
+/// Outcome of applying an [`OpacityPolicy`] to a [`SourceAudit`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OpacityVerdict {
+    /// No readable program text would ship.
+    Clean,
+    /// Source would ship; the policy tolerates it.
+    Tolerated,
+    /// Source would ship; the policy forbids it.
+    Rejected,
+}
+
+/// Every fragment of Clojure source the harness would embed, as one value.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SourceAudit {
+    leaks: Vec<SourceLeak>,
+}
+
+impl SourceAudit {
+    pub fn leaks(&self) -> &[SourceLeak] {
+        &self.leaks
+    }
+
+    /// True when the binary would carry object code and no readable text.
+    pub fn is_clean(&self) -> bool {
+        self.leaks.is_empty()
+    }
+
+    pub fn total_bytes(&self) -> usize {
+        self.leaks.iter().map(|l| l.bytes).sum()
+    }
+
+    pub fn verdict(&self, policy: OpacityPolicy) -> OpacityVerdict {
+        match (self.is_clean(), policy) {
+            (true, _) => OpacityVerdict::Clean,
+            (false, OpacityPolicy::Report) => OpacityVerdict::Tolerated,
+            (false, OpacityPolicy::RequireFullyCompiled) => OpacityVerdict::Rejected,
+        }
+    }
+}
+
+/// Collect: the source-carrying channels of the harness, as raw fragments.
+/// A new channel is one entry here and nothing else.
+fn embedded_fragments<'a>(
+    interpreted_source: &'a str,
+    compiled_namespaces: &'a [CompiledNamespace],
+    versioned_bundled: &'a [(Arc<str>, String)],
+) -> impl Iterator<Item = (SourceLeakChannel, Option<&'a str>, &'a str)> {
+    std::iter::once((SourceLeakChannel::EntryPreamble, None, interpreted_source))
+        .chain(compiled_namespaces.iter().map(|cns| {
+            (
+                SourceLeakChannel::NamespacePreamble,
+                Some(cns.ns.as_ref()),
+                cns.preamble.as_str(),
+            )
+        }))
+        .chain(versioned_bundled.iter().map(|(ns, src)| {
+            (
+                SourceLeakChannel::BundledNamespace,
+                Some(ns.as_ref()),
+                src.as_str(),
+            )
+        }))
+}
+
+/// Promote: raw fragments to a [`SourceAudit`], dropping the empty ones.
+pub fn audit_source(
+    interpreted_source: &str,
+    compiled_namespaces: &[CompiledNamespace],
+    versioned_bundled: &[(Arc<str>, String)],
+) -> SourceAudit {
+    let leaks = embedded_fragments(interpreted_source, compiled_namespaces, versioned_bundled)
+        .filter(|(_, _, text)| !text.is_empty())
+        .map(|(channel, ns, text)| SourceLeak {
+            channel,
+            ns: ns.map(str::to_owned),
+            bytes: text.len(),
+        })
+        .collect();
+    SourceAudit { leaks }
 }
 
 /// Check if a top-level form needs the interpreter (can't be AOT-compiled yet).
@@ -1087,10 +1260,11 @@ fn find_user_source(rel: &str, src_dirs: &[PathBuf]) -> Option<String> {
 /// definitions that must run through the interpreter) and the symbol of its
 /// natively compiled initializer (`None` when the namespace has no compilable
 /// top-level forms — e.g. a namespace consisting only of `defmacro`s).
-struct CompiledNamespace {
-    ns: Arc<str>,
-    init_symbol: Option<String>,
-    preamble: String,
+#[derive(Debug, Clone)]
+pub struct CompiledNamespace {
+    pub ns: Arc<str>,
+    pub init_symbol: Option<String>,
+    pub preamble: String,
 }
 
 /// Write each compiled namespace's interpreted preamble into `harness_dir/src`
@@ -1853,25 +2027,9 @@ const TEST_HARNESS_RUNTIME_CRATES: &[&str] = &[
 fn link_with_cargo(harness_dir: &Path, out_path: &Path, offline: bool) -> AotResult<()> {
     eprintln!("[aot] building harness with cargo...");
 
-    let mut cmd = std::process::Command::new("cargo");
-    cmd.arg("build").arg("--release");
-    if offline {
-        cmd.arg("--offline");
-    }
-    let output = cmd.current_dir(harness_dir).output()?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(AotError::Link(format!("cargo build failed:\n{stderr}")));
-    }
-
-    // The binary is at target/release/cljrs-aot-harness.
-    let bin_name = if cfg!(target_os = "windows") {
-        "cljrs-aot-harness.exe"
-    } else {
-        "cljrs-aot-harness"
-    };
-    let built = harness_dir.join("target/release").join(bin_name);
+    let output = cargo_build_harness_release(harness_dir, offline)?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let built = harness_bin_from_cargo_stdout(&stdout)?;
     std::fs::copy(&built, out_path)?;
 
     // Clean up the harness directory.
@@ -1889,8 +2047,26 @@ fn link_with_cargo_test_harness(
 ) -> AotResult<()> {
     eprintln!("[aot] building harness with cargo...");
 
+    let output = cargo_build_harness_release(harness_dir, offline)?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let built = harness_bin_from_cargo_stdout(&stdout)?;
+    std::fs::copy(&built, out_path)?;
+
+    // Keep the harness directory for debugging
+    eprintln!("[aot] harness directory kept at {}", harness_dir.display());
+
+    Ok(())
+}
+
+/// Run `cargo build --release --message-format=json` in the harness directory.
+fn cargo_build_harness_release(
+    harness_dir: &Path,
+    offline: bool,
+) -> AotResult<std::process::Output> {
     let mut cmd = std::process::Command::new("cargo");
-    cmd.arg("build").arg("--release");
+    cmd.arg("build")
+        .arg("--release")
+        .arg("--message-format=json");
     if offline {
         cmd.arg("--offline");
     }
@@ -1900,20 +2076,59 @@ fn link_with_cargo_test_harness(
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(AotError::Link(format!("cargo build failed:\n{stderr}")));
     }
+    Ok(output)
+}
 
-    // The binary is at target/release/cljrs-aot-harness.
-    let bin_name = if cfg!(target_os = "windows") {
-        "cljrs-aot-harness.exe"
-    } else {
-        "cljrs-aot-harness"
-    };
-    let built = harness_dir.join("target/release").join(bin_name);
-    std::fs::copy(&built, out_path)?;
+/// Name of the temporary harness package / bin target generated for AOT link.
+const AOT_HARNESS_BIN: &str = "cljrs-aot-harness";
 
-    // Keep the harness directory for debugging
-    eprintln!("[aot] harness directory kept at {}", harness_dir.display());
+/// Select the harness executable from cargo `--message-format=json` NDJSON.
+///
+/// Cargo may place binaries under `target/release`, a custom `CARGO_TARGET_DIR`,
+/// or a target-triple subdir. The last matching `compiler-artifact` message for
+/// bin `cljrs-aot-harness` with a non-null `executable` is authoritative.
+fn harness_bin_from_cargo_stdout(stdout: &str) -> AotResult<PathBuf> {
+    let mut last: Option<PathBuf> = None;
+    for line in stdout.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        if let Some(path) = compiler_artifact_bin_executable(line, AOT_HARNESS_BIN) {
+            last = Some(path);
+        }
+    }
+    last.ok_or_else(|| {
+        AotError::Link(format!(
+            "cargo build produced no compiler-artifact executable for bin `{AOT_HARNESS_BIN}` \
+             (expected via --message-format=json; handles CARGO_TARGET_DIR / triple layouts)"
+        ))
+    })
+}
 
-    Ok(())
+/// Parse one cargo JSON message line.
+///
+/// Returns `Some(executable)` only for a `compiler-artifact` whose target is
+/// bin `bin_name` and whose `executable` field is a non-empty string.
+fn compiler_artifact_bin_executable(line: &str, bin_name: &str) -> Option<PathBuf> {
+    let msg: serde_json::Value = serde_json::from_str(line).ok()?;
+    if msg.get("reason")?.as_str()? != "compiler-artifact" {
+        return None;
+    }
+    let target = msg.get("target")?;
+    if target.get("name")?.as_str()? != bin_name {
+        return None;
+    }
+    let kinds = target.get("kind")?.as_array()?;
+    let is_bin = kinds.iter().any(|k| k.as_str() == Some("bin"));
+    if !is_bin {
+        return None;
+    }
+    let exe = msg.get("executable")?.as_str()?;
+    if exe.is_empty() {
+        return None;
+    }
+    Some(PathBuf::from(exe))
 }
 
 /// How the generated harness depends on the clojurust runtime crates.
@@ -2592,5 +2807,54 @@ mod tests {
         {
             assert_eq!(v, env!("CARGO_PKG_VERSION"));
         }
+    }
+
+    #[test]
+    fn harness_bin_picks_last_matching_compiler_artifact() {
+        let stdout = r#"
+{"reason":"compiler-artifact","package_id":"lib 0.1.0","target":{"kind":["lib"],"name":"other","src_path":"/x"},"executable":null}
+{"reason":"compiler-artifact","package_id":"cljrs-aot-harness 0.1.0","target":{"kind":["bin"],"name":"cljrs-aot-harness","src_path":"/h"},"executable":"/tmp/first/target/release/cljrs-aot-harness"}
+{"reason":"build-finished","success":true}
+{"reason":"compiler-artifact","package_id":"cljrs-aot-harness 0.1.0","target":{"kind":["bin"],"crate_types":["bin"],"name":"cljrs-aot-harness","src_path":"/h"},"executable":"/custom/CARGO_TARGET_DIR/x86_64-unknown-linux-gnu/release/cljrs-aot-harness","filenames":["/custom/CARGO_TARGET_DIR/x86_64-unknown-linux-gnu/release/cljrs-aot-harness"]}
+"#;
+        let path = harness_bin_from_cargo_stdout(stdout).unwrap();
+        assert_eq!(
+            path,
+            PathBuf::from(
+                "/custom/CARGO_TARGET_DIR/x86_64-unknown-linux-gnu/release/cljrs-aot-harness"
+            )
+        );
+    }
+
+    #[test]
+    fn harness_bin_ignores_wrong_name_non_bin_and_null_executable() {
+        let stdout = r#"
+{"reason":"compiler-artifact","target":{"kind":["bin"],"name":"other-bin"},"executable":"/tmp/other"}
+{"reason":"compiler-artifact","target":{"kind":["lib"],"name":"cljrs-aot-harness"},"executable":"/tmp/lib.rlib"}
+{"reason":"compiler-artifact","target":{"kind":["bin"],"name":"cljrs-aot-harness"},"executable":null}
+{"reason":"compiler-artifact","target":{"kind":["bin"],"name":"cljrs-aot-harness"},"executable":""}
+{"reason":"not-an-artifact","target":{"kind":["bin"],"name":"cljrs-aot-harness"},"executable":"/tmp/nope"}
+"#;
+        let err = harness_bin_from_cargo_stdout(stdout).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("cljrs-aot-harness"),
+            "error should mention missing harness bin, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn harness_bin_errors_on_empty_stdout() {
+        let err = harness_bin_from_cargo_stdout("").unwrap_err();
+        assert!(matches!(err, AotError::Link(_)));
+    }
+
+    #[test]
+    fn compiler_artifact_helper_accepts_bin_with_executable() {
+        let line = r#"{"reason":"compiler-artifact","target":{"kind":["bin"],"name":"cljrs-aot-harness"},"executable":"/out/cljrs-aot-harness"}"#;
+        assert_eq!(
+            compiler_artifact_bin_executable(line, AOT_HARNESS_BIN),
+            Some(PathBuf::from("/out/cljrs-aot-harness"))
+        );
     }
 }
