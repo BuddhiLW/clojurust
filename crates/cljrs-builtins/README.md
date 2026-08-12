@@ -54,6 +54,44 @@ native fns don't carry real parameter names.
 `doc-data` in a `try`/`catch` so `(doc some-unbound-symbol)` returns `nil`
 instead of throwing, and returns just the `:doc` string.
 
+## Reader-conditional resolution (`form.rs`)
+
+The reader is platform-agnostic: it parses every branch of `#?(...)` / `#?@(...)`
+and hands back a `FormKind::ReaderCond` node. Selecting the `:rust` branch is
+therefore the job of each form-consuming boundary, and this crate holds the
+calculations they share.
+
+```rust
+/// The `:rust` branch of a conditional's clauses, or the `:default` branch.
+pub fn select_reader_cond(clauses: &[Form]) -> Option<&Form>;
+
+/// Expand `#?`/`#?@` across a sibling slice: a non-splicing conditional
+/// becomes its selected branch (or is dropped), a splicing one contributes
+/// that branch's elements inline.
+pub fn expand_reader_conds(forms: &[Form]) -> Vec<Form>;
+
+/// As above, borrowing the input unchanged when it holds no conditional.
+pub fn expand_reader_conds_cow(forms: &[Form]) -> Cow<'_, [Form]>;
+
+/// A slice that gets chunked by two was left with an odd number of forms.
+pub struct OddArity(pub usize);
+
+/// Expand, then require even length. Used by every construct that chunks
+/// siblings into pairs - map literals and `let*`/`loop*`/`binding` vectors,
+/// in both evaluators - since a splice's contribution is branch-dependent
+/// and the written parity does not decide the expanded parity.
+pub fn expand_pairs(forms: &[Form]) -> Result<Cow<'_, [Form]>, OddArity>;
+
+/// Convert a form to the value it denotes, without evaluating. Resolves
+/// conditionals in every container arm. Errors on a map whose expansion has
+/// odd length, and on a `#?@` with no sibling sequence to splice into.
+pub fn form_to_value(form: &Form) -> EvalResult<Value>;
+```
+
+Callers phrase `OddArity` in their own words (`map literal must have an even
+number of forms`, `let* binding vector must have even length`, ...), so the
+parity rule lives here while the message stays at the boundary.
+
 ## Phase B3 — `shared-atom` (cross-isolate, two-tier atom ADR)
 
 `shared-atom` is the cross-isolate tier of the two-tier atom design in
