@@ -1000,6 +1000,7 @@ dependencies = [
  "cljrs-types",
  "cljrs-value",
  "cljrs-vcs",
+ "proptest",
  "regex",
  "tempfile",
  "uuid",
@@ -1144,6 +1145,7 @@ version = "0.1.0"
 dependencies = [
  "cljrs-types",
  "miette",
+ "proptest",
 ]
 
 [[package]]

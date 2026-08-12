@@ -54,6 +54,15 @@ pub fn eval(form: &Form, env: &mut Env) -> EvalResult {
                 .map_err(EvalError::Runtime)?;
             Ok(Value::keyword(Keyword::parse(&full)))
         }
+        // A symbol key from an auto-resolved namespaced map: in evaluated
+        // position it names a var, exactly as a written-out symbol key does.
+        FormKind::AutoSymbol(s) => {
+            let full = env
+                .globals
+                .resolve_auto_keyword(&env.current_ns, s)
+                .map_err(EvalError::Runtime)?;
+            eval_symbol(&full, env)
+        }
 
         // ── Collections ───────────────────────────────────────────────────
         FormKind::List(forms) => eval_list(forms, env),
@@ -104,7 +113,13 @@ pub fn eval(form: &Form, env: &mut Env) -> EvalResult {
         }
 
         // ── Reader macros ─────────────────────────────────────────────────
-        FormKind::Quote(inner) => Ok(cljrs_builtins::form::form_to_value(inner)),
+        // `'x` sugar: like the `quote` special form, `::kw` and an
+        // auto-resolved map's symbol keys resolve against the reading
+        // namespace before the form becomes data.
+        FormKind::Quote(inner) => {
+            let resolved = cljrs_builtins::form::resolve_auto_forms(inner, env)?;
+            Ok(cljrs_builtins::form::form_to_value(&resolved))
+        }
         FormKind::SyntaxQuote(inner) => syntax_quote(inner, env),
         FormKind::Unquote(_) => Err(EvalError::Runtime("unquote outside syntax-quote".into())),
         FormKind::UnquoteSplice(_) => Err(EvalError::Runtime(

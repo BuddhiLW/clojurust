@@ -6,7 +6,7 @@
 //! a map that survives two reader passes changes meaning between them.
 
 use cljrs_reader::form::{Form, FormKind};
-use cljrs_reader::namespaced_map::qualify_keys;
+use cljrs_reader::namespaced_map::{MapNs, qualify_keys};
 use cljrs_types::span::Span;
 use proptest::prelude::*;
 use std::sync::Arc;
@@ -81,7 +81,8 @@ proptest! {
     #[test]
     fn length_is_preserved(ns in ns_name(), b in body()) {
         let n = b.len();
-        if let Ok(out) = qualify_keys(&ns, false, b) {
+        {
+            let out = qualify_keys(&MapNs::Literal(ns), b);
             prop_assert_eq!(out.len(), n);
         }
     }
@@ -91,7 +92,8 @@ proptest! {
     #[test]
     fn odd_indices_are_never_rewritten(ns in ns_name(), b in body()) {
         let before = kinds(b.clone());
-        if let Ok(out) = qualify_keys(&ns, false, b) {
+        {
+            let out = qualify_keys(&MapNs::Literal(ns), b);
             let after = kinds(out);
             for i in (1..before.len()).step_by(2) {
                 prop_assert_eq!(&before[i], &after[i]);
@@ -104,8 +106,8 @@ proptest! {
     /// every key it produced now carries an explicit namespace.
     #[test]
     fn qualification_is_idempotent(ns in ns_name(), b in keyword_body()) {
-        let once = qualify_keys(&ns, false, b).expect("keyword keys never error");
-        let twice = qualify_keys(&ns, false, once.clone()).expect("still no symbol keys");
+        let once = qualify_keys(&MapNs::Literal(ns.clone()), b);
+        let twice = qualify_keys(&MapNs::Literal(ns), once.clone());
         prop_assert_eq!(kinds(once), kinds(twice));
     }
 
@@ -118,14 +120,12 @@ proptest! {
     #[test]
     fn underscore_optout_is_one_shot_by_design(ns in ns_name(), name in bare_name()) {
         let once = qualify_keys(
-            &ns,
-            false,
+            &MapNs::Literal(ns.clone()),
             vec![form(FormKind::Keyword(format!("_/{name}"))), form(FormKind::Int(0))],
-        )
-        .unwrap();
+        );
         prop_assert_eq!(&once[0].kind, &FormKind::Keyword(name.clone()));
 
-        let twice = qualify_keys(&ns, false, once).unwrap();
+        let twice = qualify_keys(&MapNs::Literal(ns.clone()), once);
         prop_assert_eq!(&twice[0].kind, &FormKind::Keyword(format!("{ns}/{name}")));
     }
 
@@ -134,11 +134,9 @@ proptest! {
     #[test]
     fn bare_keyword_keys_gain_the_literal_namespace(ns in ns_name(), name in bare_name()) {
         let out = qualify_keys(
-            &ns,
-            false,
+            &MapNs::Literal(ns.clone()),
             vec![form(FormKind::Keyword(name.clone())), form(FormKind::Int(0))],
-        )
-        .unwrap();
+        );
         prop_assert_eq!(&out[0].kind, &FormKind::Keyword(format!("{ns}/{name}")));
     }
 
@@ -147,11 +145,9 @@ proptest! {
     #[test]
     fn underscore_always_unqualifies(ns in ns_name(), name in bare_name()) {
         let out = qualify_keys(
-            &ns,
-            false,
+            &MapNs::Literal(ns),
             vec![form(FormKind::Keyword(format!("_/{name}"))), form(FormKind::Int(0))],
-        )
-        .unwrap();
+        );
         prop_assert_eq!(&out[0].kind, &FormKind::Keyword(name));
     }
 
@@ -166,11 +162,9 @@ proptest! {
         prop_assume!(key_ns != "_");
         let spelled = format!("{key_ns}/{name}");
         let out = qualify_keys(
-            &map_ns,
-            false,
+            &MapNs::Literal(map_ns),
             vec![form(FormKind::Keyword(spelled.clone())), form(FormKind::Int(0))],
-        )
-        .unwrap();
+        );
         prop_assert_eq!(&out[0].kind, &FormKind::Keyword(spelled));
     }
 
@@ -178,7 +172,8 @@ proptest! {
     /// deferred `AutoKeyword` the evaluator would resolve against `*ns*`.
     #[test]
     fn literal_namespace_never_defers_resolution(ns in ns_name(), b in body()) {
-        if let Ok(out) = qualify_keys(&ns, false, b) {
+        {
+            let out = qualify_keys(&MapNs::Literal(ns), b);
             for f in out {
                 prop_assert!(!matches!(f.kind, FormKind::AutoKeyword(_)));
             }
@@ -190,37 +185,69 @@ proptest! {
     #[test]
     fn auto_defers_exactly_the_bare_keyword_keys(alias in ns_name(), name in bare_name()) {
         let out = qualify_keys(
-            &alias,
-            true,
+            &MapNs::Alias(alias.clone()),
             vec![form(FormKind::Keyword(name.clone())), form(FormKind::Int(0))],
-        )
-        .unwrap();
+        );
         prop_assert_eq!(&out[0].kind, &FormKind::AutoKeyword(format!("{alias}/{name}")));
     }
 
-    /// There is no auto-resolved symbol syntax, so a symbol key under an
-    /// auto-resolved map is refused for every name - never silently left bare.
+    /// A symbol key under an auto-resolved map defers exactly like a keyword
+    /// key does: to `AutoSymbol`, carrying the alias when there is one, for the
+    /// evaluator to resolve against the reading namespace.
     #[test]
-    fn auto_always_refuses_symbol_keys(name in bare_name()) {
-        prop_assume!(name != "/");
-        let err = qualify_keys(
-            "",
-            true,
-            vec![form(FormKind::Symbol(name)), form(FormKind::Int(0))],
-        )
-        .unwrap_err();
-        prop_assert!(err.contains("auto-resolved"), "{}", err);
+    fn auto_defers_symbol_keys_to_auto_symbol(alias in ns_name(), name in bare_name()) {
+        let out = qualify_keys(
+            &MapNs::CurrentNs,
+            vec![form(FormKind::Symbol(name.clone())), form(FormKind::Int(0))],
+        );
+        prop_assert_eq!(&out[0].kind, &FormKind::AutoSymbol(name.clone()));
+
+        let out = qualify_keys(
+            &MapNs::Alias(alias.clone()),
+            vec![form(FormKind::Symbol(name.clone())), form(FormKind::Int(0))],
+        );
+        prop_assert_eq!(&out[0].kind, &FormKind::AutoSymbol(format!("{alias}/{name}")));
     }
 
-    /// `/` is division, not a namespace separator, under every configuration.
+    /// `/` is a NAME, not a namespace separator: `#:foo{/ 1}` has the key
+    /// `foo//`, as the JVM reader produces. Leaving it bare would make it the
+    /// one key the map's namespace silently skips.
     #[test]
-    fn division_symbol_is_never_qualified(ns in ns_name(), auto in any::<bool>()) {
+    fn slash_takes_the_map_namespace(ns in ns_name(), name in bare_name()) {
         let out = qualify_keys(
-            &ns,
-            auto,
+            &MapNs::Literal(ns.clone()),
             vec![form(FormKind::Symbol("/".to_string())), form(FormKind::Int(0))],
-        )
-        .unwrap();
-        prop_assert_eq!(&out[0].kind, &FormKind::Symbol("/".to_string()));
+        );
+        prop_assert_eq!(&out[0].kind, &FormKind::Symbol(format!("{ns}//")));
+
+        let out = qualify_keys(
+            &MapNs::Literal(ns.clone()),
+            vec![form(FormKind::Keyword("/".to_string())), form(FormKind::Int(0))],
+        );
+        prop_assert_eq!(&out[0].kind, &FormKind::Keyword(format!("{ns}//")));
+
+        // ... and it is still just a name under an alias.
+        let out = qualify_keys(
+            &MapNs::Alias(name.clone()),
+            vec![form(FormKind::Keyword("/".to_string())), form(FormKind::Int(0))],
+        );
+        prop_assert_eq!(&out[0].kind, &FormKind::AutoKeyword(format!("{name}//")));
     }
+
+    /// Any bare identifier is a legal prefix; anything carrying a namespace of
+    /// its own, or not starting like a symbol, is refused - the prefix must
+    /// read as an unqualified symbol.
+    #[test]
+    fn prefix_parses_exactly_the_unqualified_symbols(
+        ns in ns_name(),
+        name in bare_name(),
+        auto in any::<bool>(),
+    ) {
+        let qualified = format!("{ns}/{name}");
+        let leading_digit = format!("1{ns}");
+        prop_assert!(MapNs::parse(&ns, auto).is_ok(), "{} rejected", ns);
+        prop_assert!(MapNs::parse(&qualified, auto).is_err(), "{} accepted", qualified);
+        prop_assert!(MapNs::parse(&leading_digit, auto).is_err(), "{} accepted", leading_digit);
+    }
+
 }

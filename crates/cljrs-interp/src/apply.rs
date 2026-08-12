@@ -707,7 +707,7 @@ fn macro_apply(
     // the macro's own namespace.
     let resolved_args: Vec<Form> = arg_forms
         .iter()
-        .map(|f| crate::macros::resolve_auto_kws(f, env))
+        .map(|f| cljrs_builtins::form::resolve_auto_forms(f, env))
         .collect::<EvalResult<Vec<Form>>>()?;
 
     // &form: the whole call expression as a list value.

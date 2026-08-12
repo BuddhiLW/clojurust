@@ -58,6 +58,13 @@ fn sq_form(
                 .map_err(EvalError::Runtime)?;
             Ok(Value::keyword(Keyword::parse(&full)))
         }
+        FormKind::AutoSymbol(s) => {
+            let full = env
+                .globals
+                .resolve_auto_keyword(&env.current_ns, s)
+                .map_err(EvalError::Runtime)?;
+            Ok(Value::symbol(Symbol::parse(&full)))
+        }
 
         // Lists: process each element, splicing ~@ items.
         FormKind::List(forms) => {

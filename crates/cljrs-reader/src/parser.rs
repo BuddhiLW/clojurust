@@ -220,7 +220,7 @@ impl Parser {
                     self.merged_span(&span, &close),
                 )))
             }
-            Token::NamespacedMap { ns, auto } => {
+            Token::NamespacedMap(ns) => {
                 self.bump()?;
                 // The lexer guarantees a `{` follows, so this reads the body
                 // through the ordinary map path and then rewrites the keys.
@@ -228,15 +228,13 @@ impl Parser {
                 self.bump()?;
                 let (forms, close) =
                     self.parse_seq_forms(Token::RBrace, open.clone(), "namespaced map")?;
-                if forms.len() % 2 != 0 {
+                if !forms.len().is_multiple_of(2) {
                     return Err(
                         self.make_error("map literal must have an even number of forms", span)
                     );
                 }
-                let qualified = namespaced_map::qualify_keys(&ns, auto, forms)
-                    .map_err(|msg| self.make_error(&msg, span.clone()))?;
                 Ok(Some(Form::new(
-                    FormKind::Map(qualified),
+                    FormKind::Map(namespaced_map::qualify_keys(&ns, forms)),
                     self.merged_span(&span, &close),
                 )))
             }
