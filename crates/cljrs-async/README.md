@@ -197,6 +197,7 @@ blocking bridge is a later phase.
 | `tests/async_fn.rs` | integration tests for dispatch, `await`, `deref` enforcement, `timeout`/`alts`/`alt`, channels, Phase F utilities, and `<!!`/`>!!` |
 | `tests/worker_pool.rs` | Phase A2 integration tests: offload, concurrent tasks, handle spawning, LocalSet context, singleton invariant, byte processing round-trip |
 | `tests/isolate_channel_clj.rs` | Clojure-level Phase B2 tests: `isolate-chan` pair, put/poll round-trip, FIFO order, located error on a non-shareable value, async `isolate-take!` |
+| `tests/reader_conditional_parity.rs` | property + example tests that `#?`/`#?@` resolve identically in `eval_async` and the sync evaluator (containers, `let*`/`loop*` binding vectors) |
 
 ## Public API
 
