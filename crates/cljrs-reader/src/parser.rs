@@ -16,11 +16,15 @@ use crate::token::Token;
 // ─── Parser ───────────────────────────────────────────────────────────────────
 
 /// True when a map's key/value parity is decidable at read time and violated.
+///
+/// Any reader conditional makes it undecidable: `#?@` contributes a
+/// branch-dependent number of forms and `#?` contributes one or none, so the
+/// check moves to the evaluator, which knows the platform.
 fn map_arity_is_statically_odd(forms: &[Form]) -> bool {
-    let has_splice = forms
+    let has_conditional = forms
         .iter()
-        .any(|f| matches!(f.kind, FormKind::ReaderCond { splicing: true, .. }));
-    !has_splice && !forms.len().is_multiple_of(2)
+        .any(|f| matches!(f.kind, FormKind::ReaderCond { .. }));
+    !has_conditional && !forms.len().is_multiple_of(2)
 }
 
 pub struct Parser {
@@ -867,6 +871,21 @@ mod tests {
         );
         let form = p.parse_one().unwrap().unwrap();
         assert!(matches!(form.kind, FormKind::Map(_)));
+    }
+
+    #[test]
+    fn test_map_with_non_splicing_conditional_defers_parity_check() {
+        // A non-splicing `#?` contributes one form or none, so the written
+        // parity is not the expanded parity either: `{#?(:clj :a)}` is an
+        // empty map under `:rust` and must reach the evaluator to find out.
+        for src in ["{#?(:clj :a)}", "{:a #?(:rust 1 :clj 2) :b 2}"] {
+            let mut p = Parser::new(src.to_string(), "<test>".to_string());
+            let form = p
+                .parse_one()
+                .unwrap_or_else(|e| panic!("{src} rejected at read time: {e}"))
+                .unwrap();
+            assert!(matches!(form.kind, FormKind::Map(_)), "{src}");
+        }
     }
 
     #[test]

@@ -6201,7 +6201,9 @@ fn builtin_read_string(args: &[Value]) -> ValueResult<Value> {
             let src = s.get().clone();
             let mut parser = cljrs_reader::Parser::new(src, "<read-string>".into());
             match parser.parse_one() {
-                Ok(Some(form)) => Ok(crate::form::form_to_value(&form)),
+                Ok(Some(form)) => {
+                    crate::form::form_to_value(&form).map_err(|e| ValueError::Other(e.to_string()))
+                }
                 Ok(None) => Ok(Value::Nil),
                 Err(e) => Err(ValueError::Other(e.to_string())),
             }

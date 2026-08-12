@@ -5,7 +5,7 @@ use std::sync::Arc;
 use crate::apply::eval_call;
 use crate::special::eval_special;
 use crate::syntax_quote::syntax_quote;
-use cljrs_builtins::form::{expand_reader_conds, expand_reader_conds_cow};
+use cljrs_builtins::form::{expand_pairs, expand_reader_conds, expand_reader_conds_cow};
 use cljrs_builtins::special::SPECIAL_FORMS;
 use cljrs_env::env::Env;
 use cljrs_env::error::{EvalError, EvalResult};
@@ -67,12 +67,9 @@ pub fn eval(form: &Form, env: &mut Env) -> EvalResult {
             Ok(Value::Vector(GcPtr::new(PersistentVector::from_iter(vals))))
         }
         FormKind::Map(forms) => {
-            let forms = expand_reader_conds_cow(forms);
-            if !forms.len().is_multiple_of(2) {
-                return Err(EvalError::Runtime(
-                    "map literal must have an even number of forms".into(),
-                ));
-            }
+            let forms = expand_pairs(forms).map_err(|_| {
+                EvalError::Runtime("map literal must have an even number of forms".into())
+            })?;
             let mut pairs: Vec<Value> = Vec::with_capacity(forms.len());
             for f in forms.iter() {
                 let _root = cljrs_env::gc_roots::root_values(&pairs);
@@ -97,7 +94,7 @@ pub fn eval(form: &Form, env: &mut Env) -> EvalResult {
         }
 
         // ── Reader macros ─────────────────────────────────────────────────
-        FormKind::Quote(inner) => Ok(cljrs_builtins::form::form_to_value(inner)),
+        FormKind::Quote(inner) => cljrs_builtins::form::form_to_value(inner),
         FormKind::SyntaxQuote(inner) => syntax_quote(inner, env),
         FormKind::Unquote(_) => Err(EvalError::Runtime("unquote outside syntax-quote".into())),
         FormKind::UnquoteSplice(_) => Err(EvalError::Runtime(
@@ -911,6 +908,188 @@ mod tests {
                 );
             }
         }
+    }
+
+    // ── Reader conditionals: cross-path and binding-vector properties ─────
+    //
+    // One generated position in a container or binding vector. Names are
+    // assigned by index, so generated elements are distinct and set literals
+    // stay legal.
+
+    #[derive(Clone, Debug)]
+    enum Slot {
+        /// A plain element; contributes 1.
+        Plain,
+        /// `#?(…)`; contributes 1 when the branch key matches, else 0.
+        NonSplice { matches: bool },
+        /// `#?@(…)`; contributes `n` when the branch key matches, else 0.
+        Splice { matches: bool, n: usize },
+    }
+
+    fn slot_strat() -> impl proptest::strategy::Strategy<Value = Slot> {
+        use proptest::strategy::{Just, Strategy};
+        proptest::prop_oneof![
+            Just(Slot::Plain),
+            proptest::bool::ANY.prop_map(|matches| Slot::NonSplice { matches }),
+            (proptest::bool::ANY, 0usize..3).prop_map(|(matches, n)| Slot::Splice { matches, n }),
+        ]
+    }
+
+    /// Render `slots` twice - conditionals written out, and branches inlined -
+    /// with `unit` forms per contributed position. `unit(i)` renders element
+    /// `i`; a unit of two tokens (`x0 0`) keeps pair parity even, which is what
+    /// binding vectors need.
+    fn render_slots(slots: &[Slot], unit: &dyn Fn(usize) -> String) -> (String, String) {
+        let mut next = 0usize;
+        let (mut written, mut inlined) = (Vec::new(), Vec::new());
+        for slot in slots {
+            match *slot {
+                Slot::Plain => {
+                    let u = unit(next);
+                    next += 1;
+                    written.push(u.clone());
+                    inlined.push(u);
+                }
+                Slot::NonSplice { matches } => {
+                    let u = unit(next);
+                    next += 1;
+                    let key = if matches { "rust" } else { "clj" };
+                    written.push(format!("#?(:{key} {u})"));
+                    if matches {
+                        inlined.push(u);
+                    }
+                }
+                Slot::Splice { matches, n } => {
+                    let us: Vec<String> = (0..n)
+                        .map(|_| {
+                            let u = unit(next);
+                            next += 1;
+                            u
+                        })
+                        .collect();
+                    let key = if matches { "rust" } else { "clj" };
+                    written.push(format!("#?@(:{key} [{}])", us.join(" ")));
+                    if matches {
+                        inlined.extend(us);
+                    }
+                }
+            }
+        }
+        (written.join(" "), inlined.join(" "))
+    }
+
+    /// Binding vectors take pairs, and a non-splicing `#?` selects exactly one
+    /// form - so it cannot carry a `name init` pair. Only plain positions and
+    /// `#?@` splices can appear there.
+    fn pair_slot_strat() -> impl proptest::strategy::Strategy<Value = Slot> {
+        use proptest::strategy::{Just, Strategy};
+        proptest::prop_oneof![
+            Just(Slot::Plain),
+            (proptest::bool::ANY, 0usize..3).prop_map(|(matches, n)| Slot::Splice { matches, n }),
+        ]
+    }
+
+    fn kw_unit(i: usize) -> String {
+        format!(":k{i}")
+    }
+
+    /// `x<i> <i>` - one binding pair, so every contributed position keeps the
+    /// vector's parity even.
+    fn binding_unit(i: usize) -> String {
+        format!("x{i} {i}")
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(48))]
+
+        /// A form's meaning must not depend on which path reads it. For the same
+        /// container, evaluating it, quoting it, and syntax-quoting it all agree
+        /// with the hand-inlined spelling. Before this fix the quoted and
+        /// syntax-quoted paths dropped or nil-filled splices that the evaluated
+        /// path expanded.
+        #[test]
+        fn prop_splice_agrees_across_eval_quote_and_syntax_quote(
+            slots in proptest::collection::vec(slot_strat(), 0..5),
+        ) {
+            let (written, inlined) = render_slots(&slots, &kw_unit);
+            let even = inlined.split_whitespace().count().is_multiple_of(2);
+            for (open, close) in [("[", "]"), ("#{", "}"), ("{", "}")] {
+                if open == "{" && !even {
+                    continue;
+                }
+                for prefix in ["", "'", "`"] {
+                    let got = eval_str(&format!("{prefix}{open}{written}{close}"));
+                    let want = eval_str(&format!("{prefix}{open}{inlined}{close}"));
+                    proptest::prop_assert_eq!(
+                        got.map_err(|e| e.to_string()),
+                        want.map_err(|e| e.to_string()),
+                        "prefix {:?} container {}{}", prefix, open, close
+                    );
+                }
+            }
+            // Data lists have no evaluated spelling; check both quoted forms.
+            for prefix in ["'", "`"] {
+                let got = eval_str(&format!("{prefix}({written})"));
+                let want = eval_str(&format!("{prefix}({inlined})"));
+                proptest::prop_assert_eq!(
+                    got.map_err(|e| e.to_string()),
+                    want.map_err(|e| e.to_string()),
+                    "prefix {:?} list", prefix
+                );
+            }
+        }
+
+        /// Every binding vector resolves conditionals: `let*`, `loop*` and
+        /// `binding` bind exactly what the inlined spelling binds.
+        #[test]
+        fn prop_splice_in_binding_vectors_equals_inline(
+            slots in proptest::collection::vec(pair_slot_strat(), 0..4),
+        ) {
+            let (written, inlined) = render_slots(&slots, &binding_unit);
+            let names: Vec<String> = inlined
+                .split_whitespace()
+                .step_by(2)
+                .map(str::to_string)
+                .collect();
+            let body = format!("[{}]", names.join(" "));
+            for head in ["let*", "loop*"] {
+                let got = eval_str(&format!("({head} [{written}] {body})"));
+                let want = eval_str(&format!("({head} [{inlined}] {body})"));
+                proptest::prop_assert_eq!(
+                    got.map_err(|e| e.to_string()),
+                    want.map_err(|e| e.to_string()),
+                    "{}", head
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn quoted_map_splice_lands_in_key_value_positions() {
+        assert_eq!(
+            eval_str("'{:a 1 #?@(:rust [:b 2]) :c 3}").unwrap(),
+            eval_str("{:a 1 :b 2 :c 3}").unwrap()
+        );
+    }
+
+    #[test]
+    fn syntax_quoted_splice_is_expanded_not_nil() {
+        assert_eq!(
+            eval_str("`(1 #?@(:rust [2 3]) 4)").unwrap(),
+            eval_str("'(1 2 3 4)").unwrap()
+        );
+    }
+
+    #[test]
+    fn map_literal_with_only_an_unmatched_conditional_reads_as_empty() {
+        // The written parity is odd, the expansion is empty - the reader must
+        // defer rather than reject.
+        assert_eq!(eval_str("{#?(:clj :a)}").unwrap(), eval_str("{}").unwrap());
+    }
+
+    #[test]
+    fn loop_binding_vector_expands_splices() {
+        assert_eq!(eval_str("(loop* [#?@(:rust [x 1])] x)").unwrap(), long(1));
     }
 
     // ── Error cases ───────────────────────────────────────────────────────

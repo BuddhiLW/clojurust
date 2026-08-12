@@ -14,7 +14,7 @@
 
 use std::future::Future;
 
-use cljrs_builtins::form::expand_reader_conds_cow;
+use cljrs_builtins::form::{expand_pairs, expand_reader_conds_cow};
 use cljrs_env::env::Env;
 use cljrs_env::error::{EvalError, EvalResult};
 use cljrs_gc::GcPtr;
@@ -151,12 +151,11 @@ pub async fn eval_async(form: &Form, env: &mut Env) -> EvalResult {
             return Ok(Value::Vector(GcPtr::new(PersistentVector::from_iter(vals))));
         }
         FormKind::Map(elems) => {
-            let elems = expand_reader_conds_cow(elems).into_owned();
-            if !elems.len().is_multiple_of(2) {
-                return Err(EvalError::Runtime(
-                    "map literal must have an even number of forms".into(),
-                ));
-            }
+            let elems = expand_pairs(elems)
+                .map_err(|_| {
+                    EvalError::Runtime("map literal must have an even number of forms".into())
+                })?
+                .into_owned();
             let mut pairs: Vec<Value> = Vec::with_capacity(elems.len());
             for f in &elems {
                 pairs.push(Box::pin(eval_async(f, env)).await?);
@@ -373,14 +372,11 @@ async fn eval_if_async(args: &[Form], env: &mut Env) -> EvalResult {
 /// patterns are bound via the shared [`bind_pattern`] helper.
 async fn eval_let_async(args: &[Form], env: &mut Env) -> EvalResult {
     let bindings = match args.first().map(|f| &f.kind) {
-        Some(FormKind::Vector(v)) => v.clone(),
+        Some(FormKind::Vector(v)) => expand_pairs(v)
+            .map_err(|_| EvalError::Runtime("let* binding vector must have even length".into()))?
+            .into_owned(),
         _ => return Err(EvalError::Runtime("let* requires a binding vector".into())),
     };
-    if bindings.len() % 2 != 0 {
-        return Err(EvalError::Runtime(
-            "let* binding vector must have even length".into(),
-        ));
-    }
 
     env.push_frame();
     for pair in bindings.chunks(2) {
@@ -406,14 +402,11 @@ async fn eval_let_async(args: &[Form], env: &mut Env) -> EvalResult {
 /// [`eval_body_async`], and `recur` restarts the iteration.
 async fn eval_loop_async(args: &[Form], env: &mut Env) -> EvalResult {
     let bindings = match args.first().map(|f| &f.kind) {
-        Some(FormKind::Vector(v)) => v.clone(),
+        Some(FormKind::Vector(v)) => expand_pairs(v)
+            .map_err(|_| EvalError::Runtime("loop binding vector must have even length".into()))?
+            .into_owned(),
         _ => return Err(EvalError::Runtime("loop requires a binding vector".into())),
     };
-    if bindings.len() % 2 != 0 {
-        return Err(EvalError::Runtime(
-            "loop binding vector must have even length".into(),
-        ));
-    }
 
     let patterns: Vec<Form> = bindings.iter().step_by(2).cloned().collect();
     let init_forms: Vec<Form> = bindings.iter().skip(1).step_by(2).cloned().collect();

@@ -1,5 +1,6 @@
 // ── form_to_value ─────────────────────────────────────────────────────────────
 
+use cljrs_env::error::{EvalError, EvalResult};
 use cljrs_gc::GcPtr;
 use cljrs_reader::{Form, FormKind};
 use cljrs_value::value::SetValue;
@@ -172,8 +173,16 @@ fn rewrite_pct_form(form: &Form, span: cljrs_types::span::Span) -> Form {
 
 /// Convert a `Form` to its literal `Value` without evaluating.
 /// Used by `quote` and macro expansion.
-pub fn form_to_value(form: &Form) -> Value {
-    match &form.kind {
+///
+/// Every sibling sequence is run through [`expand_reader_conds`] first, so a
+/// `#?@` splice contributes its elements to the enclosing collection rather
+/// than reaching the leaf arm.
+///
+/// Errors when the form cannot denote a value: a map literal whose expansion
+/// has odd length, or a `#?@` splice in a position that has no sibling
+/// sequence to splice into.
+pub fn form_to_value(form: &Form) -> EvalResult<Value> {
+    let value = match &form.kind {
         FormKind::Nil => Value::Nil,
         FormKind::Bool(b) => Value::Bool(*b),
         FormKind::Int(n) => Value::Long(*n),
@@ -194,83 +203,86 @@ pub fn form_to_value(form: &Form) -> Value {
         },
 
         FormKind::List(forms) => {
-            let expanded = expand_reader_conds(forms);
-            let items: Vec<Value> = expanded.iter().map(form_to_value).collect();
+            let items = forms_to_values(&expand_reader_conds_cow(forms))?;
             Value::List(GcPtr::new(PersistentList::from_iter(items)))
         }
         FormKind::Vector(forms) => {
-            let expanded = expand_reader_conds(forms);
-            let items: Vec<Value> = expanded.iter().map(form_to_value).collect();
+            let items = forms_to_values(&expand_reader_conds_cow(forms))?;
             Value::Vector(GcPtr::new(PersistentVector::from_iter(items)))
         }
         FormKind::Map(forms) => {
+            let forms = expand_pairs(forms).map_err(|_| map_literal_arity_error())?;
             let mut m = MapValue::empty();
-            for pair in forms.chunks(2) {
-                if pair.len() == 2 {
-                    m = m.assoc(form_to_value(&pair[0]), form_to_value(&pair[1]));
-                }
+            for pair in forms.chunks_exact(2) {
+                m = m.assoc(form_to_value(&pair[0])?, form_to_value(&pair[1])?);
             }
             Value::Map(m)
         }
         FormKind::Set(forms) => {
-            let s = forms
-                .iter()
-                .fold(PersistentHashSet::empty(), |s, f| s.conj(form_to_value(f)));
+            let mut s = PersistentHashSet::empty();
+            for f in expand_reader_conds_cow(forms).iter() {
+                s = s.conj(form_to_value(f)?);
+            }
             Value::Set(SetValue::Hash(GcPtr::new(s)))
         }
 
-        FormKind::Quote(inner) => {
-            // `'x` → the form x as a data value.
-            Value::List(GcPtr::new(PersistentList::from_iter([
-                Value::symbol(Symbol::simple("quote")),
-                form_to_value(inner),
-            ])))
-        }
-        FormKind::SyntaxQuote(inner) => Value::List(GcPtr::new(PersistentList::from_iter([
-            Value::symbol(Symbol::simple("syntax-quote")),
-            form_to_value(inner),
-        ]))),
-        FormKind::Unquote(inner) => Value::List(GcPtr::new(PersistentList::from_iter([
-            Value::symbol(Symbol::simple("unquote")),
-            form_to_value(inner),
-        ]))),
-        FormKind::UnquoteSplice(inner) => Value::List(GcPtr::new(PersistentList::from_iter([
-            Value::symbol(Symbol::simple("unquote-splicing")),
-            form_to_value(inner),
-        ]))),
-        FormKind::Deref(inner) => Value::List(GcPtr::new(PersistentList::from_iter([
-            Value::symbol(Symbol::simple("deref")),
-            form_to_value(inner),
-        ]))),
-        FormKind::Var(inner) => Value::List(GcPtr::new(PersistentList::from_iter([
-            Value::symbol(Symbol::simple("var")),
-            form_to_value(inner),
-        ]))),
-        FormKind::Meta(_meta, inner) => form_to_value(inner),
+        // `'x` → the form x as a data value.
+        FormKind::Quote(inner) => reader_form_value("quote", inner)?,
+        FormKind::SyntaxQuote(inner) => reader_form_value("syntax-quote", inner)?,
+        FormKind::Unquote(inner) => reader_form_value("unquote", inner)?,
+        FormKind::UnquoteSplice(inner) => reader_form_value("unquote-splicing", inner)?,
+        FormKind::Deref(inner) => reader_form_value("deref", inner)?,
+        FormKind::Var(inner) => reader_form_value("var", inner)?,
+        FormKind::Meta(_meta, inner) => form_to_value(inner)?,
         FormKind::AnonFn(body) => {
             // Expand #(...) to (fn* [...] ...) so it round-trips correctly through quote.
             let expanded = expand_anon_fn(body, form.span.clone());
-            form_to_value(&expanded)
+            form_to_value(&expanded)?
         }
         FormKind::TaggedLiteral(tag, inner) => match tag.as_str() {
             "uuid" => {
-                if let FormKind::Str(s) = &inner.kind {
-                    match uuid::Uuid::parse_str(s) {
-                        Ok(u) => Value::Uuid(u.as_u128()),
-                        Err(_) => form_to_value(inner),
-                    }
+                if let FormKind::Str(s) = &inner.kind
+                    && let Ok(u) = uuid::Uuid::parse_str(s)
+                {
+                    Value::Uuid(u.as_u128())
                 } else {
-                    form_to_value(inner)
+                    form_to_value(inner)?
                 }
             }
-            _ => form_to_value(inner),
+            _ => form_to_value(inner)?,
         },
         FormKind::ReaderCond {
             splicing: false,
             clauses,
-        } => select_reader_cond(clauses).map_or(Value::Nil, form_to_value),
-        FormKind::ReaderCond { splicing: true, .. } => Value::Nil, // splice must be handled by parent
-    }
+        } => match select_reader_cond(clauses) {
+            Some(selected) => form_to_value(selected)?,
+            None => Value::Nil,
+        },
+        // Splices are consumed by the enclosing sibling sequence; reaching a
+        // leaf means there was none.
+        FormKind::ReaderCond { splicing: true, .. } => {
+            return Err(EvalError::Runtime(
+                "splicing reader conditional not in a sequence context".into(),
+            ));
+        }
+    };
+    Ok(value)
+}
+
+fn forms_to_values(forms: &[Form]) -> EvalResult<Vec<Value>> {
+    forms.iter().map(form_to_value).collect()
+}
+
+/// `(<sym> <inner>)` — the list encoding of a reader-sugar form as data.
+fn reader_form_value(sym: &str, inner: &Form) -> EvalResult<Value> {
+    Ok(Value::List(GcPtr::new(PersistentList::from_iter([
+        Value::symbol(Symbol::simple(sym)),
+        form_to_value(inner)?,
+    ]))))
+}
+
+fn map_literal_arity_error() -> EvalError {
+    EvalError::Runtime("map literal must have an even number of forms".into())
 }
 
 /// Resolve a `#?(...)` reader conditional to the selected branch form, or
@@ -343,6 +355,25 @@ pub fn expand_reader_conds_cow(forms: &[Form]) -> std::borrow::Cow<'_, [Form]> {
         std::borrow::Cow::Owned(expand_reader_conds(forms))
     } else {
         std::borrow::Cow::Borrowed(forms)
+    }
+}
+
+/// A pair-structured sibling slice was left with an odd number of forms.
+/// Carries that length; callers phrase the error for their own construct.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OddArity(pub usize);
+
+/// Expand reader conditionals in a slice that must hold key/value or
+/// binding/init *pairs*, then enforce even parity on the expansion.
+///
+/// Callers that chunk siblings by two - map literals, `let*`/`loop*`/`binding`
+/// vectors - resolve them here before chunking.
+pub fn expand_pairs(forms: &[Form]) -> Result<std::borrow::Cow<'_, [Form]>, OddArity> {
+    let expanded = expand_reader_conds_cow(forms);
+    if expanded.len().is_multiple_of(2) {
+        Ok(expanded)
+    } else {
+        Err(OddArity(expanded.len()))
     }
 }
 
@@ -570,7 +601,7 @@ mod tests {
     }
 
     fn seq_expected_src(items: &[Item]) -> String {
-        let names: Vec<String> = items.iter().flat_map(|it| item_expected(it)).collect();
+        let names: Vec<String> = items.iter().flat_map(item_expected).collect();
         format!("[{}]", kw_list(&names))
     }
 
@@ -643,5 +674,203 @@ mod tests {
             let got = expand_reader_conds(&vec_elems(&seq_src(&items)));
             proptest::prop_assert_eq!(got.len(), expected_len);
         }
+    }
+
+    // ── quoted containers: splice equals inline ─────────────────────────────
+    //
+    // One generated position in a container. Element names are assigned by
+    // index so every element is distinct, which keeps generated set literals
+    // legal and makes map keys unambiguous.
+
+    #[derive(Clone, Debug)]
+    enum Slot {
+        /// A plain element; contributes 1.
+        Plain,
+        /// `#?(…)`; contributes 1 when the branch key matches, else 0.
+        NonSplice { matches: bool },
+        /// `#?@(…)`; contributes `n` when the branch key matches, else 0.
+        Splice { matches: bool, n: usize },
+    }
+
+    fn slot_strat() -> impl proptest::strategy::Strategy<Value = Slot> {
+        use proptest::strategy::{Just, Strategy};
+        proptest::prop_oneof![
+            Just(Slot::Plain),
+            proptest::bool::ANY.prop_map(|matches| Slot::NonSplice { matches }),
+            (proptest::bool::ANY, 0usize..3).prop_map(|(matches, n)| Slot::Splice { matches, n }),
+        ]
+    }
+
+    /// Render `slots` twice: once with the conditionals written out, once with
+    /// the selected branches already inlined. Both share one name counter, so
+    /// corresponding elements carry identical names.
+    fn render_slots(slots: &[Slot]) -> (String, String) {
+        let mut next = 0usize;
+        let mut name = || {
+            let n = next;
+            next += 1;
+            format!(":k{n}")
+        };
+        let (mut written, mut inlined) = (Vec::new(), Vec::new());
+        for slot in slots {
+            match *slot {
+                Slot::Plain => {
+                    let k = name();
+                    written.push(k.clone());
+                    inlined.push(k);
+                }
+                Slot::NonSplice { matches } => {
+                    let k = name();
+                    let key = if matches { "rust" } else { "clj" };
+                    written.push(format!("#?(:{key} {k})"));
+                    if matches {
+                        inlined.push(k);
+                    }
+                }
+                Slot::Splice { matches, n } => {
+                    let ks: Vec<String> = (0..n).map(|_| name()).collect();
+                    let key = if matches { "rust" } else { "clj" };
+                    written.push(format!("#?@(:{key} [{}])", ks.join(" ")));
+                    if matches {
+                        inlined.extend(ks);
+                    }
+                }
+            }
+        }
+        (written.join(" "), inlined.join(" "))
+    }
+
+    fn quoted_value(src: &str) -> EvalResult<Value> {
+        form_to_value(&parse_one_form(src))
+    }
+
+    /// Read `src` and convert it to a value, collapsing the read-time and
+    /// convert-time rejections into one channel: a map literal is rejected by
+    /// the reader when its parity is statically decidable and by
+    /// `form_to_value` when a reader conditional deferred it.
+    fn read_to_value(src: &str) -> Result<Value, String> {
+        let mut p = Parser::new(src.to_string(), "<test>".to_string());
+        let form = p
+            .parse_one()
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "no form".to_string())?;
+        form_to_value(&form).map_err(|e| e.to_string())
+    }
+
+    proptest::proptest! {
+        /// `expand_pairs` is exactly `expand_reader_conds` plus an even-length
+        /// gate: it accepts precisely the expansions that can be chunked by two,
+        /// and never alters what expansion produced.
+        #[test]
+        fn prop_expand_pairs_is_expansion_plus_parity_gate(
+            items in proptest::collection::vec(item_strat(), 0..6),
+        ) {
+            let forms = vec_elems(&seq_src(&items));
+            let expanded = expand_reader_conds(&forms);
+            match expand_pairs(&forms) {
+                Ok(got) => {
+                    proptest::prop_assert!(expanded.len().is_multiple_of(2));
+                    proptest::prop_assert_eq!(kinds(&got), kinds(&expanded));
+                }
+                Err(OddArity(len)) => {
+                    proptest::prop_assert!(!expanded.len().is_multiple_of(2));
+                    proptest::prop_assert_eq!(len, expanded.len());
+                }
+            }
+        }
+
+        /// The regression property for the quoted-data path: in EVERY container,
+        /// a quoted form containing reader conditionals denotes the same value as
+        /// the same container with the selected branches written out by hand.
+        /// A container that drops, reorders, or nil-fills a splice fails here.
+        #[test]
+        fn prop_quoted_splice_equals_inline_in_every_container(
+            slots in proptest::collection::vec(slot_strat(), 0..5),
+        ) {
+            let (written, inlined) = render_slots(&slots);
+            for (open, close) in [("[", "]"), ("#{", "}"), ("(", ")"), ("{", "}")] {
+                // A map needs an even number of forms to denote a value at all;
+                // that case is the subject of its own property below.
+                let expanded_len = expand_reader_conds(&vec_elems(&format!("[{written}]"))).len();
+                if open == "{" && !expanded_len.is_multiple_of(2) {
+                    continue;
+                }
+                let got = quoted_value(&format!("{open}{written}{close}"));
+                let want = quoted_value(&format!("{open}{inlined}{close}"));
+                proptest::prop_assert_eq!(
+                    got.map_err(|e| e.to_string()),
+                    want.map_err(|e| e.to_string()),
+                    "container {}{}", open, close
+                );
+            }
+        }
+
+        /// A map denotes a value exactly when its EXPANSION has even length -
+        /// the written parity says nothing, and it makes no difference whether
+        /// the reader or the evaluator is the layer that rejects it. Truncating
+        /// the odd tail (the old behaviour) would yield a value here instead.
+        #[test]
+        fn prop_map_denotes_a_value_iff_expansion_is_even(
+            slots in proptest::collection::vec(slot_strat(), 0..5),
+        ) {
+            let (written, _) = render_slots(&slots);
+            let expanded_len = expand_reader_conds(&vec_elems(&format!("[{written}]"))).len();
+            let got = read_to_value(&format!("{{{written}}}"));
+            proptest::prop_assert_eq!(got.is_ok(), expanded_len.is_multiple_of(2), "{:?}", got);
+        }
+
+        /// Nesting a container inside a quoted container does not change the
+        /// values the inner splice contributes.
+        #[test]
+        fn prop_quoted_splice_survives_nesting(
+            slots in proptest::collection::vec(slot_strat(), 0..4),
+        ) {
+            let (written, inlined) = render_slots(&slots);
+            let got = quoted_value(&format!("[:head [{written}] :tail]"));
+            let want = quoted_value(&format!("[:head [{inlined}] :tail]"));
+            proptest::prop_assert_eq!(
+                got.map_err(|e| e.to_string()),
+                want.map_err(|e| e.to_string())
+            );
+        }
+    }
+
+    // ── examples from the PR #294 review ────────────────────────────────────
+
+    #[test]
+    fn quoted_map_splices_into_key_value_positions() {
+        assert_eq!(
+            quoted_value("'{:a 1 #?@(:rust [:b 2]) :c 3}").unwrap(),
+            quoted_value("'{:a 1 :b 2 :c 3}").unwrap()
+        );
+    }
+
+    #[test]
+    fn quoted_set_splices_its_elements() {
+        assert_eq!(
+            quoted_value("'#{1 #?@(:rust [2 3]) 4}").unwrap(),
+            quoted_value("'#{1 2 3 4}").unwrap()
+        );
+    }
+
+    #[test]
+    fn quoted_map_with_odd_expansion_errors_rather_than_truncating() {
+        let err = quoted_value("{:a 1 #?@(:rust [:b]) :c 3}").unwrap_err();
+        assert!(err.to_string().contains("even number of forms"), "{err}");
+    }
+
+    #[test]
+    fn uuid_tagged_literal_reads_as_a_uuid_value() {
+        let got = quoted_value("#uuid \"f81d4fae-7dec-11d0-a765-00a0c91e6bf6\"").unwrap();
+        assert_eq!(
+            got,
+            Value::Uuid(0xf81d4fae_7dec_11d0_a765_00a0c91e6bf6_u128)
+        );
+    }
+
+    #[test]
+    fn splice_without_a_sibling_sequence_errors() {
+        let err = quoted_value("#?@(:rust [1 2])").unwrap_err();
+        assert!(err.to_string().contains("sequence context"), "{err}");
     }
 }
