@@ -36,7 +36,14 @@ pub fn builtin_array_list(args: &[Value]) -> ValueResult<Value> {
         Vec::new()
     } else {
         match &args[0] {
-            Value::Long(n) => Vec::with_capacity(*n as usize),
+            Value::Long(n) => {
+                let capacity = usize::try_from(*n).map_err(|_| ValueError::OutOfRange)?;
+                let mut elements = Vec::new();
+                elements
+                    .try_reserve_exact(capacity)
+                    .map_err(|_| ValueError::OutOfRange)?;
+                elements
+            }
             // TODO, collection types, init array-list.
             v => {
                 return Err(ValueError::WrongType {
@@ -160,5 +167,31 @@ pub fn builtin_array_list_clear(args: &[Value]) -> ValueResult<Value> {
             expected: "array-list",
             got: v.type_name().to_string(),
         }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn negative_capacity_returns_out_of_range() {
+        let result = builtin_array_list(&[Value::Long(-1)]);
+        assert!(matches!(result, Err(ValueError::OutOfRange)));
+    }
+
+    #[test]
+    fn excessive_capacity_returns_out_of_range() {
+        let result = builtin_array_list(&[Value::Long(i64::MAX)]);
+        assert!(matches!(result, Err(ValueError::OutOfRange)));
+    }
+
+    #[test]
+    fn valid_capacity_constructs_an_empty_array_list() {
+        let array_list = builtin_array_list(&[Value::Long(16)]).unwrap();
+        assert!(matches!(
+            builtin_array_list_length(&[array_list]),
+            Ok(Value::Long(0))
+        ));
     }
 }

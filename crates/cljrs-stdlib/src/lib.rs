@@ -16,7 +16,6 @@ use cljrs_eval::GlobalEnv;
 #[cfg(not(target_arch = "wasm32"))]
 use cljrs_gc::GcConfig;
 
-mod core_async;
 // io and edn use std::fs which is not available on wasm32-unknown-unknown
 #[cfg(not(target_arch = "wasm32"))]
 mod edn;

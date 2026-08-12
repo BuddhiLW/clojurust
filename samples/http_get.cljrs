@@ -8,21 +8,33 @@
 ;;
 ;; The request encoding and response decoding are done explicitly through
 ;; cljrs-charset to show the encode/decode cycle.
+;;
+;; Failures arrive in band: net/connect delivers a Value::Error on its promise
+;; channel instead of a connection map, and drain-to reports a read failure as
+;; the :error key of its result.  Both are surfaced here with `<?` / `throw-err`
+;; so a network problem reports itself, rather than showing up later as a nil
+;; where a channel was expected.
 
 (ns http-get-sample)
 
 (require '[clojure.rust.net     :as net])
 (require '[clojure.rust.charset :as charset])
-(require '[clojure.core.async   :refer [take! put!]])
+(require '[clojure.core.async   :refer [put! <?]])
+(require '[clojure.rust.error   :refer [throw-err]])
 (require '[clojure.string       :as str])
 
 (def ^:private host "clj.rs")
 
+;; Bound the connect attempt: without it an unresponsive host stalls on the
+;; OS-level TCP connect (~127s of SYN retries on Linux) before failing.
+(def ^:private connect-timeout-ms 15000)
+
 (defn ^:async fetch-first-line
   "Open `conn-chan`, send an HTTP/1.0 GET /, drain the response, and return
-  the first response line.  Closes the connection before returning."
+  the first response line.  Closes the connection before returning.
+  Throws if the connection or the read fails."
   [conn-chan]
-  (let [conn (await (take! conn-chan))]
+  (let [conn (<? conn-chan)]
     ;; Encode the request to UTF-8 bytes and send it.  Do not close :out before
     ;; draining :in — closing :out prematurely sends TCP FIN and can trigger RST
     ;; from the server before the response arrives.
@@ -31,17 +43,25 @@
                                        "Host: " host "\r\n"
                                        "Connection: close\r\n"
                                        "\r\n"))))
-    (let [{:keys [values]} (await (net/drain-to (:in conn)))
-          response         (reduce str "" (map charset/decode values))
-          first-line       (first (str/split-lines response))]
+    (let [{:keys [values error]} (await (net/drain-to (:in conn)))]
       (net/close conn)
-      first-line)))
+      (throw-err error)
+      (let [response   (reduce str "" (map charset/decode values))
+            first-line (first (str/split-lines response))]
+        first-line))))
 
 (defn ^:async -main [& _args]
   ;; Plain HTTP over TCP
-  (let [line (await (fetch-first-line (net/connect {:host host :port 80})))]
+  (let [line (await (fetch-first-line
+                      (net/connect {:host               host
+                                    :port               80
+                                    :connect-timeout-ms connect-timeout-ms})))]
     (println "HTTP :" line))
 
   ;; HTTPS over TLS — webpki root certificates are used for server verification
-  (let [line (await (fetch-first-line (net/connect {:host host :port 443 :transport :tls})))]
+  (let [line (await (fetch-first-line
+                      (net/connect {:host               host
+                                    :port               443
+                                    :transport          :tls
+                                    :connect-timeout-ms connect-timeout-ms})))]
     (println "HTTPS:" line)))
