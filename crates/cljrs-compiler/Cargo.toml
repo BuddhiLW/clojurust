@@ -42,3 +42,4 @@ serde_json         = "1"
 [dev-dependencies]
 tempfile = "3"
 wasmparser = "0.244"
+proptest = "1"
