@@ -1171,8 +1171,6 @@ dependencies = [
  "cljrs-logging",
  "cljrs-reader",
  "cljrs-value",
- "lazy_static",
- "tokio",
 ]
 
 [[package]]

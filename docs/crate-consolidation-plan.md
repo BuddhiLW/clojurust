@@ -10,6 +10,40 @@ The proposed target contains approximately 23 packages.
 
 This plan does not remove the tree-walking interpreter, JIT, AOT compiler, no-GC mode, or supported platform targets.
 
+## Progress
+
+| Stage | Status | Notes |
+|---|---|---|
+| 0. Record the baseline | Complete | [`consolidation-baseline.md`](consolidation-baseline.md) |
+| 1. Remove obsolete debris | Not started | |
+| 2. Create the merged runtime | Not started | |
+| 3. Simplify runtime state | Not started | |
+| 4. Merge JIT and compiler packages | Not started | |
+| 5. Consolidate project and CLI tools | Not started | |
+| 6. Remove compatibility packages | Not started | |
+
+Package count: 34 at baseline, 34 now, approximately 23 at target.
+
+### Corrections found while measuring the baseline
+
+Three Evidence items were already resolved before this work started, so they need
+no Stage 1 change:
+
+- `cljrs-stdlib/src/core_async.rs` does not exist. The only `core_async` source is
+  `crates/cljrs-async/src/core_async.cljrs`, which is live Clojure source, not
+  commented-out Rust.
+- `cljrs-stdlib/Cargo.toml` no longer lists `tokio` or `lazy_static`. Only
+  `Cargo.lock` still carried the stale entries.
+- No Clojure compiler namespaces remain, so `cljrs-ir-prebuild` no longer loads
+  any — but its own docs still claim it does, which Stage 1 corrects.
+
+The baseline also found one thing the plan did not anticipate: **`no-gc` does not
+build today**, for the CLI or for `cljrs-env`, `cljrs-builtins`, `cljrs-stdlib`,
+and `cljrs-async` on their own. See
+[`consolidation-baseline.md` §4.2](consolidation-baseline.md). Later stages state
+"Default and `no-gc` builds pass" as a gate; until those pre-existing defects are
+fixed, `no-gc` can only be held to "no worse than baseline".
+
 ## Background
 
 The current core split came from an earlier compiler bootstrap design.
