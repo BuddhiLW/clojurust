@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use miette::IntoDiagnostic as _;
 use tracing_subscriber::filter::Targets;
 use tracing_subscriber::layer::SubscriberExt as _;
@@ -108,6 +108,15 @@ struct Cli {
     command: Commands,
 }
 
+/// Code-generation target for `cljrs compile`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, ValueEnum)]
+enum CompileTarget {
+    /// Standalone binary via Cranelift.
+    Native,
+    /// WebAssembly module via the AOT wasm backend.
+    Wasm,
+}
+
 #[derive(Subcommand)]
 enum Commands {
     /// Interpret a .cljrs or .cljc source file.
@@ -159,8 +168,8 @@ enum Commands {
         /// binary via Cranelift; `wasm` produces a WebAssembly module via the
         /// AOT wasm backend (the entry namespace's functions; the `"rt"` imports
         /// are satisfied by the runtime built for `wasm32-unknown-unknown`).
-        #[arg(long, default_value = "native", value_name = "TARGET")]
-        target: String,
+        #[arg(long, value_enum, default_value_t = CompileTarget::Native, value_name = "TARGET")]
+        target: CompileTarget,
         /// Source directories to search when resolving `require`.
         #[arg(long = "src-path", value_name = "DIR")]
         src_paths: Vec<PathBuf>,
@@ -611,18 +620,12 @@ fn run_command(command: Commands, versioning: VersioningFlags) -> miette::Result
                 }
             }
 
-            // Validate the code-gen target up front.
-            if target != "native" && target != "wasm" {
-                return Err(miette::miette!(
-                    "unknown --target {target:?} (expected `native` or `wasm`)"
-                ));
-            }
-            if test && target == "wasm" {
+            if test && target == CompileTarget::Wasm {
                 return Err(miette::miette!(
                     "--test is not supported with --target wasm yet"
                 ));
             }
-            let opacity = resolve_opacity_policy(require_fully_compiled, &target, test)
+            let opacity = resolve_opacity_policy(require_fully_compiled, target, test)
                 .map_err(|e| miette::miette!("{e}"))?;
 
             if test {
@@ -685,7 +688,7 @@ fn run_command(command: Commands, versioning: VersioningFlags) -> miette::Result
                     }
                 };
 
-                if target == "wasm" {
+                if target == CompileTarget::Wasm {
                     cljrs_compiler::aot::compile_file_to_wasm(&entry_file, &out, &all_src_paths)
                         .map_err(|e| miette::miette!("{e}"))?;
                 } else {
@@ -778,7 +781,7 @@ fn run_command(command: Commands, versioning: VersioningFlags) -> miette::Result
 /// guarantee nothing checked.  Reject the combination rather than ignore it.
 fn resolve_opacity_policy(
     require_fully_compiled: bool,
-    target: &str,
+    target: CompileTarget,
     test: bool,
 ) -> Result<cljrs_compiler::aot::OpacityPolicy, String> {
     if !require_fully_compiled {
@@ -789,7 +792,7 @@ fn resolve_opacity_policy(
                     the test harness is not audited for embedded source"
             .to_string());
     }
-    if target == "wasm" {
+    if target == CompileTarget::Wasm {
         return Err(
             "--require-fully-compiled is not supported with --target wasm: \
                     the wasm backend is not audited for embedded source"
@@ -1992,18 +1995,18 @@ fn run_repl(globals: Arc<GlobalEnv>) {
 
 #[cfg(test)]
 mod tests {
-    use super::resolve_opacity_policy;
+    use super::{CompileTarget, resolve_opacity_policy};
     use cljrs_compiler::aot::OpacityPolicy;
 
     /// Without the flag every target/test combination is the reporting default.
     #[test]
     fn absent_flag_reports_under_every_combination() {
-        for target in ["native", "wasm"] {
+        for target in [CompileTarget::Native, CompileTarget::Wasm] {
             for test in [false, true] {
                 assert_eq!(
                     resolve_opacity_policy(false, target, test),
                     Ok(OpacityPolicy::Report),
-                    "target={target} test={test}"
+                    "target={target:?} test={test}"
                 );
             }
         }
@@ -2012,7 +2015,7 @@ mod tests {
     #[test]
     fn flag_selects_the_strict_policy_on_the_audited_path() {
         assert_eq!(
-            resolve_opacity_policy(true, "native", false),
+            resolve_opacity_policy(true, CompileTarget::Native, false),
             Ok(OpacityPolicy::RequireFullyCompiled)
         );
     }
@@ -2020,9 +2023,13 @@ mod tests {
     /// The unaudited paths reject rather than silently ignore the flag.
     #[test]
     fn flag_is_rejected_on_unaudited_paths() {
-        for (target, test) in [("native", true), ("wasm", false), ("wasm", true)] {
+        for (target, test) in [
+            (CompileTarget::Native, true),
+            (CompileTarget::Wasm, false),
+            (CompileTarget::Wasm, true),
+        ] {
             let err = resolve_opacity_policy(true, target, test)
-                .expect_err("target={target} test={test} must be rejected");
+                .expect_err("target={target:?} test={test} must be rejected");
             assert!(
                 err.contains("--require-fully-compiled"),
                 "error names the flag: {err}"
@@ -2034,7 +2041,7 @@ mod tests {
     /// message names a flag the caller actually passed.
     #[test]
     fn test_combination_is_reported_before_wasm() {
-        let err = resolve_opacity_policy(true, "wasm", true).expect_err("rejected");
+        let err = resolve_opacity_policy(true, CompileTarget::Wasm, true).expect_err("rejected");
         assert!(err.contains("--test"), "{err}");
     }
 }
