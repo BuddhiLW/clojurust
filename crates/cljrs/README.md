@@ -69,6 +69,7 @@ run to completion. A synchronous `-main` is awaited as a no-op pass-through.
 - `--target <native|wasm>` — code-generation target (default `native`). `wasm` emits a WebAssembly module via the AOT wasm backend (the entry namespace's functions; the `"rt"` imports are satisfied by the runtime built for `wasm32-unknown-unknown`). `--test` is not yet supported with `wasm`.
 - `--main <NS>` — namespace containing `-main`; overrides `:main` in `cljrs.edn` and auto-detection
 - `--test` — compile a test harness that runs every test in the given file/directory
+- `--require-fully-compiled` - fail the build if the binary would embed readable Clojure source text (interpreted preambles, bundled namespaces).  The audit runs in `compile_file`, so the flag is an error with `--test` and with `--target wasm`, whose paths do not audit; it is rejected there rather than accepted and ignored.
 
 `ir build` accepts:
 - `-n, --ns <NS>` — repeatable; namespaces to lower (default `clojure.core`)
@@ -136,6 +137,13 @@ These appear before the subcommand and apply to every command:
 - `--stack-size-mb <MB>` — thread stack size (default 64).  Raise if you hit stack overflows in deeply recursive code.
 - `--debug` — enable debug logging
 - `--trace` — enable trace logging (implies `--debug`)
+
+  Codegen crates (`cranelift_*`, `regalloc2`) are pinned to `warn` at all
+  verbosity levels — `cranelift-jit`/`cranelift-object` log every compiled
+  function's whole CLIF body at `info`, which otherwise buries real output.
+  Set `RUST_LOG` (`tracing` target=level syntax) to replace the defaults and
+  get them back, e.g. `RUST_LOG=info,cranelift_jit=info cljrs run app.cljrs`.
+
 - `-X <LEVEL:FEATURES>` — feature-level logging, repeatable.  Format: `<level>:<feat1>,<feat2>,…`.  Levels: `debug`, `trace`.  Example: `-X debug:gc,jit`.
 - `--gc-stats [FILE]` — print a `cljrs_gc::GC_STATS` snapshot at program exit (allocations, region/bump usage, GC pause count + total duration, freed objects/bytes).  No value → stdout; with a path → that file.  Honoured by `run`, `eval`, and `test`.
 - `--jit-stats [FILE]` — print a JIT specialization / inline-cache counter snapshot at program exit (boxed arithmetic bridge calls, entry-guard deopts, keyword IC fills, protocol IC hits/misses; Phase 10.6, `cljrs_compiler::rt_abi::jit_stats`).  No value → stdout; with a path → that file.  Honoured by `run`, `eval`, and `test`.
