@@ -3,8 +3,11 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use miette::IntoDiagnostic as _;
+use tracing_subscriber::filter::Targets;
+use tracing_subscriber::layer::SubscriberExt as _;
+use tracing_subscriber::util::SubscriberInitExt as _;
 
 use cljrs_eval::{Env, EvalError, GlobalEnv, eval};
 use cljrs_gc::GcConfig;
@@ -105,6 +108,15 @@ struct Cli {
     command: Commands,
 }
 
+/// Code-generation target for `cljrs compile`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, ValueEnum)]
+enum CompileTarget {
+    /// Standalone binary via Cranelift.
+    Native,
+    /// WebAssembly module via the AOT wasm backend.
+    Wasm,
+}
+
 #[derive(Subcommand)]
 enum Commands {
     /// Interpret a .cljrs or .cljc source file.
@@ -156,8 +168,8 @@ enum Commands {
         /// binary via Cranelift; `wasm` produces a WebAssembly module via the
         /// AOT wasm backend (the entry namespace's functions; the `"rt"` imports
         /// are satisfied by the runtime built for `wasm32-unknown-unknown`).
-        #[arg(long, default_value = "native", value_name = "TARGET")]
-        target: String,
+        #[arg(long, value_enum, default_value_t = CompileTarget::Native, value_name = "TARGET")]
+        target: CompileTarget,
         /// Source directories to search when resolving `require`.
         #[arg(long = "src-path", value_name = "DIR")]
         src_paths: Vec<PathBuf>,
@@ -168,6 +180,11 @@ enum Commands {
         /// Compile a test harness that runs all tests in the given file/directory.
         #[arg(long)]
         test: bool,
+        /// Fail the build if the binary would embed readable Clojure source
+        /// text (interpreted preambles, bundled namespaces).  Rejected with
+        /// `--test` and `--target wasm`, which do not run the audit.
+        #[arg(long = "require-fully-compiled")]
+        require_fully_compiled: bool,
         /// GC soft memory limit in MB (triggers collection when exceeded).
         #[arg(long)]
         gc_soft_limit_mb: Option<usize>,
@@ -339,6 +356,56 @@ fn build_gc_config(soft_limit_mb: Option<usize>, hard_limit_mb: Option<usize>) -
     }
 }
 
+/// Crates whose logging is noisy enough to drown out everything else.
+///
+/// Cranelift (and its register allocator) log whole function bodies of IR at
+/// `info`/`debug` through the `log` crate, which `tracing-subscriber`'s
+/// `tracing-log` bridge forwards into our subscriber.  A single JIT compile
+/// therefore buries any real message.  These stay at `warn` regardless of
+/// `--debug`/`--trace`; set `RUST_LOG` to see them.
+const NOISY_TARGETS: &[&str] = &[
+    "cranelift_codegen",
+    "cranelift_frontend",
+    "cranelift_jit",
+    "cranelift_module",
+    "cranelift_native",
+    "cranelift_object",
+    "regalloc2",
+];
+
+/// Install the global tracing subscriber.
+///
+/// The default verbosity comes from `--debug`/`--trace`, with the noisy
+/// codegen crates pinned to `warn`.  `RUST_LOG` (in `tracing` target=level
+/// syntax, e.g. `RUST_LOG=info,cranelift_codegen=debug`) replaces those
+/// defaults entirely, so the IR dumps are still reachable when wanted.
+fn init_tracing(cli: &Cli) {
+    let default_level = if cli.trace {
+        tracing::Level::TRACE
+    } else if cli.debug {
+        tracing::Level::DEBUG
+    } else {
+        tracing::Level::INFO
+    };
+
+    let mut filter = Targets::new().with_default(default_level);
+    for target in NOISY_TARGETS {
+        filter = filter.with_target(*target, tracing::Level::WARN);
+    }
+
+    if let Ok(spec) = std::env::var("RUST_LOG")
+        && !spec.trim().is_empty()
+        && let Ok(from_env) = spec.parse::<Targets>()
+    {
+        filter = from_env;
+    }
+
+    let _ = tracing_subscriber::registry()
+        .with(filter)
+        .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
+        .try_init();
+}
+
 fn main() -> miette::Result<()> {
     miette::set_hook(Box::new(|_| {
         Box::new(
@@ -350,16 +417,7 @@ fn main() -> miette::Result<()> {
     .into_diagnostic()?;
 
     let cli = Cli::parse();
-    let _ = tracing_subscriber::fmt()
-        .with_writer(std::io::stderr)
-        .with_max_level(if cli.trace {
-            tracing::Level::TRACE
-        } else if cli.debug {
-            tracing::Level::DEBUG
-        } else {
-            tracing::Level::INFO
-        })
-        .try_init();
+    init_tracing(&cli);
 
     // Parse -X feature logging flags
     for flag in &cli.x_flags {
@@ -533,6 +591,7 @@ fn run_command(command: Commands, versioning: VersioningFlags) -> miette::Result
             src_paths,
             main_ns,
             test,
+            require_fully_compiled,
             gc_soft_limit_mb,
             gc_hard_limit_mb,
         } => {
@@ -561,17 +620,13 @@ fn run_command(command: Commands, versioning: VersioningFlags) -> miette::Result
                 }
             }
 
-            // Validate the code-gen target up front.
-            if target != "native" && target != "wasm" {
-                return Err(miette::miette!(
-                    "unknown --target {target:?} (expected `native` or `wasm`)"
-                ));
-            }
-            if test && target == "wasm" {
+            if test && target == CompileTarget::Wasm {
                 return Err(miette::miette!(
                     "--test is not supported with --target wasm yet"
                 ));
             }
+            let opacity = resolve_opacity_policy(require_fully_compiled, target, test)
+                .map_err(|e| miette::miette!("{e}"))?;
 
             if test {
                 let test_dir = file.as_deref().unwrap_or_else(|| std::path::Path::new("."));
@@ -633,7 +688,7 @@ fn run_command(command: Commands, versioning: VersioningFlags) -> miette::Result
                     }
                 };
 
-                if target == "wasm" {
+                if target == CompileTarget::Wasm {
                     cljrs_compiler::aot::compile_file_to_wasm(&entry_file, &out, &all_src_paths)
                         .map_err(|e| miette::miette!("{e}"))?;
                 } else {
@@ -643,6 +698,7 @@ fn run_command(command: Commands, versioning: VersioningFlags) -> miette::Result
                         &all_src_paths,
                         rust_config.as_ref(),
                         versioning.verify_commit_signatures,
+                        opacity,
                     )
                     .map_err(|e| miette::miette!("{e}"))?;
                 }
@@ -713,6 +769,37 @@ fn run_command(command: Commands, versioning: VersioningFlags) -> miette::Result
             Ok(0)
         }
     }
+}
+
+/// Resolve the opacity policy a `compile` invocation runs under, rejecting the
+/// flag combinations that would not honour it.
+///
+/// The source-embedding audit lives in `compile_file`, the native non-test
+/// path.  `--test` goes through `compile_test_harness` and `--target wasm`
+/// through `compile_file_to_wasm`; neither audits, so accepting
+/// `--require-fully-compiled` there would report success while promising a
+/// guarantee nothing checked.  Reject the combination rather than ignore it.
+fn resolve_opacity_policy(
+    require_fully_compiled: bool,
+    target: CompileTarget,
+    test: bool,
+) -> Result<cljrs_compiler::aot::OpacityPolicy, String> {
+    if !require_fully_compiled {
+        return Ok(cljrs_compiler::aot::OpacityPolicy::Report);
+    }
+    if test {
+        return Err("--require-fully-compiled is not supported with --test: \
+                    the test harness is not audited for embedded source"
+            .to_string());
+    }
+    if target == CompileTarget::Wasm {
+        return Err(
+            "--require-fully-compiled is not supported with --target wasm: \
+                    the wasm backend is not audited for embedded source"
+                .to_string(),
+        );
+    }
+    Ok(cljrs_compiler::aot::OpacityPolicy::RequireFullyCompiled)
 }
 
 /// Dispatch the `ir` subcommands: `build`, `dump`, `viz`.
@@ -1904,4 +1991,57 @@ fn run_repl(globals: Arc<GlobalEnv>) {
     }
 
     println!("Bye.");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CompileTarget, resolve_opacity_policy};
+    use cljrs_compiler::aot::OpacityPolicy;
+
+    /// Without the flag every target/test combination is the reporting default.
+    #[test]
+    fn absent_flag_reports_under_every_combination() {
+        for target in [CompileTarget::Native, CompileTarget::Wasm] {
+            for test in [false, true] {
+                assert_eq!(
+                    resolve_opacity_policy(false, target, test),
+                    Ok(OpacityPolicy::Report),
+                    "target={target:?} test={test}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn flag_selects_the_strict_policy_on_the_audited_path() {
+        assert_eq!(
+            resolve_opacity_policy(true, CompileTarget::Native, false),
+            Ok(OpacityPolicy::RequireFullyCompiled)
+        );
+    }
+
+    /// The unaudited paths reject rather than silently ignore the flag.
+    #[test]
+    fn flag_is_rejected_on_unaudited_paths() {
+        for (target, test) in [
+            (CompileTarget::Native, true),
+            (CompileTarget::Wasm, false),
+            (CompileTarget::Wasm, true),
+        ] {
+            let err = resolve_opacity_policy(true, target, test)
+                .expect_err("target={target:?} test={test} must be rejected");
+            assert!(
+                err.contains("--require-fully-compiled"),
+                "error names the flag: {err}"
+            );
+        }
+    }
+
+    /// `--test` is reported ahead of `--target wasm` when both are given, so the
+    /// message names a flag the caller actually passed.
+    #[test]
+    fn test_combination_is_reported_before_wasm() {
+        let err = resolve_opacity_policy(true, CompileTarget::Wasm, true).expect_err("rejected");
+        assert!(err.contains("--test"), "{err}");
+    }
 }
