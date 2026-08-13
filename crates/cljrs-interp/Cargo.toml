@@ -23,5 +23,5 @@ uuid = { workspace = true, features = ["v4"] }
 cljrs-vcs = { workspace = true }
 
 [dev-dependencies]
-proptest = "1"
 tempfile = "3"
+proptest = "1"

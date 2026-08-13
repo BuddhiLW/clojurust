@@ -141,12 +141,11 @@ fn arglists_meta(fn_val: &Value, skip: usize) -> Option<Value> {
 fn extract_def_name(form: &Form, env: &mut Env) -> EvalResult<(String, Option<Value>)> {
     match &form.kind {
         FormKind::Symbol(s) => Ok((s.clone(), None)),
+        // `^:a ^:b x` nests `Meta` forms; unwrap all, outer mark winning.
         FormKind::Meta(meta_form, inner) => {
             let meta_val = compile_meta_form(meta_form, env)?;
-            match &inner.kind {
-                FormKind::Symbol(s) => Ok((s.clone(), Some(meta_val))),
-                _ => Err(EvalError::Runtime("def name must be a symbol".into())),
-            }
+            let (name, inner_meta) = extract_def_name(inner, env)?;
+            Ok((name, merge_meta(inner_meta, Some(meta_val))))
         }
         _ => Err(EvalError::Runtime("def name must be a symbol".into())),
     }
@@ -1260,9 +1259,14 @@ fn eval_defmacro(args: &[Form], env: &mut Env) -> EvalResult {
 // ── defonce ───────────────────────────────────────────────────────────────────
 
 fn eval_defonce(args: &[Form], env: &mut Env) -> EvalResult {
-    let name = require_sym(args, 0, "defonce")?;
+    if args.is_empty() {
+        return Err(EvalError::Runtime("defonce requires a name".into()));
+    }
+    // Share `def`'s name extraction so a metadata-carrying symbol such as
+    // `(defonce ^:private registry (atom {}))` is accepted here too.
+    let (name, _meta) = extract_def_name(&args[0], env)?;
     // If already bound, return immediately.
-    if let Some(var) = env.globals.lookup_var(&env.current_ns, name)
+    if let Some(var) = env.globals.lookup_var(&env.current_ns, &name)
         && var.get().is_bound()
     {
         return Ok(Value::Var(var));
