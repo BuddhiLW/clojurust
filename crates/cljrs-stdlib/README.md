@@ -19,26 +19,34 @@ works out of the box in any binary that calls `cljrs_stdlib::standard_env()`.
 
 ```
 src/
-  lib.rs                  Public API: register(), standard_env(), standard_env_with_paths()
+  lib.rs                  Public API: register(), the standard_env* constructors,
+                          and the embedded-source include_str! table
   string.rs               Native Rust implementations for clojure.string
   set.rs                  Native Rust implementations for clojure.set
+  io.rs                   Native Rust implementations for clojure.rust.io
+                          (IoReader/IoWriter/StringReader); not built for wasm32
+  edn.rs                  Native Rust implementations for clojure.edn; not built for wasm32
   clojure/
     string.cljrs          Clojure source for clojure.string (ns decl; natives pre-registered)
     set.cljrs             Clojure source for clojure.set   (ns decl; natives pre-registered)
+    template.cljrs        Pure Clojure implementation of clojure.template
     test.cljrs            Pure Clojure implementation of clojure.test
+    walk.cljrs            Pure Clojure implementation of clojure.walk
+    data.cljrs            Pure Clojure implementation of clojure.data
+    zip.cljrs             Pure Clojure implementation of clojure.zip
+    edn.cljrs             Clojure source for clojure.edn (ns decl; natives pre-registered)
+    rust/
+      io.cljrs            Clojure source for clojure.rust.io (ns decl; natives pre-registered)
     spec/
       alpha.cljrs         Pure Clojure implementation of clojure.spec.alpha (core spec engine)
       test/
         alpha.cljrs       Pure Clojure implementation of clojure.spec.test.alpha (instrument/unstrument)
       gen/
         alpha.cljrs       clojure.spec.gen.alpha stub — every fn throws (no generator engine)
-build.rs                  Pre-lowers clojure.core to optimized IR (gated on the
-                          `prebuild-ir` feature) — runs the ANF lowerer *and*
-                          the escape-analysis/region-allocation optimize pass,
-                          so the resulting bundle includes the RegionStart/
-                          RegionAlloc instructions consumed by the IR
-                          interpreter.  Output: `$OUT_DIR/core_ir.bin`.
 ```
+
+There is no build script. Lowering to IR happens at run time in pure Rust
+(`cljrs_ir::lower`); this crate ships source, not a prebuilt IR bundle.
 
 ## Public API
 
@@ -48,12 +56,39 @@ build.rs                  Pre-lowers clojure.core to optimized IR (gated on the
 /// Register all built-in stdlib namespaces into an existing GlobalEnv.
 pub fn register(globals: &Arc<GlobalEnv>);
 
-/// Create a GlobalEnv with bootstrap + stdlib registered (lazy loading).
+/// Create a GlobalEnv with bootstrap + stdlib registered (lazy loading),
+/// GC configured from the environment, and IR lowering enabled.
+/// Not built for wasm32.
 pub fn standard_env() -> Arc<GlobalEnv>;
 
+/// Like standard_env() but without the IR lowering hook — used by the AOT test
+/// harness, where lowering test-namespace functions would fill the global IR
+/// cache with entries nothing ever evicts.  Not built for wasm32.
+pub fn standard_env_no_ir() -> Arc<GlobalEnv>;
+
 /// Like standard_env() but also sets user source paths for require.
+/// Not built for wasm32.
 pub fn standard_env_with_paths(source_paths: Vec<PathBuf>) -> Arc<GlobalEnv>;
+
+/// Like standard_env_with_paths() but also overrides the GC configuration.
+/// Not built for wasm32.
+pub fn standard_env_with_paths_and_config(
+    source_paths: Vec<PathBuf>,
+    gc_config: Arc<GcConfig>,
+) -> Arc<GlobalEnv>;
 ```
+
+Each native module exposes its own registrar, called by `register()`:
+
+```rust
+pub fn string::register(globals: &Arc<GlobalEnv>, ns: &str);
+pub fn set::register(globals: &Arc<GlobalEnv>, ns: &str);
+pub fn io::register(globals: &Arc<GlobalEnv>, ns: &str);   // wasm32: absent
+pub fn edn::register(globals: &Arc<GlobalEnv>, ns: &str);  // wasm32: absent
+```
+
+`io` is the only one of these that is `pub` at the crate root; it also exports
+the `IoReader`, `IoWriter`, and `StringReader` native object types.
 
 ### Namespaces provided
 

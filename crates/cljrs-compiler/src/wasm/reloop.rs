@@ -52,7 +52,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::ir::{Block, BlockId, IrFunction, Terminator, VarId};
+use cljrs_ir::{Block, BlockId, IrFunction, Terminator, VarId};
 
 /// A structured control-flow tree — the relooper's output and the emitter's
 /// input.  Each node maps to a small, fixed wasm shape.  `br` targets are block
@@ -426,7 +426,7 @@ fn dominators(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ir::{Const, Inst, KnownFn};
+    use cljrs_ir::{Const, Inst, KnownFn};
     use std::sync::Arc;
 
     /// Builder that pushes blocks in id order for terse test CFGs.

@@ -49,7 +49,7 @@ Current capabilities:
 - **Rust interop** — `#[cljrs_interop::export]` proc-macro, NativeObject, FromValue/IntoValue
   marshalling, protocol dispatch, and dynamic loading of native `.so`/`.dylib`
 - **Standard library** — clojure.string, clojure.set, clojure.test, clojure.walk, clojure.edn, clojure.zip, clojure.data, clojure.template
-- **IR acceleration** — core namespace functions are pre-lowered to IR at build time for faster dispatch
+- **IR acceleration** — hot function arities are lowered to IR on a background worker and dispatched from an IR cache
 
 Tooling:
 
@@ -77,13 +77,14 @@ Tooling:
 | 8.1 | Program optimization (ANF/SSA, escape analysis, regions) | complete |
 | 8-ext-* | require, dynamic vars, *ns*, stdlib registry, transducers, … | complete |
 | 9 | Rust interop (NativeObject, FromValue/IntoValue, `#[export]`, dylib) | mostly complete |
-| 9-ir | IR pipeline & prebuilt IR acceleration | complete |
+| 9-ir | IR pipeline (run-time ANF lowering, IR cache, tiering) | complete |
 | 10 | JIT compiler (Cranelift) | working |
 | 11 | AOT compiler | working (end-to-end for multi-file programs) |
 | 12 | REPL & tooling (REPL, LSP, nREPL) | working |
 | async | core.async, async I/O, networking, charset | implemented |
 
-**880+ tests** across the workspace.
+**1077 Rust tests** across the workspace, plus **11,005 assertions** in the
+AOT-compiled `clojure-test-suite`.
 
 See [`TODO.md`](TODO.md) for the full itemised roadmap.
 
@@ -104,11 +105,10 @@ See [`TODO.md`](TODO.md) for the full itemised roadmap.
 | [`cljrs-interp`](crates/cljrs-interp) | Tree-walking Clojure interpreter: eval, special forms, macros, destructuring | complete |
 | [`cljrs-tx`](crates/cljrs-tx) | Pure tree-walked transaction functions in a bounded, invocation-lifetime no-GC arena | initial |
 | [`cljrs-ir`](crates/cljrs-ir) | IR types (ANF/SSA) with serialization (postcard); ANF lowering, escape analysis, OSR | complete |
-| [`cljrs-eval`](crates/cljrs-eval) | IR-accelerated evaluation: IR interpreter, IR cache, tiering/JIT state, lower worker, prebuilt IR loading | complete |
-| [`cljrs-ir-prebuild`](crates/cljrs-ir-prebuild) | Pre-lowers Clojure namespaces to serialized IR bundles; library backing `cljrs ir build` and the standalone `cljrs-ir-prebuild` binary | complete |
+| [`cljrs-eval`](crates/cljrs-eval) | IR-accelerated evaluation: IR interpreter, IR cache, tiering/JIT state, background lower worker, `load_prebuilt_ir` bundle replay | complete |
 | [`cljrs-stdlib`](crates/cljrs-stdlib) | Embedded stdlib: clojure.string, clojure.set, clojure.test, clojure.walk, clojure.edn, clojure.zip, clojure.data | complete |
 | [`cljrs-logging`](crates/cljrs-logging) | Feature-gated logging (`-X debug:ir`, `-X trace:gc`, etc.) | complete |
-| [`cljrs-runtime`](crates/cljrs-runtime) | Runtime support placeholder | stub |
+| [`cljrs-runtime`](crates/cljrs-runtime) | Placeholder; nothing depends on it.  Becomes the merged runtime in Stage 2 of [`docs/crate-consolidation-plan.md`](docs/crate-consolidation-plan.md) | stub |
 
 ### Compilation
 
@@ -193,7 +193,7 @@ back to the IR interpreter and tree-walker). It can also be set via
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `CLJRS_NO_IR` | unset | Disable all IR functionality. The IR cache is not consulted and prebuilt IR is not loaded; all evaluation falls back to the tree-walking interpreter. Useful for debugging semantic differences between the IR interpreter and the tree-walker. |
+| `CLJRS_NO_IR` | unset | Disable all IR functionality. The IR cache is not consulted and nothing is lowered; all evaluation falls back to the tree-walking interpreter. Useful for debugging semantic differences between the IR interpreter and the tree-walker. |
 | `CLJRS_EAGER_LOWER` | unset | Lower every `fn*` body to IR at definition time instead of lazily after warm-up. Expensive; primarily for testing the IR pipeline. No effect when `CLJRS_NO_IR` is set. |
 | `CLJRS_IR_THRESHOLD` | 50 | Tier-0 → Tier-1 warm threshold: tree-walked calls per arity before the body is lowered to IR (`0` disables). |
 | `CLJRS_JIT_THRESHOLD` | 1000 | Tier-1 → JIT-native threshold: IR-interpreted calls per arity before native compilation (`0` disables the JIT). |
@@ -249,33 +249,21 @@ The same Cranelift backend (`cljrs-compiler`, generic over
 `cranelift_module::Module`) drives both the in-process `JITModule` and the
 AOT `ObjectModule`, so `cljrs compile` reuses the JIT's codegen.
 
-### Prebuilt IR pipeline
+### IR lowering
 
-At build time (`cljrs-stdlib/build.rs`), the tree-walking interpreter boots,
-loads the Clojure compiler namespaces, and lowers all `clojure.core` function
-arities to IR. The resulting `IrBundle` is serialized with postcard and embedded
-via `include_bytes!`. At runtime, `standard_env()` deserializes the bundle and
-populates the IR cache so core functions use the IR interpreter from the first
-call — no compiler loading required.
+Lowering is pure Rust and happens at run time. `cljrs_ir::lower` turns a
+function arity into ANF/SSA `IrFunction`s; there is no build-time step, no
+bootstrap through Clojure-hosted compiler namespaces, and no embedded IR
+bundle. A function is lowered when its tree-walked call count crosses
+`--ir-threshold` (default 50), on a background worker, and the result is cached
+per `ir_arity_id`.
 
-```
-Build time:                          Runtime:
-
-build.rs                             standard_env()
-  |                                    |
-  v                                    v
-tree-walk bootstrap         deserialize prebuilt IR bundle
-  |                           (include_bytes!)
-  v                                    |
-load compiler namespaces               v
-  |                          populate IR cache with
-  v                          core fn arities
-lower all core fn arities              |
-  |                                    v
-  v                          user code: IR cache hits
-serialize to core_ir.bin     for core fns, tree-walk
-                             for user fns
-```
+`cljrs ir build` lowers whole namespaces ahead of time and serializes them to a
+bundle with postcard; `cljrs ir dump` prints one back. Those are diagnostics for
+the lowerer — no runtime path loads a bundle today. `cljrs_eval::load_prebuilt_ir`
+is the public API an embedder would call to replay one into a live environment,
+which matters for targets with no background lowering worker (a `wasm32` build,
+for instance).
 
 ### Dependency graph (core path)
 
@@ -288,7 +276,7 @@ cljrs-reader -------> cljrs-types
     |
 cljrs-value ---------> cljrs-gc, cljrs-reader, cljrs-types
     |
-cljrs-ir ------------> cljrs-types
+cljrs-ir ------------> cljrs-reader, cljrs-types
     |
 cljrs-env -----------> cljrs-value, cljrs-gc, cljrs-reader
     |
@@ -301,6 +289,8 @@ cljrs-eval ----------> cljrs-interp, cljrs-env, cljrs-ir, cljrs-value
 cljrs-stdlib --------> cljrs-eval, cljrs-interp, cljrs-ir
     |
 cljrs-compiler ------> cljrs-eval, cljrs-ir, cljrs-stdlib (Cranelift AOT)
+    |                  + cljrs-async, cljrs-io, cljrs-net, cljrs-charset,
+    |                    cljrs-base64 — extensions its AOT harness initializes
     |
 cljrs-jit -----------> cljrs-compiler, cljrs-eval, cljrs-ir (Cranelift JIT)
     |
@@ -308,6 +298,11 @@ cljrs (binary) ------> cljrs-stdlib, cljrs-compiler, cljrs-jit, cljrs-lsp,
                        cljrs-nrepl, cljrs-deps, cljrs-vcs, cljrs-ir-viz,
                        cljrs-interop  (+ async/net/charset behind features)
 ```
+
+`cljrs-compiler`'s dependency on the extension crates is unconditional, so every
+consumer compiles the async and networking stacks. Stage 4 of
+[`docs/crate-consolidation-plan.md`](docs/crate-consolidation-plan.md) replaces
+it with an extension registry the CLI populates.
 
 ---
 
@@ -326,10 +321,9 @@ crates/
   cljrs-interp/          # tree-walking interpreter
   cljrs-ir/              # IR types + lowering + serialization
   cljrs-eval/            # IR-accelerated evaluation + tiering state
-  cljrs-ir-prebuild/     # CLI tool for pre-lowering IR
   cljrs-stdlib/          # embedded standard library namespaces
   cljrs-logging/         # feature-gated debug/trace logging
-  cljrs-runtime/         # runtime support (stub)
+  cljrs-runtime/         # placeholder (stub; see docs/crate-consolidation-plan.md)
   # compilation
   cljrs-compiler/        # Cranelift codegen + AOT
   cljrs-jit/             # in-process JIT

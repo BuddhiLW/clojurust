@@ -21,7 +21,6 @@ ANF lowering and escape analysis run in pure Rust (`cljrs_ir::lower`, in the
 ```
 src/
   lib.rs        — module declarations
-  ir.rs         — re-exports all types from cljrs-ir crate
   rt_abi.rs     — C-ABI runtime bridge: ~40 extern "C" functions called by compiled code
   codegen.rs    — Cranelift code generator: IrFunction → native object code
   typeinfer.rs  — Phase 10.6 scalar representation inference (Repr lattice, fixpoint dataflow)
@@ -155,7 +154,11 @@ pub enum WasmError { Reloop(RelooperError), Unsupported(String), Unimplemented(&
 
 ## Public API
 
-### IR types (`ir.rs`)
+### IR types (from the `cljrs-ir` crate)
+
+These are **not** defined or re-exported here — `cljrs-compiler` imports them
+from `cljrs_ir` directly, as does `cljrs-eval`. Listed for reference because
+every signature below is stated in terms of them.
 
 ```rust
 pub struct IrFunction { name, params, blocks, ... }
@@ -291,7 +294,7 @@ pub fn new_compiler_from_module<M: Module>(module: M, ptr_type: types::Type) -> 
 ### Type inference (`typeinfer.rs`, Phase 10.6)
 
 ```rust
-pub use cljrs_ir::Repr; // { Boxed, Long, Double, Bool } — moved to cljrs-ir, re-exported here
+pub use cljrs_ir::Repr; // { Boxed, Long, Double, Bool } — defined in cljrs-ir, re-exported here
 pub fn infer(func: &IrFunction, specs: &[Repr]) -> HashMap<VarId, Repr>;
 ```
 

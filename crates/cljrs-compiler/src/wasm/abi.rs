@@ -34,18 +34,18 @@
 //!   returned by [`RT_REGION_START`].  A `Region` is an arena: a `(base, bump,
 //!   limit)` triple in linear memory; allocation bumps `bump`, and
 //!   [`RT_REGION_END`] resets/frees it.
-//! - [`Inst::RegionStart`](crate::ir::Inst::RegionStart) → call `rt_region_start`, keep the `i32` handle.
-//! - [`Inst::RegionAlloc`](crate::ir::Inst::RegionAlloc) → call the matching
+//! - [`Inst::RegionStart`](cljrs_ir::Inst::RegionStart) → call `rt_region_start`, keep the `i32` handle.
+//! - [`Inst::RegionAlloc`](cljrs_ir::Inst::RegionAlloc) → call the matching
 //!   `rt_region_alloc_*` with the handle as the leading `i32` arg.
-//! - [`Inst::RegionEnd`](crate::ir::Inst::RegionEnd) → call `rt_region_end` with the handle.
-//! - [`Inst::RegionParam`](crate::ir::Inst::RegionParam) → bind the function's **hidden trailing `i32`
-//!   parameter** (present iff [`IrFunction::takes_region_param`](crate::ir::IrFunction::takes_region_param)).
-//! - [`Inst::CallWithRegion`](crate::ir::Inst::CallWithRegion) → ordinary direct call, passing the caller's
+//! - [`Inst::RegionEnd`](cljrs_ir::Inst::RegionEnd) → call `rt_region_end` with the handle.
+//! - [`Inst::RegionParam`](cljrs_ir::Inst::RegionParam) → bind the function's **hidden trailing `i32`
+//!   parameter** (present iff [`IrFunction::takes_region_param`](cljrs_ir::IrFunction::takes_region_param)).
+//! - [`Inst::CallWithRegion`](cljrs_ir::Inst::CallWithRegion) → ordinary direct call, passing the caller's
 //!   region handle as the trailing `i32` argument.
 //!
 //! So the compiled signature of a region-parameterised variant is its visible
 //! params plus one trailing `i32` — exactly mirroring
-//! [`IrFunction::abi_param_count`](crate::ir::IrFunction::abi_param_count) on the native side.
+//! [`IrFunction::abi_param_count`](cljrs_ir::IrFunction::abi_param_count) on the native side.
 
 /// A WebAssembly value type, restricted to the four the backend uses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -58,7 +58,7 @@ pub enum WasmValType {
     F64,
 }
 
-use crate::ir::Repr;
+use cljrs_ir::Repr;
 
 impl WasmValType {
     /// The wasm type carrying an IR value of the given machine representation.

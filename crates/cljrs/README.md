@@ -11,8 +11,12 @@ interactively exploring clojurust programs.
 
 ```
 src/
-  main.rs   — CLI entry point: Clap structs, miette error hook, subcommand
-              dispatch, REPL loop, test harness, GC-stats reporter
+  main.rs           — CLI entry point: Clap structs, miette error hook, subcommand
+                      dispatch, REPL loop, test harness, GC-stats reporter
+  commands/
+    mod.rs          — module index for the internal command implementations
+    ir.rs           — the `ir` subcommand: `IrCommands` enum, dispatch, bundle
+                      pre-lowering (`ir build`), bundle dump, HTML IR visualizer
 ```
 
 ---
@@ -174,7 +178,8 @@ cljrs eval '(+ 1 2)'
 cljrs ir viz samples/graph.cljrs
 cljrs ir viz samples/graph.cljrs -o /tmp/graph.html --quiet
 
-# Pre-lower namespaces to IR for fast startup loading (cljrs_eval::load_prebuilt_ir)
+# Pre-lower namespaces to an IR bundle (replayed by cljrs_eval::load_prebuilt_ir;
+# no cljrs runtime path loads one today - these are lowerer diagnostics)
 cljrs ir build --ns clojure.core -o core.ir.bin
 cljrs ir build --ns my.app.core --src-path src -o app.ir.bin -v
 cljrs ir dump app.ir.bin
@@ -204,7 +209,7 @@ cljrs deps status              # show cached vs missing deps
 | Feature             | Effect                                                                        |
 |---------------------|-------------------------------------------------------------------------------|
 | `async` (default **on**) | Pulls in `cljrs-async` and `cljrs-io` and builds the Tokio runtime that drives top-level async evaluation (see implementation notes). Without it, `^:async`/`core.async`/`clojure.rust.io.async` are unavailable and evaluation is purely synchronous. |
-| `no-gc` (default off) | Propagated to `cljrs-gc`/`cljrs-value`/`cljrs-eval`/`cljrs-compiler`/`cljrs-runtime`/`cljrs-stdlib`.  Disables the tracing GC; only region-allocated and stack values are permitted.  Compiles fail (`AotError::NoGcBlacklist`) if the program contains allocations the optimizer can't lift onto regions. |
+| `no-gc` (default off) | Propagated to `cljrs-gc`/`cljrs-value`/`cljrs-eval`/`cljrs-compiler`/`cljrs-stdlib`/`cljrs-jit`.  Disables the tracing GC; only region-allocated and stack values are permitted.  Compiles fail (`AotError::NoGcBlacklist`) if the program contains allocations the optimizer can't lift onto regions. |
 | `enable-rustyline`  | Pulls in `rustyline` for a line-editing REPL.  Without it, `cljrs repl` falls back to a plain `BufRead` loop.                                                                                |
 
 Build with e.g. `cargo build --release --features enable-rustyline,no-gc`.
@@ -219,6 +224,7 @@ Build with e.g. `cargo build --release --features enable-rustyline,no-gc`.
 - The REPL prints results, paginates errors via `miette`, and persists multi-line input across blank prompts.
 - **Top-level async (with the `async` feature).** `main` builds a single-threaded Tokio runtime + `LocalSet` and stashes it in a thread-local `AsyncDriver` rather than wrapping the whole session in one `block_on`. Each top-level form is then evaluated through `cljrs_async::eval_async` via `LocalSet::block_on` in `eval_form`, so spawned tasks (core.async producers, `^:async` calls, `clojure.rust.io.async` readers/writers) make progress and a top-level `await` resolves. Tasks that outlive a form — e.g. a channel `def`d at one REPL prompt and consumed at the next — stay queued on the shared `LocalSet` and continue on the next form's drive. Note: blocking ops (`<!!`/`>!!`) still park the single executor thread and so are not usable at the top level; use `(await (take! ch))` / `go` instead.
 - `ir viz` runs the AOT pipeline through region optimization (via `cljrs_compiler::aot::lower_file_to_ir`) and hands the resulting `IrFunction` to `cljrs_ir_viz::render_html`.
+- `ir build` boots a standard environment, walks every var in the requested namespaces, and lowers each function arity with `cljrs_eval::lower::lower_arity` into an `IrBundle`. It lives in `commands/ir.rs`; there is no separate pre-build crate or binary. No `cljrs` runtime path loads a bundle — `cljrs_eval::load_prebuilt_ir` is the public API an embedder would call to replay one.
 
 ---
 
@@ -232,11 +238,9 @@ Build with e.g. `cargo build --release --features enable-rustyline,no-gc`.
 | `cljrs-value` (workspace)   | `Value` and persistent collections                                |
 | `cljrs-eval` (workspace)    | Tree-walking interpreter, `Env`                                   |
 | `cljrs-stdlib` (workspace)  | Bootstrapped standard library (`standard_env*`)                   |
-| `cljrs-runtime` (workspace) | Concurrency primitives consumed by stdlib                         |
 | `cljrs-compiler` (workspace)| AOT pipeline (`compile_file`, `compile_test_harness`, `lower_file_to_ir`) |
 | `cljrs-ir-viz` (workspace)  | HTML IR visualizer used by `ir viz`                                |
-| `cljrs-ir` (workspace)      | `IrBundle`, `deserialize_bundle` — used by `ir dump`               |
-| `cljrs-ir-prebuild` (workspace) | `run_prebuild` — used by `ir build`                            |
+| `cljrs-ir` (workspace)      | `IrBundle`, `serialize_bundle`, `deserialize_bundle` — used by `ir build` / `ir dump` |
 | `cljrs-interop` (workspace) | Rust ↔ Clojure FFI                                                |
 | `cljrs-async` (workspace, optional) | `clojure.core.async` runtime + `eval_async`; enabled by `async`  |
 | `cljrs-io` (workspace, optional) | `clojure.rust.io.async` async file I/O; enabled by `async`       |
