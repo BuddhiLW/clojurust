@@ -1403,6 +1403,16 @@ fn parse_require_spec_val(val: Value) -> Result<RequireSpec, String> {
     }
 }
 
+/// The form a require-spec element denotes: a reader conditional resolves to
+/// its selected branch, `None` when no branch matches this platform. Any other
+/// form is itself.
+fn spec_element(form: &Form) -> Option<&Form> {
+    match &form.kind {
+        FormKind::ReaderCond { clauses, .. } => select_reader_cond(clauses),
+        _ => Some(form),
+    }
+}
+
 /// Parse a `RequireSpec` from a raw `Form` (unevaluated, used in `ns` macro).
 /// Also handles versioned namespace symbols such as `my.ns@abc1234`.
 fn parse_require_spec_form(form: &Form) -> Result<RequireSpec, String> {
@@ -1420,7 +1430,10 @@ fn parse_require_spec_form(form: &Form) -> Result<RequireSpec, String> {
             if items.is_empty() {
                 return Err("require spec vector must not be empty".into());
             }
-            let (ns, version) = match &items[0].kind {
+            let head = spec_element(&items[0]).ok_or_else(|| {
+                "require spec: no reader-conditional branch matched for the namespace".to_string()
+            })?;
+            let (ns, version) = match &head.kind {
                 FormKind::Symbol(s) => {
                     let sym = cljrs_value::Symbol::parse(s);
                     (sym.name.clone(), sym.version.clone())
@@ -1431,18 +1444,11 @@ fn parse_require_spec_form(form: &Form) -> Result<RequireSpec, String> {
             let mut refer = RequireRefer::None;
             let mut i = 1;
             while i < items.len() {
-                // Resolve reader conditionals inline (e.g. #?(:cljs :refer-macros :default :refer)).
-                let item = match &items[i].kind {
-                    FormKind::ReaderCond { clauses, .. } => {
-                        match select_reader_cond(clauses) {
-                            Some(f) => f,
-                            None => {
-                                i += 1;
-                                continue;
-                            } // no matching branch — skip
-                        }
-                    }
-                    _ => &items[i],
+                // An option whose conditional selects nothing is dropped; the
+                // namespace slot above cannot be, so it errors instead.
+                let Some(item) = spec_element(&items[i]) else {
+                    i += 1;
+                    continue;
                 };
                 match &item.kind {
                     FormKind::Keyword(k) if k == "as" => {
