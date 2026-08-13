@@ -6,8 +6,8 @@ use std::sync::Arc;
 use crate::destructure::bind_pattern;
 use crate::eval::{eval, eval_body, is_special_form};
 use cljrs_builtins::form::{
-    expand_pairs, expand_reader_conds, expand_reader_conds_cow, form_to_value,
-    resolve_auto_forms, select_reader_cond,
+    expand_pairs, expand_reader_conds, expand_reader_conds_cow, form_to_value, resolve_auto_forms,
+    select_reader_cond,
 };
 use cljrs_env::env::{Env, RequireRefer, RequireSpec};
 use cljrs_env::error::{EvalError, EvalResult};
