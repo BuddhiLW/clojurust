@@ -108,7 +108,7 @@ pub fn eval(form: &Form, env: &mut Env) -> EvalResult {
         // namespace before the form becomes data.
         FormKind::Quote(inner) => {
             let resolved = cljrs_builtins::form::resolve_auto_forms(inner, env)?;
-            Ok(cljrs_builtins::form::form_to_value(&resolved))
+            cljrs_builtins::form::form_to_value(&resolved)
         }
         FormKind::SyntaxQuote(inner) => syntax_quote(inner, env),
         FormKind::Unquote(_) => Err(EvalError::Runtime("unquote outside syntax-quote".into())),
