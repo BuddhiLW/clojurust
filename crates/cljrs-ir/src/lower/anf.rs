@@ -210,6 +210,20 @@ fn lower_body(ctx: &mut LowerCtx, forms: &[Form]) -> R {
 
 // ── Form dispatch ─────────────────────────────────────────────────────────────
 
+/// Qualify an auto-resolved `::name` against the namespace being lowered.
+///
+/// An `alias/name` spelling needs the alias table, which this crate has no
+/// access to; the caller resolves those with `resolve_auto_forms` before
+/// lowering, so one arriving here is a bug rather than something to guess at.
+fn auto_qualified(ctx: &LowerCtx, name: &str, what: &str) -> Result<String, LowerError> {
+    if name.contains('/') {
+        return Err(LowerError::UnsupportedForm(format!(
+            "unresolved auto-{what} '{name}': a namespace alias must be resolved before lowering"
+        )));
+    }
+    Ok(format!("{}/{name}", ctx.ns()))
+}
+
 fn lower_form(ctx: &mut LowerCtx, form: &Form) -> R {
     ctx.maybe_emit_source_loc(&form.span);
     match &form.kind {
@@ -250,10 +264,12 @@ fn lower_form(ctx: &mut LowerCtx, form: &Form) -> R {
         FormKind::Symbolic(f) => Ok(ctx.emit_const(Const::Double(*f))),
         FormKind::Keyword(s) => Ok(ctx.emit_const(Const::Keyword(Arc::from(s.as_str())))),
         FormKind::AutoKeyword(s) => {
-            // ::kw must resolve to the current namespace at the call site, just as
-            // the interpreter's eval.rs does at runtime.
-            let full = format!("{}/{s}", ctx.ns());
+            let full = auto_qualified(ctx, s, "keyword")?;
             Ok(ctx.emit_const(Const::Keyword(Arc::from(full.as_str()))))
+        }
+        FormKind::AutoSymbol(s) => {
+            let full = auto_qualified(ctx, s, "symbol")?;
+            lower_symbol(ctx, &full)
         }
         FormKind::Symbol(s) => lower_symbol(ctx, s),
         FormKind::Vector(elems) => {

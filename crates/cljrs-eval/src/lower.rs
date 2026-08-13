@@ -10,6 +10,7 @@ use cljrs_ir::{IrFunction, Repr};
 use cljrs_reader::Form;
 use cljrs_value::TypeHint;
 
+use cljrs_builtins::form::resolve_auto_forms;
 use cljrs_env::env::Env;
 
 /// Map per-parameter primitive type hints onto representation seeds for type
@@ -176,6 +177,14 @@ fn lower_arity_inner(
     // ::kw resolution in macroexpand_body uses the correct namespace.
     let prev_ns = std::mem::replace(&mut env.current_ns, ns.clone());
     let expanded_body = macroexpand_body(body, env);
+    // Auto-resolved identifiers are qualified here, the last boundary holding
+    // an Env; the lowerer refuses any that survive. An unresolvable one is left
+    // in place for the lowerer to refuse, so the tree-walker reports it.
+    let resolved: Result<Vec<Form>, _> = expanded_body
+        .iter()
+        .map(|f| resolve_auto_forms(f, env))
+        .collect();
+    let expanded_body = resolved.unwrap_or(expanded_body);
     env.current_ns = prev_ns;
     lower_expanded_arity(
         name,

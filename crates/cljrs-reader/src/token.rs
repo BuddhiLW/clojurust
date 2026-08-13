@@ -71,6 +71,9 @@ pub enum Token {
     Symbolic(String),
     /// `#tag` — tagged literal; stores the symbol name without the leading `#`.
     TaggedLiteral(String),
+    /// The validated `#:ns` / `#::` / `#::alias` prefix of a namespaced map
+    /// literal. The following `{` is lexed as an ordinary `LBrace`.
+    NamespacedMap(crate::namespaced_map::MapNs),
 
     /// End-of-file sentinel.
     Eof,

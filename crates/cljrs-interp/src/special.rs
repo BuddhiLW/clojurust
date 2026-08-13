@@ -6,7 +6,8 @@ use std::sync::Arc;
 use crate::destructure::bind_pattern;
 use crate::eval::{eval, eval_body, is_special_form};
 use cljrs_builtins::form::{
-    expand_pairs, expand_reader_conds, expand_reader_conds_cow, form_to_value, select_reader_cond,
+    expand_pairs, expand_reader_conds, expand_reader_conds_cow, form_to_value, resolve_auto_forms,
+    select_reader_cond,
 };
 use cljrs_env::env::{Env, RequireRefer, RequireSpec};
 use cljrs_env::error::{EvalError, EvalResult};
@@ -31,7 +32,7 @@ pub fn eval_special(head: &str, args: &[Form], env: &mut Env) -> EvalResult {
         "let*" | "let" => eval_let(args, env),
         "loop*" | "loop" => eval_loop(args, env),
         "recur" => eval_recur(args, env),
-        "quote" => eval_quote(args),
+        "quote" => eval_quote(args, env),
         "var" => eval_var(args, env),
         "set!" => eval_set_bang(args, env),
         "throw" => eval_throw(args, env),
@@ -857,9 +858,12 @@ fn eval_body_with_scratch_loop(
 
 // ── quote ─────────────────────────────────────────────────────────────────────
 
-fn eval_quote(args: &[Form]) -> EvalResult {
+fn eval_quote(args: &[Form], env: &Env) -> EvalResult {
     match args.first() {
-        Some(f) => form_to_value(f),
+        // `::kw` and an auto-resolved map's symbol keys resolve against the
+        // reading namespace even under quote - the JVM resolves them at read
+        // time, before quote can see them.
+        Some(f) => form_to_value(&resolve_auto_forms(f, env)?),
         None => Err(EvalError::Runtime("quote requires an argument".into())),
     }
 }
