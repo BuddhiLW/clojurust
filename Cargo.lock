@@ -787,6 +787,7 @@ dependencies = [
  "cljrs-value",
  "futures-util",
  "gloo-timers",
+ "proptest",
  "tokio",
 ]
 
@@ -831,6 +832,7 @@ dependencies = [
  "num-bigint",
  "num-rational",
  "num-traits",
+ "proptest",
  "rand 0.10.2",
  "regex",
  "rpds",
@@ -1000,6 +1002,7 @@ dependencies = [
  "cljrs-types",
  "cljrs-value",
  "cljrs-vcs",
+ "proptest",
  "regex",
  "tempfile",
  "uuid",
@@ -1144,6 +1147,7 @@ version = "0.1.0"
 dependencies = [
  "cljrs-types",
  "miette",
+ "proptest",
 ]
 
 [[package]]

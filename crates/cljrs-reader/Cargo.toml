@@ -9,3 +9,6 @@ repository.workspace = true
 [dependencies]
 cljrs-types = { workspace = true }
 miette     = { workspace = true }
+
+[dev-dependencies]
+proptest = "1"

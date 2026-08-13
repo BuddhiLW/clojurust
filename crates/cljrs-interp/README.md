@@ -42,7 +42,12 @@ src/
                    off params into CljxFnArity::param_hints; let*/loop* binding
                    hints are stripped via bind_pattern's Meta arm (destructure.rs);
                    desugar_pre_post_conditions rewrites {:pre [...] :post [...]} maps
-                   into assertion forms (binds % to return value in :post conditions)
+                   into assertion forms (binds % to return value in :post conditions);
+                   spec_element resolves a reader conditional in ANY slot of an
+                   `ns` require spec, namespace included, so
+                   `[#?(:clj clojure.core :cljs cljs.core) :as core]` reads; an
+                   option selecting no branch is dropped, a namespace selecting
+                   none is an error
   apply.rs       — eval_call: macro expansion, native-fn dispatch, CljxFn
                    application, recur trampoline; special env-needing handlers
                    (apply, atom, reset!, swap!, volatile!, vreset!, vswap!,
@@ -68,6 +73,10 @@ tests/
   versioned_resolution.rs — end-to-end versioned resolution against a real git
                    fixture: pinned symbols, HEAD-clobber regression, versioned
                    require, GC survival of versioned values
+  require_spec_reader_conditional.rs - `ns` require specs carrying a reader
+                   conditional in the namespace slot; each case goes through an
+                   `ns` form, since a quoted `require` resolves the conditional
+                   before the spec parser sees it
 ```
 
 ---
