@@ -863,7 +863,7 @@ fn eval_quote(args: &[Form], env: &Env) -> EvalResult {
         // `::kw` and an auto-resolved map's symbol keys resolve against the
         // reading namespace even under quote - the JVM resolves them at read
         // time, before quote can see them.
-        Some(f) => Ok(form_to_value(&resolve_auto_forms(f, env)?)),
+        Some(f) => form_to_value(&resolve_auto_forms(f, env)?),
         None => Err(EvalError::Runtime("quote requires an argument".into())),
     }
 }
