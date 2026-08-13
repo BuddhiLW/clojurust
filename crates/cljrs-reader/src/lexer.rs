@@ -9,55 +9,8 @@ use miette::NamedSource;
 use cljrs_types::error::{CljxError, CljxResult};
 use cljrs_types::span::Span;
 
+use crate::chars::{is_symbol_char, is_symbol_start};
 use crate::token::Token;
-
-// ─── Character classification ─────────────────────────────────────────────────
-
-/// Returns `true` if `ch` is a valid constituent character for a symbol or
-/// keyword.  Defined *negatively*: everything that isn't a delimiter, whitespace,
-/// or special syntax character is a symbol constituent.
-///
-/// `#` is included here: it is a *non-terminating* macro character in the
-/// Clojure reader, meaning it doesn't end a symbol token that's already in
-/// progress (only a leading `#` triggers `#`-dispatch — see
-/// [`is_symbol_start`]). This is what makes auto-gensym symbols like `x#`
-/// tokenize as a single symbol rather than `x` followed by a stray `#`.
-///
-/// `:` is included here too — it is also non-terminating, so a keyword like
-/// `:xlink:href` reads as one token with the literal name `xlink:href`
-/// rather than splitting into two keywords at the embedded colon. Only a
-/// *leading* `:`/`::` is special (it triggers keyword dispatch — see
-/// [`is_symbol_start`]).
-fn is_symbol_char(ch: char) -> bool {
-    !matches!(
-        ch,
-        ' ' | '\t'
-            | '\n'
-            | '\r'
-            | ','
-            | '('
-            | ')'
-            | '['
-            | ']'
-            | '{'
-            | '}'
-            | '"'
-            | ';'
-            | '`'
-            | '~'
-            | '^'
-            | '@'
-            | '\\'
-    )
-}
-
-/// Returns `true` if `ch` can *start* a symbol (not a digit, not `#` since a
-/// leading `#` always triggers `#`-dispatch, not `:` since a leading `:`
-/// always triggers keyword dispatch, not `+`/`-` when the following char is
-/// a digit — but the caller handles the `+`/`-` case).
-fn is_symbol_start(ch: char) -> bool {
-    is_symbol_char(ch) && !ch.is_ascii_digit() && ch != '#' && ch != ':'
-}
 
 // ─── Lexer ───────────────────────────────────────────────────────────────────
 
@@ -258,6 +211,7 @@ impl Lexer {
                 }
             }
             Some('#') => self.lex_symbolic(start_pos, start_line, start_col),
+            Some(':') => self.lex_namespaced_map(start_pos, start_line, start_col),
             Some(c) if is_symbol_start(c) => {
                 let name = self.read_symbol_chars();
                 Ok((
@@ -505,6 +459,49 @@ impl Lexer {
             Token::Char(ch),
             self.span_from(start_pos, start_line, start_col),
         ))
+    }
+
+    /// Lex the `#:ns` / `#::` / `#::alias` prefix of a namespaced map. `#` is
+    /// already consumed and the next char is `:`. The `{` is left in the stream
+    /// so the parser reads the body through the ordinary map path.
+    fn lex_namespaced_map(
+        &mut self,
+        start_pos: usize,
+        start_line: u32,
+        start_col: u32,
+    ) -> CljxResult<(Token, Span)> {
+        self.advance(); // consume first ':'
+        let auto = self.peek() == Some(':');
+        if auto {
+            self.advance(); // consume second ':'
+        }
+        let text = self.read_symbol_chars();
+        let ns = crate::namespaced_map::MapNs::parse(&text, auto).map_err(|msg| {
+            let span = self.span_from(start_pos, start_line, start_col);
+            self.make_error(msg, span)
+        })?;
+        // The JVM reader skips whitespace between the prefix and the map, but
+        // not comments: `#:foo {…}` and `#:foo, {…}` are the same literal.
+        self.skip_whitespace_only();
+        if self.peek() != Some('{') {
+            let span = self.span_from(start_pos, start_line, start_col);
+            return Err(self.make_error("namespaced map literal must be followed by a map", span));
+        }
+        Ok((
+            Token::NamespacedMap(ns),
+            self.span_from(start_pos, start_line, start_col),
+        ))
+    }
+
+    /// Skip spaces, tabs, newlines and commas - and nothing else.
+    fn skip_whitespace_only(&mut self) {
+        while let Some(ch) = self.peek() {
+            if ch.is_whitespace() || ch == ',' {
+                self.advance();
+            } else {
+                break;
+            }
+        }
     }
 
     // ── Keyword ───────────────────────────────────────────────────────────
@@ -1175,6 +1172,68 @@ mod tests {
             lex_one("::ns/alias"),
             Token::AutoKeyword("ns/alias".to_string())
         );
+    }
+
+    #[test]
+    fn test_namespaced_map_prefix() {
+        use crate::namespaced_map::MapNs;
+        // The `{` is deliberately NOT consumed - the parser reads the body
+        // through the ordinary map path.
+        assert_eq!(
+            lex_one("#:adt{:a 1}"),
+            Token::NamespacedMap(MapNs::Literal("adt".to_string()))
+        );
+        assert_eq!(lex_one("#::{:a 1}"), Token::NamespacedMap(MapNs::CurrentNs));
+        assert_eq!(
+            lex_one("#::al{:a 1}"),
+            Token::NamespacedMap(MapNs::Alias("al".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_namespaced_map_prefix_skips_whitespace_before_the_brace() {
+        use crate::namespaced_map::MapNs;
+        // The JVM accepts whitespace and commas between the prefix and `{`.
+        for src in ["#:adt {:a 1}", "#:adt, {:a 1}", "#:adt\n{:a 1}"] {
+            assert_eq!(
+                lex_one(src),
+                Token::NamespacedMap(MapNs::Literal("adt".to_string())),
+                "{src}"
+            );
+        }
+        assert_eq!(
+            lex_one("#:: {:a 1}"),
+            Token::NamespacedMap(MapNs::CurrentNs)
+        );
+        assert_eq!(
+            lex_one("#::al {:a 1}"),
+            Token::NamespacedMap(MapNs::Alias("al".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_namespaced_map_prefix_does_not_skip_comments() {
+        // Whitespace only - a comment between the prefix and `{` is not a map.
+        assert!(lex_err("#:adt ;; here\n{:a 1}").contains("must be followed by a map"));
+    }
+
+    #[test]
+    fn test_namespaced_map_prefix_errors() {
+        assert!(lex_err("#:{:a 1}").contains("requires a namespace"));
+        assert!(lex_err("#:adt [1]").contains("must be followed by a map"));
+    }
+
+    #[test]
+    fn test_namespaced_map_prefix_must_be_an_unqualified_symbol() {
+        for src in [
+            "#:foo/bar{:a 1}",
+            "#:1{:a 1}",
+            "#:nil{:a 1}",
+            "#::foo/bar{:a 1}",
+        ] {
+            let err = lex_err(src);
+            assert!(err.contains("unqualified symbol"), "{src}: {err}");
+        }
     }
 
     // ── Delimiters ───────────────────────────────────────────────────────
