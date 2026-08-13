@@ -72,7 +72,7 @@ fn edn_read_string(args: &[Value]) -> ValueResult<Value> {
 
     let mut parser = Parser::new(src, "<edn>".to_string());
     match parser.parse_one() {
-        Ok(Some(form)) => Ok(form_to_value(&form)),
+        Ok(Some(form)) => form_to_value(&form).map_err(|e| ValueError::Other(e.to_string())),
         Ok(None) => match eof_val {
             Some(v) => Ok(v),
             None => Err(ValueError::Other("EOF while reading EDN".into())),
@@ -112,7 +112,7 @@ fn edn_read(args: &[Value]) -> ValueResult<Value> {
 
     let mut parser = Parser::new(src, "<edn>".to_string());
     match parser.parse_one() {
-        Ok(Some(form)) => Ok(form_to_value(&form)),
+        Ok(Some(form)) => form_to_value(&form).map_err(|e| ValueError::Other(e.to_string())),
         Ok(None) => match eof_val {
             Some(v) => Ok(v),
             None => Err(ValueError::Other("EOF while reading EDN".into())),

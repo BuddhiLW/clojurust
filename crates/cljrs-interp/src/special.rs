@@ -6,7 +6,7 @@ use std::sync::Arc;
 use crate::destructure::bind_pattern;
 use crate::eval::{eval, eval_body, is_special_form};
 use cljrs_builtins::form::{
-    expand_reader_conds, form_to_value, resolve_auto_forms, select_reader_cond,
+    expand_pairs, expand_reader_conds, expand_reader_conds_cow, form_to_value, resolve_auto_forms, select_reader_cond,
 };
 use cljrs_env::env::{Env, RequireRefer, RequireSpec};
 use cljrs_env::error::{EvalError, EvalResult};
@@ -541,24 +541,12 @@ fn eval_if(args: &[Form], env: &mut Env) -> EvalResult {
 // ── let* ──────────────────────────────────────────────────────────────────────
 
 fn eval_let(args: &[Form], env: &mut Env) -> EvalResult {
-    let raw_bindings = match args.first().map(|f| &f.kind) {
-        Some(FormKind::Vector(v)) => v.clone(),
+    let bindings = match args.first().map(|f| &f.kind) {
+        Some(FormKind::Vector(v)) => expand_pairs(v)
+            .map_err(|_| EvalError::Runtime("let* binding vector must have even length".into()))?
+            .into_owned(),
         _ => return Err(EvalError::Runtime("let* requires a binding vector".into())),
     };
-    let bindings = if raw_bindings
-        .iter()
-        .any(|f| matches!(f.kind, FormKind::ReaderCond { .. }))
-    {
-        expand_reader_conds(&raw_bindings)
-    } else {
-        raw_bindings
-    };
-
-    if bindings.len() % 2 != 0 {
-        return Err(EvalError::Runtime(
-            "let* binding vector must have even length".into(),
-        ));
-    }
 
     let body = &args[1..];
 
@@ -746,15 +734,11 @@ fn eval_chain_normally(
 
 pub fn eval_loop(args: &[Form], env: &mut Env) -> EvalResult {
     let bindings = match args.first().map(|f| &f.kind) {
-        Some(FormKind::Vector(v)) => v.clone(),
+        Some(FormKind::Vector(v)) => expand_pairs(v)
+            .map_err(|_| EvalError::Runtime("loop* binding vector must have even length".into()))?
+            .into_owned(),
         _ => return Err(EvalError::Runtime("loop* requires a binding vector".into())),
     };
-
-    if bindings.len() % 2 != 0 {
-        return Err(EvalError::Runtime(
-            "loop* binding vector must have even length".into(),
-        ));
-    }
 
     let body = &args[1..];
 
@@ -1621,7 +1605,7 @@ fn eval_load_file(args: &[Form], env: &mut Env) -> EvalResult {
 fn eval_letfn(args: &[Form], env: &mut Env) -> EvalResult {
     // (letfn [(f [params] body...) ...] body...)
     let bindings = match args.first().map(|f| &f.kind) {
-        Some(FormKind::Vector(v)) => v.clone(),
+        Some(FormKind::Vector(v)) => expand_reader_conds_cow(v).into_owned(),
         _ => return Err(EvalError::Runtime("letfn requires a binding vector".into())),
     };
 
@@ -2062,14 +2046,11 @@ fn eval_defmethod(args: &[Form], env: &mut Env) -> EvalResult {
 
 fn eval_binding(args: &[Form], env: &mut Env) -> EvalResult {
     let pairs = match args.first().map(|f| &f.kind) {
-        Some(FormKind::Vector(v)) => v.clone(),
+        Some(FormKind::Vector(v)) => expand_pairs(v)
+            .map_err(|_| EvalError::Runtime("binding vector must have even count".into()))?
+            .into_owned(),
         _ => return Err(EvalError::Runtime("binding requires a vector".into())),
     };
-    if pairs.len() % 2 != 0 {
-        return Err(EvalError::Runtime(
-            "binding vector must have even count".into(),
-        ));
-    }
 
     let mut frame: HashMap<usize, Value> = HashMap::new();
     for pair in pairs.chunks(2) {

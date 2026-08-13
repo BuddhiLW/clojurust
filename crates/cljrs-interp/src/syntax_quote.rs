@@ -4,7 +4,7 @@
 //! expanded to intermediate AST and then evaluated.
 
 use cljrs_builtins::SPECIAL_FORMS;
-use cljrs_builtins::form::form_to_value;
+use cljrs_builtins::form::{expand_reader_conds_cow, form_to_value, select_reader_cond};
 use cljrs_env::env::Env;
 use cljrs_env::error::{EvalError, EvalResult};
 use cljrs_gc::GcPtr;
@@ -141,6 +141,20 @@ fn sq_form(
             ]))))
         }
 
+        // `#?(...)` in a non-sibling position: syntax-quote the selected branch.
+        FormKind::ReaderCond {
+            splicing: false,
+            clauses,
+        } => match select_reader_cond(clauses) {
+            Some(selected) => sq_form(selected, env, gensyms),
+            None => Ok(Value::Nil),
+        },
+
+        // `#?@(...)` here has no sibling sequence to splice into.
+        FormKind::ReaderCond { splicing: true, .. } => Err(EvalError::Runtime(
+            "splicing reader conditional not in a sequence context".into(),
+        )),
+
         // #(...) anonymous function: expand to (fn* [...] ...) then syntax-quote.
         FormKind::AnonFn(body) => {
             let expanded = cljrs_builtins::form::expand_anon_fn(body, form.span.clone());
@@ -148,7 +162,7 @@ fn sq_form(
         }
 
         // Everything else: wrap as literal data.
-        _other => Ok(form_to_value(form)),
+        _other => form_to_value(form),
     }
 }
 
@@ -157,13 +171,16 @@ enum Segment {
     Many(Vec<Value>),
 }
 
+/// Process a sibling sequence, resolving `#?`/`#?@` for `:rust` first so a
+/// splice contributes its branch elements to the enclosing collection.
 fn sq_seq(
     forms: &[Form],
     env: &mut Env,
     gensyms: &mut std::collections::HashMap<String, Arc<str>>,
 ) -> EvalResult<Vec<Segment>> {
+    let forms = expand_reader_conds_cow(forms);
     let mut out = Vec::with_capacity(forms.len());
-    for f in forms {
+    for f in forms.iter() {
         match &f.kind {
             FormKind::UnquoteSplice(inner) => {
                 // ~@expr: evaluate and spread.
