@@ -12,10 +12,13 @@ Turns raw source text into a `Form` AST that the evaluator and compiler consume.
 ```
 src/
   lib.rs      — module declarations and re-exports
+  chars.rs    — char classification predicates (bottom stratum)
   token.rs    — Token enum: one variant per Clojure lexical form
   lexer.rs    — Lexer struct: byte-oriented, UTF-8-safe tokenizer
   form.rs     — Form struct + FormKind enum: the reader AST
   parser.rs   — Parser struct: recursive-descent parser + Iterator impl
+  namespaced_map.rs - MapNs prefix validation + pure key qualification for
+                      #:ns{…} / #::{…} / #::alias{…} literals
 ```
 
 ---
@@ -58,6 +61,7 @@ Every distinct lexical form the reader can produce:
 | `ReaderCondSplice` | `#?@` | |
 | `Symbolic(String)` | `##Inf`, `##NaN` | stores suffix after `##` |
 | `TaggedLiteral(String)` | `#inst`, `#uuid` | stores tag name without `#` |
+| `NamespacedMap(MapNs)` | `#:ns{`, `#::{`, `#::alias{` | prefix only; the `{` lexes as `LBrace`. The prefix is validated as an unqualified symbol and whitespace before the `{` is skipped |
 | `Eof` | — | end-of-file sentinel |
 
 ### `lexer::Lexer`
@@ -161,6 +165,7 @@ pub enum FormKind {
     Symbol(String),
     Keyword(String),
     AutoKeyword(String),
+    AutoSymbol(String),   // no surface syntax; symbol key of an auto-resolved map
 
     // Collections
     List(Vec<Form>),
@@ -229,6 +234,49 @@ evaluator is responsible for filtering by `:rust`.
 
 ---
 
+### `namespaced_map`
+
+```rust
+pub enum MapNs { Literal(String), CurrentNs, Alias(String) }
+
+impl MapNs {
+    pub fn parse(text: &str, auto: bool) -> Result<Self, String>
+}
+
+pub fn qualify_keys(ns: &MapNs, forms: Vec<Form>) -> Vec<Form>
+```
+
+`MapNs::parse` validates the prefix the lexer read after `#:` / `#::`. The JVM
+reads it as an unqualified `Symbol`, so `#:foo/bar{…}`, `#:1{…}` and
+`#:nil{…}` are read errors, and only the `#::` spellings may leave it empty.
+The three legal shapes are the three variants, so an impossible
+`(namespace, auto)` pair cannot be constructed.
+
+`qualify_keys` rewrites the keys of the literal's body - one pure function over
+an already-parsed map, holding no reader state, and total once the prefix is a
+`MapNs`.
+
+| Key in source | `#:adt{…}` | `#::{…}` | `#::al{…}` |
+|---------------|-----------|---------|-----------|
+| `:a` | `:adt/a` | `AutoKeyword("a")` | `AutoKeyword("al/a")` |
+| `:other/a` | unchanged | unchanged | unchanged |
+| `:_/a` | `:a` | `:a` | `:a` |
+| `a` (symbol) | `adt/a` | `AutoSymbol("a")` | `AutoSymbol("al/a")` |
+| `/` (symbol) | `adt//` | `AutoSymbol("/")` | `AutoSymbol("al//")` |
+| `1`, `"s"`, … | unchanged | unchanged | unchanged |
+
+Values are never touched - only even indices of the flat key/value vec. `/` is
+a name, not a namespace separator, so it takes the map's namespace like any
+other bare key.
+
+The auto-resolved spellings lower to `FormKind::AutoKeyword` / `AutoSymbol`
+rather than being resolved here, so `*ns*` and its aliases stay the evaluator's
+business and namespace resolution lives in one place. Consumers that turn a
+form into data or into IR resolve them first through
+`cljrs_builtins::form::resolve_auto_forms`.
+
+---
+
 ## Error construction
 
 On any read or parse error the crate produces a `CljxError::ReadError`
@@ -241,6 +289,7 @@ render a pointed diagnostic in the terminal.
 
 ```rust
 pub use form::{Form, FormKind};
+pub use namespaced_map::MapNs;
 pub use lexer::Lexer;
 pub use parser::Parser;
 pub use token::Token;

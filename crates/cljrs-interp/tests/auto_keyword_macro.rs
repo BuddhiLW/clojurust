@@ -164,6 +164,48 @@ fn auto_kw_alias_resolves_when_spliced_through_macro() {
     assert_eq!(result, kw("clojure.string", "foo"));
 }
 
+// ── every wrapper position, not just the ones a hand-written walk listed ─────
+//
+// `q` returns its argument as data, so the two spellings are equal exactly when
+// the macro received the `::k` side already qualified.
+
+fn quoting_macro(arg: &str, qualified: &str) -> Value {
+    eval_in_ns(
+        "my.app",
+        &format!("(do (defmacro q [f] (list 'quote f)) (= (q {arg}) (q {qualified})))"),
+    )
+}
+
+#[test]
+fn auto_kw_inside_an_anon_fn_reaches_the_macro_qualified() {
+    assert_eq!(
+        quoting_macro("#(vector ::k)", "#(vector :my.app/k)"),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn auto_kw_inside_a_deref_reaches_the_macro_qualified() {
+    assert_eq!(quoting_macro("@::k", "@:my.app/k"), Value::Bool(true));
+}
+
+#[test]
+fn auto_kw_inside_a_reader_conditional_reaches_the_macro_qualified() {
+    assert_eq!(
+        quoting_macro("[#?(:rust ::k)]", "[#?(:rust :my.app/k)]"),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn auto_resolved_map_keys_reach_the_macro_qualified() {
+    assert_eq!(
+        quoting_macro("#::{:k 1}", "{:my.app/k 1}"),
+        Value::Bool(true)
+    );
+    assert_eq!(quoting_macro("#::{k 1}", "{my.app/k 1}"), Value::Bool(true));
+}
+
 #[test]
 fn auto_kw_unknown_alias_is_an_error() {
     let (_, mut env) = make_env();
