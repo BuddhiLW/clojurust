@@ -142,12 +142,14 @@
           (rf result input)
           result)))))
   ([pred coll]
-   (loop [s (seq coll) acc []]
-     (if s
-       (if (pred (first s))
-         (recur (next s) (conj acc (first s)))
-         (recur (next s) acc))
-       (or (seq acc) '())))))
+   ;; Lazy, as the docstring says: an eager loop here never returns on an
+   ;; infinite coll, so `(take 3 (filter even? (range)))` hangs the process.
+   (lazy-seq
+     (when-let [s (seq coll)]
+       (let [f (first s) r (rest s)]
+         (if (pred f)
+           (cons f (filter pred r))
+           (filter pred r)))))))
 
 (defn remove
   "Returns a lazy sequence of the items in coll for which (pred item)
@@ -754,24 +756,19 @@
   ([n coll]
    (partition n n coll))
   ([n step coll]
-   (loop [s (seq coll) acc []]
-     (if s
-       (let [part (take n s)]
-         (if (= (count part) n)
-           (recur (nthnext s step) (conj acc part))
-           (seq acc)))
-       (seq acc))))
+   ;; Lazy: `(take 4 (partition 2 (range)))` must terminate.
+   (lazy-seq
+     (when-let [s (seq coll)]
+       (let [p (doall (take n s))]
+         (when (= n (count p))
+           (cons p (partition n step (nthnext s step))))))))
   ([n step pad coll]
-   (loop [s (seq coll) acc []]
-     (if s
-       (let [part (take n s)]
-         (if (= (count part) n)
-           (recur (nthnext s step) (conj acc part))
-           (let [padded (take n (concat part pad))]
-             (if (= (count padded) n)
-               (seq (conj acc padded))
-               (seq acc)))))
-       (seq acc)))))
+   (lazy-seq
+     (when-let [s (seq coll)]
+       (let [p (doall (take n s))]
+         (if (= n (count p))
+           (cons p (partition n step pad (nthnext s step)))
+           (list (doall (take n (concat p pad))))))))))
 
 (defn partition-all
   ([n]
@@ -793,11 +790,12 @@
                   (rf result buf))
               result)))))))
   ([n coll]
-   (loop [s (seq coll) acc []]
-     (if s
-       (let [part (take n s)]
-         (recur (nthnext s n) (conj acc part)))
-       (seq acc)))))
+   (partition-all n n coll))
+  ([n step coll]
+   (lazy-seq
+     (when-let [s (seq coll)]
+       (let [p (doall (take n s))]
+         (cons p (partition-all n step (nthnext s step))))))))
 
 (defn flatten
   "Takes any nested combination of sequential things (lists, vectors,
