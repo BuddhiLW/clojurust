@@ -752,7 +752,6 @@ dependencies = [
  "cljrs-interop",
  "cljrs-io",
  "cljrs-ir",
- "cljrs-ir-prebuild",
  "cljrs-ir-viz",
  "cljrs-jit",
  "cljrs-logging",
@@ -760,7 +759,6 @@ dependencies = [
  "cljrs-net",
  "cljrs-nrepl",
  "cljrs-reader",
- "cljrs-runtime",
  "cljrs-stdlib",
  "cljrs-types",
  "cljrs-value",
@@ -1034,19 +1032,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "cljrs-ir-prebuild"
-version = "0.1.0"
-dependencies = [
- "clap",
- "cljrs-env",
- "cljrs-eval",
- "cljrs-ir",
- "cljrs-reader",
- "cljrs-types",
- "cljrs-value",
-]
-
-[[package]]
 name = "cljrs-ir-viz"
 version = "0.1.0"
 dependencies = [
@@ -1172,8 +1157,6 @@ dependencies = [
  "cljrs-logging",
  "cljrs-reader",
  "cljrs-value",
- "lazy_static",
- "tokio",
 ]
 
 [[package]]

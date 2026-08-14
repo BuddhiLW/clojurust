@@ -16,7 +16,7 @@ use std::sync::Arc;
 use cljrs_reader::Parser;
 
 use crate::codegen::Compiler;
-use crate::ir::IrFunction;
+use cljrs_ir::IrFunction;
 
 // ── Error type ──────────────────────────────────────────────────────────────
 
@@ -145,7 +145,7 @@ struct ArityInfo {
 fn collect_defn_arities(
     ir_func: &IrFunction,
 ) -> std::collections::HashMap<(Arc<str>, Arc<str>), Vec<ArityInfo>> {
-    use crate::ir::{ClosureTemplate, Inst, VarId};
+    use cljrs_ir::{ClosureTemplate, Inst, VarId};
     use std::collections::HashMap;
 
     let mut closure_templates: HashMap<VarId, ClosureTemplate> = HashMap::new();
@@ -251,7 +251,7 @@ fn rewrite_calls_to_direct(
     ir_func: &mut IrFunction,
     defns: &std::collections::HashMap<(Arc<str>, Arc<str>), Vec<ArityInfo>>,
 ) -> usize {
-    use crate::ir::{Inst, VarId};
+    use cljrs_ir::{Inst, VarId};
     use std::collections::HashMap;
 
     // Build a map of VarId → (ns, name) for LoadGlobal instructions that load known defns.
@@ -294,7 +294,7 @@ struct AllocStats {
 }
 
 fn count_alloc_stats(ir_func: &IrFunction) -> AllocStats {
-    use crate::ir::Inst;
+    use cljrs_ir::Inst;
     let mut stats = AllocStats {
         functions: 1,
         ..Default::default()

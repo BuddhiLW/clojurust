@@ -14,7 +14,6 @@ no-gc = [
     "cljrs-value/no-gc",
     "cljrs-eval/no-gc",
     "cljrs-compiler/no-gc",
-    "cljrs-runtime/no-gc",
     "cljrs-stdlib/no-gc",
     "cljrs-jit/no-gc",
 ]
@@ -35,7 +34,6 @@ cljrs-reader   = { workspace = true }
 cljrs-value    = { workspace = true }
 cljrs-eval     = { workspace = true }
 cljrs-stdlib   = { workspace = true }
-cljrs-runtime  = { workspace = true }
 cljrs-compiler = { workspace = true }
 cljrs-ir-viz   = { workspace = true }
 cljrs-interop  = { workspace = true }
@@ -47,7 +45,6 @@ cljrs-nrepl    = { workspace = true }
 cljrs-jit      = { workspace = true }
 cljrs-dylib    = { workspace = true }
 cljrs-ir       = { workspace = true }
-cljrs-ir-prebuild = { workspace = true }
 clap          = { workspace = true }
 miette        = { workspace = true }
 tracing-subscriber = "0.3.23"

@@ -10,6 +10,40 @@ The proposed target contains approximately 23 packages.
 
 This plan does not remove the tree-walking interpreter, JIT, AOT compiler, no-GC mode, or supported platform targets.
 
+## Progress
+
+| Stage | Status | Notes |
+|---|---|---|
+| 0. Record the baseline | Complete | [`consolidation-baseline.md`](consolidation-baseline.md) |
+| 1. Remove obsolete debris | Complete | `cljrs-ir-prebuild` folded into `cljrs::commands::ir`; 34 packages → 33 |
+| 2. Create the merged runtime | Not started | |
+| 3. Simplify runtime state | Not started | |
+| 4. Merge JIT and compiler packages | Not started | |
+| 5. Consolidate project and CLI tools | Not started | |
+| 6. Remove compatibility packages | Not started | |
+
+Package count: 34 at baseline, 33 now, approximately 23 at target.
+
+### Corrections found while measuring the baseline
+
+Three Evidence items were already resolved before this work started, so they need
+no Stage 1 change:
+
+- `cljrs-stdlib/src/core_async.rs` does not exist. The only `core_async` source is
+  `crates/cljrs-async/src/core_async.cljrs`, which is live Clojure source, not
+  commented-out Rust.
+- `cljrs-stdlib/Cargo.toml` no longer lists `tokio` or `lazy_static`. Only
+  `Cargo.lock` still carried the stale entries.
+- No Clojure compiler namespaces remain, so `cljrs-ir-prebuild` no longer loads
+  any — but its own docs still claim it does, which Stage 1 corrects.
+
+The baseline also found one thing the plan did not anticipate: **`no-gc` does not
+build today**, for the CLI or for `cljrs-env`, `cljrs-builtins`, `cljrs-stdlib`,
+and `cljrs-async` on their own. See
+[`consolidation-baseline.md` §4.2](consolidation-baseline.md). Later stages state
+"Default and `no-gc` builds pass" as a gate; until those pre-existing defects are
+fixed, `no-gc` can only be held to "no worse than baseline".
+
 ## Background
 
 The current core split came from an earlier compiler bootstrap design.
@@ -232,6 +266,59 @@ Validation gate:
 - The default CLI has unchanged behavior.
 - The workspace contains no dead build script or commented implementation module.
 - Documentation describes only the Rust lowering path.
+
+#### Stage 1 outcome
+
+Items 2 and 3 needed no source change: `cljrs-stdlib/src/core_async.rs` does not
+exist and `cljrs-stdlib/Cargo.toml` no longer lists `tokio` or `lazy_static`.
+Only `Cargo.lock` still carried those entries; the Stage 0 commit refreshed it.
+
+What changed:
+
+1. Dropped `cljrs-runtime` from the CLI's dependencies and from its `no-gc`
+   feature list. Nothing in the workspace depends on the stub now.
+4. Deleted `crates/cljrs-stdlib/build.rs`.
+5. and 6. Deleted `crates/cljrs-compiler/src/ir.rs` and rewrote all 27
+   `crate::ir::` paths inside `cljrs-compiler` to `cljrs_ir::`. No package
+   outside `cljrs-compiler` referenced `cljrs_compiler::ir`.
+7. Corrected the root README's "Prebuilt IR pipeline" section (it described a
+   build-time bootstrap through Clojure compiler namespaces that does not
+   exist), its dependency graph, its crate table and repository layout, the
+   `cljrs-stdlib` README's `build.rs` entry and incomplete file/API lists, the
+   `cljrs-compiler` README's `ir.rs` entry, the `cljrs` README's dependency
+   table, the `cljrs-eval` README's `load_prebuilt_ir` note, the
+   `cljrs-value` README's forward reference to `cljrs-runtime`, and the
+   `cljrs-runtime` README (which described a `clojure.core` implementation that
+   actually lives in `cljrs-builtins` and `cljrs-interp`).
+
+**IR bundle decision: keep the commands, delete the package.** Baseline §5 found
+no cold-start benefit to preserve - no runtime path calls `load_prebuilt_ir`,
+and cold start is already ~50 ms with no bundle loaded. But `ir build` and
+`ir dump` are useful lowerer diagnostics and the public replay API matters for
+targets with no background lowering worker, so the feature stays. `run_prebuild`
+moved into `cljrs::commands::ir` and the `cljrs-ir-prebuild` package - library,
+duplicate standalone binary, and all - is gone. `cljrs_eval::load_prebuilt_ir`
+is retained, since the feature it serves remains.
+
+This also creates `crates/cljrs/src/commands/`, the module tree Stage 5 splits
+`main.rs` into. `IrCommands`, its dispatch, and `ir viz` moved there with the
+prebuild code, so Stage 5 inherits a finished `commands::ir`.
+
+Gate results:
+
+| Check | Result |
+|---|---|
+| `cargo fmt --check` | pass |
+| `cargo clippy --workspace -- -D warnings` | pass |
+| `cargo test --workspace` | 1077 passed, 0 failed, 24 ignored - identical to baseline (144 suites vs 147: the three `cljrs-ir-prebuild` targets are gone, no test was lost) |
+| Clojure test suite (AOT) | 242 suites, 629 tests, 11,005 assertions, 0 failures |
+| `cljrs --help`, `cljrs ir --help`, `ir dump/viz --help` | byte-identical to the baseline binary |
+| `cljrs ir build --help` | one intended text change: it no longer claims bundles are "loaded back at startup" |
+| `cljrs ir build --ns clojure.core` | 151 functions lowered, 2 unsupported - identical to baseline. Bundle bytes differ run-to-run in *both* binaries (the bundle is a `HashMap`), and `ir dump` of one bundle is identical modulo ordering |
+| `graph`, `life`, `core_async` samples | compile and run |
+| `no-gc` | unchanged from baseline: same four packages fail with the same three defects |
+
+Package count: 34 → 33.
 
 ### Stage 2: Create the merged runtime
 

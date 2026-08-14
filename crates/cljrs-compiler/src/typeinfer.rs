@@ -38,14 +38,14 @@
 
 use std::collections::HashMap;
 
-use crate::ir::{Const, Inst, IrFunction, KnownFn, Terminator, VarId};
+use cljrs_ir::{Const, Inst, IrFunction, KnownFn, Terminator, VarId};
 
 /// Machine representation of an IR variable in compiled code.
 ///
 /// Defined in `cljrs-ir` (so `IrFunction` can carry static `seed_reprs` from
 /// `^long`/`^double` type hints) and re-exported here for backwards
 /// compatibility — existing `cljrs_compiler::typeinfer::Repr` paths still work.
-pub use crate::ir::Repr;
+pub use cljrs_ir::Repr;
 
 /// Lattice element during inference: `None` = ⊥ (not yet computed).
 type Lat = Option<Repr>;
@@ -210,7 +210,7 @@ pub fn infer(func: &IrFunction, specs: &[Repr]) -> HashMap<VarId, Repr> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ir::Block;
+    use cljrs_ir::Block;
     use std::sync::Arc;
 
     /// (fn [n] (loop [i 0 acc 0] (if (< i n) (recur (+ i 1) (+ acc i)) acc)))

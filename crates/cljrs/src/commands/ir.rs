@@ -1,31 +1,168 @@
-//! Pre-lower Clojure namespaces to IR and serialize the result to a bundle.
+//! The `cljrs ir` subcommand: pre-lower namespaces to a serialized IR bundle,
+//! dump a bundle, and render optimized IR to an HTML page.
 //!
-//! Boots a full eval environment, loads the Clojure compiler, then iterates
-//! all vars in the requested namespaces. For each function, every arity is
-//! lowered to IR and stored in an [`IrBundle`]. The bundle can be serialized
-//! to a file that is later loaded at startup (`cljrs_eval::load_prebuilt_ir`)
-//! to skip re-lowering already-compiled functions — most useful for cutting
-//! cold-start latency on targets that can't run the background lowering
-//! worker, such as an embedder built for `wasm32`.
+//! `build` boots a standard environment, walks every var in the requested
+//! namespaces, lowers every function arity to IR, and writes the resulting
+//! [`IrBundle`] to disk. A bundle can be replayed into a live environment with
+//! [`cljrs_eval::load_prebuilt_ir`], which matches bundle entries to the
+//! `ir_arity_id`s assigned when the target functions are defined and populates
+//! the IR cache directly — so those functions execute at Tier 1 (IR
+//! interpreter) from their first call instead of waiting for background
+//! lowering to promote them.
 //!
-//! This crate is both a library (used by the `cljrs ir build`/`cljrs ir dump`
-//! subcommands) and a standalone `cljrs-ir-prebuild` binary.
+//! No `cljrs` runtime path loads a bundle today; `build` and `dump` are
+//! diagnostics for the lowerer and a starting point for embedders that cannot
+//! run the background lowering worker, such as a `wasm32` build.
 
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use cljrs_env::env::{Env, GlobalEnv};
+use clap::Subcommand;
+
+use cljrs_eval::{Env, GlobalEnv};
 use cljrs_ir::IrBundle;
 use cljrs_value::{CljxFn, Value};
 
+#[derive(Subcommand)]
+pub enum IrCommands {
+    /// Lower namespaces to IR and write a serialized bundle.
+    ///
+    /// The bundle is replayed into a live environment with the public
+    /// `cljrs_eval::load_prebuilt_ir` API, which matches bundle entries to the
+    /// live `ir_arity_id`s assigned when the target functions are defined and
+    /// populates the IR cache directly, so the functions execute at Tier 1
+    /// (IR interpreter) from their very first call - skipping the warmup that
+    /// background lowering normally needs. Most useful for cutting cold-start
+    /// latency on targets that can't run the background lowering worker, such
+    /// as an embedder built for `wasm32`.
+    Build {
+        /// Namespaces to lower (e.g. "clojure.core"). If none given, defaults to clojure.core.
+        #[arg(short, long)]
+        ns: Vec<String>,
+        /// Output file path for the serialized IR bundle.
+        #[arg(short, long, default_value = "ir_bundle.bin")]
+        output: PathBuf,
+        /// Additional source paths for namespace resolution.
+        #[arg(long = "src-path", value_name = "DIR")]
+        src_paths: Vec<PathBuf>,
+        /// Print verbose progress information.
+        #[arg(short, long)]
+        verbose: bool,
+    },
+    /// Print a human-readable dump of a serialized IR bundle.
+    Dump {
+        /// Path to a bundle written by `ir build`.
+        input: PathBuf,
+    },
+    /// Render the optimized IR for a source file to a self-contained HTML
+    /// page (source ↔ IR with region color-coding and escape annotations).
+    ///
+    /// Useful for debugging the bump-allocation optimizer: any allocation
+    /// that didn't make it into a region is flagged with its escape
+    /// verdict and a representative blamed use.
+    Viz {
+        /// Path to the source file.
+        file: PathBuf,
+        /// Output HTML path.  If omitted, writes to <file>.ir.html alongside the source.
+        #[arg(short, long)]
+        out: Option<PathBuf>,
+        /// Source directories to search when resolving `require`.
+        #[arg(long = "src-path", value_name = "DIR")]
+        src_paths: Vec<PathBuf>,
+        /// Suppress the `[aot] ...` progress output.
+        #[arg(long)]
+        quiet: bool,
+    },
+}
+
+/// Dispatch the `ir` subcommands: `build`, `dump`, `viz`.
+pub fn run(command: IrCommands) -> miette::Result<i32> {
+    match command {
+        IrCommands::Build {
+            ns,
+            output,
+            src_paths,
+            verbose,
+        } => {
+            let namespaces = if ns.is_empty() {
+                vec!["clojure.core".to_string()]
+            } else {
+                ns
+            };
+            let stats = run_prebuild(&namespaces, &output, &src_paths, verbose)
+                .map_err(|e| miette::miette!("{e}"))?;
+            eprintln!(
+                "Wrote {} functions ({} unsupported) to {}",
+                stats.lowered,
+                stats.unsupported,
+                stats.output.display()
+            );
+            Ok(0)
+        }
+        IrCommands::Dump { input } => {
+            let bytes =
+                std::fs::read(&input).map_err(|e| miette::miette!("{}: {}", input.display(), e))?;
+            let bundle = cljrs_ir::deserialize_bundle(&bytes)
+                .map_err(|e| miette::miette!("failed to deserialize {}: {e}", input.display()))?;
+            println!("{}", bundle);
+            Ok(0)
+        }
+        IrCommands::Viz {
+            file,
+            out,
+            src_paths,
+            quiet,
+        } => run_viz(file, out, src_paths, quiet),
+    }
+}
+
+// ── ir viz ────────────────────────────────────────────────────────────────────
+
+/// Lower a source file through the AOT pipeline (up to region optimization)
+/// and write a self-contained HTML visualizer to disk.
+fn run_viz(
+    file: PathBuf,
+    out: Option<PathBuf>,
+    src_paths: Vec<PathBuf>,
+    quiet: bool,
+) -> miette::Result<i32> {
+    let (source, ir) = cljrs_compiler::aot::lower_file_to_ir(&file, &src_paths, quiet)
+        .map_err(|e| miette::miette!("{e}"))?;
+    let title = format!("IR — {}", file.display());
+    let html = cljrs_ir_viz::render_html(
+        &ir,
+        Some(&source),
+        &cljrs_ir_viz::RenderOptions { title: Some(title) },
+    );
+    let out_path = out.unwrap_or_else(|| {
+        let mut p = file.clone();
+        let new_name = format!(
+            "{}.ir.html",
+            file.file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("output")
+        );
+        p.set_file_name(new_name);
+        p
+    });
+    std::fs::write(&out_path, html)
+        .map_err(|e| miette::miette!("writing {}: {e}", out_path.display()))?;
+    if !quiet {
+        eprintln!("[ir viz] wrote {}", out_path.display());
+    }
+    Ok(0)
+}
+
+// ── ir build ──────────────────────────────────────────────────────────────────
+
 /// Outcome of a [`run_prebuild`] call.
-pub struct PrebuildStats {
+struct PrebuildStats {
     /// Number of function arities successfully lowered to IR.
-    pub lowered: usize,
+    lowered: usize,
     /// Number of function arities the lowerer could not handle.
-    pub unsupported: usize,
+    unsupported: usize,
     /// Where the serialized bundle was written.
-    pub output: PathBuf,
+    output: PathBuf,
 }
 
 /// Boot a standard environment, lower every function in `namespaces` to IR,
@@ -34,7 +171,7 @@ pub struct PrebuildStats {
 /// Non-`clojure.core` namespaces are `require`d from `src_paths` before
 /// lowering. Returns an error string on any unrecoverable failure (IR
 /// lowering disabled, a namespace that fails to load, or an I/O error).
-pub fn run_prebuild(
+fn run_prebuild(
     namespaces: &[String],
     output: &PathBuf,
     src_paths: &[PathBuf],

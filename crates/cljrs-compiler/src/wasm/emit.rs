@@ -157,7 +157,7 @@ use wasm_encoder::{
     MemArg, MemoryType, Module, RefType, TableType, TypeSection, ValType,
 };
 
-use crate::ir::{
+use cljrs_ir::{
     Block, BlockId, ClosureTemplate, Const, Inst, IrFunction, KnownFn, RegionAllocKind, Repr,
     Terminator, VarId,
 };
@@ -1978,7 +1978,7 @@ fn align_up(n: usize, a: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ir::{Block, Terminator};
+    use cljrs_ir::{Block, Terminator};
     use std::sync::Arc;
 
     fn validate(bytes: &[u8]) {
@@ -2203,7 +2203,7 @@ mod tests {
     /// signature gains one trailing `i32` (mirroring `abi_param_count`).
     #[test]
     fn region_param_variant_validates() {
-        use crate::ir::RegionAllocKind;
+        use cljrs_ir::RegionAllocKind;
         let mut f = IrFunction::new(Some(Arc::from("rv__rg")), None);
         let x = f.fresh_var();
         f.params = vec![(Arc::from("x"), x)];
@@ -2230,7 +2230,7 @@ mod tests {
     /// param — the handle is a plain local.
     #[test]
     fn function_scoped_region_validates() {
-        use crate::ir::RegionAllocKind;
+        use cljrs_ir::RegionAllocKind;
         let mut f = IrFunction::new(Some(Arc::from("scoped")), None);
         let x = f.fresh_var();
         f.params = vec![(Arc::from("x"), x)];
@@ -2255,7 +2255,7 @@ mod tests {
     /// Region-allocated map (pair count) and cons (two direct pointer args).
     #[test]
     fn region_alloc_map_and_cons_validate() {
-        use crate::ir::RegionAllocKind;
+        use cljrs_ir::RegionAllocKind;
         let mut f = IrFunction::new(Some(Arc::from("rmc")), None);
         let k = f.fresh_var();
         let val = f.fresh_var();
@@ -2344,7 +2344,7 @@ mod tests {
     /// threads the caller's region handle as the hidden trailing argument.
     #[test]
     fn bundle_call_with_region_validates() {
-        use crate::ir::RegionAllocKind;
+        use cljrs_ir::RegionAllocKind;
 
         // callee variant: takes a hidden trailing region, allocates into it.
         let mut callee = IrFunction::new(Some(Arc::from("callee__rg")), None);

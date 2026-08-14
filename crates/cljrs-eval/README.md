@@ -162,7 +162,8 @@ pub mod defn_registry {
    - **Eager lowering (opt-in, `CLJRS_EAGER_LOWER=1`)**: `ir_interp::eager_lower_fn` is
      registered as the `on_fn_defined` hook; when `compiler_ready` is true, new `fn*`
      definitions are lowered immediately.
-   - **Pre-built bundles**: `load_prebuilt_ir`.
+   - **Pre-built bundles**: `load_prebuilt_ir` — public API for embedders, called by
+     nothing in this workspace. `cljrs ir build` writes the bundles it consumes.
    The resulting `IrFunction::is_async` flag matches the `CljxFn::is_async` attribute.
 6. `eval_call` in `cljrs_interp` routes `Value::Fn` calls through `globals.call_cljrs_fn`
    (the registered hook) rather than calling the tree-walker directly, so IR-cached

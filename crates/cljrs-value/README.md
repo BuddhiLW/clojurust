@@ -10,8 +10,8 @@ Core runtime values and persistent collections for clojurust.
 
 Defines `Value`, the single enum that represents every Clojure runtime value,
 plus all persistent (immutable, structurally shared) collection types.  The
-`cljrs-eval` crate will operate on `Value`s; `cljrs-runtime` will build the
-standard library on top of them.
+`cljrs-interp` and `cljrs-eval` crates operate on `Value`s; `cljrs-builtins` and
+`cljrs-stdlib` build the standard library on top of them.
 
 ---
 

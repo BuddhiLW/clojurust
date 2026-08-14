@@ -70,7 +70,7 @@ pub mod abi;
 pub mod emit;
 pub mod reloop;
 
-use crate::ir::IrFunction;
+use cljrs_ir::IrFunction;
 
 /// Errors produced by the wasm backend.
 #[derive(Debug)]
@@ -154,8 +154,8 @@ pub fn compile_function(func: &IrFunction, cfg: &WasmBackend) -> Result<Vec<u8>,
 /// Compile a bundle of [`IrFunction`]s — each top-level function plus all of its
 /// nested [`IrFunction::subfunctions`], flattened — into a single wasm module.
 ///
-/// Every function is exported under its name, and an [`crate::ir::Inst::CallDirect`] /
-/// [`crate::ir::Inst::CallWithRegion`] resolves its callee to the bundled
+/// Every function is exported under its name, and an [`cljrs_ir::Inst::CallDirect`] /
+/// [`cljrs_ir::Inst::CallWithRegion`] resolves its callee to the bundled
 /// function's wasm index.  This is the multi-function entry point behind item 1
 /// of `docs/wasm-aot-plan.md`; [`compile_function`] is the single-function
 /// special case.

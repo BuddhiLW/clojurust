@@ -15,8 +15,8 @@ use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
 use cranelift_module::{FuncId, Linkage, Module};
 use cranelift_object::{ObjectBuilder, ObjectModule};
 
-use crate::ir::{BlockId, Const, Inst, IrFunction, KnownFn, RegionAllocKind, Terminator, VarId};
 use crate::typeinfer::{self, Repr};
+use cljrs_ir::{BlockId, Const, Inst, IrFunction, KnownFn, RegionAllocKind, Terminator, VarId};
 
 // ── Error type ──────────────────────────────────────────────────────────────
 
@@ -2829,11 +2829,7 @@ mod tests {
         forms
     }
 
-    fn lower(
-        name: &str,
-        params: &[Arc<str>],
-        body: &[cljrs_reader::Form],
-    ) -> crate::ir::IrFunction {
+    fn lower(name: &str, params: &[Arc<str>], body: &[cljrs_reader::Form]) -> cljrs_ir::IrFunction {
         // Run on a thread with a larger stack since Clojure eval is deeply recursive.
         let name = name.to_string();
         let params = params.to_vec();

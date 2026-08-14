@@ -1,10 +1,25 @@
 # cljrs-runtime
 
-Core standard library for clojurust — the `clojure.core` equivalent. Provides
-built-in functions, macros, and concurrency primitives that Clojure programs
-expect to exist at startup.
+Placeholder package. It contains no code and nothing in the workspace depends
+on it.
 
-**Phase:** 5 (core functions) + Phase 7 (concurrency) — stub only, not yet implemented.
+**Status:** empty stub, reserved. Stage 2 of
+[`docs/crate-consolidation-plan.md`](../../docs/crate-consolidation-plan.md)
+replaces it with the merged runtime — `cljrs-env`, `cljrs-builtins`,
+`cljrs-interp`, and `cljrs-eval` folded into `env`, `builtins`, `interp`, and
+`tiered` modules behind one `Runtime` builder.
+
+The work this README used to describe — registering `clojure.core` functions
+and macros, and the concurrency primitives — was implemented elsewhere and is
+live today:
+
+| What | Where it actually lives |
+|---|---|
+| Core functions, type predicates, collection and seq operations | [`cljrs-builtins`](../cljrs-builtins) |
+| Core macros, special forms, destructuring | [`cljrs-interp`](../cljrs-interp) |
+| `atom` / `ref` / `agent` / `future` / `promise` | [`cljrs-builtins`](../cljrs-builtins) |
+| Namespace registry, dynamic bindings, GC roots | [`cljrs-env`](../cljrs-env) |
+| Embedded `clojure.*` namespaces | [`cljrs-stdlib`](../cljrs-stdlib) |
 
 ---
 
@@ -12,35 +27,22 @@ expect to exist at startup.
 
 ```
 src/
-  lib.rs    — doc-comment stub describing planned implementation
+  lib.rs    — doc-comment stub; no items
 ```
 
 ---
 
-## Planned public API (Phase 5 + 7)
+## Public API
 
-The runtime registers native Rust functions into the `clojure.core` namespace
-at interpreter startup. End-user Clojure code calls these transparently; no
-Rust API is public beyond the registration entry point:
+None. The crate exports nothing.
 
-```rust
-/// Register all core functions and macros into `env`.
-/// Called once during interpreter initialisation.
-pub fn register_core(env: &mut cljrs_eval::Env)
-```
+---
 
-Planned function groups:
-- **Arithmetic & comparison** — `+`, `-`, `*`, `/`, `=`, `<`, `>`, `mod`, …
-- **Type predicates** — `nil?`, `number?`, `string?`, `seq?`, `fn?`, …
-- **Persistent collections** — `conj`, `assoc`, `dissoc`, `get`, `count`,
-  `first`, `rest`, `cons`, `into`, …
-- **Seq abstractions** — `map`, `filter`, `reduce`, `take`, `drop`, `flatten`, …
-- **Lazy sequences** — `lazy-seq`, `range`, `repeat`, `iterate`, …
-- **String & I/O** — `str`, `println`, `print`, `slurp`, `spit`, …
-- **Core macros** — `when`, `when-not`, `cond`, `->`, `->>`, `and`, `or`,
-  `doto`, `for`, `dotimes`, `while`, …
-- **Concurrency (Phase 7)** — `atom`, `swap!`, `reset!`, `deref`; `ref`, `dosync`,
-  `alter`, `commute`; `agent`, `send`; `future`, `promise`, `deliver`
+## Features
+
+| Feature | Effect |
+|---|---|
+| `no-gc` | Forwards to `cljrs-gc/no-gc`. Inert while the crate is empty. |
 
 ---
 
@@ -48,6 +50,6 @@ Planned function groups:
 
 | Crate | Role |
 |-------|------|
-| `cljrs-types` (workspace) | `CljxError`, `CljxResult` |
-| `cljrs-gc` (workspace) | `GcPtr<Value>` for all runtime values |
-| `cljrs-eval` (workspace) | `Env` — namespace registry for function registration |
+| `cljrs-types` (workspace) | unused by the stub; kept for the Stage 2 merge |
+| `cljrs-gc` (workspace) | unused by the stub; carries the `no-gc` feature forward |
+| `cljrs-eval` (workspace) | unused by the stub; kept for the Stage 2 merge |
