@@ -341,6 +341,16 @@ impl SourceAudit {
 }
 
 pub enum OpacityPolicy { Report /* default */, RequireFullyCompiled }
+
+pub struct BundleAudit;                 // what the wasm module would omit
+impl BundleAudit {
+    pub fn of(omissions: impl IntoIterator<Item = Omission>) -> Self;
+    pub fn omissions(&self) -> &[Omission];
+    pub fn is_complete(&self) -> bool;
+    pub fn count(&self) -> usize;
+    pub fn verdict(&self, policy: OpacityPolicy) -> OpacityVerdict;
+}
+pub enum OmissionKind { Namespace, EntryForm }
 pub enum OpacityVerdict { Clean, Tolerated, Rejected }
 ```
 
@@ -367,17 +377,26 @@ A new source-carrying channel is one entry in `embedded_fragments`; a new
 policy is one `OpacityPolicy` variant. `OpacityPolicy::Report` is the default
 and preserves existing behaviour.
 
-The audit is reached through `compile_file` only. `compile_test_harness`
-(`--test`) and `compile_file_to_wasm` (`--target wasm`) do not run it, so the
-CLI rejects `--require-fully-compiled` in combination with either
-(`resolve_opacity_policy` in `crates/cljrs/src/main.rs`) rather than accept a
-flag it would not honour.
+`SourceAudit` covers the native backend. The wasm backend embeds no source at
+all, so it falls short the other way: a namespace it cannot lower is skipped
+and an entry form needing the interpreter is filtered out of `__cljrs_main`,
+both left for an IR-interpreter tier that is not wired up yet. `BundleAudit`
+collects those omissions during `lower_file_to_ir_bundle` and
+`compile_file_to_wasm` applies the SAME `OpacityPolicy` to them, so
+`--require-fully-compiled` means "the artifact fully represents the program"
+on both backends and each reports its own way of falling short.
+
+`compile_test_harness` (`--test`) has no audit and cannot have one: it bundles
+every test namespace as interpreted source unconditionally, so a strict policy
+could never be satisfied. The CLI refuses that combination
+(`resolve_opacity_policy` in `crates/cljrs/src/main.rs`).
 
 Property tests: `tests/source_leak_audit.rs`; end-to-end:
 `require_fully_compiled_{rejects_embedded_source,accepts_plain_defn}` in
 `tests/aot_e2e.rs`.
 
-`compile_file_to_wasm` is the `cljrs compile --target wasm` entry point: it lowers
+`compile_file_to_wasm(src, out, src_dirs, opacity)` is the `cljrs compile
+--target wasm` entry point: it lowers
 the source **and its transitively-required user namespaces** to a bundle of IR
 functions (`lower_file_to_ir_bundle`: entry `__cljrs_main` + one
 `__cljrs_ns_init_N` per lowerable required namespace, mirroring `compile_file`'s

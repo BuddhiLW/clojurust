@@ -6,7 +6,8 @@ use std::sync::Arc;
 use crate::destructure::bind_pattern;
 use crate::eval::{eval, eval_body, is_special_form};
 use cljrs_builtins::form::{
-    expand_pairs, expand_reader_conds, expand_reader_conds_cow, form_to_value, select_reader_cond,
+    expand_pairs, expand_reader_conds, expand_reader_conds_cow, form_to_value, resolve_auto_forms,
+    select_reader_cond,
 };
 use cljrs_env::env::{Env, RequireRefer, RequireSpec};
 use cljrs_env::error::{EvalError, EvalResult};
@@ -31,7 +32,7 @@ pub fn eval_special(head: &str, args: &[Form], env: &mut Env) -> EvalResult {
         "let*" | "let" => eval_let(args, env),
         "loop*" | "loop" => eval_loop(args, env),
         "recur" => eval_recur(args, env),
-        "quote" => eval_quote(args),
+        "quote" => eval_quote(args, env),
         "var" => eval_var(args, env),
         "set!" => eval_set_bang(args, env),
         "throw" => eval_throw(args, env),
@@ -140,12 +141,11 @@ fn arglists_meta(fn_val: &Value, skip: usize) -> Option<Value> {
 fn extract_def_name(form: &Form, env: &mut Env) -> EvalResult<(String, Option<Value>)> {
     match &form.kind {
         FormKind::Symbol(s) => Ok((s.clone(), None)),
+        // `^:a ^:b x` nests `Meta` forms; unwrap all, outer mark winning.
         FormKind::Meta(meta_form, inner) => {
             let meta_val = compile_meta_form(meta_form, env)?;
-            match &inner.kind {
-                FormKind::Symbol(s) => Ok((s.clone(), Some(meta_val))),
-                _ => Err(EvalError::Runtime("def name must be a symbol".into())),
-            }
+            let (name, inner_meta) = extract_def_name(inner, env)?;
+            Ok((name, merge_meta(inner_meta, Some(meta_val))))
         }
         _ => Err(EvalError::Runtime("def name must be a symbol".into())),
     }
@@ -857,9 +857,12 @@ fn eval_body_with_scratch_loop(
 
 // ── quote ─────────────────────────────────────────────────────────────────────
 
-fn eval_quote(args: &[Form]) -> EvalResult {
+fn eval_quote(args: &[Form], env: &Env) -> EvalResult {
     match args.first() {
-        Some(f) => form_to_value(f),
+        // `::kw` and an auto-resolved map's symbol keys resolve against the
+        // reading namespace even under quote - the JVM resolves them at read
+        // time, before quote can see them.
+        Some(f) => form_to_value(&resolve_auto_forms(f, env)?),
         None => Err(EvalError::Runtime("quote requires an argument".into())),
     }
 }
@@ -1256,9 +1259,14 @@ fn eval_defmacro(args: &[Form], env: &mut Env) -> EvalResult {
 // ── defonce ───────────────────────────────────────────────────────────────────
 
 fn eval_defonce(args: &[Form], env: &mut Env) -> EvalResult {
-    let name = require_sym(args, 0, "defonce")?;
+    if args.is_empty() {
+        return Err(EvalError::Runtime("defonce requires a name".into()));
+    }
+    // Share `def`'s name extraction so a metadata-carrying symbol such as
+    // `(defonce ^:private registry (atom {}))` is accepted here too.
+    let (name, _meta) = extract_def_name(&args[0], env)?;
     // If already bound, return immediately.
-    if let Some(var) = env.globals.lookup_var(&env.current_ns, name)
+    if let Some(var) = env.globals.lookup_var(&env.current_ns, &name)
         && var.get().is_bound()
     {
         return Ok(Value::Var(var));
@@ -1395,6 +1403,16 @@ fn parse_require_spec_val(val: Value) -> Result<RequireSpec, String> {
     }
 }
 
+/// The form a require-spec element denotes: a reader conditional resolves to
+/// its selected branch, `None` when no branch matches this platform. Any other
+/// form is itself.
+fn spec_element(form: &Form) -> Option<&Form> {
+    match &form.kind {
+        FormKind::ReaderCond { clauses, .. } => select_reader_cond(clauses),
+        _ => Some(form),
+    }
+}
+
 /// Parse a `RequireSpec` from a raw `Form` (unevaluated, used in `ns` macro).
 /// Also handles versioned namespace symbols such as `my.ns@abc1234`.
 fn parse_require_spec_form(form: &Form) -> Result<RequireSpec, String> {
@@ -1412,7 +1430,10 @@ fn parse_require_spec_form(form: &Form) -> Result<RequireSpec, String> {
             if items.is_empty() {
                 return Err("require spec vector must not be empty".into());
             }
-            let (ns, version) = match &items[0].kind {
+            let head = spec_element(&items[0]).ok_or_else(|| {
+                "require spec: no reader-conditional branch matched for the namespace".to_string()
+            })?;
+            let (ns, version) = match &head.kind {
                 FormKind::Symbol(s) => {
                     let sym = cljrs_value::Symbol::parse(s);
                     (sym.name.clone(), sym.version.clone())
@@ -1423,18 +1444,11 @@ fn parse_require_spec_form(form: &Form) -> Result<RequireSpec, String> {
             let mut refer = RequireRefer::None;
             let mut i = 1;
             while i < items.len() {
-                // Resolve reader conditionals inline (e.g. #?(:cljs :refer-macros :default :refer)).
-                let item = match &items[i].kind {
-                    FormKind::ReaderCond { clauses, .. } => {
-                        match select_reader_cond(clauses) {
-                            Some(f) => f,
-                            None => {
-                                i += 1;
-                                continue;
-                            } // no matching branch — skip
-                        }
-                    }
-                    _ => &items[i],
+                // An option whose conditional selects nothing is dropped; the
+                // namespace slot above cannot be, so it errors instead.
+                let Some(item) = spec_element(&items[i]) else {
+                    i += 1;
+                    continue;
                 };
                 match &item.kind {
                     FormKind::Keyword(k) if k == "as" => {

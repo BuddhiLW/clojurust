@@ -43,7 +43,8 @@ impl FormKind {
             | FormKind::Regex(s)
             | FormKind::Symbol(s)
             | FormKind::Keyword(s)
-            | FormKind::AutoKeyword(s) => s.capacity(),
+            | FormKind::AutoKeyword(s)
+            | FormKind::AutoSymbol(s) => s.capacity(),
 
             // Vec<Form> — Vec overhead + recursive children.
             FormKind::List(v)
@@ -97,7 +98,13 @@ pub enum FormKind {
     // ── Identifiers ───────────────────────────────────────────────────────────
     Symbol(String),
     Keyword(String),
+    /// `::kw` / `::alias/kw` - the namespace is resolved against the reading
+    /// namespace by the evaluator, not by the reader.
     AutoKeyword(String),
+    /// A symbol whose namespace is auto-resolved the same way. There is no
+    /// surface syntax for one; the reader produces it for a bare symbol key in
+    /// an auto-resolved namespaced map (`#::{a 1}`, `#::alias{a 1}`).
+    AutoSymbol(String),
 
     // ── Collections ───────────────────────────────────────────────────────────
     List(Vec<Form>),

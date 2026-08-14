@@ -171,6 +171,57 @@ fn rewrite_pct_form(form: &Form, span: cljrs_types::span::Span) -> Form {
     }
 }
 
+// ── auto-resolved identifiers ─────────────────────────────────────────────────
+
+/// Replace every `AutoKeyword` / `AutoSymbol` in a form tree with its
+/// fully-qualified `Keyword` / `Symbol`, resolving an `alias/name` prefix
+/// through `env`'s namespace alias table.
+///
+/// Every boundary that turns a form into data or into IR - `quote`, the `'`
+/// sugar, and `lower_arity` - must call this first, so no tier below sees an
+/// unresolved identifier. Errors when an alias is not registered in `env`.
+pub fn resolve_auto_forms(form: &Form, env: &cljrs_env::env::Env) -> EvalResult<Form> {
+    let resolve_seq = |items: &Vec<Form>| -> EvalResult<Vec<Form>> {
+        items.iter().map(|f| resolve_auto_forms(f, env)).collect()
+    };
+    let resolve_box =
+        |inner: &Form| -> EvalResult<Box<Form>> { Ok(Box::new(resolve_auto_forms(inner, env)?)) };
+    let qualify = |name: &str| -> EvalResult<String> {
+        env.globals
+            .resolve_auto_keyword(&env.current_ns, name)
+            .map_err(EvalError::Runtime)
+    };
+
+    let kind = match &form.kind {
+        FormKind::AutoKeyword(s) => FormKind::Keyword(qualify(s)?),
+        FormKind::AutoSymbol(s) => FormKind::Symbol(qualify(s)?),
+
+        FormKind::List(items) => FormKind::List(resolve_seq(items)?),
+        FormKind::Vector(items) => FormKind::Vector(resolve_seq(items)?),
+        FormKind::Map(items) => FormKind::Map(resolve_seq(items)?),
+        FormKind::Set(items) => FormKind::Set(resolve_seq(items)?),
+        FormKind::AnonFn(items) => FormKind::AnonFn(resolve_seq(items)?),
+        FormKind::ReaderCond { splicing, clauses } => FormKind::ReaderCond {
+            splicing: *splicing,
+            clauses: resolve_seq(clauses)?,
+        },
+
+        FormKind::Quote(inner) => FormKind::Quote(resolve_box(inner)?),
+        FormKind::SyntaxQuote(inner) => FormKind::SyntaxQuote(resolve_box(inner)?),
+        FormKind::Unquote(inner) => FormKind::Unquote(resolve_box(inner)?),
+        FormKind::UnquoteSplice(inner) => FormKind::UnquoteSplice(resolve_box(inner)?),
+        FormKind::Deref(inner) => FormKind::Deref(resolve_box(inner)?),
+        FormKind::Var(inner) => FormKind::Var(resolve_box(inner)?),
+        FormKind::TaggedLiteral(tag, inner) => {
+            FormKind::TaggedLiteral(tag.clone(), resolve_box(inner)?)
+        }
+        FormKind::Meta(meta, inner) => FormKind::Meta(resolve_box(meta)?, resolve_box(inner)?),
+
+        _ => return Ok(form.clone()),
+    };
+    Ok(Form::new(kind, form.span.clone()))
+}
+
 /// Convert a `Form` to its literal `Value` without evaluating.
 /// Used by `quote` and macro expansion.
 ///
@@ -197,6 +248,7 @@ pub fn form_to_value(form: &Form) -> EvalResult<Value> {
         FormKind::Symbol(s) => Value::symbol(Symbol::parse(s)),
         FormKind::Keyword(s) => Value::keyword(Keyword::parse(s)),
         FormKind::AutoKeyword(s) => Value::keyword(Keyword::simple(s.as_str())),
+        FormKind::AutoSymbol(s) => Value::symbol(Symbol::parse(s)),
         FormKind::Regex(s) => match Regex::new(s.as_str()) {
             Ok(pattern) => Value::Pattern(GcPtr::new(pattern)),
             Err(_) => Value::Nil, // should already have been caught

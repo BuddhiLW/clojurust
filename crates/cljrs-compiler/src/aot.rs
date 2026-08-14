@@ -420,7 +420,7 @@ pub fn lower_file_to_ir(
 fn lower_file_to_ir_bundle(
     src_path: &Path,
     src_dirs: &[PathBuf],
-) -> AotResult<Vec<(String, IrFunction)>> {
+) -> AotResult<(Vec<(String, IrFunction)>, BundleAudit)> {
     eprintln!("[aot] reading {}", src_path.display());
     let source = std::fs::read_to_string(src_path)?;
     let filename = src_path.display().to_string();
@@ -461,6 +461,7 @@ fn lower_file_to_ir_bundle(
     // ── Discovered required namespaces → initializers (graceful skip) ────────
     let discovered = discover_bundled_sources(&env.globals, &pre_loaded, src_dirs);
     let mut bundle: Vec<(String, IrFunction)> = Vec::new();
+    let mut audit = BundleAudit::default();
     for (i, (ns, src)) in discovered.iter().enumerate() {
         let init_symbol = format!("__cljrs_ns_init_{i}");
         match lower_namespace(ns, src, &init_symbol, &env.globals) {
@@ -469,6 +470,11 @@ fn lower_file_to_ir_bundle(
             }
             _ => {
                 eprintln!("[aot] {ns}: not wasm-compilable, left for the IR-interpreter tier");
+                audit.record(
+                    OmissionKind::Namespace,
+                    Some(ns.to_string()),
+                    "not wasm-compilable".to_string(),
+                );
             }
         }
     }
@@ -483,6 +489,11 @@ fn lower_file_to_ir_bundle(
     let mut compilable = Vec::new();
     for (i, form) in expanded.iter().enumerate() {
         if needs_interpreter(&forms[i]) || expanded_needs_interpreter(form) {
+            audit.record(
+                OmissionKind::EntryForm,
+                Some(env.current_ns.to_string()),
+                form_head(&forms[i]),
+            );
             continue;
         }
         compilable.push(form.clone());
@@ -514,7 +525,27 @@ fn lower_file_to_ir_bundle(
     // Entry main first, then the namespace initializers.
     let mut out = vec![("__cljrs_main".to_string(), main)];
     out.extend(bundle);
-    Ok(out)
+    Ok((out, audit))
+}
+
+/// How a dropped form was spelled: `(defmulti route ...)` renders as
+/// `(defmulti route)`, enough to find it without echoing the body.
+fn form_head(form: &cljrs_reader::Form) -> String {
+    use cljrs_reader::form::FormKind;
+    match &form.kind {
+        FormKind::List(parts) => {
+            let names: Vec<String> = parts
+                .iter()
+                .take(2)
+                .map(|p| match &p.kind {
+                    FormKind::Symbol(s) => s.clone(),
+                    other => format!("{other:?}"),
+                })
+                .collect();
+            format!("({})", names.join(" "))
+        }
+        other => format!("{other:?}"),
+    }
 }
 
 /// AOT-compile a source file to a standalone WebAssembly module.
@@ -540,8 +571,19 @@ pub fn compile_file_to_wasm(
     src_path: &Path,
     out_path: &Path,
     src_dirs: &[PathBuf],
+    opacity: OpacityPolicy,
 ) -> AotResult<()> {
-    let bundle = lower_file_to_ir_bundle(src_path, src_dirs)?;
+    let (bundle, audit) = lower_file_to_ir_bundle(src_path, src_dirs)?;
+
+    match audit.verdict(opacity) {
+        OpacityVerdict::Rejected => return Err(AotError::Eval(audit.to_string())),
+        OpacityVerdict::Tolerated => eprintln!(
+            "[aot] {} unit(s) of the program left out of the wasm module \
+             (--require-fully-compiled makes this an error)",
+            audit.count()
+        ),
+        OpacityVerdict::Clean => {}
+    }
 
     eprintln!("[aot] emitting wasm module ({} function(s))", bundle.len());
     let refs: Vec<&IrFunction> = bundle.iter().map(|(_, ir)| ir).collect();
@@ -924,15 +966,118 @@ pub enum OpacityPolicy {
     RequireFullyCompiled,
 }
 
-/// Outcome of applying an [`OpacityPolicy`] to a [`SourceAudit`].
+/// Outcome of applying an [`OpacityPolicy`] to a [`SourceAudit`] or a
+/// [`BundleAudit`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OpacityVerdict {
-    /// No readable program text would ship.
+    /// The artifact fully represents the program.
     Clean,
-    /// Source would ship; the policy tolerates it.
+    /// It falls short; the policy tolerates that.
     Tolerated,
-    /// Source would ship; the policy forbids it.
+    /// It falls short; the policy forbids that.
     Rejected,
+}
+
+/// A part of the program the wasm module would not contain.
+///
+/// The wasm backend embeds no source, so [`SourceAudit`] finds nothing there.
+/// It falls short the other way: what it cannot lower it drops, leaving the
+/// module opaque and incomplete.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Omission {
+    pub kind: OmissionKind,
+    /// The namespace it belongs to, when one is known.
+    pub ns: Option<String>,
+    /// How the dropped unit was spelled, for locating it in the source.
+    pub detail: String,
+}
+
+/// The reason a unit is missing from the module.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OmissionKind {
+    /// A required namespace the backend could not lower or codegen.
+    Namespace,
+    /// A top-level entry form filtered out of `__cljrs_main`.
+    EntryForm,
+}
+
+impl std::fmt::Display for OmissionKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            OmissionKind::Namespace => write!(f, "namespace"),
+            OmissionKind::EntryForm => write!(f, "entry form"),
+        }
+    }
+}
+
+impl std::fmt::Display for Omission {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.ns {
+            Some(ns) => write!(f, "{} ({ns}): {}", self.kind, self.detail),
+            None => write!(f, "{}: {}", self.kind, self.detail),
+        }
+    }
+}
+
+/// Everything the wasm module would leave out, as one value.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct BundleAudit {
+    omissions: Vec<Omission>,
+}
+
+impl BundleAudit {
+    /// Promote raw omissions into an audit. The lowering pass records into one
+    /// as it goes; this is the pure way to build the same value.
+    pub fn of(omissions: impl IntoIterator<Item = Omission>) -> Self {
+        Self {
+            omissions: omissions.into_iter().collect(),
+        }
+    }
+
+    pub fn omissions(&self) -> &[Omission] {
+        &self.omissions
+    }
+
+    /// True when the module carries every namespace and form of the program.
+    pub fn is_complete(&self) -> bool {
+        self.omissions.is_empty()
+    }
+
+    pub fn count(&self) -> usize {
+        self.omissions.len()
+    }
+
+    pub(crate) fn record(&mut self, kind: OmissionKind, ns: Option<String>, detail: String) {
+        self.omissions.push(Omission { kind, ns, detail });
+    }
+
+    pub fn verdict(&self, policy: OpacityPolicy) -> OpacityVerdict {
+        match (self.is_complete(), policy) {
+            (true, _) => OpacityVerdict::Clean,
+            (false, OpacityPolicy::Report) => OpacityVerdict::Tolerated,
+            (false, OpacityPolicy::RequireFullyCompiled) => OpacityVerdict::Rejected,
+        }
+    }
+}
+
+impl std::fmt::Display for BundleAudit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        writeln!(
+            f,
+            "--require-fully-compiled: {} unit(s) of the program would be missing \
+             from the wasm module:",
+            self.omissions.len()
+        )?;
+        for o in &self.omissions {
+            writeln!(f, "  • {o}")?;
+        }
+        write!(
+            f,
+            "The wasm backend drops what it cannot lower, leaving it for an \
+             IR-interpreter tier that is not wired up yet. Move the forms above \
+             out of the compiled unit, or drop --require-fully-compiled."
+        )
+    }
 }
 
 /// Every fragment of Clojure source the harness would embed, as one value.

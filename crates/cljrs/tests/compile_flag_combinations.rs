@@ -1,9 +1,8 @@
 //! CLI-level contract for `cljrs compile --require-fully-compiled`.
 //!
-//! The source-embedding audit only runs on the native, non-test path. These
-//! tests drive the built binary (via `CARGO_BIN_EXE_cljrs`) to pin that the
-//! unaudited combinations are rejected outright rather than accepted and
-//! ignored, and that the audited one is not caught by the same check.
+//! Both backends audit, so both accept `--require-fully-compiled`. `--test`
+//! cannot satisfy it and is refused. These tests drive the built binary via
+//! `CARGO_BIN_EXE_cljrs`.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -35,14 +34,19 @@ fn require_fully_compiled_rejects_test_harness() {
     );
 }
 
+/// wasm audits completeness now, so the flag is accepted there. It must not
+/// be turned away by the combination check before the backend can apply it.
 #[test]
-fn require_fully_compiled_rejects_wasm_target() {
-    let out = compile(&["--target", "wasm", "--require-fully-compiled", "app.cljrs"]);
-    let stderr = stderr_of(&out);
-    assert!(!out.status.success(), "should fail; stderr: {stderr}");
+fn require_fully_compiled_is_accepted_on_the_wasm_path() {
+    let stderr = stderr_of(&compile(&[
+        "--target",
+        "wasm",
+        "--require-fully-compiled",
+        "no-such-file.cljrs",
+    ]));
     assert!(
-        stderr.contains("--require-fully-compiled") && stderr.contains("wasm"),
-        "message names both flags: {stderr}"
+        !stderr.contains("is not supported with"),
+        "wasm must not be refused for the flag: {stderr}"
     );
 }
 

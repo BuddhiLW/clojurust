@@ -1,0 +1,45 @@
+name: Showcase Demos
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CLJRS_GC_STATS: "-"
+
+jobs:
+  demo:
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Graph sample (region-alloc smoke test)
+            sample: samples/graph.cljrs
+            bin: graph-sample
+          - name: Game of Life (bump-allocator showcase)
+            sample: samples/life.cljrs
+            bin: life-sample
+          - name: core.async sample (CSP showcase)
+            sample: samples/core_async.cljrs
+            bin: async-sample
+          - name: HTTP GET sample (net + charset showcase)
+            sample: samples/http_get.cljrs
+            bin: http-get-sample
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Compile and run ${{ matrix.sample }}
+        run: |
+          cargo run -p cljrs compile -o "${{ matrix.bin }}" "${{ matrix.sample }}"
+          ./"${{ matrix.bin }}"
