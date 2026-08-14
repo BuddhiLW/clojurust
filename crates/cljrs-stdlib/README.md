@@ -13,14 +13,21 @@ lazily-loaded built-ins; no filesystem dependency at runtime.
 Clojurust has no classpath or JAR mechanism.  This crate solves the distribution
 problem by embedding `.cljrs` source files via `include_str!` and registering
 them in `GlobalEnv::builtin_sources` so that `(require '[clojure.string :as str])`
-works out of the box in any binary that calls `cljrs_stdlib::standard_env()`.
+works out of the box in any binary that calls `cljrs_stdlib::install()`.
+
+This crate is an *extension*: it does not construct runtimes and does not choose
+execution modes. Since Stage 3 of
+[`docs/crate-consolidation-plan.md`](../../docs/crate-consolidation-plan.md),
+runtime construction belongs to `cljrs_runtime::Runtime::builder()`, and the
+caller — the CLI, an embedding host, the AOT compiler — picks the mode, source
+paths, and GC limits.
 
 ## File layout
 
 ```
 src/
-  lib.rs                  Public API: register(), the standard_env* constructors,
-                          and the embedded-source include_str! table
+  lib.rs                  Public API: install() / register(), and the
+                          embedded-source include_str! table
   string.rs               Native Rust implementations for clojure.string
   set.rs                  Native Rust implementations for clojure.set
   io.rs                   Native Rust implementations for clojure.rust.io
@@ -53,29 +60,28 @@ There is no build script. Lowering to IR happens at run time in pure Rust
 ### Entry points
 
 ```rust
-/// Register all built-in stdlib namespaces into an existing GlobalEnv.
+/// Install every built-in stdlib namespace into a runtime.
+pub fn install(runtime: &Runtime);
+
+/// The same, addressed by GlobalEnv, for callers that only hold an
+/// environment handle.
 pub fn register(globals: &Arc<GlobalEnv>);
+```
 
-/// Create a GlobalEnv with bootstrap + stdlib registered (lazy loading),
-/// GC configured from the environment, and IR lowering enabled.
-/// Not built for wasm32.
-pub fn standard_env() -> Arc<GlobalEnv>;
+Both are idempotent: a second call does not re-evaluate sources (`load_ns`'s
+already-loaded guard prevents that), but it does overwrite the native fn
+registrations in each namespace. Namespaces are registered as embedded
+*sources*, so each is parsed and evaluated on its first `require` rather than at
+install time.
 
-/// Like standard_env() but without the IR lowering hook — used by the AOT test
-/// harness, where lowering test-namespace functions would fill the global IR
-/// cache with entries nothing ever evicts.  Not built for wasm32.
-pub fn standard_env_no_ir() -> Arc<GlobalEnv>;
+```rust
+use cljrs_runtime::{ExecutionMode, Runtime};
 
-/// Like standard_env() but also sets user source paths for require.
-/// Not built for wasm32.
-pub fn standard_env_with_paths(source_paths: Vec<PathBuf>) -> Arc<GlobalEnv>;
-
-/// Like standard_env_with_paths() but also overrides the GC configuration.
-/// Not built for wasm32.
-pub fn standard_env_with_paths_and_config(
-    source_paths: Vec<PathBuf>,
-    gc_config: Arc<GcConfig>,
-) -> Arc<GlobalEnv>;
+let runtime = Runtime::builder()
+    .execution_mode(ExecutionMode::Tiered)
+    .source_paths(paths)
+    .build()?;
+cljrs_stdlib::install(&runtime);
 ```
 
 Each native module exposes its own registrar, called by `register()`:
@@ -181,7 +187,7 @@ exists purely so that idiomatic specs which `(:require [clojure.spec.gen.alpha
 
 ## Dependency notes
 
-- `cljrs-stdlib` depends on `cljrs-eval` (for `GlobalEnv`, `standard_env_minimal`)
-- `cljrs-eval` does **not** depend on `cljrs-stdlib` (no circular dep)
-- The `cljrs` binary depends on both; use `cljrs_stdlib::standard_env()` instead of
-  `cljrs_eval::standard_env()` so that stdlib namespaces are available
+- `cljrs-stdlib` depends on `cljrs-runtime` (for `Runtime` and `GlobalEnv`)
+- `cljrs-runtime` does **not** depend on `cljrs-stdlib` (no circular dep)
+- The `cljrs` binary depends on both: it builds the runtime and then calls
+  `cljrs_stdlib::install()` so stdlib namespaces are available

@@ -246,14 +246,10 @@ pub fn eval_call(func_form: &Form, arg_forms: &[Form], env: &mut Env) -> EvalRes
         args.push(eval(f, env)?);
     }
 
-    // For Clojure functions, dispatch through the global hook so the IR
-    // interpreter (when active) gets a chance to run cached IR instead of
-    // always falling back to tree-walking.  `globals.call_cljrs_fn` is set
-    // to `crate::tiered::apply::call_cljrs_fn` at startup when the IR tier is
-    // available, and to the plain tree-walking version otherwise.
-    //
-    // Extract the function pointer before the call so the borrow checker sees
-    // only one mutable borrow of `env` at the call site.
+    // For Clojure functions, dispatch through `GlobalEnv::call_cljrs_fn` so
+    // the runtime's execution mode picks the path: the IR-aware dispatcher in
+    // `crate::tiered::apply` for a tiered runtime, this module's plain tree
+    // walker otherwise.
     if let Value::Fn(f) = &callee {
         // `^:async` functions dispatch through the async runtime (when one is
         // registered), spawning the body and returning a Future immediately.
@@ -262,8 +258,7 @@ pub fn eval_call(func_form: &Form, arg_forms: &[Form], env: &mut Env) -> EvalRes
         }
         let _args_root = crate::env::gc_roots::root_values(&args);
         crate::env::gc_roots::gc_safepoint(env);
-        let call_fn = env.globals.call_cljrs_fn;
-        return call_fn(f.get(), &args, env);
+        return env.call_cljrs_fn(f.get(), &args);
     }
 
     crate::env::apply::apply_value(&callee, args, env)

@@ -544,7 +544,8 @@ versioned loader rather than the plain `require` path.
 | `cljrs-value` (workspace) | `Value`, collections, `NativeFn` — value types referenced by IR and rt_abi |
 | `cljrs-reader` (workspace) | `Form`, `FormKind` — input AST for lowering |
 | `cljrs-eval` (workspace) | `Env`, `GlobalEnv`, macros, callback — macro expansion + rt_call dispatch |
-| `cljrs-stdlib` (workspace) | `standard_env` — bootstrap environment for macro expansion + harness |
+| `cljrs-runtime` (workspace) | `Runtime::builder` — bootstrap environment for macro expansion + harness |
+| `cljrs-stdlib` (workspace) | `install` — stdlib namespaces in that environment |
 | `cranelift-*` (workspace) | Cranelift compiler infrastructure (`cranelift-jit` registered in workspace deps for Phase 10.1 `cljrs-jit`) |
 | `cljrs-env` (via `cljrs-eval`) | `callback::invoke`, `apply::{type_tag_of, type_tag_matches}` — rt_call dispatch + protocol IC tag validation |
 | `target-lexicon` (workspace) | Target triple detection |

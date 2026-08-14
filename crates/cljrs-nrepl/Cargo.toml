@@ -7,6 +7,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+cljrs-runtime = { workspace = true }
 cljrs-gc       = { workspace = true }
 cljrs-value    = { workspace = true }
 cljrs-reader   = { workspace = true }

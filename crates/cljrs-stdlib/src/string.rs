@@ -8,7 +8,7 @@ use cljrs_value::{Arity, PersistentVector, Value, ValueError, ValueResult};
 
 use crate::register_fns;
 
-pub fn register(globals: &Arc<cljrs_eval::GlobalEnv>, ns: &str) {
+pub fn register(globals: &Arc<cljrs_runtime::env::env::GlobalEnv>, ns: &str) {
     register_fns!(
         globals,
         ns,
@@ -273,7 +273,7 @@ fn join(args: &[Value]) -> ValueResult<Value> {
         let s = get_str(&args[0])?;
         (s.to_string(), &args[1])
     };
-    let items = cljrs_interp::destructure::value_to_seq_vec(coll);
+    let items = cljrs_runtime::interp::destructure::value_to_seq_vec(coll);
     let result = items
         .iter()
         .map(|v| match v {

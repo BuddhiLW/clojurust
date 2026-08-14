@@ -178,18 +178,20 @@ fn run_prebuild(
     verbose: bool,
 ) -> Result<PrebuildStats, String> {
     // 1. Boot the environment.
-    let globals = if src_paths.is_empty() {
-        cljrs_eval::standard_env()
-    } else {
-        cljrs_eval::standard_env_with_paths(src_paths.to_vec())
-    };
+    let runtime = cljrs_runtime::Runtime::builder()
+        .execution_mode(cljrs_runtime::ExecutionMode::Tiered)
+        .source_paths(src_paths.to_vec())
+        .build()
+        .map_err(|e| format!("{e}"))?;
 
-    let mut env = Env::new(globals.clone(), "user");
-
-    // 2. Enable IR lowering.
-    if !cljrs_eval::mark_compiler_ready(&globals) {
+    // 2. IR lowering must actually be live — `CLJRS_NO_IR` pins the runtime
+    //    at tree-walk, and there would be nothing to lower or dump.
+    if !runtime.tier_state().ir_enabled() {
         return Err("IR lowering is disabled (CLJRS_NO_IR is set)".to_string());
     }
+
+    let globals = runtime.globals().clone();
+    let mut env = Env::new(globals.clone(), "user");
 
     // 3. Load any non-core namespaces that were requested.
     for ns_name in namespaces {

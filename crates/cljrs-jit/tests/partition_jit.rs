@@ -13,14 +13,14 @@ use cljrs_value::Value;
 fn make_env() -> (std::sync::Arc<cljrs_env::env::GlobalEnv>, Env) {
     cljrs_jit::init();
     let _mutator = cljrs_gc::register_mutator();
-    let globals = cljrs_stdlib::standard_env();
-    // Wait for the compiler-namespace background load.
-    while !globals
-        .compiler_ready
-        .load(std::sync::atomic::Ordering::Acquire)
-    {
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
+    let globals = {
+        let runtime = cljrs_runtime::Runtime::builder()
+            .execution_mode(cljrs_runtime::ExecutionMode::Tiered)
+            .build()
+            .expect("runtime");
+        cljrs_stdlib::install(&runtime);
+        runtime.into_globals()
+    };
     let env = Env::new(globals.clone(), "user");
     (globals, env)
 }

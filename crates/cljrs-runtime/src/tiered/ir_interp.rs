@@ -1683,8 +1683,9 @@ fn builtin_compare(known_fn: &KnownFn, args: &[Value]) -> EvalResult {
 /// Eagerly lower all arities of a function to IR, storing the results
 /// in the IR cache.  Failures are silently recorded as `Unsupported`.
 ///
-/// Only lowers if the compiler is already loaded (`compiler_ready` is true).
-/// Compiler loading is triggered separately (e.g., by the binary at startup).
+/// Only lowers once the runtime has left its bootstrap and raised the tier
+/// state to [`crate::TierState::Ir`] or above; the gate is applied by
+/// `GlobalEnv::on_fn_defined`, which is this function's only caller.
 pub(crate) fn eager_lower_fn(f: &CljxFn, env: &mut Env) {
     use crate::tiered::apply::IR_LOWERING_ACTIVE;
     let mut lowered = 0;
@@ -1701,16 +1702,6 @@ pub(crate) fn eager_lower_fn(f: &CljxFn, env: &mut Env) {
     // Don't lower macros (they operate on forms, not values).
     if f.is_macro {
         cljrs_logging::feat_debug!("ir", "not lowering macro: {:?}", f.name);
-        return;
-    }
-
-    // Only lower if compiler is already ready (don't trigger loading).
-    if !env
-        .globals
-        .compiler_ready
-        .load(std::sync::atomic::Ordering::Acquire)
-    {
-        cljrs_logging::feat_debug!("ir", "compiler not ready, not lowering");
         return;
     }
 
@@ -1736,13 +1727,15 @@ pub(crate) fn eager_lower_fn(f: &CljxFn, env: &mut Env) {
     // (param_count, is_variadic, ir).
     let mut registered: Vec<(usize, bool, Arc<IrFunction>)> = Vec::new();
 
+    let ir_cache = env.globals.ir_cache().clone();
+
     for arity in &f.arities {
         let arity_id = arity.ir_arity_id;
-        if !crate::tiered::ir_cache::should_attempt(arity_id) {
+        if !ir_cache.should_attempt(arity_id) {
             cached += 1;
             // Keep already-cached arities in the registration so a partial
             // re-lower doesn't drop them from the cross-defn registry.
-            if let Some(ir) = crate::tiered::ir_cache::get_cached(arity_id) {
+            if let Some(ir) = ir_cache.get(arity_id) {
                 registered.push((arity.params.len(), arity.rest_param.is_some(), ir));
             }
             continue;
@@ -1769,7 +1762,7 @@ pub(crate) fn eager_lower_fn(f: &CljxFn, env: &mut Env) {
                 ir_func.seed_reprs =
                     crate::tiered::lower::seed_reprs_from_hints(&arity.param_hints);
                 let ir_func = Arc::new(ir_func);
-                crate::tiered::ir_cache::store_cached(arity_id, ir_func.clone());
+                ir_cache.store(arity_id, ir_func.clone());
                 // The lowering specialized against these defns — invalidate
                 // it (and re-lower lazily) if any of them is rebound.
                 crate::tiered::defn_registry::record_dependents(arity_id, used_externals);
@@ -1777,7 +1770,7 @@ pub(crate) fn eager_lower_fn(f: &CljxFn, env: &mut Env) {
                 lowered += 1;
             }
             Err(_) => {
-                crate::tiered::ir_cache::store_unsupported(arity_id);
+                ir_cache.store_unsupported(arity_id);
                 failed += 1;
             }
         }
@@ -1792,7 +1785,7 @@ pub(crate) fn eager_lower_fn(f: &CljxFn, env: &mut Env) {
     {
         crate::tiered::defn_registry::install_invalidation_hook();
         crate::tiered::defn_registry::register_defn(
-            crate::tiered::lower::globals_id(env),
+            env.globals.id(),
             &f.defining_ns,
             &Arc::from(name),
             registered,

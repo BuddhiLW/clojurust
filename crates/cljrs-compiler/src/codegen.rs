@@ -2837,7 +2837,14 @@ mod tests {
         std::thread::Builder::new()
             .stack_size(8 * 1024 * 1024)
             .spawn(move || {
-                let globals = cljrs_stdlib::standard_env();
+                let globals = {
+                    let runtime = cljrs_runtime::Runtime::builder()
+                        .execution_mode(cljrs_runtime::ExecutionMode::Tiered)
+                        .build()
+                        .expect("runtime");
+                    cljrs_stdlib::install(&runtime);
+                    runtime.into_globals()
+                };
                 let mut env = cljrs_eval::Env::new(globals, "user");
                 crate::aot::lower_via_rust(Some(&name), "user", &params, &body, &mut env).unwrap()
             })

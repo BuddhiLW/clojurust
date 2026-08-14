@@ -2,13 +2,12 @@
 
 #![cfg(feature = "no-gc")]
 
-use std::cell::Cell;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
 
-use cljrs_env::env::Env;
-use cljrs_env::error::EvalError;
 use cljrs_reader::{Form, Parser};
+use cljrs_runtime::env::env::Env;
+use cljrs_runtime::env::error::EvalError;
 use cljrs_value::clone::{CloneError, SerializedValue, deserialize, serialize};
 use cljrs_value::{Arity, NativeFn, Value, ValueError};
 
@@ -245,9 +244,13 @@ fn execute_inner(
 
     // Bootstrap is trusted but is deliberately constructed inside the arena so
     // the complete namespace/Var/function environment dies with the call.
-    // The call hook enforces the call-depth cap, protecting the hosting
-    // thread's Rust stack from unbounded interpreted recursion.
-    let globals = cljrs_interp::standard_env_minimal(None, Some(hook_call), None);
+    // `ExecutionMode::NoGcTransaction` enforces the call-depth cap, protecting
+    // the hosting thread's Rust stack from unbounded interpreted recursion.
+    let globals = cljrs_runtime::Runtime::builder()
+        .execution_mode(cljrs_runtime::ExecutionMode::NoGcTransaction)
+        .build()
+        .map_err(|_| TxError::Panic)?
+        .into_globals();
     for entry in &host.entries {
         globals.get_or_create_ns(&entry.namespace);
         globals.intern(
@@ -259,14 +262,14 @@ fn execute_inner(
     let mut env = Env::new(globals, "user");
     let args: Vec<_> = args.into_iter().map(deserialize).collect();
 
-    let _policy = cljrs_env::policy::TransactionPolicyGuard::install();
-    let meter = cljrs_env::gas::GasMeter::new(limits.gas);
-    let _gas = cljrs_env::gas::GasGuard::install(meter);
-    let _depth = DepthGuard::install(limits.call_depth);
+    let _policy = cljrs_runtime::env::policy::TransactionPolicyGuard::install();
+    let meter = cljrs_runtime::env::gas::GasMeter::new(limits.gas);
+    let _gas = cljrs_runtime::env::gas::GasGuard::install(meter);
+    let _depth = cljrs_runtime::env::depth::DepthGuard::install(limits.call_depth);
 
     let function = env.eval(program.form()).map_err(map_eval_error)?;
-    let result =
-        cljrs_env::apply::apply_value(&function, args, &mut env).map_err(map_eval_error)?;
+    let result = cljrs_runtime::env::apply::apply_value(&function, args, &mut env)
+        .map_err(map_eval_error)?;
     let result = serialize(&result)?;
     validate_pure_data(&result).map_err(TxError::InvalidResult)?;
 
@@ -308,64 +311,16 @@ fn host_native(entry: &HostEntry) -> Value {
     Value::NativeFunction(cljrs_gc::GcPtr::new(native))
 }
 
-/// Marker text for depth-cap rejection (the hook's error type is fixed by
-/// `GlobalEnv`, so the cap surfaces as a runtime error carrying this text).
-const DEPTH_MSG: &str = "cljrs-tx: transaction call depth exceeded";
-
-thread_local! {
-    /// `(limit, current)` nested-application counter for the running
-    /// invocation; `None` outside one.
-    static CALL_DEPTH: Cell<Option<(u64, u64)>> = const { Cell::new(None) };
-}
-
-/// Installs the call-depth budget for one invocation's dynamic extent.
-struct DepthGuard;
-
-impl DepthGuard {
-    fn install(limit: u64) -> Self {
-        CALL_DEPTH.with(|cell| cell.set(Some((limit, 0))));
-        Self
-    }
-}
-
-impl Drop for DepthGuard {
-    fn drop(&mut self) {
-        CALL_DEPTH.with(|cell| cell.set(None));
-    }
-}
-
-/// The pluggable function-application hook: enforces the call-depth cap
-/// (each interpreted application consumes real Rust stack, and an overflow
-/// would abort the process), then delegates to the tree-walking apply.
-#[allow(clippy::result_large_err)]
-fn hook_call(
-    f: &cljrs_value::CljxFn,
-    args: &[Value],
-    env: &mut Env,
-) -> cljrs_env::error::EvalResult {
-    let Some((limit, depth)) = CALL_DEPTH.with(Cell::get) else {
-        return cljrs_interp::apply::call_cljrs_fn(f, args, env);
-    };
-    if depth >= limit {
-        return Err(EvalError::Runtime(DEPTH_MSG.into()));
-    }
-    CALL_DEPTH.with(|cell| cell.set(Some((limit, depth + 1))));
-    let result = cljrs_interp::apply::call_cljrs_fn(f, args, env);
-    CALL_DEPTH.with(|cell| {
-        if let Some((limit, current)) = cell.get() {
-            cell.set(Some((limit, current.saturating_sub(1))));
-        }
-    });
-    result
-}
-
 fn map_eval_error(error: EvalError) -> TxError {
     match error {
         EvalError::GasExhausted => TxError::GasExhausted,
         EvalError::ForbiddenEffect(operation) => TxError::ForbiddenEffect(operation),
         other => {
             let text = other.to_string();
-            if text.contains(DEPTH_MSG) {
+            // The depth cap surfaces as a runtime error carrying a fixed
+            // marker: the interpreter's call path has one error type, so
+            // `ExecutionMode::NoGcTransaction` reports the overrun in its text.
+            if text.contains(cljrs_runtime::env::depth::DEPTH_EXCEEDED_MSG) {
                 TxError::DepthExceeded
             } else {
                 TxError::Evaluation(text)

@@ -283,7 +283,14 @@ mod reclaim_integration {
                 while let Ok(Some(f)) = parser.parse_one() {
                     forms.push(f);
                 }
-                let globals = cljrs_stdlib::standard_env();
+                let globals = {
+                    let runtime = cljrs_runtime::Runtime::builder()
+                        .execution_mode(cljrs_runtime::ExecutionMode::Tiered)
+                        .build()
+                        .expect("runtime");
+                    cljrs_stdlib::install(&runtime);
+                    runtime.into_globals()
+                };
                 let mut env = cljrs_eval::Env::new(globals, "user");
                 cljrs_compiler::aot::lower_via_rust(Some(&name), "user", &params, &forms, &mut env)
                     .expect("lowering should succeed")

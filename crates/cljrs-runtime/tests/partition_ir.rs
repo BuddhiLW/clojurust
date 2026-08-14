@@ -11,7 +11,11 @@ use cljrs_runtime::tiered::Env;
 use cljrs_value::Value;
 
 fn make_env() -> (Arc<cljrs_runtime::env::env::GlobalEnv>, Env) {
-    let globals = cljrs_runtime::tiered::standard_env();
+    let globals = cljrs_runtime::Runtime::builder()
+        .execution_mode(cljrs_runtime::ExecutionMode::Tiered)
+        .build()
+        .expect("runtime")
+        .into_globals();
     let env = Env::new(globals.clone(), "user");
     (globals, env)
 }

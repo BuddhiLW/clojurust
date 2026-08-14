@@ -237,7 +237,8 @@ Build with e.g. `cargo build --release --features enable-rustyline,no-gc`.
 | `cljrs-reader` (workspace)  | Lexer + parser                                                    |
 | `cljrs-value` (workspace)   | `Value` and persistent collections                                |
 | `cljrs-eval` (workspace)    | Tree-walking interpreter, `Env`                                   |
-| `cljrs-stdlib` (workspace)  | Bootstrapped standard library (`standard_env*`)                   |
+| `cljrs-runtime` (workspace) | Runtime construction (`Runtime::builder`) and evaluation           |
+| `cljrs-stdlib` (workspace)  | Standard library installed into the runtime (`install`)           |
 | `cljrs-compiler` (workspace)| AOT pipeline (`compile_file`, `compile_test_harness`, `lower_file_to_ir`) |
 | `cljrs-ir-viz` (workspace)  | HTML IR visualizer used by `ir viz`                                |
 | `cljrs-ir` (workspace)      | `IrBundle`, `serialize_bundle`, `deserialize_bundle` — used by `ir build` / `ir dump` |

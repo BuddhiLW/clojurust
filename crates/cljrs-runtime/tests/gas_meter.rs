@@ -12,7 +12,12 @@ fn form(src: &str) -> cljrs_reader::Form {
 
 fn env() -> Env {
     Env::new(
-        cljrs_runtime::interp::standard_env(None, None, None),
+        cljrs_runtime::Runtime::builder()
+            .execution_mode(cljrs_runtime::ExecutionMode::TreeWalk)
+            .eager_clojure_test(true)
+            .build()
+            .expect("runtime")
+            .into_globals(),
         "user",
     )
 }

@@ -15,7 +15,6 @@ use std::sync::Arc;
 
 use cljrs_ir::osr::build_osr_function;
 use cljrs_ir::{Block, BlockId, Const, Inst, IrFunction, KnownFn, Terminator, VarId};
-use cljrs_runtime::interp::standard_env_minimal;
 use cljrs_runtime::tiered::{Env, ir_interp::interpret_ir};
 use cljrs_value::Value;
 
@@ -75,7 +74,11 @@ fn sum_loop_fn() -> IrFunction {
 
 fn run(ir: &IrFunction, args: Vec<Value>) -> Value {
     let _mutator = cljrs_gc::register_mutator();
-    let globals = standard_env_minimal(None, None, None);
+    let globals = cljrs_runtime::Runtime::builder()
+        .execution_mode(cljrs_runtime::ExecutionMode::TreeWalk)
+        .build()
+        .expect("runtime")
+        .into_globals();
     let mut env = Env::new(globals.clone(), "user");
     let ns: Arc<str> = Arc::from("user");
     cljrs_runtime::env::callback::push_eval_context(&env);

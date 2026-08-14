@@ -35,7 +35,12 @@ extern "C" fn sentinel_poll(sm: *mut CljxStateMachine) -> i32 {
 
 #[test]
 fn registered_poll_fn_takes_over_dispatch() {
-    let globals = cljrs_interp::standard_env(None, None, None);
+    let globals = cljrs_runtime::Runtime::builder()
+        .execution_mode(cljrs_runtime::ExecutionMode::TreeWalk)
+        .eager_clojure_test(true)
+        .build()
+        .expect("runtime")
+        .into_globals();
     cljrs_async::init(&globals);
 
     block_on_local(async move {

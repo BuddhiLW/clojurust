@@ -63,7 +63,11 @@ impl Repl {
     #[wasm_bindgen(constructor)]
     pub fn new() -> Repl {
         console_error_panic_hook::set_once();
-        let globals = cljrs_interp::standard_env_minimal(None, None, None);
+        let globals = cljrs_runtime::Runtime::builder()
+            .execution_mode(cljrs_runtime::ExecutionMode::TreeWalk)
+            .build()
+            .expect("runtime")
+            .into_globals();
         cljrs_stdlib::register(&globals);
         cljrs_dom::set_globals(globals.clone());
         cljrs_dom::register(&globals);

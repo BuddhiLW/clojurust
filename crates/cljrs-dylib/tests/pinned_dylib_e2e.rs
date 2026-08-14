@@ -133,7 +133,11 @@ fn pinned_native_dylib_end_to_end() {
     }
 
     let _mutator = cljrs_gc::register_mutator();
-    let globals = cljrs_interp::standard_env_minimal(None, None, None);
+    let globals = cljrs_runtime::Runtime::builder()
+        .execution_mode(cljrs_runtime::ExecutionMode::TreeWalk)
+        .build()
+        .expect("runtime")
+        .into_globals();
 
     // Host's own (HEAD) implementation — must remain untouched.
     let head_fn = cljrs_value::NativeFn {
@@ -231,7 +235,11 @@ fn native_dep_loaded_by_plain_require() {
     }
 
     let _mutator = cljrs_gc::register_mutator();
-    let globals = cljrs_interp::standard_env_minimal(None, None, None);
+    let globals = cljrs_runtime::Runtime::builder()
+        .execution_mode(cljrs_runtime::ExecutionMode::TreeWalk)
+        .build()
+        .expect("runtime")
+        .into_globals();
 
     // cljrs.edn equivalent: pinlib is a git dep with :rust/load :dylib, pinned
     // at the v1 commit.  No Clojure source on the path provides this namespace.

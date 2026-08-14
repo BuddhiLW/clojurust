@@ -5087,7 +5087,11 @@ mod tests {
         use cljrs_value::{NativeFn, Protocol, ProtocolFn, ProtocolMethod};
 
         let _mutator = cljrs_gc::register_mutator();
-        let globals = cljrs_interp::standard_env_minimal(None, None, None);
+        let globals = cljrs_runtime::Runtime::builder()
+            .execution_mode(cljrs_runtime::ExecutionMode::TreeWalk)
+            .build()
+            .expect("runtime")
+            .into_globals();
         let env = cljrs_env::env::Env::new(globals, "user");
         cljrs_env::callback::push_eval_context(&env);
 

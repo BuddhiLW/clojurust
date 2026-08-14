@@ -17,7 +17,11 @@
 //! # Usage
 //!
 //! ```rust,ignore
-//! let globals = cljrs_stdlib::standard_env();
+//! let runtime = cljrs_runtime::Runtime::builder()
+//!     .execution_mode(cljrs_runtime::ExecutionMode::Tiered)
+//!     .build()?;
+//! cljrs_stdlib::install(&runtime);
+//! let globals = runtime.globals().clone();
 //! cljrs_async::init(&globals); // channels + executor (required)
 //! cljrs_io::init(&globals);    // async file I/O
 //! ```

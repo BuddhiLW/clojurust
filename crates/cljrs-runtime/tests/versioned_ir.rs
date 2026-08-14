@@ -97,7 +97,13 @@ fn parse_body(src: &str) -> Vec<Form> {
 }
 
 fn make_globals(src_dir: &Path) -> Arc<GlobalEnv> {
-    cljrs_runtime::interp::standard_env_with_paths(None, None, None, vec![src_dir.to_path_buf()])
+    cljrs_runtime::Runtime::builder()
+        .execution_mode(cljrs_runtime::ExecutionMode::TreeWalk)
+        .eager_clojure_test(true)
+        .source_paths(vec![src_dir.to_path_buf()])
+        .build()
+        .expect("runtime")
+        .into_globals()
 }
 
 fn eval_tree_walk(globals: &Arc<GlobalEnv>, src: &str) -> Value {

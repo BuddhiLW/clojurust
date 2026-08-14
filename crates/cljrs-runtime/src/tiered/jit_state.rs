@@ -326,7 +326,7 @@ static BOOTSTRAP_ARITY_WATERMARK: AtomicU64 = AtomicU64::new(0);
 
 /// Record the bootstrap/user boundary: every arity id strictly below `w` was
 /// defined before the compiler became ready.  Called by
-/// `mark_compiler_ready` with `crate::interp::arity::next_arity_id()`.
+/// the runtime builder with `crate::interp::arity::next_arity_id()`.
 pub fn set_bootstrap_arity_watermark(w: u64) {
     BOOTSTRAP_ARITY_WATERMARK.store(w, Ordering::Relaxed);
 }

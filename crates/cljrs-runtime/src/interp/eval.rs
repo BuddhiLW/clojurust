@@ -447,7 +447,12 @@ mod tests {
     use std::sync::Arc;
 
     fn make_env() -> (Arc<GlobalEnv>, Env) {
-        let globals = crate::interp::standard_env(None, None, None);
+        let globals = crate::Runtime::builder()
+            .execution_mode(crate::ExecutionMode::TreeWalk)
+            .eager_clojure_test(true)
+            .build()
+            .expect("runtime")
+            .into_globals();
         let env = Env::new(globals.clone(), "user");
         (globals, env)
     }
@@ -1833,8 +1838,13 @@ mod tests {
     }
 
     fn make_env_with_paths(paths: Vec<std::path::PathBuf>) -> (Arc<GlobalEnv>, Env) {
-        use crate::interp::standard_env_with_paths;
-        let globals = standard_env_with_paths(None, None, None, paths);
+        let globals = crate::Runtime::builder()
+            .execution_mode(crate::ExecutionMode::TreeWalk)
+            .eager_clojure_test(true)
+            .source_paths(paths)
+            .build()
+            .expect("runtime")
+            .into_globals();
         let env = Env::new(globals.clone(), "user");
         (globals, env)
     }

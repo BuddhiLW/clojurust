@@ -8,18 +8,13 @@ repository.workspace = true
 
 [features]
 default = []
-no-gc = ["cljrs-gc/no-gc", "cljrs-value/no-gc", "cljrs-eval/no-gc", "cljrs-interp/no-gc", "cljrs-builtins/no-gc"]
+no-gc = ["cljrs-gc/no-gc", "cljrs-value/no-gc", "cljrs-runtime/no-gc"]
 
 [dependencies]
-cljrs-builtins = { workspace = true }
-cljrs-logging  = { workspace = true }
-cljrs-gc       = { workspace = true }
-cljrs-ir       = { workspace = true }
-cljrs-value    = { workspace = true }
-cljrs-eval     = { workspace = true }
-cljrs-reader   = { workspace = true }
-cljrs-interp   = { workspace = true }
-
-[dev-dependencies]
-cljrs-env = { workspace = true }
+cljrs-logging = { workspace = true }
+cljrs-gc      = { workspace = true }
+cljrs-ir      = { workspace = true }
+cljrs-value   = { workspace = true }
+cljrs-runtime = { workspace = true }
+cljrs-reader  = { workspace = true }
 

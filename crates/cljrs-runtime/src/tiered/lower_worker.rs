@@ -52,7 +52,7 @@ pub(crate) struct LowerArityRequest {
 /// cross-defn registration (`register_defn`) sees the complete fn, exactly
 /// as eager lowering does.
 pub(crate) struct LowerRequest {
-    pub globals_id: usize,
+    pub globals_id: u64,
     pub name: Option<Arc<str>>,
     pub ns: Arc<str>,
     pub is_async: bool,
@@ -109,6 +109,18 @@ fn worker_loop(rx: Receiver<LowerRequest>) {
 }
 
 fn process_request(req: &LowerRequest) {
+    // The request names the runtime that enqueued it; that runtime owns the
+    // cache this lowering publishes into.  A runtime dropped while its
+    // request sat in the queue has nothing left to publish to.
+    let Some(ir_cache) = crate::tiered::ir_cache::by_globals_id(req.globals_id) else {
+        cljrs_logging::feat_debug!(
+            "ir",
+            "dropping lower request for dead runtime id={}",
+            req.globals_id
+        );
+        return;
+    };
+
     // Arities lowered (or already cached), collected for the cross-defn
     // registry: (param_count, is_variadic, ir).
     let mut registered: Vec<(usize, bool, Arc<cljrs_ir::IrFunction>)> = Vec::new();
@@ -119,10 +131,8 @@ fn process_request(req: &LowerRequest) {
         // Skip arities that already have a terminal cache state — unless a
         // relower mark is pending, in which case the cached IR is stale
         // (rebound external) and must be redone.
-        if !crate::tiered::ir_cache::should_attempt(id)
-            && !crate::tiered::defn_registry::relower_marked(id)
-        {
-            if let Some(ir) = crate::tiered::ir_cache::get_cached(id) {
+        if !ir_cache.should_attempt(id) && !crate::tiered::defn_registry::relower_marked(id) {
+            if let Some(ir) = ir_cache.get(id) {
                 registered.push((arity.params.len(), arity.rest_param.is_some(), ir));
             }
             continue;
@@ -134,7 +144,7 @@ fn process_request(req: &LowerRequest) {
             // lowering; a rebind after this point re-sets the mark, which
             // the post-store peek below catches.
             crate::tiered::defn_registry::take_relower(id);
-            crate::tiered::ir_cache::invalidate(id);
+            ir_cache.invalidate(id);
 
             match crate::tiered::lower::lower_expanded_arity(
                 req.name.as_deref(),
@@ -152,11 +162,11 @@ fn process_request(req: &LowerRequest) {
                 Ok((mut ir, _used)) => {
                     ir.seed_reprs = crate::tiered::lower::seed_reprs_from_hints(&arity.param_hints);
                     let ir = Arc::new(ir);
-                    crate::tiered::ir_cache::store_cached(id, ir.clone());
+                    ir_cache.store(id, ir.clone());
                     if crate::tiered::defn_registry::relower_marked(id) {
                         // An external this lowering specialized against was
                         // rebound mid-flight; the stored IR is stale.
-                        crate::tiered::ir_cache::invalidate(id);
+                        ir_cache.invalidate(id);
                         continue;
                     }
                     crate::tiered::jit_state::on_ir_published(id);
@@ -171,7 +181,7 @@ fn process_request(req: &LowerRequest) {
                     break;
                 }
                 Err(e) => {
-                    crate::tiered::ir_cache::store_unsupported(id);
+                    ir_cache.store_unsupported(id);
                     cljrs_logging::feat_debug!(
                         "ir",
                         "background lower unsupported arity_id={} ({:?}): {}",
@@ -189,7 +199,7 @@ fn process_request(req: &LowerRequest) {
             // Retry budget exhausted under rebind churn.  Leave the entry
             // absent and clear `lower_queued` so the dispatch seam can
             // re-trigger lowering on a later call.
-            crate::tiered::ir_cache::invalidate(id);
+            ir_cache.invalidate(id);
             crate::tiered::jit_state::clear_lower_queued(id);
             cljrs_logging::feat_debug!(
                 "ir",
@@ -225,7 +235,7 @@ mod tests {
     }
 
     /// An identity-function arity request: `(fn [x] x)`.
-    fn identity_request(arity_id: u64, fn_name: &str, ns: &str, gid: usize) -> LowerRequest {
+    fn identity_request(arity_id: u64, fn_name: &str, ns: &str, gid: u64) -> LowerRequest {
         LowerRequest {
             globals_id: gid,
             name: Some(Arc::from(fn_name)),
@@ -249,24 +259,25 @@ mod tests {
             .lock()
             .unwrap_or_else(|p| p.into_inner());
         let id = 0xC500_0001u64;
-        let gid = 0xC500_0001usize;
+        let gid = 0xC500_0001u64;
+        let ir_cache = crate::tiered::ir_cache::IrCache::new(gid);
         let ns = "test.worker-ns";
         let req = identity_request(id, "ident", ns, gid);
 
-        assert!(crate::tiered::ir_cache::should_attempt(id));
+        assert!(ir_cache.should_attempt(id));
         process_request(&req);
 
         // IR published and the defn registered for cross-defn promotion.
-        assert!(crate::tiered::ir_cache::get_cached(id).is_some());
+        assert!(ir_cache.get(id).is_some());
         let mut referenced = std::collections::HashSet::new();
         referenced.insert((Arc::<str>::from(ns), Arc::<str>::from("ident")));
         let externals = crate::tiered::defn_registry::externals_for(gid, &referenced);
         assert_eq!(externals.len(), 1);
 
         // A second request for the same arity is a no-op (terminal state).
-        let before = crate::tiered::ir_cache::get_cached(id).unwrap();
+        let before = ir_cache.get(id).unwrap();
         process_request(&req);
-        let after = crate::tiered::ir_cache::get_cached(id).unwrap();
+        let after = ir_cache.get(id).unwrap();
         assert!(Arc::ptr_eq(&before, &after));
     }
 
@@ -280,13 +291,14 @@ mod tests {
         // the mark-then-invalidate window seen from the worker thread — the
         // mark must force a re-lower, and must be consumed by it.
         let id = 0xC500_0011u64;
-        let gid = 0xC500_0011usize;
+        let gid = 0xC500_0011u64;
+        let ir_cache = crate::tiered::ir_cache::IrCache::new(gid);
         let callee_ns: Arc<str> = Arc::from("test.worker-relower-ns");
         let callee: Arc<str> = Arc::from("callee");
 
         // Plant stale IR and a relower mark (via a real rebind drain).
         let stale = Arc::new(cljrs_ir::IrFunction::new(None, None));
-        crate::tiered::ir_cache::store_cached(id, stale.clone());
+        ir_cache.store(id, stale.clone());
         crate::tiered::defn_registry::record_dependents(
             id,
             vec![(callee_ns.clone(), callee.clone())],
@@ -302,7 +314,7 @@ mod tests {
         ));
 
         // Fresh IR replaced the stale one and the mark was consumed.
-        let fresh = crate::tiered::ir_cache::get_cached(id).expect("re-lowered IR");
+        let fresh = ir_cache.get(id).expect("re-lowered IR");
         assert!(!Arc::ptr_eq(&fresh, &stale));
         assert!(!crate::tiered::defn_registry::relower_marked(id));
     }

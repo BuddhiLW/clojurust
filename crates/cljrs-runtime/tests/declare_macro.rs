@@ -10,7 +10,12 @@ use cljrs_runtime::env::env::{Env, GlobalEnv};
 use cljrs_value::{Keyword, Value};
 
 fn make_env() -> (Arc<GlobalEnv>, Env) {
-    let globals = cljrs_runtime::interp::standard_env(None, None, None);
+    let globals = cljrs_runtime::Runtime::builder()
+        .execution_mode(cljrs_runtime::ExecutionMode::TreeWalk)
+        .eager_clojure_test(true)
+        .build()
+        .expect("runtime")
+        .into_globals();
     let env = Env::new(globals.clone(), "user");
     (globals, env)
 }

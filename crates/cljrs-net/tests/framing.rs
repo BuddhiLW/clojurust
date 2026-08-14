@@ -13,7 +13,14 @@ use cljrs_reader::Parser;
 use cljrs_value::{Keyword, Value};
 
 fn setup_globals() -> Arc<cljrs_env::env::GlobalEnv> {
-    let globals = cljrs_stdlib::standard_env();
+    let globals = {
+        let runtime = cljrs_runtime::Runtime::builder()
+            .execution_mode(cljrs_runtime::ExecutionMode::Tiered)
+            .build()
+            .expect("runtime");
+        cljrs_stdlib::install(&runtime);
+        runtime.into_globals()
+    };
     cljrs_net::init(&globals);
     globals
 }
