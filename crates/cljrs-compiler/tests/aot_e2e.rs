@@ -2740,3 +2740,43 @@ fn require_fully_compiled_accepts_plain_defn() {
     )
     .expect("a defn-only program must pass the gate");
 }
+
+#[test]
+fn require_fully_compiled_rejects_an_incomplete_wasm_module() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let src = dir.path().join("omit.cljrs");
+    std::fs::write(
+        &src,
+        "(defmulti route (fn [m] (:kind m)))\n\
+         (defmethod route :alpha [m] (:v m))\n\
+         (defn add [a b] (+ a b))\n",
+    )
+    .expect("write");
+    let out = dir.path().join("omit.wasm");
+    let err = cljrs_compiler::aot::compile_file_to_wasm(
+        &src,
+        &out,
+        &[],
+        cljrs_compiler::aot::OpacityPolicy::RequireFullyCompiled,
+    )
+    .expect_err("defmulti/defmethod cannot be lowered, so the module is incomplete");
+    let msg = format!("{err}");
+    assert!(msg.contains("defmulti"), "names the dropped form: {msg}");
+    assert!(!out.exists(), "nothing may be written on rejection");
+}
+
+#[test]
+fn require_fully_compiled_accepts_a_complete_wasm_module() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let src = dir.path().join("clean.cljrs");
+    std::fs::write(&src, "(defn add [a b] (+ a b))\n").expect("write");
+    let out = dir.path().join("clean.wasm");
+    cljrs_compiler::aot::compile_file_to_wasm(
+        &src,
+        &out,
+        &[],
+        cljrs_compiler::aot::OpacityPolicy::RequireFullyCompiled,
+    )
+    .expect("a plain defn lowers, so nothing is omitted");
+    assert!(out.exists());
+}

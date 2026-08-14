@@ -625,7 +625,7 @@ fn run_command(command: Commands, versioning: VersioningFlags) -> miette::Result
                     "--test is not supported with --target wasm yet"
                 ));
             }
-            let opacity = resolve_opacity_policy(require_fully_compiled, target, test)
+            let opacity = resolve_opacity_policy(require_fully_compiled, test)
                 .map_err(|e| miette::miette!("{e}"))?;
 
             if test {
@@ -689,8 +689,13 @@ fn run_command(command: Commands, versioning: VersioningFlags) -> miette::Result
                 };
 
                 if target == CompileTarget::Wasm {
-                    cljrs_compiler::aot::compile_file_to_wasm(&entry_file, &out, &all_src_paths)
-                        .map_err(|e| miette::miette!("{e}"))?;
+                    cljrs_compiler::aot::compile_file_to_wasm(
+                        &entry_file,
+                        &out,
+                        &all_src_paths,
+                        opacity,
+                    )
+                    .map_err(|e| miette::miette!("{e}"))?;
                 } else {
                     cljrs_compiler::aot::compile_file(
                         &entry_file,
@@ -771,17 +776,15 @@ fn run_command(command: Commands, versioning: VersioningFlags) -> miette::Result
     }
 }
 
-/// Resolve the opacity policy a `compile` invocation runs under, rejecting the
-/// flag combinations that would not honour it.
+/// Resolve the opacity policy a `compile` invocation runs under.
 ///
-/// The source-embedding audit lives in `compile_file`, the native non-test
-/// path.  `--test` goes through `compile_test_harness` and `--target wasm`
-/// through `compile_file_to_wasm`; neither audits, so accepting
-/// `--require-fully-compiled` there would report success while promising a
-/// guarantee nothing checked.  Reject the combination rather than ignore it.
+/// Both backends audit: `compile_file` for embedded source, and
+/// `compile_file_to_wasm` for units the module would omit.  `--test` does not:
+/// `compile_test_harness` bundles every test namespace as interpreted source
+/// unconditionally, so a strict policy there could never be satisfied and the
+/// combination is refused rather than left to fail confusingly.
 fn resolve_opacity_policy(
     require_fully_compiled: bool,
-    target: CompileTarget,
     test: bool,
 ) -> Result<cljrs_compiler::aot::OpacityPolicy, String> {
     if !require_fully_compiled {
@@ -791,13 +794,6 @@ fn resolve_opacity_policy(
         return Err("--require-fully-compiled is not supported with --test: \
                     the test harness is not audited for embedded source"
             .to_string());
-    }
-    if target == CompileTarget::Wasm {
-        return Err(
-            "--require-fully-compiled is not supported with --target wasm: \
-                    the wasm backend is not audited for embedded source"
-                .to_string(),
-        );
     }
     Ok(cljrs_compiler::aot::OpacityPolicy::RequireFullyCompiled)
 }
@@ -1995,53 +1991,36 @@ fn run_repl(globals: Arc<GlobalEnv>) {
 
 #[cfg(test)]
 mod tests {
-    use super::{CompileTarget, resolve_opacity_policy};
+    use super::resolve_opacity_policy;
     use cljrs_compiler::aot::OpacityPolicy;
 
-    /// Without the flag every target/test combination is the reporting default.
+    /// Without the flag the policy is the reporting default.
     #[test]
-    fn absent_flag_reports_under_every_combination() {
-        for target in [CompileTarget::Native, CompileTarget::Wasm] {
-            for test in [false, true] {
-                assert_eq!(
-                    resolve_opacity_policy(false, target, test),
-                    Ok(OpacityPolicy::Report),
-                    "target={target:?} test={test}"
-                );
-            }
+    fn absent_flag_always_reports() {
+        for test in [false, true] {
+            assert_eq!(
+                resolve_opacity_policy(false, test),
+                Ok(OpacityPolicy::Report),
+                "test={test}"
+            );
         }
     }
 
     #[test]
     fn flag_selects_the_strict_policy_on_the_audited_path() {
         assert_eq!(
-            resolve_opacity_policy(true, CompileTarget::Native, false),
+            resolve_opacity_policy(true, false),
             Ok(OpacityPolicy::RequireFullyCompiled)
         );
     }
 
-    /// The unaudited paths reject rather than silently ignore the flag.
+    /// `--test` rejects rather than silently ignoring the flag.
     #[test]
-    fn flag_is_rejected_on_unaudited_paths() {
-        for (target, test) in [
-            (CompileTarget::Native, true),
-            (CompileTarget::Wasm, false),
-            (CompileTarget::Wasm, true),
-        ] {
-            let err = resolve_opacity_policy(true, target, test)
-                .expect_err("target={target:?} test={test} must be rejected");
-            assert!(
-                err.contains("--require-fully-compiled"),
-                "error names the flag: {err}"
-            );
-        }
-    }
-
-    /// `--test` is reported ahead of `--target wasm` when both are given, so the
-    /// message names a flag the caller actually passed.
-    #[test]
-    fn test_combination_is_reported_before_wasm() {
-        let err = resolve_opacity_policy(true, CompileTarget::Wasm, true).expect_err("rejected");
-        assert!(err.contains("--test"), "{err}");
+    fn flag_is_rejected_under_test() {
+        let err = resolve_opacity_policy(true, true).expect_err("--test must be rejected");
+        assert!(
+            err.contains("--require-fully-compiled") && err.contains("--test"),
+            "error names both flags: {err}"
+        );
     }
 }

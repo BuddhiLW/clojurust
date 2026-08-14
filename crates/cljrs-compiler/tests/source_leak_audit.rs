@@ -255,3 +255,69 @@ fn default_policy_never_breaks_an_existing_build() {
     );
     assert_eq!(OpacityPolicy::default(), OpacityPolicy::Report);
 }
+
+// ── BundleAudit: the wasm side of the same policy ────────────────────────────
+
+use cljrs_compiler::aot::{BundleAudit, Omission, OmissionKind};
+
+fn omission_kind() -> impl Strategy<Value = OmissionKind> {
+    prop_oneof![Just(OmissionKind::Namespace), Just(OmissionKind::EntryForm)]
+}
+
+fn bundle_audit() -> impl Strategy<Value = BundleAudit> {
+    prop::collection::vec((omission_kind(), "[a-z.]{1,12}", "[a-z() ]{1,12}"), 0..6).prop_map(
+        |rows| {
+            BundleAudit::of(rows.into_iter().map(|(kind, ns, detail)| Omission {
+                kind,
+                ns: Some(ns),
+                detail,
+            }))
+        },
+    )
+}
+
+proptest! {
+    /// Completeness is exactly "recorded nothing", the wasm analogue of
+    /// SourceAudit's soundness property.
+    #[test]
+    fn complete_iff_no_omissions(a in bundle_audit()) {
+        prop_assert_eq!(a.is_complete(), a.count() == 0);
+        prop_assert_eq!(a.count(), a.omissions().len());
+    }
+
+    /// A complete module satisfies every policy; only the strict one can
+    /// reject, and only an incomplete module.
+    #[test]
+    fn only_the_strict_policy_rejects(a in bundle_audit()) {
+        prop_assert_ne!(a.verdict(OpacityPolicy::Report), OpacityVerdict::Rejected);
+        let strict = a.verdict(OpacityPolicy::RequireFullyCompiled);
+        if a.is_complete() {
+            prop_assert_eq!(strict, OpacityVerdict::Clean);
+        } else {
+            prop_assert_eq!(strict, OpacityVerdict::Rejected);
+        }
+    }
+
+    /// The report names every omission, since it is the only thing telling a
+    /// caller which unit to move out of the compiled unit.
+    #[test]
+    fn the_report_lists_every_omission(a in bundle_audit()) {
+        prop_assume!(!a.is_complete());
+        let rendered = a.to_string();
+        for o in a.omissions() {
+            prop_assert!(rendered.contains(&o.detail), "{} missing from {}", o.detail, rendered);
+        }
+    }
+
+    /// Adding an omission never removes one.
+    #[test]
+    fn recording_is_monotonic(a in bundle_audit(), ns in "[a-z]{1,8}") {
+        let before = a.count();
+        let grown = BundleAudit::of(a.omissions().iter().cloned().chain([Omission {
+            kind: OmissionKind::Namespace,
+            ns: Some(ns),
+            detail: "x".to_string(),
+        }]));
+        prop_assert_eq!(grown.count(), before + 1);
+    }
+}
