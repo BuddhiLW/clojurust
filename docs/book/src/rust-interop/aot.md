@@ -26,7 +26,9 @@ is copied to the output path.
 fn main() {
     cljrs_compiler::rt_abi::anchor_rt_symbols();
 
-    let globals = cljrs_stdlib::standard_env();
+    let runtime = cljrs_runtime::Runtime::builder().build()?;
+    cljrs_stdlib::install(&runtime);
+    let globals = runtime.into_globals();
 
     // Native init — registered before any Clojure code runs
     let mut registry = cljrs_interop::Registry::new(globals.clone());

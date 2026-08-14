@@ -17,7 +17,7 @@ This plan does not remove the tree-walking interpreter, JIT, AOT compiler, no-GC
 | 0. Record the baseline | Complete | [`consolidation-baseline.md`](consolidation-baseline.md) |
 | 1. Remove obsolete debris | Complete | `cljrs-ir-prebuild` folded into `cljrs::commands::ir`; 34 packages → 33 |
 | 2. Create the merged runtime | Complete | `cljrs-env`/`-builtins`/`-interp`/`-eval` merged into `cljrs-runtime`; the four remain as re-export shims until Stage 6 |
-| 3. Simplify runtime state | Not started | |
+| 3. Simplify runtime state | Complete | One builder, one dispatch path; per-instance IR cache |
 | 4. Merge JIT and compiler packages | Not started | |
 | 5. Consolidate project and CLI tools | Not started | |
 | 6. Remove compatibility packages | Not started | |
@@ -462,6 +462,123 @@ Validation gate:
 - One function-call path selects tree walk, IR, or JIT execution.
 - Two runtime instances do not share IR caches or tier counters.
 - The runtime has no callback that exists only to break an old package cycle.
+
+#### Stage 3 outcome
+
+Runtime construction and execution-mode selection now belong to
+`cljrs-runtime`. What changed, item by item:
+
+**1-4. One construction path.** Nine "standard environment" constructors across
+three layers are replaced by `Runtime::builder()`:
+
+| Removed | Replacement |
+|---|---|
+| `cljrs_interp::standard_env{,_minimal,_with_paths}` | `.execution_mode(TreeWalk)` |
+| `cljrs_eval::standard_env{,_minimal,_with_paths}` | `.execution_mode(Tiered)` |
+| `cljrs_eval::standard_env_minimal_no_ir` | `.execution_mode(TreeWalk)` |
+| `cljrs_eval::mark_compiler_ready` | `build()` raises the tier state |
+| `cljrs_stdlib::standard_env{,_no_ir}` | builder + `cljrs_stdlib::install` |
+| `cljrs_stdlib::standard_env_with_paths{,_and_config}` | `.source_paths()` / `.gc_config()` |
+
+The builder owns the bootstrap, source paths, GC configuration and root
+registration, embedded namespace sources, and tier enablement. `cljrs-stdlib`
+is now an extension: `install(&Runtime)` adds namespaces to a runtime the
+caller already built, and it no longer decides execution modes or GC limits.
+
+That removes its direct `cljrs_gc::HEAP.set_config_from_env()` calls — the
+`no-gc` defect the Stage 2 outcome left for this stage. `cljrs-gc` grows a
+no-op `set_config_from_env()` in the `no-gc` build so the API is uniform in
+both builds.
+
+**5-6. Callback seams removed.** `GlobalEnv::eval_fn`, `call_cljrs_fn`, and
+`on_fn_defined` were function pointers that let `cljrs-interp` reach
+`cljrs-eval` without a dependency cycle. With both in one package since Stage 2
+the mode is data and the dispatch is a direct call: `GlobalEnv::call_cljrs_fn`
+matches on `ExecutionMode`, and `eval` calls the tree walker directly — its
+pointer only ever held one implementation.
+
+The one call-path override with a reason to exist is `cljrs-tx`'s call-depth
+cap, which keeps interpreted recursion from overflowing the host thread's Rust
+stack. It survives as `ExecutionMode::NoGcTransaction` plus
+`cljrs_runtime::env::depth`, i.e. as a runtime-owned mode rather than an
+arbitrary hook a downstream package installs.
+
+**7. Explicit tier state.** `compiler_ready` was a bool that said only
+"not tree-walk". `TierState` (`TreeWalk` / `Ir` / `Jit`) starts at `TreeWalk` —
+nothing can be lowered before `clojure.core` exists — and the builder raises it
+once to the mode's target tier when the bootstrap finishes. This is what gives
+`ExecutionMode::TieredNoJit` real meaning: it stops at Tier 1 even with a JIT
+backend linked in, where before the only way to not reach native code was to
+not link `cljrs-jit`. `CLJRS_NO_IR` pins any runtime at `TreeWalk`.
+
+Five test crates spun on `compiler_ready` waiting for a background
+compiler-namespace loader that has not existed since the Rust lowering path
+landed; those loops are deleted.
+
+**8. IR cache in the runtime instance.** `IrCache` moved from a process-global
+static into `GlobalEnv`. Two runtimes never read or evict each other's entries,
+and a runtime's IR is freed when the runtime is — the accumulation
+`cljrs_stdlib::standard_env_no_ir`'s doc comment worked around ("hundreds of MB
+over 233 namespaces") is structural now, not something callers avoid by
+picking a different constructor.
+
+Three callers hold only an arity id and have no route back to the runtime that
+minted it: the background lowering worker, the JIT worker's publish guard, and
+the process-global var-rebind hook. They resolve through a weak index of live
+caches. Arity ids come from one process-wide counter, so at most one live cache
+can hold a given id and the lookup is unambiguous.
+
+**Deferred to Stage 4, by the plan's own division:** the JIT tier counters and
+native-code tables in `tiered::jit_state` stay process-global. They are reached
+from `cljrs-jit` and from JIT-compiled native code through arity ids and
+`OnceLock` hooks with no runtime handle anywhere on the path, and Stage 4 item 4
+is exactly "replace global JIT hooks with compiler state owned by the runtime".
+Moving them here would have pulled that work forward and made both stages
+unreviewable. The weak IR-cache index goes away with them.
+
+**9. No address-derived cache keys.** The cross-defn registry was keyed by
+`Arc::as_ptr(&env.globals) as usize`. An address is unique only while its
+allocation is live, so a dropped runtime could hand its key to the next one
+built and let it inherit — and stage-4 inline — the dead runtime's IR. Keys are
+now `GlobalEnv::id`, allocated from a counter. The GC root tracer holds a `Weak`
+handle for the same reason: a dropped runtime stops being a root instead of
+pinning itself alive forever through the heap's tracer list.
+
+Gate results:
+
+| Check | Result |
+|---|---|
+| `cargo fmt --all --check` | pass |
+| `cargo clippy --workspace --all-targets -- -D warnings` | pass |
+| `cargo test --workspace` | 1148 passed, 0 failed, 23 ignored — same pass count as Stage 2 |
+| One builder creates every supported runtime mode | pass — `TreeWalk`, `Tiered`, `TieredNoJit`, `NoGcTransaction` all come from `Runtime::builder()`; no other constructor remains |
+| One function-call path selects tree walk, IR, or JIT | pass — `GlobalEnv::call_cljrs_fn` is the single dispatch point |
+| Two runtime instances do not share IR caches | pass — covered by `ir_cache::tests::caches_are_per_runtime`. Tier counters are Stage 4's, see above |
+| No callback that exists only to break an old package cycle | pass — the three `GlobalEnv` pointers are gone; the loader/async/JIT hooks that remain are for optional systems, which the plan keeps |
+| Clojure test suite (interpreter) | 240 namespaces, 308 tests, 5,486 assertions, 0 failures |
+| Clojure test suite (AOT) | 240 namespaces compiled and run: 308 tests, 5,486 assertions, 0 failures |
+| `cljrs eval`, `run samples/graph.cljrs`, `compile -o life-sample samples/life.cljrs` + run | pass. `samples/life.cljrs` seeds its grid randomly, so its final population differs run to run in any build |
+| `cljrs ir build --ns clojure.core` | 151 functions lowered, 2 unsupported — identical to Stage 1 and Stage 2 |
+
+`no-gc` — **now green for the CLI**, the first time in this plan:
+
+| Package | Baseline | After Stage 2 | Now |
+|---|---|---|---|
+| `cljrs-env`, `cljrs-builtins` | fail | pass | pass |
+| `cljrs-runtime`, `cljrs-interp`, `cljrs-eval`, `cljrs-gc`, `cljrs-value`, `cljrs-tx` | pass | pass | pass |
+| `cljrs-stdlib` | fail | fail | **pass** |
+| `cljrs` (both feature sets) | fail | fail | **pass** |
+| `cljrs-async` | fail | fail | fail |
+
+Baseline defect 2 is fixed: `cljrs-stdlib` called `cljrs_gc::HEAP.set_config_from_env()`
+at two sites, and that method existed only in the GC build. Moving GC
+configuration into the runtime builder removed both calls, and `cljrs-gc` gained
+a no-op `set_config_from_env()` in the `no-gc` build so the API is the same
+shape in both. With `cljrs-stdlib` building, the CLI builds too, with and
+without default features.
+
+Defect 1 — `cljrs-async` has no `no-gc` feature at all — is untouched and
+remains Stage 4's.
 
 ### Stage 4: Merge JIT and compiler packages
 

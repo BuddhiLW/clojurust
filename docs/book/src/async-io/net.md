@@ -273,7 +273,9 @@ channel:
 
 ```rust
 rt.block_on(local.run_until(async {
-    let globals = cljrs_stdlib::standard_env();
+    let runtime = cljrs_runtime::Runtime::builder().build()?;
+    cljrs_stdlib::install(&runtime);
+    let globals = runtime.into_globals();
     cljrs_net::init(&globals);
     // ... evaluate code ...
 }));

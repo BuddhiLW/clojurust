@@ -21,7 +21,11 @@
 //!     .source_paths(vec!["src".into()])
 //!     .build()
 //!     .expect("bootstrap");
-//! cljrs_stdlib::install(&runtime);
+//!
+//! // Extensions install into the finished runtime; this package cannot name
+//! // them (they depend on it), so the call is shown rather than compiled:
+//! //     cljrs_stdlib::install(&runtime);
+//! let mut env = runtime.env("user");
 //! ```
 
 use std::path::PathBuf;

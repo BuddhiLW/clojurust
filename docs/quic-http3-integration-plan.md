@@ -224,7 +224,7 @@ Server: `(h3/start-server (fn [{:keys [method path respond]}] (respond {...})) {
 ## Verification
 - New tests `crates/cljrs-net/tests/quic.rs` and `tests/h3.rs`, mirroring
   `tests/tls.rs`:
-  - Setup: `let globals = cljrs_stdlib::standard_env(); cljrs_net::init(&globals);`
+  - Setup: build a `Runtime`, `cljrs_stdlib::install(&runtime)`, then `cljrs_net::init(runtime.globals());`
     on a `current_thread` runtime + `LocalSet::block_on` (as `tls.rs` does), so
     both the LocalSet bridges and the WorkerPool pool tasks run.
   - Drive Rust entry points directly (`quic::connect_to`, `quic::listen_on`,

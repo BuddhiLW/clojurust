@@ -24,7 +24,8 @@
 //! ```no_run
 //! let runtime = cljrs_runtime::Runtime::builder()
 //!     .execution_mode(cljrs_runtime::ExecutionMode::Tiered)
-//!     .build()?;
+//!     .build()
+//!     .unwrap();
 //! cljrs_stdlib::install(&runtime);
 //! let globals = runtime.globals().clone();
 //! let config = cljrs_nrepl::Config::default();
