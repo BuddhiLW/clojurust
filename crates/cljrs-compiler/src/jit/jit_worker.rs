@@ -1,7 +1,7 @@
 //! Background JIT compilation worker thread.
 //!
 //! Receives compilation requests on a channel, compiles each `IrFunction` via
-//! Cranelift, hands the module to the epoch-tagged [`code_cache`](crate::code_cache),
+//! Cranelift, hands the module to the epoch-tagged [`code_cache`](crate::jit::code_cache),
 //! and atomically publishes the resulting function pointer + epoch via
 //! `cljrs_eval::jit_state`.
 //!
@@ -19,11 +19,11 @@
 use std::sync::Arc;
 use std::sync::mpsc::Receiver;
 
-use cljrs_compiler::typeinfer::Repr;
+use crate::typeinfer::Repr;
 use cljrs_ir::{BlockId, IrFunction};
 
-use crate::code_cache;
-use crate::jit_compiler::compile_jit;
+use crate::jit::code_cache;
+use crate::jit::jit_compiler::compile_jit;
 
 pub(crate) enum CompileRequest {
     /// Whole-function compile for a hot arity.

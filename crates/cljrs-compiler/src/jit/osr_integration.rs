@@ -35,7 +35,7 @@ fn build_ir(name: &str, params: &[Arc<str>], body_src: &str) -> IrFunction {
                 runtime.into_globals()
             };
             let mut env = cljrs_eval::Env::new(globals, "user");
-            cljrs_compiler::aot::lower_via_rust(Some(&name), "user", &params, &forms, &mut env)
+            crate::aot::lower_via_rust(Some(&name), "user", &params, &forms, &mut env)
                 .expect("lowering should succeed")
         })
         .unwrap()
@@ -73,10 +73,10 @@ fn osr_entry_compiles_and_resumes_natively_mid_loop() {
         osr.live_ins.len()
     );
 
-    let compiled =
-        crate::jit_compiler::compile_jit("__cljrs_jit_osr_test", &osr.func, &[]).expect("compile");
+    let compiled = crate::jit::jit_compiler::compile_jit("__cljrs_jit_osr_test", &osr.func, &[])
+        .expect("compile");
     let fn_ptr = compiled.fn_ptr;
-    let epoch = crate::code_cache::register(0xC0DE_0540, compiled);
+    let epoch = crate::jit::code_cache::register(0xC0DE_0540, compiled);
 
     // Mid-loop interpreter state for n=10, paused at i=5: acc = 0+1+2+3+4 = 10.
     // The transform orders live-ins as [header φ dsts (i, acc), then outer (n)].

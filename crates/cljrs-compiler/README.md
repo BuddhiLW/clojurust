@@ -1,8 +1,14 @@
 # cljrs-compiler
 
-Program analysis, optimization, and AOT compilation for clojurust. Provides an
-intermediate representation (IR) in A-normal form with SSA, escape analysis,
-Cranelift-based native code generation, and a C-ABI runtime bridge.
+Program analysis, optimization, JIT, and AOT compilation for clojurust — one
+package for every code-generating path. Provides an intermediate
+representation (IR) in A-normal form with SSA, escape analysis, Cranelift-based
+native code generation, and a C-ABI runtime bridge.
+
+The JIT (`jit/`) and the AOT backends (`aot.rs`, `wasm/`) are not separate
+products: they share `typeinfer`, `codegen`, and the `rt_abi` runtime ABI as
+sibling modules, so a change to the calling convention or to representation
+inference lands in both at once.
 
 ANF lowering and escape analysis run in pure Rust (`cljrs_ir::lower`, in the
 `cljrs-ir` crate); the Cranelift codegen backend here consumes the resulting
@@ -10,7 +16,7 @@ ANF lowering and escape analysis run in pure Rust (`cljrs_ir::lower`, in the
 
 **Phase:** 8.1 (optimization) + 10.0 (backend refactor) + 11 (AOT compilation) + no-gc phases 6–7 — end-to-end AOT working for multi-file programs with variadic functions, protocols, escape analysis optimization, apply, core HOFs, sequence/collection ops, type predicates, atom constructor, and inline expansions.  Under the `no-gc` feature the AOT driver also runs the **blacklist analysis** (`escape.rs`) which rejects programs that cannot be safely compiled without a GC.
 
-**Phase 10.0 (backend refactor):** `Compiler` and `FunctionTranslator` are now generic over `cranelift_module::Module` (`Compiler<M: Module = ObjectModule>`).  The shared CLIF-emitting logic (`compile_function`, `declare_function`) and the full `rt_abi` symbol declaration table (`declare_runtime_funcs`) work with any `Module` backend.  AOT-specific construction (`Compiler::new`) and finalisation (`Compiler::finish`) live in `impl Compiler<ObjectModule>`; the free function `new_compiler_from_module` lets the upcoming `cljrs-jit` crate hand a pre-built `JITModule` to the shared codegen.
+**Phase 10.0 (backend refactor):** `Compiler` and `FunctionTranslator` are now generic over `cranelift_module::Module` (`Compiler<M: Module = ObjectModule>`).  The shared CLIF-emitting logic (`compile_function`, `declare_function`) and the full `rt_abi` symbol declaration table (`declare_runtime_funcs`) work with any `Module` backend.  AOT-specific construction (`Compiler::new`) and finalisation (`Compiler::finish`) live in `impl Compiler<ObjectModule>`; the free function `new_compiler_from_module` lets the `jit/` module hand a pre-built `JITModule` to the shared codegen.
 
 **Phase 10.6 (specialization & inline caches):** `typeinfer.rs` infers a machine representation (`Repr::{Boxed, Long, Double, Bool}`) for every IR var; codegen keeps unboxed values in registers (`iadd`/`fadd`/`icmp` instead of `rt_add`/`rt_lt` bridge calls), boxing only at boxed-context uses.  `compile_function_with_specs` compiles a type-specialized entry whose prologue guards each specialized parameter's runtime tag and returns the deopt sentinel on mismatch.  Keyword constants and `Inst::Call` sites compile through per-call-site inline caches (writable module data slots + the `rt_kw_ic_fill` / `rt_call_ic` bridges).
 
@@ -26,6 +32,13 @@ src/
   typeinfer.rs  — Phase 10.6 scalar representation inference (Repr lattice, fixpoint dataflow)
   aot.rs        — AOT driver: source → parse → expand → lower → codegen → cargo build → binary
   escape.rs     — (no-gc only) blacklist analysis: 4 checks that reject no-gc–unsafe IR patterns
+  jit/          — in-process JIT tier (Cranelift `JITModule`) over the same codegen
+    mod.rs        — `init()`: installs the runtime's JIT seams and spawns the worker; `on_var_rebind` stales superseded code
+    jit_compiler.rs — `compile_jit` / `compile_jit_poll`: build a `JITModule`, register rt_abi symbols, call shared codegen
+    jit_worker.rs   — background compile thread; maps Tier-1 type profiles to per-parameter specializations
+    code_cache.rs   — epoch-tagged module registry; stale/pin/reclaim at stop-the-world safepoints
+    async_jit.rs    — `^:async` arity activation: lower → state machine → native poll fn
+    osr_integration.rs — (test-only) end-to-end OSR entry compile + call
   wasm/         — AOT Clojure → WebAssembly backend (scaffold; second backend over the same IR)
     mod.rs      — public API (`compile_function`, `compile_bundle`, `WasmBackend`, `WasmError`); browser tier model
     abi.rs      — ABI/region contract: Value→i32, rt_abi import table, region-handle threading
@@ -252,15 +265,17 @@ walk directly, preserving full semantics.
   `jit_stats` module — relaxed diagnostic counters (`BOXED_ARITH_CALLS`, `GUARD_DEOPTS`,
   `KW_IC_FILLS`, `PROTO_IC_HITS`, `PROTO_IC_MISSES`) and `jit_stats::snapshot() -> String`
   (written by `cljrs --jit-stats`).
-- **JIT hooks (safe Rust, not `extern "C"`):**
+- **JIT seams (safe Rust, not `extern "C"`):**
   `take_pending_exception_value() -> Option<Value>` — take + clear the thread's pending
-  exception as an owned `Value`; the JIT dispatch seam calls it (via a hook installed by
-  `cljrs_jit::init`) right after native code returns, so an uncaught `(throw …)` propagates
-  as `EvalError::Thrown` instead of a nil return.
-  `set_closure_escape_hook(fn())` — installed by `cljrs_jit::init`; `rt_make_fn`,
-  `rt_make_fn_variadic`, and `rt_make_fn_multi` fire it whenever they wrap a compiled
-  function pointer into a GC-managed closure value, so the JIT can pin the executing
-  module's reclamation epoch (unset under AOT, where code is never unloaded).
+  exception as an owned `Value`; the JIT dispatch seam calls it right after native code
+  returns, so an uncaught `(throw …)` propagates as `EvalError::Thrown` instead of a nil
+  return.
+  `deopt_sentinel_addr() -> usize` — address of the pointer a failed entry guard returns.
+  Closure escape: `rt_make_fn`, `rt_make_fn_variadic`, and `rt_make_fn_multi` call
+  `jit::code_cache::pin_epoch` directly (via `notify_closure_escape`) whenever they wrap a
+  compiled function pointer into a GC-managed closure value, pinning the executing module's
+  reclamation epoch.  A no-op under AOT, where there is no executing JIT frame and code is
+  never unloaded.
 
 ### Cranelift codegen (`codegen.rs`)
 
@@ -316,6 +331,37 @@ matching the boxed rt_abi bridge: checked long `+`/`-`/`*` (overflow throws,
 via an inline signed-overflow branch matching `rt_add`/etc.), wrapping
 `unchecked-*`, f64 promotion for mixed operands, ordered float compares;
 `Div`/`Rem` and cross-type `Eq` always stay boxed.
+
+### JIT tier (`jit/`)
+
+In-process compilation of hot arities to native code, over the same
+`codegen`/`typeinfer`/`rt_abi` as AOT.  A function reaches it through the
+tiers: tree-walk → background-lowered IR (Tier 1) → JIT-native (Tier 2).
+
+```rust
+pub fn init();                                  // install the runtime seams + spawn the worker
+
+pub mod code_cache {
+    pub fn mark_stale(epoch: u64);              // supersede a module (reclaimed at the next STW)
+    pub fn reclaim_at_stw() -> usize;           // free stale, unpinned modules with no live frame
+    pub fn live_count() -> usize;               // diagnostics
+    pub fn stale_count() -> usize;
+    pub fn reclaimed_count() -> u64;
+    pub fn reclaimed_bytes() -> u64;
+}
+```
+
+`init()` is idempotent.  It installs the enqueue (whole-function and OSR),
+pending-exception, deopt-sentinel, stale-epoch, var-rebind, stop-the-world
+reclaim, and async-compile seams, then spawns the `cljrs-jit-worker` thread.
+Everything else in the module is crate-private: `jit_compiler::compile_jit`
+(and `compile_jit_poll` for `^:async` state machines), `jit_worker`, and
+`async_jit`.
+
+Environment: `CLJRS_JIT_THRESHOLD` (Tier-1 calls before compiling, default
+1000), `CLJRS_OSR_THRESHOLD` (loop back-edges before an OSR-entry compile),
+`CLJRS_JIT_NO_SPEC=1` (compile generically), `CLJRS_JIT_DEOPT_LIMIT` (entry-guard
+failures tolerated before a specialization is discarded).
 
 ### AOT driver (`aot.rs`)
 
@@ -546,6 +592,7 @@ versioned loader rather than the plain `require` path.
 | `cljrs-eval` (workspace) | `Env`, `GlobalEnv`, macros, callback — macro expansion + rt_call dispatch |
 | `cljrs-runtime` (workspace) | `Runtime::builder` — bootstrap environment for macro expansion + harness |
 | `cljrs-stdlib` (workspace) | `install` — stdlib namespaces in that environment |
-| `cranelift-*` (workspace) | Cranelift compiler infrastructure (`cranelift-jit` registered in workspace deps for Phase 10.1 `cljrs-jit`) |
+| `cranelift-*` (workspace) | Cranelift compiler infrastructure (`cranelift-object` for AOT, `cranelift-jit` for the `jit/` tier) |
+| `cljrs-logging` (workspace) | `feat_debug!("jit", …)` — JIT tier diagnostics |
 | `cljrs-env` (via `cljrs-eval`) | `callback::invoke`, `apply::{type_tag_of, type_tag_matches}` — rt_call dispatch + protocol IC tag validation |
 | `target-lexicon` (workspace) | Target triple detection |

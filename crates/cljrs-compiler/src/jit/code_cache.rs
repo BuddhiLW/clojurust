@@ -32,7 +32,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 
-use crate::jit_compiler::CompiledFn;
+use crate::jit::jit_compiler::CompiledFn;
 
 /// Monotonic epoch source.  Never reused, so an epoch uniquely identifies one
 /// compiled module for the life of the process.
@@ -83,7 +83,7 @@ pub(crate) fn register(arity_id: u64, compiled: CompiledFn) -> u64 {
 /// already stale.
 ///
 /// Public (beyond the crate) only as the stale-epoch hook target installed
-/// into `cljrs_eval::jit_state` by [`crate::init`].
+/// into `cljrs_eval::jit_state` by [`crate::jit::init`].
 pub fn mark_stale(epoch: u64) {
     let mut state = cache().lock().unwrap();
     if let Some(record) = state.live.remove(&epoch) {
@@ -292,7 +292,7 @@ mod reclaim_integration {
                     runtime.into_globals()
                 };
                 let mut env = cljrs_eval::Env::new(globals, "user");
-                cljrs_compiler::aot::lower_via_rust(Some(&name), "user", &params, &forms, &mut env)
+                crate::aot::lower_via_rust(Some(&name), "user", &params, &forms, &mut env)
                     .expect("lowering should succeed")
             })
             .unwrap()
@@ -307,11 +307,12 @@ mod reclaim_integration {
 
         // Emulate the worker: compile, register (→ epoch), publish ptr + epoch.
         let compiled =
-            crate::jit_compiler::compile_jit(&format!("__cljrs_jit_{arity_id}"), &ir, &[]).unwrap();
+            crate::jit::jit_compiler::compile_jit(&format!("__cljrs_jit_{arity_id}"), &ir, &[])
+                .unwrap();
         let fn_ptr = compiled.fn_ptr;
-        let epoch = crate::code_cache::register(arity_id, compiled);
+        let epoch = crate::jit::code_cache::register(arity_id, compiled);
         cljrs_eval::jit_state::store_native_fn(arity_id, fn_ptr, epoch);
-        assert!(crate::code_cache::is_live(epoch));
+        assert!(crate::jit::code_cache::is_live(epoch));
         assert_eq!(
             cljrs_eval::jit_state::get_native_fn(arity_id),
             Some((fn_ptr, epoch)),
@@ -327,28 +328,28 @@ mod reclaim_integration {
             None,
             "future calls must no longer dispatch to stale code",
         );
-        crate::code_cache::mark_stale(epoch);
-        assert!(crate::code_cache::is_stale(epoch));
-        assert!(!crate::code_cache::is_live(epoch));
+        crate::jit::code_cache::mark_stale(epoch);
+        assert!(crate::jit::code_cache::is_stale(epoch));
+        assert!(!crate::jit::code_cache::is_live(epoch));
 
         // A frame executing this epoch defers reclamation.
         {
             let _frame = cljrs_eval::jit_state::push_jit_frame(epoch);
-            crate::code_cache::reclaim_at_stw();
+            crate::jit::code_cache::reclaim_at_stw();
             assert!(
-                crate::code_cache::is_stale(epoch),
+                crate::jit::code_cache::is_stale(epoch),
                 "must not free code while a frame is executing it",
             );
         }
 
         // With no live frame, the next safepoint reclaim frees the module.
-        let before = crate::code_cache::reclaimed_count();
-        let freed = crate::code_cache::reclaim_at_stw();
+        let before = crate::jit::code_cache::reclaimed_count();
+        let freed = crate::jit::code_cache::reclaim_at_stw();
         assert!(
             freed >= 1,
             "stale module with no live frame should be freed"
         );
-        assert!(!crate::code_cache::is_stale(epoch));
-        assert!(crate::code_cache::reclaimed_count() > before);
+        assert!(!crate::jit::code_cache::is_stale(epoch));
+        assert!(crate::jit::code_cache::reclaimed_count() > before);
     }
 }

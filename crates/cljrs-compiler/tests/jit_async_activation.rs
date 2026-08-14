@@ -31,7 +31,7 @@ fn eval_all(src: &str, env: &mut Env) -> Value {
 
 #[test]
 fn async_fn_compiles_to_native_state_machine_on_call() {
-    cljrs_jit::init();
+    cljrs_compiler::jit::init();
     let _mutator = cljrs_gc::register_mutator();
 
     let globals = {
@@ -84,7 +84,7 @@ fn async_fn_compiles_to_native_state_machine_on_call() {
 /// operand `i` read `(inc i)` after the slot was overwritten.
 #[test]
 fn async_loop_with_await_is_correct() {
-    cljrs_jit::init();
+    cljrs_compiler::jit::init();
     let _mutator = cljrs_gc::register_mutator();
     let globals = {
         let runtime = cljrs_runtime::Runtime::builder()
@@ -132,7 +132,7 @@ fn async_loop_with_await_is_correct() {
 /// Phase H4 — so it stays on the `eval_async` tree-walker.
 #[test]
 fn async_fn_using_channels_is_not_compiled() {
-    cljrs_jit::init();
+    cljrs_compiler::jit::init();
     let _mutator = cljrs_gc::register_mutator();
     let globals = {
         let runtime = cljrs_runtime::Runtime::builder()

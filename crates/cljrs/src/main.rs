@@ -496,7 +496,7 @@ fn init_jit(threshold: Option<u32>) {
     if let Some(t) = threshold {
         cljrs_eval::jit_state::set_jit_threshold(t);
     }
-    cljrs_jit::init();
+    cljrs_compiler::jit::init();
 }
 
 /// CLI-level versioned-symbol policy flags, threaded into `setup_globals`.

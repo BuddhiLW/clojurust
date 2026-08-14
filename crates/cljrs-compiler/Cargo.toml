@@ -12,6 +12,7 @@ no-gc = ["cljrs-gc/no-gc", "cljrs-value/no-gc", "cljrs-eval/no-gc", "cljrs-inter
 
 [dependencies]
 cljrs-runtime = { workspace = true }
+cljrs-logging  = { workspace = true }
 cljrs-async    = { workspace = true }
 cljrs-io       = { workspace = true }
 cljrs-net      = { workspace = true }
@@ -33,6 +34,7 @@ cranelift-codegen  = { workspace = true }
 cranelift-frontend = { workspace = true }
 cranelift-module   = { workspace = true }
 cranelift-object   = { workspace = true }
+cranelift-jit      = { workspace = true }
 cranelift-native   = { workspace = true }
 target-lexicon     = { workspace = true }
 
@@ -44,3 +46,4 @@ serde_json         = "1"
 tempfile = "3"
 wasmparser = "0.244"
 proptest = "1"
+tokio = { workspace = true, features = ["rt", "sync", "time", "macros"] }

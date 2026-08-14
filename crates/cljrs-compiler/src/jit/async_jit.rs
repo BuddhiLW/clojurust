@@ -2,7 +2,7 @@
 //! functions on demand.
 //!
 //! `cljrs-async` drives `^:async` dispatch but cannot compile (it sits below
-//! this crate).  [`crate::init`] installs [`compile_async_arity`] as the
+//! this crate).  [`crate::jit::init`] installs [`compile_async_arity`] as the
 //! `cljrs_env` async-compile hook; the async dispatcher calls it once per arity
 //! the first time that arity is invoked.  The hook lowers the arity to a state
 //! machine ([`cljrs_ir::lower::lower_async`]), JIT-compiles its poll function,
@@ -18,7 +18,7 @@ use cljrs_env::env::Env;
 use cljrs_interp::apply::select_arity;
 use cljrs_value::Value;
 
-use crate::jit_compiler::{CompiledFn, compile_jit_poll};
+use crate::jit::jit_compiler::{CompiledFn, compile_jit_poll};
 
 /// Compiled poll-fn modules kept alive for the process lifetime: each registered
 /// `poll_fn` pointer points into its module's executable memory.  Redefining an
@@ -26,7 +26,7 @@ use crate::jit_compiler::{CompiledFn, compile_jit_poll};
 /// is future work, mirroring the closure-escape epoch pinning elsewhere.
 static KEEPALIVE: Mutex<Vec<CompiledFn>> = Mutex::new(Vec::new());
 
-/// The async-compile hook installed by [`crate::init`].  Lowers the called
+/// The async-compile hook installed by [`crate::jit::init`].  Lowers the called
 /// `^:async` arity to a state machine, JIT-compiles its poll function, and
 /// registers it under the arity's `ir_arity_id`.  A no-op on any lowering or
 /// codegen failure, so the arity keeps tree-walking.

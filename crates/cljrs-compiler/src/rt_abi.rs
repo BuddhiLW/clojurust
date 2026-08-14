@@ -1847,24 +1847,23 @@ pub unsafe extern "C" fn rt_conj(coll: *const Value, val: *const Value) -> *cons
 
 // ── Function/closure construction ───────────────────────────────────────────
 
-/// Hook invoked whenever `rt_make_fn*` wraps a compiled function pointer into
-/// a closure value.
+/// Called whenever `rt_make_fn*` wraps a compiled function pointer into a
+/// closure value.
 ///
-/// Installed by `cljrs_jit::init`: the resulting `Value::NativeFunction` lives
-/// on the GC heap and captures a raw pointer into the executing JIT module, so
-/// the JIT pins that module's reclamation epoch.  Unset under AOT, where code
-/// is never unloaded.
-static CLOSURE_ESCAPE_HOOK: std::sync::OnceLock<fn()> = std::sync::OnceLock::new();
-
-/// Install the closure-escape hook (installed once by `cljrs_jit::init`).
-pub fn set_closure_escape_hook(f: fn()) {
-    let _ = CLOSURE_ESCAPE_HOOK.set(f);
-}
-
+/// The resulting `Value::NativeFunction` lives on the GC heap and captures a
+/// raw pointer into the *executing* module, which the active-frame scan cannot
+/// see — so the JIT code cache pins that module's reclamation epoch and never
+/// unloads it (a bounded leak, but sound).
+///
+/// Under AOT there is no executing JIT frame, so `current_jit_epoch` is `None`
+/// and this is a no-op: AOT code is never unloaded in the first place.  Before
+/// the JIT moved into this package the call had to be routed through a
+/// process-global `OnceLock` hook; [`crate::jit::code_cache`] is now a sibling
+/// module, so it is a direct call.
 #[inline]
 fn notify_closure_escape() {
-    if let Some(hook) = CLOSURE_ESCAPE_HOOK.get() {
-        hook();
+    if let Some(epoch) = cljrs_runtime::tiered::jit_state::current_jit_epoch() {
+        crate::jit::code_cache::pin_epoch(epoch);
     }
 }
 

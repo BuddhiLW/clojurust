@@ -209,7 +209,7 @@ cljrs deps status              # show cached vs missing deps
 | Feature             | Effect                                                                        |
 |---------------------|-------------------------------------------------------------------------------|
 | `async` (default **on**) | Pulls in `cljrs-async` and `cljrs-io` and builds the Tokio runtime that drives top-level async evaluation (see implementation notes). Without it, `^:async`/`core.async`/`clojure.rust.io.async` are unavailable and evaluation is purely synchronous. |
-| `no-gc` (default off) | Propagated to `cljrs-gc`/`cljrs-value`/`cljrs-eval`/`cljrs-compiler`/`cljrs-stdlib`/`cljrs-jit`.  Disables the tracing GC; only region-allocated and stack values are permitted.  Compiles fail (`AotError::NoGcBlacklist`) if the program contains allocations the optimizer can't lift onto regions. |
+| `no-gc` (default off) | Propagated to `cljrs-gc`/`cljrs-value`/`cljrs-eval`/`cljrs-compiler`/`cljrs-stdlib`.  Disables the tracing GC; only region-allocated and stack values are permitted.  Compiles fail (`AotError::NoGcBlacklist`) if the program contains allocations the optimizer can't lift onto regions. |
 | `enable-rustyline`  | Pulls in `rustyline` for a line-editing REPL.  Without it, `cljrs repl` falls back to a plain `BufRead` loop.                                                                                |
 
 Build with e.g. `cargo build --release --features enable-rustyline,no-gc`.

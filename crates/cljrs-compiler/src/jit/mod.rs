@@ -3,26 +3,29 @@
 //! ## How it fits into the execution tiers
 //!
 //! ```text
-//! call_cljrs_fn (cljrs-eval/src/apply.rs)
-//!     ↓ JIT-native   ← this crate publishes compiled function pointers
+//! call_cljrs_fn (cljrs-runtime/src/tiered/apply.rs)
+//!     ↓ JIT-native   ← this module publishes compiled function pointers
 //!     ↓ Tier-1 IR    ← invocation counter bumped here; enqueue when hot
 //!     ↓ Tree-walk    ← universal fallback
 //! ```
+//!
+//! The JIT shares `typeinfer`, `codegen`, and `rt_abi` with the AOT backends
+//! directly — they are sibling modules of this one, not a separate package.
 //!
 //! ## Usage
 //!
 //! Call [`init`] once at process startup (before any Clojure code runs):
 //!
 //! ```rust,ignore
-//! cljrs_jit::init();
+//! cljrs_compiler::jit::init();
 //! ```
 //!
 //! This:
-//! 1. Installs an enqueue hook in `cljrs_eval::jit_state`.
+//! 1. Installs an enqueue hook in `cljrs_runtime::tiered::jit_state`.
 //! 2. Spawns the background JIT worker thread.
 //!
 //! Functions reach IR via warm-threshold background lowering (Phase 10.7,
-//! owned by `cljrs-eval`): once a function's tree-walked call count exceeds
+//! owned by `cljrs-runtime`): once a function's tree-walked call count exceeds
 //! `CLJRS_IR_THRESHOLD` (default 50) it is lowered to optimized IR in the
 //! background and dispatch switches to the Tier-1 IR interpreter.  Hot
 //! functions (Tier-1 call count exceeding `CLJRS_JIT_THRESHOLD`, default
@@ -85,25 +88,13 @@ pub fn init() {
     // entry) take an uncaught `(throw …)` stashed by native code and re-raise
     // it as `EvalError::Thrown`.  cljrs-eval cannot depend on cljrs-compiler,
     // so the taker is threaded through as a hook here.
-    cljrs_eval::jit_state::set_pending_exception_hook(
-        cljrs_compiler::rt_abi::take_pending_exception_value,
-    );
+    cljrs_eval::jit_state::set_pending_exception_hook(crate::rt_abi::take_pending_exception_value);
 
     // Deoptimization (Phase 10.6): a specialized compilation's failed entry
     // guard returns rt_abi's sentinel pointer; the dispatch seam compares
     // result addresses against it via this hook and re-runs the call at
     // Tier 1.
-    cljrs_eval::jit_state::set_deopt_sentinel_hook(cljrs_compiler::rt_abi::deopt_sentinel_addr);
-
-    // Closure escape: when JIT code materializes a closure via `rt_make_fn*`,
-    // the resulting GC-managed value captures a raw pointer into the executing
-    // module.  The frame scan cannot see such values, so pin the module's
-    // epoch — it is never unloaded (bounded leak, sound).
-    cljrs_compiler::rt_abi::set_closure_escape_hook(|| {
-        if let Some(epoch) = cljrs_eval::jit_state::current_jit_epoch() {
-            code_cache::pin_epoch(epoch);
-        }
-    });
+    cljrs_eval::jit_state::set_deopt_sentinel_hook(crate::rt_abi::deopt_sentinel_addr);
 
     // Code unloading (Phase 10.2):
     //

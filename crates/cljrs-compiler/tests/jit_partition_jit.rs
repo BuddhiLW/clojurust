@@ -11,7 +11,7 @@ use cljrs_reader::Parser;
 use cljrs_value::Value;
 
 fn make_env() -> (std::sync::Arc<cljrs_env::env::GlobalEnv>, Env) {
-    cljrs_jit::init();
+    cljrs_compiler::jit::init();
     let _mutator = cljrs_gc::register_mutator();
     let globals = {
         let runtime = cljrs_runtime::Runtime::builder()

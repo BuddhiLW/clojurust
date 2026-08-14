@@ -135,7 +135,7 @@ fn hammer_until_native(env: &mut Env, fn_name: &str, arity_id: u64) -> Value {
 
 // ── The test ──────────────────────────────────────────────────────────────────
 
-/// Single test (not one per scenario): `cljrs_jit::init` installs process
+/// Single test (not one per scenario): `cljrs_compiler::jit::init` installs process
 /// globals, so scenarios share the booted environment.
 #[test]
 fn jit_native_code_resolves_pinned_symbols() {
@@ -144,7 +144,7 @@ fn jit_native_code_resolves_pinned_symbols() {
     // Tiny threshold so the worker kicks in after a handful of calls; must be
     // set before init.  init() also forces eager IR lowering.
     cljrs_eval::jit_state::set_jit_threshold(3);
-    cljrs_jit::init();
+    cljrs_compiler::jit::init();
 
     let _mutator = cljrs_gc::register_mutator();
     let globals = {
