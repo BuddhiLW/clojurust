@@ -821,20 +821,7 @@ dependencies = [
 name = "cljrs-builtins"
 version = "0.1.0"
 dependencies = [
- "bigdecimal",
- "cljrs-env",
- "cljrs-gc",
- "cljrs-reader",
- "cljrs-types",
- "cljrs-value",
- "num-bigint",
- "num-rational",
- "num-traits",
- "proptest",
- "rand 0.10.2",
- "regex",
- "rpds",
- "uuid",
+ "cljrs-runtime",
 ]
 
 [[package]]
@@ -928,31 +915,14 @@ dependencies = [
 name = "cljrs-env"
 version = "0.1.0"
 dependencies = [
- "cljrs-deps",
- "cljrs-gc",
- "cljrs-logging",
- "cljrs-reader",
- "cljrs-types",
- "cljrs-value",
- "cljrs-vcs",
- "log",
- "thiserror",
+ "cljrs-runtime",
 ]
 
 [[package]]
 name = "cljrs-eval"
 version = "0.1.0"
 dependencies = [
- "cljrs-builtins",
- "cljrs-env",
- "cljrs-gc",
- "cljrs-interp",
- "cljrs-ir",
- "cljrs-logging",
- "cljrs-reader",
- "cljrs-types",
- "cljrs-value",
- "tempfile",
+ "cljrs-runtime",
 ]
 
 [[package]]
@@ -993,17 +963,7 @@ dependencies = [
 name = "cljrs-interp"
 version = "0.1.0"
 dependencies = [
- "cljrs-builtins",
- "cljrs-env",
- "cljrs-gc",
- "cljrs-reader",
- "cljrs-types",
- "cljrs-value",
- "cljrs-vcs",
- "proptest",
- "regex",
- "tempfile",
- "uuid",
+ "cljrs-runtime",
 ]
 
 [[package]]
@@ -1139,9 +1099,26 @@ dependencies = [
 name = "cljrs-runtime"
 version = "0.1.0"
 dependencies = [
- "cljrs-eval",
+ "bigdecimal",
+ "cljrs-deps",
  "cljrs-gc",
+ "cljrs-ir",
+ "cljrs-logging",
+ "cljrs-reader",
  "cljrs-types",
+ "cljrs-value",
+ "cljrs-vcs",
+ "log",
+ "num-bigint",
+ "num-rational",
+ "num-traits",
+ "proptest",
+ "rand 0.10.2",
+ "regex",
+ "rpds",
+ "tempfile",
+ "thiserror",
+ "uuid",
 ]
 
 [[package]]

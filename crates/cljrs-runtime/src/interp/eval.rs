@@ -1,0 +1,2453 @@
+//! Top-level `eval` dispatcher and form-to-value conversion.
+
+use std::sync::Arc;
+
+use crate::builtins::form::{expand_pairs, expand_reader_conds, expand_reader_conds_cow};
+use crate::builtins::special::SPECIAL_FORMS;
+use crate::env::env::Env;
+use crate::env::error::{EvalError, EvalResult};
+use crate::interp::apply::eval_call;
+use crate::interp::special::eval_special;
+use crate::interp::syntax_quote::syntax_quote;
+use cljrs_gc::GcPtr;
+use cljrs_reader::Form;
+use cljrs_reader::form::FormKind;
+use cljrs_value::value::SetValue;
+use cljrs_value::{
+    FutureState, Keyword, MapValue, PersistentHashSet, PersistentList, PersistentVector, Symbol,
+    Value,
+};
+use regex::Regex;
+
+/// Evaluate a `Form` in the given `Env`.
+pub fn eval(form: &Form, env: &mut Env) -> EvalResult {
+    if !crate::env::gas::charge(1) {
+        return Err(EvalError::GasExhausted);
+    }
+    match &form.kind {
+        // ── Atoms ─────────────────────────────────────────────────────────
+        FormKind::Nil => Ok(Value::Nil),
+        FormKind::Bool(b) => Ok(Value::Bool(*b)),
+        FormKind::Int(n) => Ok(Value::Long(*n)),
+        FormKind::Float(f) => Ok(Value::Double(*f)),
+        FormKind::Symbolic(f) => Ok(Value::Double(*f)), // ##Inf etc.
+        FormKind::Str(s) => Ok(Value::string(s.clone())),
+        FormKind::Char(c) => Ok(Value::Char(*c)),
+        FormKind::BigInt(s) => crate::builtins::parse_bigint(s),
+        FormKind::BigDecimal(s) => crate::builtins::parse_bigdecimal(s),
+        FormKind::Ratio(s) => crate::builtins::parse_ratio(s),
+        FormKind::Regex(s) => {
+            let r = Regex::new(s);
+            match r {
+                Ok(r) => Ok(Value::Pattern(GcPtr::new(r))),
+                Err(e) => Err(EvalError::Runtime(e.to_string())),
+            }
+        }
+
+        // ── Identifiers ───────────────────────────────────────────────────
+        FormKind::Symbol(s) => eval_symbol(s, env),
+        FormKind::Keyword(s) => Ok(Value::keyword(Keyword::parse(s))),
+        FormKind::AutoKeyword(s) => {
+            let full = env
+                .globals
+                .resolve_auto_keyword(&env.current_ns, s)
+                .map_err(EvalError::Runtime)?;
+            Ok(Value::keyword(Keyword::parse(&full)))
+        }
+        // A symbol key from an auto-resolved namespaced map: in evaluated
+        // position it names a var, exactly as a written-out symbol key does.
+        FormKind::AutoSymbol(s) => {
+            let full = env
+                .globals
+                .resolve_auto_keyword(&env.current_ns, s)
+                .map_err(EvalError::Runtime)?;
+            eval_symbol(&full, env)
+        }
+
+        // ── Collections ───────────────────────────────────────────────────
+        FormKind::List(forms) => eval_list(forms, env),
+        FormKind::Vector(forms) => {
+            let forms = expand_reader_conds_cow(forms);
+            let mut vals: Vec<Value> = Vec::with_capacity(forms.len());
+            for f in forms.iter() {
+                let _root = crate::env::gc_roots::root_values(&vals);
+                vals.push(eval(f, env)?);
+            }
+            Ok(Value::Vector(GcPtr::new(PersistentVector::from_iter(vals))))
+        }
+        FormKind::Map(forms) => {
+            let forms = expand_pairs(forms).map_err(|_| {
+                EvalError::Runtime("map literal must have an even number of forms".into())
+            })?;
+            let mut pairs: Vec<Value> = Vec::with_capacity(forms.len());
+            for f in forms.iter() {
+                let _root = crate::env::gc_roots::root_values(&pairs);
+                pairs.push(eval(f, env)?);
+            }
+            let kv_pairs: Vec<(Value, Value)> = pairs
+                .chunks(2)
+                .map(|pair| (pair[0].clone(), pair[1].clone()))
+                .collect();
+            Ok(Value::Map(MapValue::from_pairs(kv_pairs)))
+        }
+        FormKind::Set(forms) => {
+            let forms = expand_reader_conds_cow(forms);
+            let mut vals: Vec<Value> = Vec::with_capacity(forms.len());
+            for f in forms.iter() {
+                let _root = crate::env::gc_roots::root_values(&vals);
+                vals.push(eval(f, env)?);
+            }
+            Ok(Value::Set(SetValue::Hash(GcPtr::new(
+                PersistentHashSet::from_iter(vals),
+            ))))
+        }
+
+        // ── Reader macros ─────────────────────────────────────────────────
+        // `'x` sugar: like the `quote` special form, `::kw` and an
+        // auto-resolved map's symbol keys resolve against the reading
+        // namespace before the form becomes data.
+        FormKind::Quote(inner) => {
+            let resolved = crate::builtins::form::resolve_auto_forms(inner, env)?;
+            crate::builtins::form::form_to_value(&resolved)
+        }
+        FormKind::SyntaxQuote(inner) => syntax_quote(inner, env),
+        FormKind::Unquote(_) => Err(EvalError::Runtime("unquote outside syntax-quote".into())),
+        FormKind::UnquoteSplice(_) => Err(EvalError::Runtime(
+            "unquote-splice outside syntax-quote".into(),
+        )),
+        FormKind::Deref(inner) => {
+            let v = eval(inner, env)?;
+            if env.is_async && matches!(v, Value::Future(_)) {
+                return Err(EvalError::Runtime(
+                    "deref (@) on a future is not allowed inside an ^:async function; use (await ...) instead".into(),
+                ));
+            }
+            deref_value(v)
+        }
+        FormKind::Var(inner) => {
+            if let FormKind::Symbol(s) = &inner.kind {
+                let parsed = Symbol::parse(s);
+                let ns: Arc<str> = match parsed.namespace.as_deref() {
+                    Some(ns_part) => env
+                        .globals
+                        .resolve_alias(&env.current_ns, ns_part)
+                        .unwrap_or_else(|| Arc::from(ns_part)),
+                    None => env.current_ns.clone(),
+                };
+                env.globals
+                    .lookup_var_in_ns(&ns, &parsed.name)
+                    .map(Value::Var)
+                    .ok_or_else(|| EvalError::UnboundSymbol(s.clone()))
+            } else {
+                Err(EvalError::Runtime("var requires a symbol".into()))
+            }
+        }
+        FormKind::Meta(_, form) => {
+            // Ignore metadata in Phase 4; just eval the annotated form.
+            eval(form, env)
+        }
+
+        // ── Dispatch ──────────────────────────────────────────────────────
+        FormKind::AnonFn(body) => {
+            let expanded = crate::builtins::form::expand_anon_fn(body, form.span.clone());
+            eval(&expanded, env)
+        }
+        FormKind::ReaderCond {
+            splicing: _,
+            clauses,
+        } => eval_reader_cond(clauses, env),
+        FormKind::TaggedLiteral(tag, inner) => eval_tagged_literal(tag, inner, env),
+    }
+}
+
+/// Evaluate a form with a cooperative execution-credit budget.
+///
+/// Nested tree-walker, IR-interpreter, and JIT work shares this budget.  The
+/// existing [`eval`] entry point remains unmetered unless called inside this
+/// dynamic scope.
+pub fn eval_with_gas(form: &Form, env: &mut Env, credits: u64) -> EvalResult {
+    let meter = crate::env::gas::GasMeter::new(credits);
+    let _guard = crate::env::gas::GasGuard::install(meter);
+    eval(form, env)
+}
+
+// ── List / call dispatch ──────────────────────────────────────────────────────
+
+fn eval_list(forms: &[Form], env: &mut Env) -> EvalResult {
+    if forms.is_empty() {
+        return Ok(Value::List(GcPtr::new(PersistentList::empty())));
+    }
+
+    // Expand reader conditionals (both splicing and non-splicing) before dispatch.
+    let expanded: Vec<Form>;
+    let forms: &[Form] = if forms
+        .iter()
+        .any(|f| matches!(f.kind, FormKind::ReaderCond { .. }))
+    {
+        expanded = expand_reader_conds(forms);
+        if expanded.is_empty() {
+            return Ok(Value::List(GcPtr::new(PersistentList::empty())));
+        }
+        &expanded
+    } else {
+        forms
+    };
+
+    // Check for special form.
+    if let FormKind::Symbol(s) = &forms[0].kind
+        && is_special_form(s)
+    {
+        return eval_special(s, &forms[1..], env);
+    }
+
+    eval_call(&forms[0], &forms[1..], env)
+}
+
+// ── Symbol resolution ─────────────────────────────────────────────────────────
+
+fn eval_symbol(s: &str, env: &mut Env) -> EvalResult {
+    let sym = Symbol::parse(s);
+
+    // Explicit version suffix (`name@hash` or `ns/name@hash`): always a
+    // namespace-level lookup — no local-frame fallback.
+    #[cfg(not(target_arch = "wasm32"))]
+    if let Some(ref commit) = sym.version.clone() {
+        crate::env::policy::check_versioned_lookup()?;
+        return crate::interp::versioned::resolve_versioned_symbol(&sym, commit, env);
+    }
+    #[cfg(target_arch = "wasm32")]
+    if sym.version.is_some() {
+        return Err(crate::env::error::EvalError::Runtime(
+            "versioned symbols are not supported in WASM".to_string(),
+        ));
+    }
+
+    // Local frames (params, let-bindings, closed-over vars) take priority for
+    // unversioned symbols.
+    if let Some(v) = env.lookup_local_frames(s) {
+        return Ok(v);
+    }
+
+    // Inherited versioned context: if we are evaluating inside a versioned
+    // function body, unversioned same-namespace symbols resolve at the inherited
+    // commit rather than HEAD.  "Same namespace" includes a qualified
+    // self-reference written with the base name (`mylib/x` inside `mylib@hash`).
+    #[cfg(not(target_arch = "wasm32"))]
+    if let Some(commit) = env.versioned_eval_commit.clone() {
+        let is_same_ns = sym.namespace.is_none()
+            || sym.namespace.as_deref() == Some(env.current_ns.as_ref())
+            || sym.namespace.as_deref()
+                == Some(crate::env::versioned::base_ns_name(&env.current_ns));
+        if is_same_ns {
+            return crate::interp::versioned::resolve_versioned_symbol(&sym, &commit, env);
+        }
+    }
+
+    // Fall through to normal global namespace lookup.
+    if let Some(v) = env.globals.lookup_in_ns(&env.current_ns, s) {
+        return Ok(v);
+    }
+
+    // Namespace-qualified external symbol: `ns/name`
+    if s.contains('/')
+        && !s.starts_with('/')
+        && let Some(ns_part) = &sym.namespace
+    {
+        let resolved: Arc<str> = env
+            .globals
+            .resolve_alias(&env.current_ns, ns_part)
+            .unwrap_or_else(|| Arc::from(ns_part.as_ref()));
+        // Qualified self-reference inside a versioned namespace: `mylib/x`
+        // written in `mylib@hash`'s own source resolves at the pinned commit,
+        // i.e. inside the versioned namespace itself.
+        #[cfg(not(target_arch = "wasm32"))]
+        let resolved: Arc<str> = if env.current_ns.as_ref() != resolved.as_ref()
+            && crate::env::versioned::base_ns_name(&env.current_ns) == resolved.as_ref()
+        {
+            env.current_ns.clone()
+        } else {
+            resolved
+        };
+        return env
+            .globals
+            .lookup_in_ns(&resolved, &sym.name)
+            .ok_or_else(|| EvalError::UnboundSymbol(s.to_string()));
+    }
+
+    // JVM class names resolve to themselves as symbols (for instance?, catch, etc.)
+    if is_jvm_class_name(s) {
+        return Ok(Value::symbol(Symbol::simple(s)));
+    }
+
+    Err(EvalError::UnboundSymbol(s.to_string()))
+}
+
+/// Recognise JVM-style class names used in Clojure for `instance?`, `catch`, etc.
+pub fn is_jvm_class_name(s: &str) -> bool {
+    matches!(
+        s,
+        "clojure.lang.BigInt"
+            | "java.math.BigDecimal"
+            | "java.math.BigInteger"
+            | "clojure.lang.Ratio"
+            | "java.lang.Long"
+            | "java.lang.Double"
+            | "java.lang.String"
+            | "java.lang.Boolean"
+            | "java.lang.Character"
+            | "java.lang.Number"
+            | "clojure.lang.Symbol"
+            | "clojure.lang.Keyword"
+            | "clojure.lang.PersistentList"
+            | "clojure.lang.PersistentVector"
+            | "clojure.lang.PersistentHashMap"
+            | "clojure.lang.PersistentHashSet"
+            | "clojure.lang.PersistentArrayMap"
+            | "clojure.lang.IFn"
+            | "clojure.lang.ISeq"
+            | "clojure.lang.IPending"
+            | "clojure.lang.Atom"
+            | "clojure.lang.Var"
+            | "clojure.lang.Namespace"
+            | "java.util.UUID"
+            | "java.lang.Exception"
+            | "java.lang.Throwable"
+            | "java.lang.Error"
+            | "Exception"
+            | "Throwable"
+            | "Error"
+            | "clojure.lang.ExceptionInfo"
+            | "clojure.lang.IEditableCollection"
+            | "Boolean"
+            | "clojure.lang.PersistentQueue"
+            | "java.util.regex.Pattern"
+    )
+}
+
+// ── is_special_form ───────────────────────────────────────────────────────────
+
+pub fn is_special_form(s: &str) -> bool {
+    SPECIAL_FORMS.contains(&s)
+}
+
+// ── eval_body ─────────────────────────────────────────────────────────────────
+
+/// Dereference a value: used by `@x` reader macro and the `deref` builtin.
+pub fn deref_value(v: Value) -> EvalResult {
+    match v {
+        Value::Atom(a) => Ok(a.get().deref()),
+        Value::SharedAtom(sa) => Ok(cljrs_value::demote(&sa.deref_val())),
+        Value::Var(var) => crate::env::dynamics::deref_var(&var)
+            .ok_or_else(|| EvalError::Runtime("unbound var".into())),
+        Value::Volatile(vol) => Ok(vol.get().deref()),
+        Value::Delay(d) => d.get().force().map_err(EvalError::Runtime),
+        Value::Agent(a) => Ok(a.get().get_state()),
+        Value::Reduced(inner) => Ok(*inner),
+        Value::Promise(p) => Ok(p.get().deref_blocking()),
+        Value::Future(f) => {
+            let mut guard = f.get().state.lock().unwrap();
+            loop {
+                match &*guard {
+                    FutureState::Done(v) => {
+                        f.get().mark_observed();
+                        return Ok(v.clone());
+                    }
+                    FutureState::Failed(v) => {
+                        f.get().mark_observed();
+                        return Err(EvalError::Thrown(v.clone()));
+                    }
+                    FutureState::GasExhausted => {
+                        f.get().mark_observed();
+                        return Err(EvalError::GasExhausted);
+                    }
+                    FutureState::Cancelled => {
+                        return Err(EvalError::Runtime("future was cancelled".into()));
+                    }
+                    FutureState::Running => {
+                        guard = f.get().cond.wait(guard).unwrap();
+                    }
+                }
+            }
+        }
+        other => Err(EvalError::Runtime(format!(
+            "cannot deref {}",
+            other.type_name()
+        ))),
+    }
+}
+
+/// Evaluate a sequence of forms and return the value of the last one.
+pub fn eval_body(forms: &[Form], env: &mut Env) -> EvalResult {
+    let mut result = Value::Nil;
+    for form in forms {
+        result = eval(form, env)?;
+    }
+    Ok(result)
+}
+
+// ── reader cond ───────────────────────────────────────────────────────────────
+
+fn eval_reader_cond(clauses: &[Form], env: &mut Env) -> EvalResult {
+    // clauses = [kw form kw form ...]
+    let mut i = 0;
+    let mut default: Option<&Form> = None;
+    while i + 1 < clauses.len() {
+        match &clauses[i].kind {
+            FormKind::Keyword(k) if k == "rust" => {
+                return eval(&clauses[i + 1], env);
+            }
+            FormKind::Keyword(k) if k == "default" => {
+                default = Some(&clauses[i + 1]);
+            }
+            _ => {}
+        }
+        i += 2;
+    }
+    match default {
+        Some(f) => eval(f, env),
+        None => Ok(Value::Nil),
+    }
+}
+
+// ── tagged literals ──────────────────────────────────────────────────────────
+
+fn eval_tagged_literal(tag: &str, inner: &Form, env: &mut Env) -> EvalResult {
+    match tag {
+        "uuid" => {
+            let val = eval(inner, env)?;
+            match &val {
+                Value::Str(s) => {
+                    let uuid = uuid::Uuid::parse_str(s.get())
+                        .map_err(|e| EvalError::Runtime(format!("invalid UUID: {e}")))?;
+                    Ok(Value::Uuid(uuid.as_u128()))
+                }
+                _ => Err(EvalError::Runtime(format!(
+                    "#uuid expects a string, got {}",
+                    val.type_name()
+                ))),
+            }
+        }
+        "inst" => {
+            // TODO: implement #inst for date/time literals
+            let val = eval(inner, env)?;
+            Ok(val)
+        }
+        _ => Err(EvalError::Runtime(format!(
+            "unknown tagged literal: #{tag}"
+        ))),
+    }
+}
+
+// ── Tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::env::env::GlobalEnv;
+    use std::sync::Arc;
+
+    fn make_env() -> (Arc<GlobalEnv>, Env) {
+        let globals = crate::interp::standard_env(None, None, None);
+        let env = Env::new(globals.clone(), "user");
+        (globals, env)
+    }
+
+    fn eval_str(src: &str) -> EvalResult {
+        let (_, mut env) = make_env();
+        eval_src(src, &mut env)
+    }
+
+    fn eval_src(src: &str, env: &mut Env) -> EvalResult {
+        let mut parser = cljrs_reader::Parser::new(src.to_string(), "<test>".to_string());
+        let forms = parser.parse_all().map_err(EvalError::Read)?;
+        let mut result = Value::Nil;
+        for form in forms {
+            result = eval(&form, env)?;
+        }
+        Ok(result)
+    }
+
+    fn long(n: i64) -> Value {
+        Value::Long(n)
+    }
+    fn bool_v(b: bool) -> Value {
+        Value::Bool(b)
+    }
+
+    // ── Atoms ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_literal_int() {
+        assert_eq!(eval_str("42").unwrap(), long(42));
+    }
+
+    #[test]
+    fn test_literal_string() {
+        assert!(matches!(eval_str("\"hello\"").unwrap(), Value::Str(_)));
+    }
+
+    #[test]
+    fn test_literal_nil() {
+        assert_eq!(eval_str("nil").unwrap(), Value::Nil);
+    }
+
+    #[test]
+    fn test_literal_true() {
+        assert_eq!(eval_str("true").unwrap(), bool_v(true));
+    }
+
+    #[test]
+    fn test_literal_false() {
+        assert_eq!(eval_str("false").unwrap(), bool_v(false));
+    }
+
+    // ── Arithmetic ────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_add() {
+        assert_eq!(eval_str("(+ 1 2)").unwrap(), long(3));
+    }
+
+    #[test]
+    fn test_mul() {
+        assert_eq!(eval_str("(* 2 3)").unwrap(), long(6));
+    }
+
+    #[test]
+    fn test_div_exact() {
+        assert_eq!(eval_str("(/ 10 2)").unwrap(), long(5));
+    }
+
+    #[test]
+    fn test_sub() {
+        assert_eq!(eval_str("(- 10 3)").unwrap(), long(7));
+    }
+
+    // ── let ───────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_let_simple() {
+        assert_eq!(eval_str("(let* [x 1 y 2] (+ x y))").unwrap(), long(3));
+    }
+
+    #[test]
+    fn test_let_shadowing() {
+        assert_eq!(eval_str("(let* [x 1] (let* [x 10] x))").unwrap(), long(10));
+    }
+
+    // ── fn + call ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_fn_call() {
+        assert_eq!(eval_str("((fn* [x] (* x x)) 5)").unwrap(), long(25));
+    }
+
+    #[test]
+    fn test_closure_capture() {
+        assert_eq!(
+            eval_str("(let* [n 3] ((fn* [x] (+ x n)) 4))").unwrap(),
+            long(7)
+        );
+    }
+
+    #[test]
+    fn test_multi_arity_fn() {
+        assert_eq!(
+            eval_str("((fn* ([x] x) ([x y] (+ x y))) 1 2)").unwrap(),
+            long(3)
+        );
+    }
+
+    // ── recur / loop ──────────────────────────────────────────────────────
+
+    #[test]
+    fn test_loop_recur() {
+        let result =
+            eval_str("(loop* [i 0 acc 0] (if (= i 5) acc (recur (inc i) (+ acc i))))").unwrap();
+        assert_eq!(result, long(10));
+    }
+
+    // ── def / defn ────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_def() {
+        let (_, mut env) = make_env();
+        eval_src("(def x 42)", &mut env).unwrap();
+        assert_eq!(eval_src("x", &mut env).unwrap(), long(42));
+    }
+
+    #[test]
+    fn test_defn() {
+        let (_, mut env) = make_env();
+        eval_src("(defn square [x] (* x x))", &mut env).unwrap();
+        assert_eq!(eval_src("(square 7)", &mut env).unwrap(), long(49));
+    }
+
+    // ── if ────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_if_truthy() {
+        assert_eq!(eval_str("(if true 1 2)").unwrap(), long(1));
+    }
+
+    #[test]
+    fn test_if_falsy() {
+        assert_eq!(eval_str("(if false 1 2)").unwrap(), long(2));
+    }
+
+    #[test]
+    fn test_if_nil_branch() {
+        assert_eq!(eval_str("(if false 1)").unwrap(), Value::Nil);
+    }
+
+    // ── do ────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_do() {
+        assert_eq!(eval_str("(do 1 2 3)").unwrap(), long(3));
+    }
+
+    // ── quote ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_quote_list() {
+        let v = eval_str("'(1 2 3)").unwrap();
+        assert!(matches!(v, Value::List(_)));
+    }
+
+    // ── keyword lookup ────────────────────────────────────────────────────
+
+    #[test]
+    fn test_keyword_lookup() {
+        assert_eq!(eval_str("(:a {:a 1})").unwrap(), long(1));
+    }
+
+    #[test]
+    fn test_keyword_lookup_missing() {
+        assert_eq!(eval_str("(:b {:a 1})").unwrap(), Value::Nil);
+    }
+
+    // ── Map / Vector / Set literals ───────────────────────────────────────
+
+    #[test]
+    fn test_map_literal() {
+        let v = eval_str("{:a 1 :b 2}").unwrap();
+        assert!(matches!(v, Value::Map(_)));
+        if let Value::Map(m) = &v {
+            assert_eq!(m.count(), 2);
+        }
+    }
+
+    #[test]
+    fn test_vector_literal() {
+        let v = eval_str("[1 2 3]").unwrap();
+        assert!(matches!(v, Value::Vector(_)));
+    }
+
+    #[test]
+    fn test_set_literal() {
+        let v = eval_str("#{1 2 3}").unwrap();
+        assert!(matches!(v, Value::Set(_)));
+    }
+
+    #[test]
+    fn test_contains_q_vector_non_integer_key_returns_false() {
+        // Regression for #206: non-integer key on a vector must return false,
+        // not throw a WrongType error.
+        assert_eq!(eval_str("(contains? [1 2 3] :a)").unwrap(), bool_v(false));
+        assert_eq!(
+            eval_str("(contains? [1 2 3] \"x\")").unwrap(),
+            bool_v(false)
+        );
+        // Integer keys still work correctly.
+        assert_eq!(eval_str("(contains? [1 2 3] 0)").unwrap(), bool_v(true));
+        assert_eq!(eval_str("(contains? [1 2 3] 9)").unwrap(), bool_v(false));
+    }
+
+    // ── set! ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_set_bang() {
+        let (_, mut env) = make_env();
+        eval_src("(def x 1)", &mut env).unwrap();
+        eval_src("(set! x 99)", &mut env).unwrap();
+        assert_eq!(eval_src("x", &mut env).unwrap(), long(99));
+    }
+
+    // ── throw / try / catch ───────────────────────────────────────────────
+
+    #[test]
+    fn test_throw_catch() {
+        let v = eval_str("(try (throw (ex-info \"oops\" {})) (catch Exception e (ex-message e)))")
+            .unwrap();
+        assert!(matches!(v, Value::Str(_)));
+    }
+
+    #[test]
+    fn test_try_no_throw() {
+        assert_eq!(eval_str("(try 42)").unwrap(), long(42));
+    }
+
+    #[test]
+    fn test_catch_default_catches_internal_value_errors() {
+        // Regression for #168: internal `ValueError`s (IndexOutOfBounds, WrongType)
+        // raised by core ops must be caught by the ClojureScript `:default` keyword,
+        // not just by symbol catch types.
+        for src in [
+            "(try (nth [1 2 3] 10) (catch :default e \"caught\"))",
+            "(try (aget (long-array 3) 10) (catch :default e \"caught\"))",
+            "(try (aset (long-array 3) 10 5) (catch :default e \"caught\"))",
+        ] {
+            let v = eval_str(src).unwrap();
+            assert_eq!(v, Value::string("caught"), "{src}");
+        }
+    }
+
+    #[test]
+    fn test_catch_default_binds_clean_ex_message() {
+        // The caught value is a normalized exception: `ex-message` returns the
+        // plain `ValueError` text with no `runtime error:` prefix, matching how a
+        // user `throw` / `ex-info` value behaves.
+        let v = eval_str("(try (nth [1 2 3] 10) (catch :default e (ex-message e)))").unwrap();
+        assert_eq!(v, Value::string("index out of bounds: 10 >= 3"));
+    }
+
+    #[test]
+    fn test_finally_runs_and_value_is_discarded() {
+        // finally executes for its side effect, but the `try` value is the body's.
+        let v = eval_str("(let [a (atom 0)] (try 1 (finally (reset! a 5))) @a)").unwrap();
+        assert_eq!(v, long(5));
+        assert_eq!(eval_str("(try 1 (finally 2))").unwrap(), long(1));
+    }
+
+    #[test]
+    fn test_finally_runs_after_catch() {
+        let v = eval_str(
+            "(let [a (atom 0)]
+               (try (throw (ex-info \"x\" {})) (catch Exception e :caught)
+                 (finally (reset! a 9)))
+               @a)",
+        )
+        .unwrap();
+        assert_eq!(v, long(9));
+    }
+
+    #[test]
+    fn test_finally_exception_propagates() {
+        // An exception thrown from `finally` supersedes the body's result.
+        assert!(eval_str("(try 1 (finally (throw (ex-info \"boom\" {}))))").is_err());
+    }
+
+    #[test]
+    fn test_catch_reader_conditional_type() {
+        // Regression for #210: a reader conditional in the catch type position must
+        // be resolved before matching — previously the catch clause was silently
+        // dropped and the exception escaped.
+
+        // Single-branch: #?(:rust Exception)
+        let v =
+            eval_str(r#"(try (throw (ex-info "boom" {})) (catch #?(:rust Exception) e :caught))"#)
+                .unwrap();
+        let kw_caught = Value::keyword(cljrs_value::Keyword::simple("caught"));
+        assert_eq!(v, kw_caught, "single-branch reader cond");
+
+        // Multi-branch: the :rust branch must win over :clj/:cljs/:default ordering
+        let v = eval_str(concat!(
+            "(try (throw (ex-info \"boom\" {})) ",
+            "(catch #?(:clj Throwable :cljs :default :rust Exception) e :caught))",
+        ))
+        .unwrap();
+        assert_eq!(v, kw_caught, "multi-branch reader cond");
+
+        // A reader conditional whose :rust branch resolves to :default is also a
+        // catch-all and must match any exception.
+        let v =
+            eval_str(r#"(try (throw (ex-info "boom" {})) (catch #?(:rust :default) e :caught))"#)
+                .unwrap();
+        assert_eq!(v, kw_caught, "reader cond resolves to :default");
+
+        // A reader conditional with no :rust branch must NOT catch the exception.
+        let result =
+            eval_str(r#"(try (throw (ex-info "boom" {})) (catch #?(:clj Throwable) e :caught))"#);
+        assert!(
+            result.is_err(),
+            "no matching :rust branch must let exception escape"
+        );
+    }
+
+    #[test]
+    fn test_nth_negative_index() {
+        // Negative index returns the not-found default, or throws without one.
+        assert_eq!(
+            eval_str("(= (nth [10 20 30] -1 :nf) :nf)").unwrap(),
+            bool_v(true)
+        );
+        assert!(eval_str("(nth [10 20 30] -1)").is_err());
+        assert!(eval_str("(nth '(1 2 3) -1)").is_err());
+        // Crucially, must NOT hang walking an infinite lazy seq to usize::MAX.
+        assert_eq!(
+            eval_str("(= (nth (range) -1 :nf) :nf)").unwrap(),
+            bool_v(true)
+        );
+        assert_eq!(
+            eval_str("(= (nth '(1 2 3) -1 :nf) :nf)").unwrap(),
+            bool_v(true)
+        );
+    }
+
+    // ── destructuring ─────────────────────────────────────────────────────
+
+    #[test]
+    fn test_sequential_destructure() {
+        assert_eq!(eval_str("(let* [[a b] [1 2]] (+ a b))").unwrap(), long(3));
+    }
+
+    #[test]
+    fn test_rest_destructure() {
+        let v = eval_str("(let* [[h & t] [1 2 3]] t)").unwrap();
+        assert!(matches!(v, Value::List(_)));
+        if let Value::List(l) = &v {
+            assert_eq!(l.get().count(), 2);
+        }
+    }
+
+    // ── defmacro ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_defmacro() {
+        let (_, mut env) = make_env();
+        eval_src("(defmacro my-if [t a b] (list 'if t a b))", &mut env).unwrap();
+        assert_eq!(eval_src("(my-if true 1 2)", &mut env).unwrap(), long(1));
+        assert_eq!(eval_src("(my-if false 1 2)", &mut env).unwrap(), long(2));
+    }
+
+    // ── syntax-quote ──────────────────────────────────────────────────────
+
+    #[test]
+    fn test_syntax_quote_basic() {
+        let (_, mut env) = make_env();
+        eval_src("(def b 2)", &mut env).unwrap();
+        let v = eval_src("`(a ~b)", &mut env).unwrap();
+        assert!(matches!(v, Value::List(_)));
+        if let Value::List(l) = &v {
+            // Should be (user/a 2)
+            let items: Vec<_> = l.get().iter().cloned().collect();
+            assert_eq!(items.len(), 2);
+            assert_eq!(items[1], long(2));
+        }
+    }
+
+    // ── reader conditionals ───────────────────────────────────────────────
+
+    #[test]
+    fn test_reader_cond_rust() {
+        // :rust branch selected.
+        assert_eq!(eval_str("#?(:rust 1 :clj 2)").unwrap(), long(1));
+    }
+
+    #[test]
+    fn test_reader_cond_default() {
+        // No :rust; fall through to :default.
+        assert_eq!(eval_str("#?(:clj 2 :default 99)").unwrap(), long(99));
+    }
+
+    #[test]
+    fn test_reader_cond_splice_in_vector() {
+        assert_eq!(
+            eval_str("[1 #?@(:rust [:a :b]) 2]").unwrap(),
+            eval_str("[1 :a :b 2]").unwrap()
+        );
+    }
+
+    #[test]
+    fn test_reader_cond_splice_in_set() {
+        assert_eq!(
+            eval_str("#{1 #?@(:rust [2 3]) 4}").unwrap(),
+            eval_str("#{1 2 3 4}").unwrap()
+        );
+    }
+
+    #[test]
+    fn test_reader_cond_splice_in_map() {
+        assert_eq!(
+            eval_str("{:a 1 #?@(:rust [:b 2]) :c 3}").unwrap(),
+            eval_str("{:a 1 :b 2 :c 3}").unwrap()
+        );
+    }
+
+    #[test]
+    fn test_reader_cond_splice_in_call_args() {
+        assert_eq!(
+            eval_str("(vector 1 #?@(:rust [2 3]) 4)").unwrap(),
+            eval_str("[1 2 3 4]").unwrap()
+        );
+    }
+
+    #[test]
+    fn test_reader_cond_splice_no_match_removed() {
+        assert_eq!(
+            eval_str("[1 #?@(:clj [:a :b]) 2]").unwrap(),
+            eval_str("[1 2]").unwrap()
+        );
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(48))]
+        /// Splicing `#?@(:rust mid)` into any container evaluates to the same
+        /// value as inlining `mid` literally - for vector, set, data-list, and
+        /// call arguments. Elements are distinct so set literals stay legal.
+        #[test]
+        fn prop_splice_evals_as_inline_in_every_container(
+            np in 0usize..3, nm in 0usize..3, ns in 0usize..3,
+        ) {
+            let kw_run = |start: usize, n: usize| {
+                (start..start + n)
+                    .map(|i| format!(":v{i}"))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            };
+            let p = kw_run(0, np);
+            let m = kw_run(np, nm);
+            let s = kw_run(np + nm, ns);
+            for (open, close, quote) in
+                [("[", "]", ""), ("#{", "}", ""), ("(", ")", "'"), ("(vector ", ")", "")]
+            {
+                let spliced = format!("{quote}{open}{p} #?@(:rust [{m}]) {s}{close}");
+                let inlined = format!("{quote}{open}{p} {m} {s}{close}");
+                proptest::prop_assert_eq!(
+                    eval_str(&spliced).unwrap(),
+                    eval_str(&inlined).unwrap(),
+                    "container {}{}",
+                    open,
+                    close
+                );
+            }
+        }
+    }
+
+    // ── Reader conditionals: cross-path and binding-vector properties ─────
+    //
+    // One generated position in a container or binding vector. Names are
+    // assigned by index, so generated elements are distinct and set literals
+    // stay legal.
+
+    #[derive(Clone, Debug)]
+    enum Slot {
+        /// A plain element; contributes 1.
+        Plain,
+        /// `#?(…)`; contributes 1 when the branch key matches, else 0.
+        NonSplice { matches: bool },
+        /// `#?@(…)`; contributes `n` when the branch key matches, else 0.
+        Splice { matches: bool, n: usize },
+    }
+
+    fn slot_strat() -> impl proptest::strategy::Strategy<Value = Slot> {
+        use proptest::strategy::{Just, Strategy};
+        proptest::prop_oneof![
+            Just(Slot::Plain),
+            proptest::bool::ANY.prop_map(|matches| Slot::NonSplice { matches }),
+            (proptest::bool::ANY, 0usize..3).prop_map(|(matches, n)| Slot::Splice { matches, n }),
+        ]
+    }
+
+    /// Render `slots` twice - conditionals written out, and branches inlined -
+    /// with `unit` forms per contributed position. `unit(i)` renders element
+    /// `i`; a unit of two tokens (`x0 0`) keeps pair parity even, which is what
+    /// binding vectors need.
+    fn render_slots(slots: &[Slot], unit: &dyn Fn(usize) -> String) -> (String, String) {
+        let mut next = 0usize;
+        let (mut written, mut inlined) = (Vec::new(), Vec::new());
+        for slot in slots {
+            match *slot {
+                Slot::Plain => {
+                    let u = unit(next);
+                    next += 1;
+                    written.push(u.clone());
+                    inlined.push(u);
+                }
+                Slot::NonSplice { matches } => {
+                    let u = unit(next);
+                    next += 1;
+                    let key = if matches { "rust" } else { "clj" };
+                    written.push(format!("#?(:{key} {u})"));
+                    if matches {
+                        inlined.push(u);
+                    }
+                }
+                Slot::Splice { matches, n } => {
+                    let us: Vec<String> = (0..n)
+                        .map(|_| {
+                            let u = unit(next);
+                            next += 1;
+                            u
+                        })
+                        .collect();
+                    let key = if matches { "rust" } else { "clj" };
+                    written.push(format!("#?@(:{key} [{}])", us.join(" ")));
+                    if matches {
+                        inlined.extend(us);
+                    }
+                }
+            }
+        }
+        (written.join(" "), inlined.join(" "))
+    }
+
+    /// Binding vectors take pairs, and a non-splicing `#?` selects exactly one
+    /// form - so it cannot carry a `name init` pair. Only plain positions and
+    /// `#?@` splices can appear there.
+    fn pair_slot_strat() -> impl proptest::strategy::Strategy<Value = Slot> {
+        use proptest::strategy::{Just, Strategy};
+        proptest::prop_oneof![
+            Just(Slot::Plain),
+            (proptest::bool::ANY, 0usize..3).prop_map(|(matches, n)| Slot::Splice { matches, n }),
+        ]
+    }
+
+    fn kw_unit(i: usize) -> String {
+        format!(":k{i}")
+    }
+
+    /// `x<i> <i>` - one binding pair, so every contributed position keeps the
+    /// vector's parity even.
+    fn binding_unit(i: usize) -> String {
+        format!("x{i} {i}")
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(48))]
+
+        /// A form's meaning must not depend on which path reads it. For the same
+        /// container, evaluating it, quoting it, and syntax-quoting it all agree
+        /// with the hand-inlined spelling. Before this fix the quoted and
+        /// syntax-quoted paths dropped or nil-filled splices that the evaluated
+        /// path expanded.
+        #[test]
+        fn prop_splice_agrees_across_eval_quote_and_syntax_quote(
+            slots in proptest::collection::vec(slot_strat(), 0..5),
+        ) {
+            let (written, inlined) = render_slots(&slots, &kw_unit);
+            let even = inlined.split_whitespace().count().is_multiple_of(2);
+            for (open, close) in [("[", "]"), ("#{", "}"), ("{", "}")] {
+                if open == "{" && !even {
+                    continue;
+                }
+                for prefix in ["", "'", "`"] {
+                    let got = eval_str(&format!("{prefix}{open}{written}{close}"));
+                    let want = eval_str(&format!("{prefix}{open}{inlined}{close}"));
+                    proptest::prop_assert_eq!(
+                        got.map_err(|e| e.to_string()),
+                        want.map_err(|e| e.to_string()),
+                        "prefix {:?} container {}{}", prefix, open, close
+                    );
+                }
+            }
+            // Data lists have no evaluated spelling; check both quoted forms.
+            for prefix in ["'", "`"] {
+                let got = eval_str(&format!("{prefix}({written})"));
+                let want = eval_str(&format!("{prefix}({inlined})"));
+                proptest::prop_assert_eq!(
+                    got.map_err(|e| e.to_string()),
+                    want.map_err(|e| e.to_string()),
+                    "prefix {:?} list", prefix
+                );
+            }
+        }
+
+        /// Every binding vector resolves conditionals: `let*`, `loop*` and
+        /// `binding` bind exactly what the inlined spelling binds.
+        #[test]
+        fn prop_splice_in_binding_vectors_equals_inline(
+            slots in proptest::collection::vec(pair_slot_strat(), 0..4),
+        ) {
+            let (written, inlined) = render_slots(&slots, &binding_unit);
+            let names: Vec<String> = inlined
+                .split_whitespace()
+                .step_by(2)
+                .map(str::to_string)
+                .collect();
+            let body = format!("[{}]", names.join(" "));
+            for head in ["let*", "loop*"] {
+                let got = eval_str(&format!("({head} [{written}] {body})"));
+                let want = eval_str(&format!("({head} [{inlined}] {body})"));
+                proptest::prop_assert_eq!(
+                    got.map_err(|e| e.to_string()),
+                    want.map_err(|e| e.to_string()),
+                    "{}", head
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn quoted_map_splice_lands_in_key_value_positions() {
+        assert_eq!(
+            eval_str("'{:a 1 #?@(:rust [:b 2]) :c 3}").unwrap(),
+            eval_str("{:a 1 :b 2 :c 3}").unwrap()
+        );
+    }
+
+    #[test]
+    fn syntax_quoted_splice_is_expanded_not_nil() {
+        assert_eq!(
+            eval_str("`(1 #?@(:rust [2 3]) 4)").unwrap(),
+            eval_str("'(1 2 3 4)").unwrap()
+        );
+    }
+
+    #[test]
+    fn map_literal_with_only_an_unmatched_conditional_reads_as_empty() {
+        // The written parity is odd, the expansion is empty - the reader must
+        // defer rather than reject.
+        assert_eq!(eval_str("{#?(:clj :a)}").unwrap(), eval_str("{}").unwrap());
+    }
+
+    #[test]
+    fn loop_binding_vector_expands_splices() {
+        assert_eq!(eval_str("(loop* [#?@(:rust [x 1])] x)").unwrap(), long(1));
+    }
+
+    // ── Error cases ───────────────────────────────────────────────────────
+
+    #[test]
+    fn test_unbound_symbol() {
+        let r = eval_str("undefined-var-xyz");
+        assert!(matches!(r, Err(EvalError::UnboundSymbol(_))));
+    }
+
+    #[test]
+    fn test_wrong_arity() {
+        let (_, mut env) = make_env();
+        eval_src("(defn one-arg [x] x)", &mut env).unwrap();
+        let r = eval_src("(one-arg 1 2)", &mut env);
+        assert!(matches!(r, Err(EvalError::Arity { .. })));
+    }
+
+    #[test]
+    fn test_not_callable() {
+        let r = eval_str("(42 1 2)");
+        assert!(matches!(r, Err(EvalError::NotCallable(_))));
+    }
+
+    // ── Higher-order functions (bootstrap) ────────────────────────────────
+
+    #[test]
+    fn test_map_fn() {
+        assert_eq!(
+            eval_str("(vec (map inc [1 2 3]))").unwrap(),
+            eval_str("[2 3 4]").unwrap()
+        );
+    }
+
+    #[test]
+    fn test_filter_fn() {
+        assert_eq!(
+            eval_str("(vec (filter odd? [1 2 3 4 5]))").unwrap(),
+            eval_str("[1 3 5]").unwrap()
+        );
+    }
+
+    #[test]
+    fn test_reduce_fn() {
+        assert_eq!(eval_str("(reduce + [1 2 3 4 5])").unwrap(), long(15));
+    }
+
+    #[test]
+    fn test_apply_fn() {
+        assert_eq!(eval_str("(apply + [1 2 3])").unwrap(), long(6));
+    }
+
+    #[test]
+    fn test_atom_ops() {
+        let (_, mut env) = make_env();
+        eval_src("(def a (atom 0))", &mut env).unwrap();
+        eval_src("(swap! a inc)", &mut env).unwrap();
+        assert_eq!(eval_src("(deref a)", &mut env).unwrap(), long(1));
+    }
+
+    #[test]
+    fn test_when_macro() {
+        assert_eq!(eval_str("(when true 42)").unwrap(), long(42));
+        assert_eq!(eval_str("(when false 42)").unwrap(), Value::Nil);
+    }
+
+    #[test]
+    fn test_cond_macro() {
+        assert_eq!(eval_str("(cond false 1 true 2)").unwrap(), long(2));
+    }
+
+    #[test]
+    fn test_and_or() {
+        assert_eq!(eval_str("(and 1 2 3)").unwrap(), long(3));
+        assert_eq!(eval_str("(and 1 false 3)").unwrap(), bool_v(false));
+        assert_eq!(eval_str("(or false nil 42)").unwrap(), long(42));
+        assert_eq!(eval_str("(or false nil)").unwrap(), Value::Nil);
+    }
+
+    // ── Phase 5: Lazy sequences ───────────────────────────────────────────
+
+    #[test]
+    fn test_lazy_range() {
+        assert_eq!(
+            eval_str("(= (into [] (take 5 (range))) [0 1 2 3 4])").unwrap(),
+            bool_v(true)
+        );
+    }
+
+    #[test]
+    fn test_lazy_range_bounded() {
+        assert_eq!(
+            eval_str("(= (into [] (range 3)) [0 1 2])").unwrap(),
+            bool_v(true)
+        );
+    }
+
+    #[test]
+    fn test_lazy_iterate() {
+        assert_eq!(
+            eval_str("(= (into [] (take 3 (iterate inc 0))) [0 1 2])").unwrap(),
+            bool_v(true)
+        );
+    }
+
+    #[test]
+    fn test_lazy_repeat() {
+        assert_eq!(
+            eval_str("(= (into [] (take 3 (repeat :x))) [:x :x :x])").unwrap(),
+            bool_v(true)
+        );
+    }
+
+    #[test]
+    fn test_lazy_cycle() {
+        assert_eq!(
+            eval_str("(= (into [] (take 5 (cycle [1 2]))) [1 2 1 2 1])").unwrap(),
+            bool_v(true)
+        );
+    }
+
+    // ── Phase 5: Associative destructuring ───────────────────────────────
+
+    #[test]
+    fn test_assoc_destructure() {
+        assert_eq!(
+            eval_str("(let [{:keys [a b]} {:a 1 :b 2}] (+ a b))").unwrap(),
+            long(3)
+        );
+    }
+
+    #[test]
+    fn test_assoc_destructure_or() {
+        assert_eq!(
+            eval_str("(let [{:keys [a b] :or {b 99}} {:a 1}] b)").unwrap(),
+            long(99)
+        );
+    }
+
+    // ── Phase 5: letfn ───────────────────────────────────────────────────
+
+    #[test]
+    fn test_letfn() {
+        assert_eq!(
+            eval_str("(letfn [(fact [n] (if (= n 0) 1 (* n (fact (dec n)))))] (fact 5))").unwrap(),
+            long(120)
+        );
+    }
+
+    // ── Phase 5: namespace ops ────────────────────────────────────────────
+
+    #[test]
+    fn test_in_ns() {
+        let (_, mut env) = make_env();
+        eval_src("(in-ns 'mytest)", &mut env).unwrap();
+        assert_eq!(env.current_ns.as_ref(), "mytest");
+        eval_src("(in-ns 'user)", &mut env).unwrap();
+        assert_eq!(env.current_ns.as_ref(), "user");
+    }
+
+    // ── Phase 5: spit / slurp ─────────────────────────────────────────────
+
+    #[test]
+    fn test_spit_slurp() {
+        let path = std::env::temp_dir().join("cljrs_test_spit_slurp.txt");
+        let path_str = path.to_str().unwrap();
+        let src = format!(
+            r#"(do (spit "{}" "hello clojurust") (slurp "{}"))"#,
+            path_str, path_str
+        );
+        let result = eval_str(&src).unwrap();
+        if let Value::Str(s) = result {
+            assert_eq!(s.get().as_str(), "hello clojurust");
+        } else {
+            panic!("expected string result from slurp");
+        }
+        let _ = std::fs::remove_file(path);
+    }
+
+    // ── Phase 5: update-in ───────────────────────────────────────────────
+
+    #[test]
+    fn test_update_in() {
+        assert_eq!(
+            eval_str("(= (update-in {:a {:b 1}} [:a :b] inc) {:a {:b 2}})").unwrap(),
+            bool_v(true)
+        );
+    }
+
+    // ── Phase 5: if-let / when-let ────────────────────────────────────────
+
+    #[test]
+    fn test_if_let_truthy() {
+        assert_eq!(eval_str("(if-let [x 42] x :nope)").unwrap(), long(42));
+    }
+
+    #[test]
+    fn test_if_let_falsy() {
+        assert_eq!(
+            eval_str("(if-let [x nil] x :nope)").unwrap(),
+            eval_str(":nope").unwrap()
+        );
+    }
+
+    #[test]
+    fn test_when_let_truthy() {
+        assert_eq!(eval_str("(when-let [x 7] (* x 2))").unwrap(), long(14));
+    }
+
+    #[test]
+    fn test_when_let_falsy() {
+        assert_eq!(eval_str("(when-let [x nil] 99)").unwrap(), Value::Nil);
+    }
+
+    // ── Phase 5: math functions ───────────────────────────────────────────
+
+    #[test]
+    fn test_math_trig() {
+        // sin(0) = 0, cos(0) = 1
+        assert_eq!(eval_str("(Math/sin 0)").unwrap(), Value::Double(0.0));
+        assert_eq!(eval_str("(Math/cos 0)").unwrap(), Value::Double(1.0));
+    }
+
+    #[test]
+    fn test_math_constants() {
+        assert!(
+            matches!(eval_str("Math/PI").unwrap(), Value::Double(v) if (v - std::f64::consts::PI).abs() < 1e-10)
+        );
+        assert!(
+            matches!(eval_str("Math/E").unwrap(), Value::Double(v) if (v - std::f64::consts::E).abs() < 1e-10)
+        );
+    }
+
+    #[test]
+    fn test_math_log_exp() {
+        // exp(0) = 1, log(1) = 0
+        assert_eq!(eval_str("(Math/exp 0)").unwrap(), Value::Double(1.0));
+        assert_eq!(eval_str("(Math/log 1)").unwrap(), Value::Double(0.0));
+    }
+
+    // ── Phase 6: Protocols & Multimethods ─────────────────────────────────
+
+    #[test]
+    fn test_defprotocol() {
+        // Defining a protocol creates a callable ProtocolFn that errors without impl.
+        let result = eval_str(
+            r#"
+            (defprotocol Greet
+              (greet [this]))
+            (greet "hello")
+            "#,
+        );
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("No implementation"), "got: {msg}");
+    }
+
+    #[test]
+    fn test_extend_type() {
+        let result = eval_str(
+            r#"
+            (defprotocol Greet
+              (greet [this]))
+            (extend-type String
+              Greet
+              (greet [this] (str "Hello, " this "!")))
+            (greet "world")
+            "#,
+        )
+        .unwrap();
+        assert_eq!(result, Value::string("Hello, world!"));
+    }
+
+    #[test]
+    fn test_protocol_dispatch() {
+        let result = eval_str(
+            r#"
+            (defprotocol Describable
+              (describe [this]))
+            (extend-type String
+              Describable
+              (describe [this] (str "string:" this)))
+            (extend-type Long
+              Describable
+              (describe [this] (str "long:" this)))
+            [(describe "hi") (describe 42)]
+            "#,
+        )
+        .unwrap();
+        assert!(matches!(result, Value::Vector(_)));
+        let s = format!("{}", result);
+        assert!(s.contains("string:hi"), "got: {s}");
+        assert!(s.contains("long:42"), "got: {s}");
+    }
+
+    #[test]
+    fn test_extend_protocol() {
+        let result = eval_str(
+            r#"
+            (defprotocol Showable
+              (show [this]))
+            (extend-protocol Showable
+              String
+              (show [this] (str "S:" this))
+              Long
+              (show [this] (str "L:" this)))
+            [(show "x") (show 7)]
+            "#,
+        )
+        .unwrap();
+        let s = format!("{}", result);
+        assert!(s.contains("S:x"), "got: {s}");
+        assert!(s.contains("L:7"), "got: {s}");
+    }
+
+    #[test]
+    fn test_extend_via_metadata() {
+        // `:extend-via-metadata true` lets an instance implement a protocol by
+        // carrying the impl fn in its own metadata, keyed by the protocol
+        // method's fully-qualified symbol (matching real Clojure's
+        // `MethodImplCache` dispatch, which looks up `(.sym cache)` in
+        // `(meta x)`) — no `extend-type`/`extend-protocol` needed. Idiomatic
+        // usage produces that qualified symbol via syntax-quote.
+        let result = eval_str(
+            r#"
+            (defprotocol IRender
+              :extend-via-metadata true
+              (create-element [this tag-name]))
+            (def renderer (with-meta {} {`create-element (fn [this tag-name] (str "made-" tag-name))}))
+            (create-element renderer "div")
+            "#,
+        )
+        .unwrap();
+        assert_eq!(result, Value::string("made-div"));
+    }
+
+    #[test]
+    fn test_extend_via_metadata_falls_back_to_type_tag() {
+        // Metadata impls take priority, but a value without metadata still
+        // dispatches on its type tag as usual.
+        let result = eval_str(
+            r#"
+            (defprotocol IRender
+              :extend-via-metadata true
+              (create-element [this tag-name]))
+            (extend-type Map
+              IRender
+              (create-element [this tag-name] (str "type-tag-" tag-name)))
+            [(create-element {} "span")
+             (create-element (with-meta {} {`create-element (fn [this tag-name] (str "meta-" tag-name))}) "div")]
+            "#,
+        )
+        .unwrap();
+        let s = format!("{}", result);
+        assert!(s.contains("type-tag-span"), "got: {s}");
+        assert!(s.contains("meta-div"), "got: {s}");
+    }
+
+    #[test]
+    fn test_extend_via_metadata_cross_ns() {
+        // Mirrors Replicant's mutation_log fake renderer: `IRender` is
+        // defined in `replicant.core`, and a test namespace `:refer`s the
+        // method and implements it purely via metadata (no `extend-type`).
+        // Syntax-quoting `create-element` there must resolve to the
+        // protocol's home namespace (`replicant.core/create-element`), which
+        // is exactly the key the dispatcher looks up.
+        let dir = temp_ns_dir("extend_via_metadata_cross_ns");
+        std::fs::create_dir_all(dir.join("replicant")).unwrap();
+        std::fs::write(
+            dir.join("replicant").join("core.cljrs"),
+            r#"(ns replicant.core)
+               (defprotocol IRender
+                 :extend-via-metadata true
+                 (create-element [this tag-name]))"#,
+        )
+        .unwrap();
+        let (_, mut env) = make_env_with_paths(vec![dir]);
+        let result = eval_src(
+            r#"
+            (ns mutation-log-test
+              (:require [replicant.core :refer [create-element]]))
+            (def renderer (with-meta {} {`create-element (fn [this tag-name] (str "made-" tag-name))}))
+            (create-element renderer "div")
+            "#,
+            &mut env,
+        )
+        .unwrap();
+        assert_eq!(result, Value::string("made-div"));
+    }
+
+    #[test]
+    fn test_extend_via_metadata_cross_ns_via_alias() {
+        // The `:refer` case above never touches the buggy path: a `:refer`d
+        // bare symbol resolves through `lookup_var_in_ns`, which was always
+        // correct. Real usage syntax-quotes an *aliased* symbol instead —
+        // `` `p/attached? `` — which used to hit `qualify_symbol`'s "already
+        // has a slash, keep as-is" branch and leak the alias text (`p/...`)
+        // into the produced symbol instead of resolving it to the protocol's
+        // home namespace (`replicant.protocols/...`), so the metadata key
+        // never matched.
+        let dir = temp_ns_dir("extend_via_metadata_cross_ns_via_alias");
+        std::fs::create_dir_all(dir.join("replicant")).unwrap();
+        std::fs::write(
+            dir.join("replicant").join("protocols.cljrs"),
+            r#"(ns replicant.protocols)
+               (defprotocol IRender
+                 :extend-via-metadata true
+                 (attached? [this el]))"#,
+        )
+        .unwrap();
+        let (_, mut env) = make_env_with_paths(vec![dir]);
+        let result = eval_src(
+            r#"
+            (ns mutation-log-test
+              (:require [replicant.protocols :as p]))
+            (def r (with-meta {:log []} {`p/attached? (fn [_ el] el)}))
+            (p/attached? r :el)
+            "#,
+            &mut env,
+        )
+        .unwrap();
+        assert_eq!(result, Value::keyword(Keyword::simple("el")));
+    }
+
+    #[test]
+    fn test_satisfies() {
+        let result = eval_str(
+            r#"
+            (defprotocol Animal
+              (speak [this]))
+            (extend-type String
+              Animal
+              (speak [this] this))
+            [(satisfies? Animal "dog") (satisfies? Animal 42)]
+            "#,
+        )
+        .unwrap();
+        let s = format!("{}", result);
+        assert!(s.contains("true"), "got: {s}");
+        assert!(s.contains("false"), "got: {s}");
+    }
+
+    #[test]
+    fn test_defmulti_defmethod() {
+        // Note: fn param destructuring not yet supported; use explicit map lookups.
+        let result = eval_str(
+            r#"
+            (defmulti area :shape)
+            (defmethod area :circle [m] (* 3 (:r m) (:r m)))
+            (defmethod area :rectangle [m] (* (:w m) (:h m)))
+            [(area {:shape :circle :r 2}) (area {:shape :rectangle :w 3 :h 4})]
+            "#,
+        )
+        .unwrap();
+        let s = format!("{}", result);
+        // circle: 3*2*2=12, rectangle: 3*4=12
+        assert!(s.contains("12"), "got: {s}");
+    }
+
+    #[test]
+    fn test_default_dispatch() {
+        let result = eval_str(
+            r#"
+            (defmulti classify :kind)
+            (defmethod classify :default [x] :unknown)
+            (defmethod classify :cat [x] :meow)
+            [(classify {:kind :dog}) (classify {:kind :cat})]
+            "#,
+        )
+        .unwrap();
+        let s = format!("{}", result);
+        assert!(s.contains(":unknown"), "got: {s}");
+        assert!(s.contains(":meow"), "got: {s}");
+    }
+
+    #[test]
+    fn test_prefer_method() {
+        // prefer-method shouldn't error; just records preference
+        let result = eval_str(
+            r#"
+            (defmulti foo identity)
+            (defmethod foo :a [x] 1)
+            (prefer-method foo :a :b)
+            (foo :a)
+            "#,
+        )
+        .unwrap();
+        assert_eq!(result, Value::Long(1));
+    }
+
+    #[test]
+    fn test_remove_method() {
+        let result = eval_str(
+            r#"
+            (defmulti bar identity)
+            (defmethod bar :x [_] 99)
+            (remove-method bar :x)
+            (bar :x)
+            "#,
+        );
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("No method"), "got: {msg}");
+    }
+
+    // ── Phase 7: Concurrency primitives ──────────────────────────────────────
+
+    #[test]
+    fn test_compare_and_set() {
+        let result = eval_str(
+            r#"
+            (let [a (atom 10)]
+              [(compare-and-set! a 10 20)   ; succeeds: 10 == 10
+               (compare-and-set! a 10 30)   ; fails:    20 != 10
+               @a])
+            "#,
+        )
+        .unwrap();
+        let s = format!("{}", result);
+        assert!(s.contains("true"), "got: {s}");
+        assert!(s.contains("false"), "got: {s}");
+        assert!(s.contains("20"), "got: {s}");
+    }
+
+    #[test]
+    fn test_volatile() {
+        let result = eval_str(
+            r#"
+            (let [v (volatile! 1)]
+              (vreset! v 2)
+              (vswap! v + 10)
+              @v)
+            "#,
+        )
+        .unwrap();
+        assert_eq!(result, Value::Long(12));
+    }
+
+    #[test]
+    fn test_delay() {
+        // Body should not be evaluated until forced.
+        let result = eval_str(
+            r#"
+            (let [calls (atom 0)
+                  d (delay (swap! calls inc) 42)]
+              [@calls (force d) @calls (force d) @calls])
+            "#,
+        )
+        .unwrap();
+        let s = format!("{}", result);
+        // calls starts at 0, force evaluates body once (returns 42), second force uses cache
+        // s = [0 42 1 42 1]
+        assert!(s.starts_with("[0 42 1 42 1]"), "got: {s}");
+    }
+
+    #[test]
+    fn test_realized() {
+        let result = eval_str(
+            r#"
+            (let [d (delay 99)]
+              [(realized? d) (force d) (realized? d)])
+            "#,
+        )
+        .unwrap();
+        let s = format!("{}", result);
+        assert!(s.starts_with("[false 99 true]"), "got: {s}");
+    }
+
+    #[test]
+    fn test_promise() {
+        let result = eval_str(
+            r#"
+            (let [p (promise)]
+              (deliver p 42)
+              (deliver p 99)  ; second deliver is ignored
+              @p)
+            "#,
+        )
+        .unwrap();
+        assert_eq!(result, Value::Long(42));
+    }
+
+    #[test]
+    #[ignore = "future/thread spawn not yet implemented (Phase A1 — GcPtr: !Send)"]
+    fn test_future() {
+        let result = eval_str(
+            r#"
+            (let [f (future (+ 1 2))]
+              @f)
+            "#,
+        )
+        .unwrap();
+        assert_eq!(result, Value::Long(3));
+    }
+
+    #[test]
+    #[ignore = "agent not yet implemented (Phase A1 — GcPtr: !Send)"]
+    fn test_agent_send() {
+        let result = eval_str(
+            r#"
+            (let [a (agent 0)]
+              (send a + 1)
+              (send a + 2)
+              (await-agent a)
+              @a)
+            "#,
+        )
+        .unwrap();
+        assert_eq!(result, Value::Long(3));
+    }
+
+    #[test]
+    #[ignore = "agent not yet implemented (Phase A1 — GcPtr: !Send)"]
+    fn test_agent_error_restart() {
+        let result = eval_str(
+            r#"
+            (let [a (agent 10)]
+              (send a (fn [_] (throw (ex-info "boom" {}))))
+              (await-agent a)
+              (let [err (agent-error a)]
+                (restart-agent a 99)
+                [err @a]))
+            "#,
+        )
+        .unwrap();
+        let s = format!("{}", result);
+        // err should be a string containing "boom", @a should be 99
+        assert!(s.contains("boom"), "got: {s}");
+        assert!(s.contains("99"), "got: {s}");
+    }
+
+    #[test]
+    fn test_defrecord_basic() {
+        // Constructor and field access via keyword.
+        let result = eval_str(
+            r#"
+            (defrecord Point [x y])
+            (let [p (->Point 3 4)]
+              [(:x p) (:y p)])
+            "#,
+        )
+        .unwrap();
+        assert_eq!(result.to_string(), "[3 4]");
+    }
+
+    #[test]
+    fn test_defrecord_map_constructor() {
+        let result = eval_str(
+            r#"
+            (defrecord Color [r g b])
+            (let [c (map->Color {:r 255 :g 128 :b 0})]
+              [(:r c) (:g c) (:b c)])
+            "#,
+        )
+        .unwrap();
+        assert_eq!(result.to_string(), "[255 128 0]");
+    }
+
+    #[test]
+    fn test_defrecord_assoc() {
+        // assoc on a record returns a new record of the same type.
+        let result = eval_str(
+            r#"
+            (defrecord Pt [x y])
+            (let [p (->Pt 1 2)
+                  q (assoc p :x 99)]
+              [(:x q) (:y q) (record? q)])
+            "#,
+        )
+        .unwrap();
+        assert_eq!(result.to_string(), "[99 2 true]");
+    }
+
+    #[test]
+    fn test_defrecord_with_protocol() {
+        let result = eval_str(
+            r#"
+            (defprotocol IShape
+              (area [this]))
+            (defrecord Circle [radius]
+              IShape
+              (area [this] (* 3 (:radius this) (:radius this))))
+            (let [c (->Circle 5)]
+              (area c))
+            "#,
+        )
+        .unwrap();
+        assert_eq!(result, cljrs_value::Value::Long(75));
+    }
+
+    #[test]
+    fn test_instance_q() {
+        let result = eval_str(
+            r#"
+            (defrecord Dog [name])
+            (let [d (->Dog "Rex")]
+              [(instance? Dog d) (instance? Dog 42)])
+            "#,
+        )
+        .unwrap();
+        assert_eq!(result.to_string(), "[true false]");
+    }
+
+    #[test]
+    fn test_reify_basic() {
+        let result = eval_str(
+            r#"
+            (defprotocol IGreet
+              (greet [this name]))
+            (let [greeter (reify IGreet
+                            (greet [this name] (str "Hello, " name "!")))]
+              (greet greeter "World"))
+            "#,
+        )
+        .unwrap();
+        assert_eq!(result.to_string(), "\"Hello, World!\"");
+    }
+
+    // ── require / load-file ───────────────────────────────────────────────
+
+    fn temp_ns_dir(test_name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("cljrs_test_{test_name}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn make_env_with_paths(paths: Vec<std::path::PathBuf>) -> (Arc<GlobalEnv>, Env) {
+        use crate::interp::standard_env_with_paths;
+        let globals = standard_env_with_paths(None, None, None, paths);
+        let env = Env::new(globals.clone(), "user");
+        (globals, env)
+    }
+
+    #[test]
+    fn test_require_as() {
+        let dir = temp_ns_dir("require_as");
+        std::fs::write(
+            dir.join("mylib.cljrs"),
+            "(ns mylib) (defn greet [n] (str \"hello \" n))",
+        )
+        .unwrap();
+        let (_, mut env) = make_env_with_paths(vec![dir]);
+        let result = eval_src("(require '[mylib :as ml]) (ml/greet \"world\")", &mut env).unwrap();
+        assert_eq!(result.to_string(), "\"hello world\"");
+    }
+
+    #[test]
+    fn test_require_refer() {
+        let dir = temp_ns_dir("require_refer");
+        std::fs::write(
+            dir.join("myutil.cljrs"),
+            "(ns myutil) (defn twice [x] (* 2 x))",
+        )
+        .unwrap();
+        let (_, mut env) = make_env_with_paths(vec![dir]);
+        let result = eval_src("(require '[myutil :refer [twice]]) (twice 21)", &mut env).unwrap();
+        assert_eq!(result, Value::Long(42));
+    }
+
+    #[test]
+    fn test_require_refer_all() {
+        let dir = temp_ns_dir("require_refer_all");
+        std::fs::write(
+            dir.join("mymath.cljrs"),
+            "(ns mymath) (defn square [x] (* x x))",
+        )
+        .unwrap();
+        let (_, mut env) = make_env_with_paths(vec![dir]);
+        let result = eval_src("(require '[mymath :refer :all]) (square 7)", &mut env).unwrap();
+        assert_eq!(result, Value::Long(49));
+    }
+
+    #[test]
+    fn test_ns_require_clause() {
+        let dir = temp_ns_dir("ns_require");
+        std::fs::write(
+            dir.join("greeter.cljrs"),
+            "(ns greeter) (defn hi [n] (str \"Hi \" n))",
+        )
+        .unwrap();
+        let (_, mut env) = make_env_with_paths(vec![dir]);
+        let result = eval_src(
+            "(ns myapp (:require [greeter :as g])) (g/hi \"Alice\")",
+            &mut env,
+        )
+        .unwrap();
+        assert_eq!(result.to_string(), "\"Hi Alice\"");
+    }
+
+    #[test]
+    fn test_var_quote_alias_resolution() {
+        // #'alias/sym must resolve the alias to the full namespace, just like
+        // a regular function call does (issue #187).
+        let dir = temp_ns_dir("var_quote_alias");
+        // lib.core maps to lib/core.cljrs on the source path.
+        std::fs::create_dir_all(dir.join("lib")).unwrap();
+        std::fs::write(
+            dir.join("lib/core.cljrs"),
+            "(ns lib.core) (defn public [x] (* x 2))",
+        )
+        .unwrap();
+        let (_, mut env) = make_env_with_paths(vec![dir]);
+        // Regular call via alias must work first.
+        let call_result = eval_src("(require '[lib.core :as l]) (l/public 21)", &mut env).unwrap();
+        assert_eq!(call_result, Value::Long(42));
+        // #'alias/sym reader form.
+        let var_result = eval_src("#'l/public", &mut env).unwrap();
+        assert!(
+            matches!(var_result, Value::Var(_)),
+            "expected Var, got {var_result:?}"
+        );
+        assert_eq!(var_result.to_string(), "#'lib.core/public");
+        // (var alias/sym) special form must also resolve the alias.
+        let var_special = eval_src("(var l/public)", &mut env).unwrap();
+        assert_eq!(var_special.to_string(), "#'lib.core/public");
+    }
+
+    #[test]
+    fn test_require_idempotent() {
+        let dir = temp_ns_dir("require_idempotent");
+        // File has a side effect tracked via an atom
+        std::fs::write(
+            dir.join("counter.cljrs"),
+            "(ns counter) (def loaded-count (atom 0)) (swap! loaded-count inc)",
+        )
+        .unwrap();
+        let (globals, mut env) = make_env_with_paths(vec![dir]);
+        eval_src("(require 'counter)", &mut env).unwrap();
+        eval_src("(require 'counter)", &mut env).unwrap();
+        // The atom should have been incremented only once.
+        let count = globals.lookup_in_ns("counter", "loaded-count").unwrap();
+        if let Value::Atom(a) = count {
+            assert_eq!(a.get().deref(), Value::Long(1));
+        } else {
+            panic!("expected atom");
+        }
+    }
+
+    #[test]
+    fn test_require_not_found() {
+        let (_, mut env) = make_env_with_paths(vec![]);
+        let err = eval_src("(require 'nonexistent.ns)", &mut env).unwrap_err();
+        let msg = format!("{err:?}");
+        assert!(msg.contains("nonexistent.ns"), "unexpected error: {msg}");
+    }
+
+    #[test]
+    fn test_require_circular() {
+        let dir = temp_ns_dir("require_circular");
+        // a requires b, b requires a
+        std::fs::write(dir.join("cira.cljrs"), "(ns cira (:require [cirb]))").unwrap();
+        std::fs::write(dir.join("cirb.cljrs"), "(ns cirb (:require [cira]))").unwrap();
+        let (_, mut env) = make_env_with_paths(vec![dir]);
+        let err = eval_src("(require 'cira)", &mut env).unwrap_err();
+        let msg = format!("{err:?}");
+        assert!(
+            msg.contains("circular"),
+            "expected circular error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_load_file() {
+        let dir = temp_ns_dir("load_file");
+        let path = dir.join("script.cljrs");
+        std::fs::write(&path, "(+ 1 2)").unwrap();
+        let (_, mut env) = make_env_with_paths(vec![]);
+        let result = eval_src(&format!("(load-file \"{}\")", path.display()), &mut env).unwrap();
+        assert_eq!(result, Value::Long(3));
+    }
+
+    // ── *ns* and namespace reflection ─────────────────────────────────────────
+
+    #[test]
+    fn test_star_ns_initial() {
+        // After standard_env(), *ns* should be the user namespace.
+        let (_, mut env) = make_env();
+        let v = eval_src("*ns*", &mut env).unwrap();
+        match v {
+            Value::Namespace(ns) => assert_eq!(ns.get().name.as_ref(), "user"),
+            other => panic!("expected Namespace, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_star_ns_after_in_ns() {
+        let (_, mut env) = make_env();
+        eval_src("(in-ns 'myns)", &mut env).unwrap();
+        let v = eval_src("*ns*", &mut env).unwrap();
+        match v {
+            Value::Namespace(ns) => assert_eq!(ns.get().name.as_ref(), "myns"),
+            other => panic!("expected Namespace, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_star_ns_after_ns_form() {
+        let (_, mut env) = make_env();
+        eval_src("(ns mytest.ns)", &mut env).unwrap();
+        let v = eval_src("*ns*", &mut env).unwrap();
+        match v {
+            Value::Namespace(ns) => assert_eq!(ns.get().name.as_ref(), "mytest.ns"),
+            other => panic!("expected Namespace, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_ns_name() {
+        let (_, mut env) = make_env();
+        let v = eval_src("(ns-name *ns*)", &mut env).unwrap();
+        match v {
+            Value::Symbol(s) => assert_eq!(s.get().name.as_ref(), "user"),
+            other => panic!("expected Symbol, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_find_ns() {
+        let (_, mut env) = make_env();
+        // known ns
+        let v = eval_src("(find-ns 'user)", &mut env).unwrap();
+        assert!(matches!(v, Value::Namespace(_)));
+        // unknown ns
+        let v2 = eval_src("(find-ns 'nonexistent)", &mut env).unwrap();
+        assert_eq!(v2, Value::Nil);
+    }
+
+    #[test]
+    fn test_all_ns() {
+        let (_, mut env) = make_env();
+        let v = eval_src("(all-ns)", &mut env).unwrap();
+        // Should be a list containing at least user and clojure.core
+        let names: Vec<String> = match &v {
+            Value::List(l) => l
+                .get()
+                .iter()
+                .filter_map(|ns| match ns {
+                    Value::Namespace(n) => Some(n.get().name.as_ref().to_string()),
+                    _ => None,
+                })
+                .collect(),
+            other => panic!("expected list, got {other:?}"),
+        };
+        assert!(names.contains(&"user".to_string()));
+        assert!(names.contains(&"clojure.core".to_string()));
+    }
+
+    #[test]
+    fn test_ns_interns() {
+        let (_, mut env) = make_env();
+        eval_src("(def my-test-var 42)", &mut env).unwrap();
+        let v = eval_src("(ns-interns *ns*)", &mut env).unwrap();
+        let Value::Map(m) = v else {
+            panic!("expected map")
+        };
+        // The map should contain 'my-test-var
+        let sym = Value::symbol(cljrs_value::Symbol::simple("my-test-var"));
+        assert!(m.get(&sym).is_some());
+    }
+
+    #[test]
+    fn test_create_ns() {
+        let (_, mut env) = make_env();
+        let v = eval_src("(create-ns 'fresh.ns)", &mut env).unwrap();
+        match v {
+            Value::Namespace(ns) => assert_eq!(ns.get().name.as_ref(), "fresh.ns"),
+            other => panic!("expected Namespace, got {other:?}"),
+        }
+        // find-ns should now find it
+        let v2 = eval_src("(find-ns 'fresh.ns)", &mut env).unwrap();
+        assert!(matches!(v2, Value::Namespace(_)));
+    }
+
+    // ── Dynamic variables (Phase 9) ───────────────────────────────────────────
+
+    #[test]
+    fn test_dynamic_var_basic() {
+        let (globals, mut env) = make_env();
+        let result = eval_src("(def ^:dynamic *x* 10) (binding [*x* 42] *x*)", &mut env).unwrap();
+        assert_eq!(result, Value::Long(42));
+        // verify root is still bound
+        let root = globals.lookup_in_ns("user", "*x*");
+        assert_eq!(root, Some(Value::Long(10)));
+    }
+
+    #[test]
+    fn test_dynamic_var_restore() {
+        let (_globals, mut env) = make_env();
+        eval_src("(def ^:dynamic *x* 10)", &mut env).unwrap();
+        eval_src("(binding [*x* 42] *x*)", &mut env).unwrap();
+        // After binding block, value restored to root
+        let val = eval_src("*x*", &mut env).unwrap();
+        assert_eq!(val, Value::Long(10));
+    }
+
+    #[test]
+    fn test_dynamic_var_nested() {
+        let (_, mut env) = make_env();
+        eval_src("(def ^:dynamic *x* 1)", &mut env).unwrap();
+        let result = eval_src("(binding [*x* 2] (binding [*x* 3] *x*))", &mut env).unwrap();
+        assert_eq!(result, Value::Long(3));
+        // After both blocks
+        let val = eval_src("*x*", &mut env).unwrap();
+        assert_eq!(val, Value::Long(1));
+    }
+
+    #[test]
+    fn test_dynamic_var_unaffected() {
+        let (_, mut env) = make_env();
+        eval_src("(def ^:dynamic *x* 10)", &mut env).unwrap();
+        eval_src("(def y 99)", &mut env).unwrap();
+        eval_src("(binding [*x* 42] *x*)", &mut env).unwrap();
+        // non-dynamic var y is unchanged
+        let val = eval_src("y", &mut env).unwrap();
+        assert_eq!(val, Value::Long(99));
+    }
+
+    #[test]
+    #[ignore = "future/thread spawn not yet implemented (Phase A1 — GcPtr: !Send)"]
+    fn test_binding_conveyance() {
+        let (_, mut env) = make_env();
+        eval_src("(def ^:dynamic *x* 10)", &mut env).unwrap();
+        let result = eval_src("(binding [*x* 42] @(future *x*))", &mut env).unwrap();
+        assert_eq!(result, Value::Long(42));
+    }
+
+    #[test]
+    fn test_var_set_in_binding() {
+        let (_, mut env) = make_env();
+        eval_src("(def ^:dynamic *x* 10)", &mut env).unwrap();
+        // set! inside binding sets thread-local
+        let inside = eval_src("(binding [*x* 1] (set! *x* 2) *x*)", &mut env).unwrap();
+        assert_eq!(inside, Value::Long(2));
+        // root still 10
+        let root = eval_src("*x*", &mut env).unwrap();
+        assert_eq!(root, Value::Long(10));
+    }
+
+    #[test]
+    fn test_with_bindings_star() {
+        let (_, mut env) = make_env();
+        eval_src("(def ^:dynamic *x* 10)", &mut env).unwrap();
+        let result = eval_src("(with-bindings* {#'*x* 99} (fn [] *x*))", &mut env).unwrap();
+        assert_eq!(result, Value::Long(99));
+    }
+
+    #[test]
+    fn test_binding_fully_qualified_cross_ns_dynamic_var() {
+        let (_, mut env) = make_env();
+        let result = eval_src(
+            r#"
+            (ns other.ns)
+            (def ^:dynamic *dispatch* nil)
+            (ns user)
+            (binding [other.ns/*dispatch* (fn [x] x)]
+              (other.ns/*dispatch* 42))
+            "#,
+            &mut env,
+        )
+        .unwrap();
+        assert_eq!(result, Value::Long(42));
+    }
+
+    #[test]
+    fn test_binding_aliased_cross_ns_dynamic_var() {
+        // (binding [alias/*var* v] ...) must resolve `alias` through the
+        // current ns's `:require :as` aliases, exactly like ordinary
+        // qualified-symbol lookup — this is how Replicant's public
+        // `set-dispatch!`/life-cycle dispatch binds `*dispatch*` across
+        // namespaces.
+        let dir = temp_ns_dir("binding_aliased_cross_ns_dynamic_var");
+        std::fs::create_dir_all(dir.join("replicant")).unwrap();
+        std::fs::write(
+            dir.join("replicant").join("core.cljrs"),
+            r#"(ns replicant.core)
+               (def ^:dynamic *dispatch* nil)
+               (defn call-dispatch [x] (*dispatch* x))"#,
+        )
+        .unwrap();
+        let (_, mut env) = make_env_with_paths(vec![dir]);
+        let result = eval_src(
+            r#"
+            (ns life-cycle-test
+              (:require [replicant.core :as r]))
+            (binding [r/*dispatch* (fn [x] x)]
+              (r/call-dispatch 42))
+            "#,
+            &mut env,
+        )
+        .unwrap();
+        assert_eq!(result, Value::Long(42));
+    }
+
+    #[test]
+    fn test_meta_on_var() {
+        let (_, mut env) = make_env();
+        eval_src("(def ^:dynamic *x* 1)", &mut env).unwrap();
+        let m = eval_src("(meta #'*x*)", &mut env).unwrap();
+        // meta should be {:dynamic true}
+        if let Value::Map(mv) = &m {
+            let kw = Value::keyword(cljrs_value::Keyword::parse("dynamic"));
+            assert_eq!(mv.get(&kw), Some(Value::Bool(true)));
+        } else {
+            panic!("expected map, got {m:?}");
+        }
+    }
+
+    #[test]
+    fn test_bound_pred() {
+        let (_, mut env) = make_env();
+        eval_src("(def ^:dynamic *x* 1)", &mut env).unwrap();
+        let t = eval_src("(bound? #'*x*)", &mut env).unwrap();
+        assert_eq!(t, Value::Bool(true));
+    }
+
+    #[test]
+    fn test_alter_var_root() {
+        let (_, mut env) = make_env();
+        eval_src("(def x 1)", &mut env).unwrap();
+        eval_src("(alter-var-root #'x inc)", &mut env).unwrap();
+        let val = eval_src("x", &mut env).unwrap();
+        assert_eq!(val, Value::Long(2));
+    }
+
+    // ── clojure.test ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_clojure_test_is_pass() {
+        // (is expr) returns true on a passing assertion.
+        let (_, mut env) = make_env();
+        eval_src(
+            "(require '[clojure.test :refer [is deftest run-tests]])",
+            &mut env,
+        )
+        .unwrap();
+        let v = eval_src("(is (= 1 1))", &mut env).unwrap();
+        assert_eq!(v, Value::Bool(true));
+    }
+
+    #[test]
+    fn test_clojure_test_is_fail() {
+        // (is expr) returns false on a failing assertion.
+        let (_, mut env) = make_env();
+        eval_src("(require '[clojure.test :refer [is]])", &mut env).unwrap();
+        let v = eval_src("(is (= 1 2))", &mut env).unwrap();
+        assert_eq!(v, Value::Bool(false));
+    }
+
+    #[test]
+    fn test_clojure_test_is_catch_error() {
+        // (is expr) catches runtime errors and returns false.
+        let (_, mut env) = make_env();
+        eval_src("(require '[clojure.test :refer [is]])", &mut env).unwrap();
+        let v = eval_src("(is (/ 1 0))", &mut env).unwrap();
+        assert_eq!(v, Value::Bool(false));
+    }
+
+    #[test]
+    fn test_clojure_test_deftest_and_run() {
+        // deftest + run-tests smoke test: counters reflect pass/fail.
+        let (_, mut env) = make_env();
+        eval_src(
+            "(require '[clojure.test :refer [deftest is run-tests]])",
+            &mut env,
+        )
+        .unwrap();
+        eval_src("(deftest my-passing-test (is (= 1 1)))", &mut env).unwrap();
+        eval_src("(deftest my-failing-test (is (= 1 2)))", &mut env).unwrap();
+        let counters = eval_src("(run-tests)", &mut env).unwrap();
+        // Should have run 2 tests, 1 pass, 1 fail.
+        if let Value::Map(m) = counters {
+            let get = |k: &str| {
+                m.get(&Value::keyword(cljrs_value::Keyword {
+                    namespace: None,
+                    name: Arc::from(k),
+                }))
+            };
+            assert_eq!(get("test"), Some(Value::Long(2)));
+            assert_eq!(get("pass"), Some(Value::Long(1)));
+            assert_eq!(get("fail"), Some(Value::Long(1)));
+            assert_eq!(get("error"), Some(Value::Long(0)));
+        } else {
+            panic!("expected map from run-tests, got {counters:?}");
+        }
+    }
+
+    #[test]
+    fn test_alter_meta_bang() {
+        // alter-meta! applies fn to var's meta and stores result.
+        let (_, mut env) = make_env();
+        eval_src("(def myvar 42)", &mut env).unwrap();
+        eval_src("(alter-meta! #'myvar assoc :foo :bar)", &mut env).unwrap();
+        let m = eval_src("(meta #'myvar)", &mut env).unwrap();
+        if let Value::Map(map) = m {
+            let foo_key = Value::keyword(cljrs_value::Keyword {
+                namespace: None,
+                name: Arc::from("foo"),
+            });
+            assert!(map.get(&foo_key).is_some());
+        } else {
+            panic!("expected map, got {m:?}");
+        }
+    }
+
+    #[test]
+    fn test_catch_runtime_error() {
+        // (try (/ 1 0) (catch Exception e "caught")) => "caught"
+        let (_, mut env) = make_env();
+        let v = eval_src(r#"(try (/ 1 0) (catch Exception e "caught"))"#, &mut env).unwrap();
+        assert_eq!(v, Value::string("caught".to_string()));
+    }
+
+    #[test]
+    fn test_ns_resolve() {
+        let (_, mut env) = make_env();
+        eval_src("(def somevar 99)", &mut env).unwrap();
+        // ns-resolve with current ns returns the var.
+        let v = eval_src("(ns-resolve *ns* 'somevar)", &mut env).unwrap();
+        assert!(matches!(v, Value::Var(_)));
+        // ns-resolve for non-existent symbol returns nil.
+        let v2 = eval_src("(ns-resolve *ns* 'nonexistent)", &mut env).unwrap();
+        assert_eq!(v2, Value::Nil);
+    }
+
+    // ── Persistent structure virtualization ──────────────────────────────
+
+    #[test]
+    fn test_assoc_chain_virtualized() {
+        // Assoc chain where intermediates aren't used — should be virtualized.
+        let v = eval_str(
+            "(let [m {}
+                   a (assoc m :x 1)
+                   b (assoc a :y 2)
+                   c (assoc b :z 3)]
+               c)",
+        )
+        .unwrap();
+        // Result should be {:x 1, :y 2, :z 3}.
+        assert!(matches!(&v, Value::Map(_)));
+        if let Value::Map(m) = &v {
+            assert_eq!(m.count(), 3);
+            assert_eq!(m.get(&Value::keyword(Keyword::simple("x"))), Some(long(1)));
+            assert_eq!(m.get(&Value::keyword(Keyword::simple("y"))), Some(long(2)));
+            assert_eq!(m.get(&Value::keyword(Keyword::simple("z"))), Some(long(3)));
+        }
+    }
+
+    #[test]
+    fn test_conj_chain_virtualized() {
+        // Conj chain on a vector.
+        let v = eval_str(
+            "(let [v [1]
+                   a (conj v 2)
+                   b (conj a 3)
+                   c (conj b 4)]
+               c)",
+        )
+        .unwrap();
+        assert_eq!(v, eval_str("[1 2 3 4]").unwrap());
+    }
+
+    #[test]
+    fn test_assoc_chain_intermediate_used_no_virtualize() {
+        // If an intermediate is used in the body, virtualization should not apply,
+        // but the result should still be correct.
+        let v = eval_str(
+            "(let [a (assoc {} :x 1)
+                   b (assoc a :y 2)]
+               (list (count a) (count b)))",
+        )
+        .unwrap();
+        // a has 1 entry, b has 2.
+        if let Value::List(l) = &v {
+            let items: Vec<_> = l.get().iter().cloned().collect();
+            assert_eq!(items, vec![long(1), long(2)]);
+        } else {
+            panic!("expected list, got {:?}", v);
+        }
+    }
+
+    #[test]
+    fn test_assoc_chain_on_existing_map() {
+        // Chain on an existing non-empty map.
+        let v = eval_str(
+            "(let [m {:a 1}
+                   a (assoc m :b 2)
+                   b (assoc a :c 3)]
+               b)",
+        )
+        .unwrap();
+        if let Value::Map(m) = &v {
+            assert_eq!(m.count(), 3);
+        } else {
+            panic!("expected map");
+        }
+    }
+
+    // ── :pre/:post conditions ─────────────────────────────────────────────
+
+    #[test]
+    fn test_post_condition_percent_bound() {
+        // % must resolve to the return value inside :post conditions.
+        let v = eval_str("(defn g [x] {:post [(pos? %)]} (inc x)) (g 5)").unwrap();
+        assert_eq!(v, long(6));
+    }
+
+    #[test]
+    fn test_post_condition_violation_throws() {
+        // A failing :post condition must throw.
+        let r = eval_str("(defn g [x] {:post [(neg? %)]} (inc x)) (g 5)");
+        assert!(r.is_err(), "expected error from failing :post condition");
+    }
+
+    #[test]
+    fn test_pre_condition_passes() {
+        let v = eval_str("(defn g [x] {:pre [(pos? x)]} (inc x)) (g 5)").unwrap();
+        assert_eq!(v, long(6));
+    }
+
+    #[test]
+    fn test_pre_condition_violation_throws() {
+        let r = eval_str("(defn g [x] {:pre [(pos? x)]} (inc x)) (g -1)");
+        assert!(r.is_err(), "expected error from failing :pre condition");
+    }
+
+    #[test]
+    fn test_pre_and_post_conditions() {
+        let v = eval_str("(defn g [x] {:pre [(pos? x)] :post [(> % x)]} (inc x)) (g 3)").unwrap();
+        assert_eq!(v, long(4));
+    }
+
+    #[test]
+    fn test_post_condition_no_pre() {
+        // :post only (no :pre).
+        let v = eval_str("(defn h [x] {:post [(number? %)]} (inc x)) (h 2)").unwrap();
+        assert_eq!(v, long(3));
+    }
+
+    #[test]
+    fn test_pre_condition_no_post() {
+        // :pre only (no :post); existing test variant without conditions map.
+        let v = eval_str("(defn h [x] {:pre [(number? x)]} x) (h 42)").unwrap();
+        assert_eq!(v, long(42));
+    }
+}

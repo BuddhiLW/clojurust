@@ -1,18 +1,10 @@
-#![allow(clippy::result_large_err)]
-#![allow(clippy::type_complexity)]
-#![allow(clippy::arc_with_non_send_sync)]
+//! Deprecated compatibility shim.
+//!
+//! The native `clojure.core` builtins moved into
+//! [`cljrs_runtime::builtins`](../cljrs_runtime/builtins/index.html) in Stage 2
+//! of the crate consolidation plan. This package only re-exports them so
+//! downstream packages can migrate one at a time; it is removed in Stage 6.
+//!
+//! Replace `cljrs_builtins::x` with `cljrs_runtime::builtins::x`.
 
-mod array_list;
-mod bitops;
-pub mod builtins;
-pub mod form;
-mod new;
-mod regex;
-pub mod special;
-mod taps;
-mod time;
-pub mod transients;
-pub mod util;
-
-pub use special::*;
-pub use util::*;
+pub use cljrs_runtime::builtins::*;

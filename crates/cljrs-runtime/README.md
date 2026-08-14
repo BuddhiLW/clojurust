@@ -1,25 +1,27 @@
 # cljrs-runtime
 
-Placeholder package. It contains no code and nothing in the workspace depends
-on it.
+The clojurust runtime: namespaces and environments, native `clojure.core`
+builtins, the tree-walking interpreter, and the tiered (IR-accelerated)
+evaluator.
 
-**Status:** empty stub, reserved. Stage 2 of
+**Status:** implemented. Stage 2 of
 [`docs/crate-consolidation-plan.md`](../../docs/crate-consolidation-plan.md)
-replaces it with the merged runtime — `cljrs-env`, `cljrs-builtins`,
-`cljrs-interp`, and `cljrs-eval` folded into `env`, `builtins`, `interp`, and
-`tiered` modules behind one `Runtime` builder.
+merged four packages into this one, one per module:
 
-The work this README used to describe — registering `clojure.core` functions
-and macros, and the concurrency primitives — was implemented elsewhere and is
-live today:
+| Module | Former package | Responsibility |
+|---|---|---|
+| [`env`](#module-env) | `cljrs-env` | Namespace registry, vars, dynamic bindings, GC roots, loader, gas, policy |
+| [`builtins`](#module-builtins) | `cljrs-builtins` | Native `clojure.core` functions plus the Clojure bootstrap source |
+| [`interp`](#module-interp) | `cljrs-interp` | Tree-walking interpreter: special forms, macros, destructuring |
+| [`tiered`](#module-tiered) | `cljrs-eval` | IR lowering, tier-1 IR interpreter, JIT dispatch state |
 
-| What | Where it actually lives |
-|---|---|
-| Core functions, type predicates, collection and seq operations | [`cljrs-builtins`](../cljrs-builtins) |
-| Core macros, special forms, destructuring | [`cljrs-interp`](../cljrs-interp) |
-| `atom` / `ref` / `agent` / `future` / `promise` | [`cljrs-builtins`](../cljrs-builtins) |
-| Namespace registry, dynamic bindings, GC roots | [`cljrs-env`](../cljrs-env) |
-| Embedded `clojure.*` namespaces | [`cljrs-stdlib`](../cljrs-stdlib) |
+The four former packages still exist as re-export shims so downstream packages
+can migrate one at a time; Stage 6 removes them. New code should use
+`cljrs_runtime::{env, builtins, interp, tiered}`.
+
+Stage 2 moved files and rewrote import paths only. The `Runtime` /
+`RuntimeBuilder` / `ExecutionMode` API described in the plan, and the removal of
+the `GlobalEnv` callback seams, are Stage 3.
 
 ---
 
@@ -27,14 +29,803 @@ live today:
 
 ```
 src/
-  lib.rs    — doc-comment stub; no items
+  lib.rs                — crate root; declares the four modules
+
+  env/
+    mod.rs              — module declarations; re-exports AsyncRuntime
+    env.rs              — Env (lexical scope) and GlobalEnv (namespace registry, vars)
+    error.rs            — EvalError / EvalResult and conversion helpers
+    apply.rs            — apply_value: callee dispatch (fns, keywords, maps, sets,
+                          vars, protocols, multimethods) and async dispatch
+    callback.rs         — thread-local eval context for Rust→Clojure callbacks
+    dynamics.rs         — dynamic var binding frames (binding, with-bindings*)
+    gas.rs              — cooperative execution-credit metering
+    gc_roots.rs         — GC root registration for the interpreter's Rust stack
+    loader.rs           — namespace loading (require / load_ns) from source paths
+    policy.rs           — capability policy for isolated transaction functions
+    taps.rs             — tap> / add-tap registry
+    async_hook.rs       — AsyncRuntime seam and the async-JIT compile hook
+    versioned.rs        — (non-WASM) versioned symbol/namespace resolution
+
+  builtins/
+    mod.rs              — module declarations; re-exports special::* and util::*
+    builtins.rs         — the native fn registry (register_all) and BUILTIN_DOCS
+    special.rs          — special-form stub vars and shared dispatch helpers
+    form.rs             — reader-conditional resolution; form → value conversion
+    util.rs             — shared argument-coercion and error helpers
+    transients.rs       — transient collection builtins
+    array_list.rs       — java.util.ArrayList-alike interop shim
+    bitops.rs           — bit-and / bit-or / bit-shift-* and friends
+    new.rs              — (new Type ...) construction dispatch
+    regex.rs            — re-pattern / re-find / re-seq / re-matches
+    taps.rs             — add-tap / tap> builtins over env::taps
+    time.rs             — clock and duration builtins
+    bootstrap.cljrs     — Clojure source evaluated into clojure.core at startup
+    clojure_test.cljrs  — embedded clojure.test source
+
+  interp/
+    mod.rs              — standard_env_minimal / standard_env / standard_env_with_paths
+    eval.rs             — top-level eval dispatch; symbol/keyword/collection eval
+    special.rs          — special-form evaluators (def, fn*, let*, loop*, try, ns, …)
+    apply.rs            — eval_call: macro expansion, native dispatch, recur trampoline
+    arity.rs            — fresh arity ID generator
+    destructure.rs      — pattern destructuring (vector, map, & rest)
+    macros.rs           — macro expansion helpers
+    syntax_quote.rs     — syntax-quote (backtick) expansion
+    virtualize.rs       — let-chain virtualization: assoc/conj chains → transients
+    versioned.rs        — (non-WASM) tree-walker entry point for versioned resolution
+
+  tiered/
+    mod.rs              — re-exports; standard_env*; mark_compiler_ready; load_prebuilt_ir
+    apply.rs            — IR-aware dispatch: JIT → IR cache → tree-walk fallback
+    ir_interp.rs        — tier-1 IR interpreter over a VarId→Value register file
+    ir_cache.rs         — thread-safe cache of lowered IR keyed by arity ID
+    lower.rs            — orchestrates the pure-Rust cljrs_ir::lower pipeline
+    lower_worker.rs     — background IR-lowering worker thread ("cljrs-ir-lower")
+    defn_registry.rs    — cross-defn IR registry and invalidation edges
+    jit_state.rs        — JIT counters, native-fn table, epochs, OSR slots
+
+tests/
+  no_gc_eval.rs                    — (no-gc) arithmetic, def provenance, region stack
+  versioned_resolution.rs          — versioned resolution against a real git fixture
+  require_spec_reader_conditional.rs — reader conditionals in ns require specs
+  declare_macro.rs, doc.rs, gas_meter.rs, into_seq_target.rs, map_entry.rs,
+  named_fn_identity.rs, ns_metadata.rs, partition_arities.rs, shared_atom.rs,
+  symbolic_nan.rs, threading_macros.rs, auto_gensym.rs, auto_keyword_macro.rs,
+  assoc_in_metadata.rs, empty_metadata.rs, into_metadata.rs, vec_metadata.rs,
+  defonce_metadata.rs, defonce_metadata_properties.rs,
+  auto_resolution_properties.rs   — tree-walker behavior (moved from cljrs-interp)
+  gas_meter_ir.rs, versioned_ir.rs, partition_ir.rs, destructure_lowering.rs,
+  osr_transfer.rs, region_phi_uaf.rs — tiered behavior (moved from cljrs-eval)
 ```
 
 ---
 
-## Public API
+## Module `env`
 
-None. The crate exports nothing.
+### `env` submodule
+
+`Env` is a lexical scope chained to a parent; `GlobalEnv` is the process-wide
+namespace registry (namespaces, interned vars, source paths, refer/alias
+tables, the version cache, and the evaluator function pointers that Stage 3
+removes).
+
+### `error` submodule
+
+`EvalError` / `EvalResult` are the evaluator's error types. Helpers:
+
+- `EvalError::to_error_value(self) -> Value` — convert an error into a Clojure
+  error *value*; `Thrown` is returned unchanged, anything else is wrapped in a
+  fresh `ExceptionInfo`
+- `value_error_to_eval_error(err: ValueError) -> EvalError` — surface a builtin's
+  `ValueError` as a *catchable* `EvalError::Thrown(Value::Error(..))`, preserving
+  the original variant and its plain message (no `runtime error:` prefix) so
+  `(catch :default e ..)` / `ex-message` / `ex-data` behave the same as for a
+  user `throw` / `ex-info`. A `ValueError::Thrown` re-surfaces the exact value.
+
+### `gas` submodule
+
+Cooperative execution-credit metering shared dynamically across tree-walker,
+IR-interpreter, and JIT callbacks. `GasMeter::new(credits)` creates a shared
+budget, `GasGuard::install(meter)` scopes it to the current evaluation thread,
+`active_meters() -> Vec<Arc<GasMeter>>` and `install_meters(&[Arc<GasMeter>])`
+propagate complete nested scopes to async polls, `charge(cost) -> bool` consumes
+an all-or-nothing checkpoint, and
+`take_exhausted() -> bool` transfers a native-tier exhaustion signal back to
+the evaluator. `EvalError::GasExhausted` is the dedicated caller-facing error.
+Exhaustion state is scoped per guard, so an exhausted inner evaluation cannot
+poison a healthy outer evaluation after the inner guard drops.
+
+### `policy` submodule
+
+Dynamic capability policy used by isolated transaction functions.
+`TransactionPolicyGuard::install()` denies filesystem and output operations,
+clocks, randomness, process-global mutable facilities, blocking/concurrency,
+versioned namespace loading, and Rust object construction. `check_native`,
+`check_special`, and `check_versioned_lookup` are enforced at the interpreter's
+final dispatch seams. `next_transaction_gensym()` supplies an invocation-local
+deterministic sequence for syntax-quote hygiene. Violations return
+`EvalError::ForbiddenEffect(String)`.
+
+### `versioned` submodule (non-WASM)
+
+Shared versioned-symbol/namespace resolution service used by **every**
+execution tier (tree-walker, IR interpreter, JIT/AOT `rt_load_global*`
+bridges). Resolving `ns/name@commit` ensures the immutable versioned
+namespace `"ns@commit"` is loaded — from an embedded builtin source first,
+falling back to fetching the file from git history — then performs a plain
+`lookup_in_ns("ns@commit", name)`. Native (Rust-backed) symbols with no
+Clojure source fall back to the HEAD implementation. Public API:
+
+- `resolve_versioned_value(globals, defining_ns, ns_part, name, commit) -> EvalResult<Value>`
+  — full resolution: alias handling, lazy namespace load, native HEAD fallback
+- `ensure_versioned_ns_loaded(globals, base_ns, commit) -> EvalResult<Arc<str>>`
+  — idempotent load of `"base_ns@commit"` (same cycle/cross-thread coordination
+  as the unversioned loader); returns the versioned namespace name
+- `base_ns_name(ns: &str) -> &str` — strip a trailing `@<commit>` suffix
+
+Sources fetched from git are recorded in `GlobalEnv::versioned_sources`
+(`record_versioned_source` / `versioned_sources_snapshot`) so the AOT
+compiler can embed them in produced binaries.
+`pin_if_available(globals, base_ns, commit) -> EvalResult<bool>` is the AOT
+discovery hook: force-loads a pin when its source is locatable, skips
+otherwise.  `GlobalEnv::set_versioned_offline(true)` (called by AOT harness
+binaries) restricts versioned loading to embedded sources — a missing
+embedding fails with a clear "was not embedded at compile time" error
+instead of fetching from git.
+
+Native (Rust-backed) packages get a **verified HEAD binding**: the fallback
+checks the pin against `GlobalEnv::native_provenance` (recorded via
+`set_native_provenance` / `Registry::set_provenance`; prefix-match in either
+direction for abbreviated hashes).  Mismatching or missing provenance warns
+once per pin (`provenance_warned`), or errors when
+`set_enforce_native_versions(true)` is set (`--enforce-native-versions`,
+cljrs.edn `:enforce-native-versions`).
+
+Opt-in pinned native code: `GlobalEnv::set_pinned_native_loader` installs a
+`PinnedNativeLoader` callback (provided by `cljrs-dylib`); the resolver
+consults it before the HEAD fallback, and a successful load redirects the
+lookup into the freshly registered `"<ns>@<commit>"` namespace.
+
+Plain `require` of a native dep: `GlobalEnv::set_native_require_loader`
+installs a `NativeRequireLoader` callback (also provided by `cljrs-dylib`).
+The unversioned namespace loader (`loader::do_load`) consults it when a
+`require`d namespace has no Clojure source on the source path; a successful
+load registers a `:rust/load :dylib` dep's exports into the **unversioned**
+namespace (built at the dep's pinned `:git/sha`), so a plain
+`(require '[my.native.lib :as l])` of a pure-native package succeeds.
+
+AOT-compiled namespaces: the binary produced by `cljrs compile` registers a
+`CompiledNsLoader` per required namespace via
+`GlobalEnv::register_compiled_ns_loader`.  `loader::do_load` checks
+`GlobalEnv::compiled_ns_loader` **first** — before builtin source, disk, and
+native fallbacks — and, when one is present, runs it instead of interpreting
+Clojure source.  The loader evaluates the namespace's small interpreted
+preamble (its `ns`/`require` form and any `defmacro`/protocol/multimethod
+definitions) and then calls the namespace's natively compiled initializer, so
+the bulk of a required namespace runs as machine code rather than being
+tree-walked at startup.  `*ns*` is saved/restored around the loader so the
+caller's namespace is undisturbed.
+
+### `gc_roots` submodule
+
+Manages GC root registration for the interpreter's Rust call stack. Public API:
+
+- `push_env_root(env: &Env) -> EnvRootGuard` — registers an `Env` pointer as a GC root; guard removes on drop
+- `root_value(val: &Value) -> ValueRootGuard` — registers a single `Value` pointer as a GC root
+- `root_values(vals: &[Value]) -> ValueRootGuard` — registers a slice of `Value` pointers as GC roots
+- `root_option_values(vals: &[Option<Value>]) -> OptionValueRootGuard` — registers an `Option<Value>` slice (e.g. IR register file)
+- `gc_safepoint(env: &Env)` — interpreter-level safepoint: parks if collection in progress, or initiates collection on memory pressure
+- `force_collect(env: &Env)` — immediately initiates a GC collection bypassing memory-pressure threshold
+- `async_gc_collect()` — services a pending GC request from a Tokio `LocalSet` task at a cooperative yield point; safe to call when no other tasks are polling, so thread-local root stacks are stable and fully describe all suspended-task `GcPtr`s
+- `set_stw_reclaim_hook(f)` — registers a stop-the-world reclaim hook; multiple hooks may be registered and each runs (in registration order) inside the STW guard at the tail of every collection (`force_collect`, `gc_safepoint`, `async_gc_collect`), when all mutator threads are parked.  Registrants: `cljrs-jit` frees superseded native code (Phase 10.2); the `tiered` lowering worker sweeps idle Tier-1 IR (Phase 10.7)
+
+Root tracing covers all namespaces (including immutable `ns@commit`
+namespaces) **and** the values in `GlobalEnv::version_cache`, so versioned
+values that exist only in the cache (native HEAD fallbacks) survive
+collection.
+
+### `apply` submodule
+
+`apply_value` applies an evaluated callee to evaluated args (functions,
+keywords, maps, sets, vars, protocol/multimethod dispatch). For a
+`Value::ProtocolFn` callee whose protocol has `extend_via_metadata` set (`(defprotocol
+Name :extend-via-metadata true ...)`), dispatch first checks the first arg's
+metadata for an entry keyed by the `ProtocolFn` itself (e.g. `(with-meta {}
+{my-method (fn [this] ...)})`) before falling back to the type-tag `impls`
+lookup — this lets a value implement a protocol without a matching
+`extend-type`/`extend-protocol`. Protocol dispatch helpers shared with the
+Phase 10.6 inline caches:
+
+- `type_tag_of(val: &Value) -> Arc<str>` — canonical protocol dispatch tag of a value
+- `type_tag_matches(val: &Value, tag: &str) -> bool` — allocation-free equality
+  against a cached tag; must agree exactly with `type_tag_of` (used by
+  `rt_call_ic`'s hot path in `cljrs-compiler`)
+- `dispatch_if_async(callee, args, env)` — spawn `^:async` callees on the async runtime
+
+### `callback` submodule
+
+Thread-local eval context for Rust→Clojure callbacks (`invoke`, `with_eval_context`). The context is pushed automatically around native builtin calls and by the Tier-1 IR executor; rt_abi bridges (`rt_call`, `rt_load_global`, the HOF bridges) dispatch through it. Public API includes:
+
+- `push_eval_context(env: &Env)` / `pop_eval_context()` — bracket a native call with the current env's globals + namespace
+- `capture_eval_context() -> Option<(Arc<GlobalEnv>, Arc<str>)>` — snapshot the innermost context (e.g. to hand to another thread)
+- `install_eval_context(globals, ns)` — push a previously captured context (spawned threads)
+- `install_eval_context_guard(globals, ns) -> EvalContextGuard` — like `install_eval_context`, but pops on drop (including unwind); used by the JIT-native dispatch seam
+- `current_is_async() -> bool` — whether the innermost context is inside an `^:async` body
+- `invoke(f: &Value, args: Vec<Value>) -> ValueResult<Value>` — call a Clojure-callable value through the innermost context. Honors `^:async` dispatch (via `apply::dispatch_if_async`) so a native/compiled caller of an `^:async` fn gets a `Value::Future`, not a synchronously-run body
+- `with_eval_context(f)` — run a closure with a temporary `Env` built from the innermost context
+
+### `async_hook` submodule
+
+The optional async-runtime seam (`AsyncRuntime` trait, installed by `cljrs-async`). Also hosts the async-JIT compile hook: `set_async_compile_hook` / `async_compile_hook` (`fn(&Value, usize, &mut Env)`), installed by `cljrs-jit::init` and called by the async dispatcher to lower + compile + register a native poll function for a called `^:async` arity (a no-op when the JIT is absent).
+
+---
+
+## Module `builtins`
+
+The `clojure.core`-equivalent runtime implemented in Rust, registered into a
+name → fn dispatch table by `builtins::register_all(&globals, ns)`.
+`BOOTSTRAP_SOURCE` (`bootstrap.cljrs`) and `CLOJURE_TEST_SOURCE`
+(`clojure_test.cljrs`) are the embedded Clojure sources evaluated on top of it.
+
+### Map entries
+
+Map entries are a dedicated type, not plain 2-element vectors: seq'ing a map,
+`find`, and the `map-entry` constructor produce vectors tagged as entries
+(`PersistentVector::map_entry` in `cljrs-value`).
+
+- `(map-entry k v)` / `(map-entry coll)` — build an entry from a key and
+  value, or from any seqable of exactly two elements.
+- `(map-entry? x)` — true only for real entries; `(map-entry? [:a 1])` is
+  false.
+- `key` / `val` (bootstrap) — accept only real map entries and throw
+  otherwise.
+
+Entries otherwise behave exactly like 2-element vectors (equality, hashing,
+printing, `nth`, destructuring), and, as in Clojure, any vector derived from
+an entry (`conj`, `assoc`, `pop`, `subvec`, ...) is a plain vector again.
+
+### Unchecked arithmetic
+
+Includes the `unchecked-*` integer arithmetic family — `unchecked-add`,
+`unchecked-subtract`, `unchecked-multiply`, `unchecked-inc`, `unchecked-dec`,
+`unchecked-negate` (and their `-int` aliases) — which wrap on overflow, in
+contrast to the checked `+`/`-`/`*` (which throw on overflow at the IR/compiled
+tiers and promote to BigInt in the tree-walk tier).
+
+### Docstrings (`doc` / `doc-data`)
+
+`register_all` attaches `:doc` var metadata to native builtins from the
+`BUILTIN_DOCS: &[(&str, &str)]` table (in `builtins.rs`), keyed by the name
+the builtin is interned under. Not every builtin has an entry — special-form
+stub vars and rarely-used internals are skipped, and a builtin later
+redefined in `bootstrap.cljrs` (e.g. `swap!`, `partition`, `range`) carries
+its docstring there instead, since the Clojure-level `defn`/`defmacro`
+re-interns the var (see the `interp` module below for how `def`/`defn`/
+`defmacro` capture docstrings into var meta). Any builtin *may* carry a
+docstring simply by adding a `BUILTIN_DOCS` entry; `#[cfg(test)] mod
+doc_tests` in `builtins.rs` asserts every entry names something actually
+registered, and that there are no duplicate names.
+
+`doc-data` (`builtin_doc_data`, registered as a native fn) takes a `Var`
+(`#'foo`), a value carrying attached metadata (`with-meta`), or a bare
+function value, and returns `{:doc <string-or-nil> :arities <vector-or-nil>}`.
+`:arities` prefers `:arglists` var metadata when present (real parameter
+names, from `def`/`defn`/`defmacro`); otherwise it synthesizes placeholder
+parameter names (`arg1`, `arg2`, ...) from a native fn's `Arity` shape, since
+native fns don't carry real parameter names.
+
+`clojure.core/doc` (a macro, defined in `bootstrap.cljrs`) wraps `(var sym)` +
+`doc-data` in a `try`/`catch` so `(doc some-unbound-symbol)` returns `nil`
+instead of throwing, and returns just the `:doc` string.
+
+### Reader-conditional resolution (`form.rs`)
+
+The reader is platform-agnostic: it parses every branch of `#?(...)` / `#?@(...)`
+and hands back a `FormKind::ReaderCond` node. Selecting the `:rust` branch is
+therefore the job of each form-consuming boundary, and this module holds the
+calculations they share.
+
+```rust
+/// The `:rust` branch of a conditional's clauses, or the `:default` branch.
+pub fn select_reader_cond(clauses: &[Form]) -> Option<&Form>;
+
+/// Expand `#?`/`#?@` across a sibling slice: a non-splicing conditional
+/// becomes its selected branch (or is dropped), a splicing one contributes
+/// that branch's elements inline.
+pub fn expand_reader_conds(forms: &[Form]) -> Vec<Form>;
+
+/// As above, borrowing the input unchanged when it holds no conditional.
+pub fn expand_reader_conds_cow(forms: &[Form]) -> Cow<'_, [Form]>;
+
+/// A slice that gets chunked by two was left with an odd number of forms.
+pub struct OddArity(pub usize);
+
+/// Expand, then require even length. Used by every construct that chunks
+/// siblings into pairs - map literals and `let*`/`loop*`/`binding` vectors,
+/// in both evaluators - since a splice's contribution is branch-dependent
+/// and the written parity does not decide the expanded parity.
+pub fn expand_pairs(forms: &[Form]) -> Result<Cow<'_, [Form]>, OddArity>;
+
+/// Convert a form to the value it denotes, without evaluating. Resolves
+/// conditionals in every container arm. Errors on a map whose expansion has
+/// odd length, and on a `#?@` with no sibling sequence to splice into.
+pub fn form_to_value(form: &Form) -> EvalResult<Value>;
+```
+
+Callers phrase `OddArity` in their own words (`map literal must have an even
+number of forms`, `let* binding vector must have even length`, ...), so the
+parity rule lives here while the message stays at the boundary.
+
+### Phase B3 — `shared-atom` (cross-isolate, two-tier atom ADR)
+
+`shared-atom` is the cross-isolate tier of the two-tier atom design in
+`docs/async-worker-pool-plan.md`.  Unlike `atom` (isolate-local, GC-backed),
+its contents are promoted to a `Send + Sync` `SharedValue`
+(`cljrs_value::shared`) behind a lock-free `ArcSwap`, so the reference can cross
+the isolate boundary and be mutated concurrently:
+
+- `(shared-atom x)` — construct, promoting `x` (non-promotable values such as
+  closures and native resources are rejected here).
+- `(shared-atom? x)` — predicate.
+- `deref` / `reset!` / `swap!` / `compare-and-set!` — dispatch on
+  `Value::SharedAtom` alongside the local `atom` path; writes promote, reads
+  demote, and `swap!`/`compare-and-set!` use a single lock-free CAS with retry.
+
+---
+
+## Module `interp`
+
+Self-contained tree-walking interpreter for Clojure.
+
+**Phase:** Core interpreter — implemented.  `no-gc` region/static-sink support (Phases 4–5), blacklist integration (Phase 6), and integration tests (Phase 8) of `docs/no-gc-plan.md` — implemented.
+
+Evaluates Clojure `Form` ASTs produced by `cljrs-reader`, managing lexical
+environments, special forms, function application, and the recur trampoline.
+
+Allocations are scoped per function call and per loop iteration: under GC, each
+trampoline iteration (`call_cljrs_fn`, `eval_loop`) runs inside its own
+`cljrs_gc::push_alloc_frame()`, so that iteration's intermediates — and a
+`recur`'s now-dead values — become collectable when the frame drops, instead of
+being pinned in `ALLOC_ROOTS` for the lifetime of the enclosing top-level form.
+The return value / recur args are moved out before the frame drops and re-rooted
+at the next iteration (or by the caller on return); no GC safepoint runs in the
+interval (GC fires only at explicit safepoints, with a one-cycle grace period —
+see `cljrs-gc`). Under the `no-gc` Cargo feature the same scoping is achieved
+with the allocation-context stack protocol (scratch regions for function/loop
+scopes; `StaticArena` for static-sink expressions).
+When the `env` module's transaction policy and `InvocationGuard` are active, the
+same tree walker denies external capabilities and routes all allocations into
+one invocation-lifetime region instead.
+
+### Environment constructors
+
+```rust
+pub fn standard_env_minimal(eval_fn, call_cljrs_fn, on_fn_defined) -> Arc<GlobalEnv>;
+pub fn standard_env(eval_fn, call_cljrs_fn, on_fn_defined) -> Arc<GlobalEnv>;
+pub fn standard_env_with_paths(eval_fn, call_cljrs_fn, on_fn_defined, source_paths) -> Arc<GlobalEnv>;
+```
+
+`standard_env_minimal` registers native builtins into `clojure.core`, evaluates
+`bootstrap.cljrs`, and sets up the `user` namespace. `standard_env` also eagerly
+loads `clojure.test`. Stage 3 replaces all three with `Runtime::builder()`.
+
+### `eval(form, env) -> EvalResult`
+
+Evaluate a single `Form` in `env`.  Entry point for the interpreter.
+
+### `eval_with_gas(form, env, credits) -> EvalResult`
+
+Evaluate a form with a cooperative execution-credit budget. Tree-walker form
+entries cost one credit; Tier-1 IR and JIT basic blocks use the same weighted
+`phis + instructions + terminator` approximation. Exhaustion returns
+`EvalError::GasExhausted`; ordinary `eval` calls remain unmetered.
+
+This is a cooperative mechanism and currently a host API rather than a CLI or
+nREPL policy. Native builtins that do substantial work without re-entering the
+evaluator may consume fewer credits than equivalent interpreted code. Compiled
+code emits a checkpoint call at every basic block even when no meter is active;
+avoiding that always-on JIT cost requires a future metering-mode fast path.
+
+### `eval_call(func_form, arg_forms, env) -> EvalResult`
+
+Evaluate a function-call form.  Handles macros, native-function special cases,
+and user-defined `CljxFn` application with the recur trampoline.
+
+### `eval_body(forms, env) -> EvalResult`
+
+Evaluate a sequence of forms, returning the value of the last one.
+
+### `eval_loop(args, env) -> EvalResult`
+
+Evaluate a `loop*` form.  Each iteration is scoped in its own allocation frame
+so intermediate allocations are freed per iteration: under GC a
+`cljrs_gc::push_alloc_frame()` that drops at the end of the iteration; under
+`no-gc` a `ScratchGuard` popped before the tail expression (recur args or return
+value).
+
+### `eval_defn(args, env) -> EvalResult`
+
+Evaluate a `defn` form.  Accepts metadata on the name (`(defn ^:async f …)`) and
+an attr-map (`(defn f {:async true} …)`); `^:async` marks the resulting `CljxFn`
+as async.  Under `no-gc`, wraps fn creation in `StaticCtxGuard` so the `CljxFn`
+object lands in the `StaticArena`.
+
+### Docstring / `:arglists` metadata (`def`, `defn`, `defmacro`)
+
+`eval_def`, `eval_defn`, and `eval_defmacro` all recognize an optional
+docstring positional arg (`(def name "doc" val)`, `(defn name "doc" [..] ..)`,
+`(defmacro name "doc" [..] ..)`) and store it as `{:doc "..."}` in the
+resulting Var's metadata, merged with any reader/attr-map metadata via
+`merge_meta`.  `defn`/`defmacro` additionally derive `{:arglists (...)}` from
+the evaluated `CljxFn`'s parsed arities (`arglists_meta`, in `special.rs`);
+for `defmacro` the implicit `&form`/`&env` params are elided from the shown
+signature.  This is what `clojure.core/doc` and `doc-data` (in the `builtins`
+module) read back, and what `cljrs-nrepl`'s `op_lookup` surfaces to editors.
+
+### `meta_form_is_async(meta: &Form) -> bool`
+
+Returns true when a `^meta` form (or attr-map literal) requests `:async` — either
+the keyword shorthand `^:async` or an explicit `{:async true}` map.  `fn`/`defn`
+use it to set `CljxFn::is_async`, which `env::apply::dispatch_if_async`
+checks at call time to route through the async runtime.
+
+### Special handlers in `apply.rs`
+
+Each handler evaluates its key expressions under the correct allocation context:
+
+| Handler | Static-sink guard coverage |
+|---|---|
+| `handle_atom_call` | initial value |
+| `handle_reset_bang` | new value |
+| `handle_swap_call` | function return value |
+| `handle_volatile` | initial value |
+| `handle_vreset` | new value |
+| `handle_vswap` | function return value |
+| `handle_agent_call` | initial value |
+| `handle_alter_var_root` | function return value |
+| `handle_intern` | value expression (3-arg form) |
+
+### Value-level special form helpers (IR interpreter API)
+
+The IR interpreter receives already-evaluated `Vec<Value>` arguments rather than
+`&[Form]` AST nodes.  These public functions mirror the `handle_*` form-level
+handlers but accept pre-evaluated args, allowing the IR interpreter to
+implement sentinel operations without hitting the stub errors registered in
+`clojure.core`:
+
+| Function | Operation |
+|---|---|
+| `eval_swap_bang(args, env)` | `swap!` — apply f to atom, store result |
+| `eval_volatile(args)` | `volatile!` — create a new volatile |
+| `eval_vreset_bang(args)` | `vreset!` — reset volatile value |
+| `eval_vswap_bang(args, env)` | `vswap!` — apply f to volatile value, store result |
+| `make_delay_from_fn(f, globals, ns)` | `make-delay` — wrap zero-arg fn in a `Delay` |
+| `eval_alter_var_root(args, env)` | `alter-var-root` — apply f to var root, store result |
+| `eval_vary_meta(args, env)` | `vary-meta` — apply f to obj metadata |
+| `eval_with_bindings_star(args, env)` | `with-bindings*` — push binding frame, call f |
+| `eval_send_to_agent(args, env)` | `send` / `send-off` — dispatch action to agent |
+| `dispatch_method(method, target, args)` | `(.method target args…)` — interop method dispatch on an evaluated target (strings, vectors, seqs) |
+
+`make_lazy_seq_from_fn(f, globals, ns)` (already public) creates a `LazySeq`
+from a zero-arg callable; the above `make_delay_from_fn` is the analogous
+helper for `Delay`.
+
+### `special.rs` notes
+
+`parse_arity` peels primitive type hints (`^long x`, `^doubles a`) off params
+into `CljxFnArity::param_hints`; `let*`/`loop*` binding hints are stripped via
+`bind_pattern`'s `Meta` arm (`destructure.rs`); `desugar_pre_post_conditions`
+rewrites `{:pre [...] :post [...]}` maps into assertion forms (binding `%` to
+the return value in `:post` conditions); `spec_element` resolves a reader
+conditional in ANY slot of an `ns` require spec, namespace included, so
+`[#?(:clj clojure.core :cljs cljs.core) :as core]` reads — an option selecting
+no branch is dropped, a namespace selecting none is an error.
+
+---
+
+## Module `tiered`
+
+IR-accelerated evaluation. Wraps the tree-walking interpreter in `interp` with
+IR lowering and interpretation for faster function execution.
+
+**Phase:** IR tier-1 interpreter — implemented.
+
+When a Clojure function has been lowered to IR — by the warm-threshold
+background lowering worker (Phase 10.7, the default), eagerly at definition
+time via the `on_fn_defined` hook (`CLJRS_EAGER_LOWER=1`), or from a pre-built
+cache — calls are dispatched to the tier-1 IR interpreter. Otherwise they fall
+back to the tree-walking interpreter.
+
+Lowering itself is pure Rust (`cljrs_ir::lower`); the `lower` submodule here
+orchestrates macro expansion (interpreter) and the Env-free lowering half.
+
+### Public API
+
+```rust
+/// Re-exports from the interp and env modules:
+pub use crate::env::env::{Env, GlobalEnv};
+pub use crate::env::error::{EvalError, EvalResult};
+pub use crate::interp::eval::{eval, eval_with_gas};
+pub use crate::env::callback::invoke;
+pub use crate::env::loader::load_ns;
+
+/// Create a minimal GlobalEnv with IR-accelerated eval/call dispatch.
+/// Passes tiered::apply::call_cljrs_fn (IR + tree-walk fallback)
+/// and eager_lower_fn hook to interp::standard_env_minimal.
+pub fn standard_env_minimal() -> Arc<GlobalEnv>;
+
+/// Like standard_env_minimal() but without the eager-lowering hook.
+pub fn standard_env_minimal_no_ir() -> Arc<GlobalEnv>;
+
+/// Like standard_env_minimal() but also registers compiler sources.
+pub fn standard_env() -> Arc<GlobalEnv>;
+
+/// Like standard_env() but also sets user source paths.
+pub fn standard_env_with_paths(source_paths: Vec<PathBuf>) -> Arc<GlobalEnv>;
+
+/// Mark the IR compiler ready (lowering is pure Rust — nothing to load),
+/// snapshotting the bootstrap arity watermark. Honors CLJRS_NO_IR. Idempotent.
+pub fn mark_compiler_ready(globals: &Arc<GlobalEnv>) -> bool;
+
+/// Load pre-built IR from a serialized bundle into the IR cache.
+/// Walks all namespaces, matches bundle keys to runtime arity IDs.
+/// Returns the number of arities loaded.
+pub fn load_prebuilt_ir(globals: &Arc<GlobalEnv>, bundle: &IrBundle) -> usize;
+
+/// IR lowering helpers (in submodule `lower`):
+///
+/// `lower_arity(name, params, rest, destructure_params, destructure_rest, body,
+///     ns, env, is_async)` — ANF lowering only.
+/// `lower_and_optimize_arity(name, params, rest, destructure_params,
+///     destructure_rest, body, ns, env, is_async)` — also runs
+///     region-optimization.  Both accept `is_async: bool` from the `CljxFn` and
+///     propagate it to `IrFunction::is_async`.
+///
+/// `destructure_params: &[(usize, Form)]` carries the original destructuring
+/// patterns for parameters the interpreter replaced with gensym placeholders
+/// (paired with their index into `params`); `destructure_rest: Option<&Form>`
+/// is the rest parameter's pattern when it is itself destructured.  Both are
+/// expanded into explicit bindings in the IR prologue, so destructured-param
+/// arities now lower to the IR/JIT tiers instead of falling back to the
+/// tree-walker.
+pub mod lower {
+    pub fn lower_arity(..., is_async: bool) -> Result<IrFunction, LowerError>;
+    pub fn lower_and_optimize_arity(..., is_async: bool) -> Result<IrFunction, LowerError>;
+    /// Like lower_and_optimize_arity, but also returns the (ns, name) set of
+    /// cross-defn externals the optimizer consulted (invalidation deps).
+    pub fn lower_and_optimize_arity_tracked(..., is_async: bool)
+        -> Result<(IrFunction, Vec<(Arc<str>, Arc<str>)>), LowerError>;
+
+    // Phase 10.7 — the two halves of lowering, split for background use:
+    /// Macro-expand a body on the calling thread (macros need the interpreter).
+    pub fn macroexpand_body(body: &[Form], env: &mut Env) -> Vec<Form>;
+    /// Env-free lowering of an already-expanded body; callable off-thread.
+    /// `arity_id: Some(id)` uses defn_registry::snapshot_externals (atomic
+    /// dependent recording, required off the mutator thread); `None` uses the
+    /// legacy externals_for (synchronous callers record dependents themselves).
+    pub fn lower_expanded_arity(name, params, rest, destructure_params,
+        destructure_rest, expanded_body, ns, globals_id: usize,
+        arity_id: Option<u64>, do_optimize: bool, is_async: bool)
+        -> Result<(IrFunction, Vec<(Arc<str>, Arc<str>)>), LowerError>;
+    /// Identity of the GlobalEnv behind `env` (scopes the cross-defn registry).
+    pub fn globals_id(env: &Env) -> usize;
+}
+
+/// Cross-defn IR registry (in submodule `defn_registry`, Phase 10.5):
+pub mod defn_registry {
+    pub fn register_defn(globals_id, ns, name, arities: Vec<(usize, bool, Arc<IrFunction>)>);
+    pub fn externals_for(globals_id, referenced) -> Vec<ExternalDefn>;
+    pub fn record_dependents(arity_id, used);
+    /// Phase 10.7: externals_for + record_dependents in one step, atomic with
+    /// respect to on_redefined (holds the registry lock across the edge write).
+    /// The background worker must use this — see lower_worker.rs.
+    pub fn snapshot_externals(globals_id, arity_id, referenced) -> Vec<ExternalDefn>;
+    pub fn on_redefined(ns, name) -> Vec<u64>;   // dependents to invalidate
+    pub fn relower_pending() -> bool;            // dispatch fast-path check
+    pub fn relower_marked(arity_id) -> bool;     // peek without consuming (dispatch)
+    pub fn take_relower(arity_id) -> bool;       // consume (lowering worker only)
+    pub fn install_invalidation_hook();          // idempotent; var-rebind hook
+}
+```
+
+### IR dispatch flow
+
+1. `tiered::apply::call_cljrs_fn` is registered as the `call_cljrs_fn` function pointer in `GlobalEnv`
+2. On each call, it checks `ir_cache::get_cached(arity_id)` for a lowered IR function
+3. If cached **and not async**: executes via `ir_interp::interpret_ir` (register-file interpreter)
+4. If not cached **or async**: counts the call (`jit_state::record_interp_call`, Phase 10.7 —
+   see "Background lowering" below) and falls back to `interp::apply::call_cljrs_fn`
+   (tree-walking).  For `^:async` functions the tree-walking path dispatches to `eval_async`
+   in `cljrs-async`, which cooperatively yields to the Tokio `LocalSet` executor.
+5. How IR gets into the cache:
+   - **Warm-threshold background lowering (default, Phase 10.7)**: when a function's
+     tree-walked call count crosses `ir_threshold()` (default 50), the dispatch seam
+     macro-expands its arity bodies on the calling thread and enqueues them to the
+     `cljrs-ir-lower` worker, which lowers + optimizes off-thread and publishes via
+     `ir_cache::store_cached`.
+   - **Eager lowering (opt-in, `CLJRS_EAGER_LOWER=1`)**: `ir_interp::eager_lower_fn` is
+     registered as the `on_fn_defined` hook; when `compiler_ready` is true, new `fn*`
+     definitions are lowered immediately.
+   - **Pre-built bundles**: `load_prebuilt_ir` — public API for embedders, called by
+     nothing in this workspace. `cljrs ir build` writes the bundles it consumes.
+   The resulting `IrFunction::is_async` flag matches the `CljxFn::is_async` attribute.
+6. `eval_call` in `interp` routes `Value::Fn` calls through `globals.call_cljrs_fn`
+   (the registered hook) rather than calling the tree-walker directly, so IR-cached
+   arities are used on direct call paths too
+7. JIT tier: before the IR cache, `call_cljrs_fn` checks `jit_state::get_native_fn(arity_id)`
+   for compiled native code and, if present, dispatches to it.  `call_jit_native` brackets
+   the native call with: a frame epoch (code unloading), GC roots for the caller env and
+   args, **an eval context** (rt_abi bridges — `rt_call`, `rt_load_global`, the HOF
+   bridges — dispatch through `env::callback`; without it they silently return nil),
+   and an alloc frame.  After the call it takes any pending exception stashed by an
+   uncaught native `(throw …)` and re-raises it as `EvalError::Thrown` (same in
+   `try_osr_enter` for OSR entries)
+
+### Background lowering & cold-IR eviction (Phase 10.7)
+
+The default tiering pipeline is count-driven end to end:
+
+```
+Tier 0 tree-walk ──(ir_threshold, 50 calls)──▶ background lower ──▶ Tier 1 IR
+Tier 1 IR ──(jit_threshold, 1000 calls; counter restarts at IR publish)──▶ Tier 2 JIT
+```
+
+- The crossing call macro-expands the fn's arity bodies **on the calling
+  thread** (macros are user Clojure functions and need the interpreter), then
+  ships a `LowerRequest` (plain `Form` data) to the `cljrs-ir-lower` worker.
+  The worker is not a GC mutator: it only runs the Env-free half of lowering.
+- Skipped: macros, async fns, capturing closures, bootstrap-era definitions
+  (arity id below the watermark snapshotted by `mark_compiler_ready`), and
+  fns defined in builtin-source namespaces (clojure.test, clojure.string, …).  Background lowering targets **user code only**:
+  shipped namespaces only ever reached the IR tiers under opt-in eager
+  lowering, and some of their patterns are known to miscompile (see TODO.md
+  Phase 10.7 notes).
+- Rebind safety: `snapshot_externals` records dependent edges atomically with
+  reading the registry, and the worker is the only consumer of relower marks —
+  after `store_cached` it re-peeks the mark and re-lowers (≤3 attempts) if a
+  rebind landed mid-flight.  The dispatch seam only peeks
+  (`relower_marked` + `lower_queued` dedup) and enqueues.
+- Cold eviction: `Cached` entries track last access; `ir_cache::sweep_idle`
+  runs at the stop-the-world reclaim pass and evicts entries idle past
+  `CLJRS_IR_CACHE_TTL` (default 600 s) — deliberately *colder* than native
+  code.  Entries backing published native code or an in-flight compile are
+  never evicted (deopt fallback); `Unsupported` markers are kept forever.
+  Eviction drops the `JitEntry` (the fn can re-warm) and stales any OSR code.
+- Knobs: `CLJRS_IR_THRESHOLD` / `set_ir_threshold` / `--ir-threshold N`
+  (0 disables background lowering), `CLJRS_IR_CACHE_TTL`, `CLJRS_NO_IR`
+  (kills all IR), `CLJRS_EAGER_LOWER=1` (restores eager lowering — also the
+  escape hatch for the known limitation that a long-running loop entered at
+  Tier 0 cannot tier up mid-call, since the tree-walker has no OSR).
+
+### JIT state & code unloading (`jit_state`)
+
+`jit_state` is the seam between the Tier-1 interpreter and the background JIT
+(`cljrs-jit`). Public surface:
+
+```rust
+pub fn set_jit_threshold(t: u32);                 // calls before compile (default 1000)
+pub fn set_ir_threshold(t: u32);                  // Tier-0 calls before background lowering
+                                                  // (default 50; u32::MAX disables)
+pub fn record_interp_call(arity_id) -> bool;      // Tier-0 call accounting; true = snapshot+enqueue
+pub fn lower_queued(arity_id) -> bool;            // dedup gate for the warm/relower paths
+pub fn mark_lower_queued(arity_id);               // set on accepted enqueue
+pub fn clear_lower_queued(arity_id);              // worker re-arms after abandoning an arity
+pub fn on_ir_published(arity_id);                 // worker: restart counter at IR publish
+pub fn evict_entry_if_cold(arity_id) -> bool;     // TTL sweep: drop entry unless native/queued
+pub fn stale_osr_code(arity_id);                  // TTL sweep: stale published OSR entries
+pub fn compile_queued(arity_id) -> bool;          // TTL sweep: in-flight JIT needs the IR
+pub fn set_bootstrap_arity_watermark(w: u64);     // mark_compiler_ready snapshots the boundary
+pub fn is_bootstrap_arity(arity_id) -> bool;      // bootstrap fns excluded from background lowering
+pub fn record_call(arity_id, ir_func, profile_args);  // bump counter + arg-type profile; enqueue when hot
+pub fn arg_type_profile(arity_id) -> Option<Vec<u8>>; // per-param type bitmasks (PROFILE_LONG/_DOUBLE/_OTHER)
+pub fn set_enqueue_hook(f);                        // installed by cljrs_jit::init
+pub fn store_native_fn(arity_id, ptr, epoch);      // worker publishes compiled code
+pub fn get_native_fn(arity_id) -> Option<(*const (), u64)>;   // (fn_ptr, epoch)
+pub fn take_native_epoch(arity_id) -> Option<u64>; // on redefinition: null ptr, drop entry, return epoch
+pub fn push_jit_frame(epoch) -> JitFrameGuard;     // mark a native frame live for its call
+pub fn current_jit_epoch() -> Option<u64>;         // innermost native frame's epoch (closure-escape pinning)
+pub fn live_epochs() -> HashSet<u64>;              // epochs with a live frame (call at STW only)
+pub fn set_pending_exception_hook(f);              // installed by cljrs_jit::init (rt_abi taker)
+pub fn take_pending_exception() -> Option<Value>;  // uncaught native throw, taken at the dispatch seam
+pub fn set_stale_epoch_hook(f);                    // installed by cljrs_jit::init (code_cache::mark_stale)
+pub fn stale_native_code(arity_id);                // null ptr + route epochs to the stale hook (10.5)
+pub unsafe fn dispatch_jit_call(fn_ptr, args) -> *const Value;
+
+// Deoptimization (Phase 10.6):
+pub fn set_deopt_sentinel_hook(f: fn() -> usize);  // installed by cljrs_jit::init (rt_abi sentinel addr)
+pub fn is_deopt_result(ptr: *const Value) -> bool; // dispatch seam: did the entry guard fail?
+pub fn record_deopt(arity_id);                     // count a guard failure; past deopt_limit():
+                                                   // unpublish + stale the specialized code, ban
+                                                   // the arity from re-specialization
+pub fn specialization_allowed(arity_id) -> bool;   // worker: may this arity be specialized?
+pub fn deopt_limit() -> u32;                       // CLJRS_JIT_DEOPT_LIMIT (default 10)
+```
+
+`call_jit_native` checks `is_deopt_result` on every native return: a
+specialized function whose entry type guard failed returns rt_abi's sentinel
+*before any side effect*, so the seam simply re-executes the call at Tier 1
+(`execute_ir`) — exact interpreter semantics for the violating call.
+
+Type profiles (Phase 10.6): `record_call` ORs each positional argument's type
+class (`PROFILE_LONG` / `PROFILE_DOUBLE` / `PROFILE_OTHER`) into
+`JitEntry::arg_profile` until the compile is queued; variadic arities profile
+only the fixed prefix (the rest-list param is padded `PROFILE_OTHER` so it can
+never be specialized).  The JIT worker reads the snapshot via
+`arg_type_profile` to choose per-parameter specializations.
+
+Each native call brackets itself with `push_jit_frame(epoch)` so the JIT code
+cache can free a superseded module only once no frame is executing it
+(`live_epochs` scanned at the stop-the-world GC safepoint).
+
+### OSR — on-stack replacement (Phase 10.4)
+
+A single hot call containing a `loop*`/`recur` never returns to re-dispatch, so
+the invocation counter cannot promote it.  Instead:
+
+1. `interpret_ir_with_osr` (the dispatch path used by `apply::execute_ir`,
+   which passes the arity ID) counts back-edges per `RecurJump` target.  The
+   counters are local to one execution on purpose: hot-within-one-call is
+   exactly the case invocation tiering misses.
+2. Crossing `osr_threshold()` calls `jit_state::osr_request`, which enqueues
+   `(arity_id, header_block, IrFunction)` to the JIT worker exactly once.
+3. The worker builds the OSR-entry variant (`cljrs_ir::osr::build_osr_function`),
+   compiles it, and publishes `(fn_ptr, epoch, live_ins)` via `store_osr_fn`.
+4. At each subsequent loop-header entry (after φ resolution, so the loop
+   variables are current), the interpreter polls `osr_poll`; on `Ready` it
+   snapshots the live-in registers and calls the native entry
+   (`try_osr_enter`) — the native frame finishes the loop *and* the rest of
+   the function, and its return value becomes the call's result.
+
+OSR `jit_state` surface:
+
+```rust
+pub fn set_osr_threshold(t: u32);                  // back-edges before compile
+pub fn osr_threshold() -> u32;                     // override → CLJRS_OSR_THRESHOLD → jit_threshold()
+pub fn set_osr_enqueue_hook(f);                    // installed by cljrs_jit::init
+pub fn osr_request(arity_id, header, ir_func);     // idempotent compile request
+pub fn osr_poll(arity_id, header) -> OsrPoll;      // NotRequested | Pending | Ready(OsrSlot) | Failed
+pub fn store_osr_fn(arity_id, header, ptr, epoch, live_ins);  // worker publishes
+pub fn mark_osr_failed(arity_id, header);          // worker declines; interpreters stop polling
+pub fn take_osr_epochs(arity_id) -> Vec<u64>;      // on redefinition: drop entries, return epochs
+```
+
+`OsrSlot { fn_ptr, epoch, live_ins }` carries the interpreter registers to pass
+(in parameter order); the transfer uses the same rooting + `push_jit_frame`
+protocol as ordinary JIT-native calls.  Scratch regions opened before the loop
+stay open across the transfer (the OSR variant drops their `RegionEnd`s) and
+unwind with the interpreter frame.
+
+### Special-form coverage in the IR interpreter
+
+Several `clojure.core` entries are sentinel stubs that error unconditionally
+when called through the normal function-call path — the real logic lives in
+`eval_call`'s special-form dispatch.  `ir_interp.rs` handles all of them
+without going through the stubs:
+
+| Operation | How handled in IR |
+|---|---|
+| `swap!` (`KnownFn::AtomSwap`) | `interp::apply::eval_swap_bang` |
+| `with-bindings*` (`KnownFn::WithBindings`) | `interp::apply::eval_with_bindings_star` |
+| `volatile!` | `dispatch_sentinel_by_name` → `eval_volatile` |
+| `vreset!` | `dispatch_sentinel_by_name` → `eval_vreset_bang` |
+| `vswap!` | `dispatch_sentinel_by_name` → `eval_vswap_bang` |
+| `make-delay` | `dispatch_sentinel_by_name` → `make_delay_from_fn` |
+| `alter-var-root` | `dispatch_sentinel_by_name` → `eval_alter_var_root` |
+| `vary-meta` | `dispatch_sentinel_by_name` → `eval_vary_meta` |
+| `send` / `send-off` | `dispatch_sentinel_by_name` → `eval_send_to_agent` |
+| `with-out-str` (`KnownFn::WithOutStr`) | native: `push_output_capture` → apply body thunk → `pop_output_capture` (the clojure.core var is a nil stub and must never be called) |
+| `(.method target args…)` interop | `dispatch_sentinel_by_name` intercepts dot-prefixed `CallDirect` names → `interp::apply::dispatch_method` |
+
+Both `Inst::Call` (where the callee register holds a sentinel `NativeFunction`)
+and `Inst::CallDirect` (where the callee is named directly) are intercepted.
+
+`load_global_value` additionally mirrors `eval_symbol`'s whole-symbol lookup:
+when `(ns, name)` resolution fails, it retries `"{ns}/{name}"` in the defining
+namespace (with the clojure.core refers fallback), so slash-named builtins
+like `Math/abs` — registered in clojure.core under their full name but split
+by the lowerer — resolve at Tier 1 exactly as they do tree-walked.
+(`rt_load_global` in cljrs-compiler does the same for compiled code.)
 
 ---
 
@@ -42,7 +833,7 @@ None. The crate exports nothing.
 
 | Feature | Effect |
 |---|---|
-| `no-gc` | Forwards to `cljrs-gc/no-gc`. Inert while the crate is empty. |
+| `no-gc` | Forwards to `cljrs-gc/no-gc` and `cljrs-value/no-gc`; switches `env::gc_roots`, `interp::special`, and `interp::apply` to the region/`StaticArena` allocation protocol |
 
 ---
 
@@ -50,6 +841,14 @@ None. The crate exports nothing.
 
 | Crate | Role |
 |-------|------|
-| `cljrs-types` (workspace) | unused by the stub; kept for the Stage 2 merge |
-| `cljrs-gc` (workspace) | unused by the stub; carries the `no-gc` feature forward |
-| `cljrs-eval` (workspace) | unused by the stub; kept for the Stage 2 merge |
+| `cljrs-types` | `Span` |
+| `cljrs-gc` | `GcPtr<T>`, alloc frames, safepoints |
+| `cljrs-value` | `Value`, `CljxFn`, persistent collections, `shared` |
+| `cljrs-reader` | `Form` AST and `Parser` |
+| `cljrs-ir` | IR types (`IrFunction`, `Block`, `Inst`, `IrBundle`) and lowering |
+| `cljrs-logging` | tracing setup used by the lowering worker |
+| `cljrs-deps` | project configuration consulted by the namespace loader |
+| `cljrs-vcs` (non-WASM) | git history access for versioned namespace resolution |
+| `num-bigint`, `num-rational`, `bigdecimal`, `num-traits` | numeric tower |
+| `rand`, `rpds`, `uuid`, `regex` | builtin implementations |
+| `log`, `thiserror` | diagnostics and error derivation |

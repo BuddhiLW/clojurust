@@ -100,15 +100,15 @@ See [`TODO.md`](TODO.md) for the full itemised roadmap.
 | [`cljrs-reader`](crates/cljrs-reader) | Lexer + recursive-descent parser; produces `Form` AST with source spans | complete |
 | [`cljrs-value`](crates/cljrs-value) | `Value` enum; persistent collections (rpds-backed); Clojure-compatible hashing | complete |
 | [`cljrs-gc`](crates/cljrs-gc) | Non-moving mark-and-sweep GC; `GcPtr<T>` smart pointer; `Trace` trait; scratch regions | complete |
-| [`cljrs-env`](crates/cljrs-env) | Shared runtime environment: `GlobalEnv`, `Env`, dynamic bindings, namespace loader, GC roots | complete |
-| [`cljrs-builtins`](crates/cljrs-builtins) | Native Clojure core functions (~300 builtins), transients, regex, bitops | complete |
-| [`cljrs-interp`](crates/cljrs-interp) | Tree-walking Clojure interpreter: eval, special forms, macros, destructuring | complete |
+| [`cljrs-runtime`](crates/cljrs-runtime) | The runtime: `env` (`GlobalEnv`, `Env`, dynamic bindings, namespace loader, GC roots), `builtins` (~300 native core functions, transients, regex, bitops), `interp` (tree-walking interpreter: eval, special forms, macros, destructuring), `tiered` (IR interpreter, IR cache, tiering/JIT state, background lower worker, `load_prebuilt_ir` bundle replay) | complete |
+| [`cljrs-env`](crates/cljrs-env) | Re-export shim for `cljrs_runtime::env` | deprecated |
+| [`cljrs-builtins`](crates/cljrs-builtins) | Re-export shim for `cljrs_runtime::builtins` | deprecated |
+| [`cljrs-interp`](crates/cljrs-interp) | Re-export shim for `cljrs_runtime::interp` | deprecated |
 | [`cljrs-tx`](crates/cljrs-tx) | Pure tree-walked transaction functions in a bounded, invocation-lifetime no-GC arena | initial |
 | [`cljrs-ir`](crates/cljrs-ir) | IR types (ANF/SSA) with serialization (postcard); ANF lowering, escape analysis, OSR | complete |
-| [`cljrs-eval`](crates/cljrs-eval) | IR-accelerated evaluation: IR interpreter, IR cache, tiering/JIT state, background lower worker, `load_prebuilt_ir` bundle replay | complete |
+| [`cljrs-eval`](crates/cljrs-eval) | Re-export shim for `cljrs_runtime::tiered` | deprecated |
 | [`cljrs-stdlib`](crates/cljrs-stdlib) | Embedded stdlib: clojure.string, clojure.set, clojure.test, clojure.walk, clojure.edn, clojure.zip, clojure.data | complete |
 | [`cljrs-logging`](crates/cljrs-logging) | Feature-gated logging (`-X debug:ir`, `-X trace:gc`, etc.) | complete |
-| [`cljrs-runtime`](crates/cljrs-runtime) | Placeholder; nothing depends on it.  Becomes the merged runtime in Stage 2 of [`docs/crate-consolidation-plan.md`](docs/crate-consolidation-plan.md) | stub |
 
 ### Compilation
 
@@ -230,13 +230,13 @@ Source code
   Reader (cljrs-reader)         lexer + parser -> Form AST
     |
     v
-  Macroexpansion (cljrs-interp) expand macros, syntax-quote
+  Macroexpansion (runtime::interp) expand macros, syntax-quote
     |
     v
-  Tier 0: tree-walk (cljrs-interp)   immediate execution; counts calls per arity
+  Tier 0: tree-walk (runtime::interp) immediate execution; counts calls per arity
     |
     v
-  Tier 1: IR interpreter (cljrs-eval) hot arities lowered to ANF/SSA IR
+  Tier 1: IR interp (runtime::tiered) hot arities lowered to ANF/SSA IR
     |                                  (background lower worker), interpreted
     v                                  faster; OSR counters on hot loops
   Tier 2: JIT native (cljrs-jit)     hottest arities compiled to native code
@@ -278,21 +278,21 @@ cljrs-value ---------> cljrs-gc, cljrs-reader, cljrs-types
     |
 cljrs-ir ------------> cljrs-reader, cljrs-types
     |
-cljrs-env -----------> cljrs-value, cljrs-gc, cljrs-reader
+cljrs-runtime -------> cljrs-value, cljrs-gc, cljrs-reader, cljrs-ir
+    |                  modules: env, builtins, interp, tiered
     |
-cljrs-builtins ------> cljrs-env, cljrs-value, cljrs-gc
+    |                  cljrs-env / cljrs-builtins / cljrs-interp / cljrs-eval
+    |                  are deprecated re-export shims over those four modules
     |
-cljrs-interp --------> cljrs-builtins, cljrs-env, cljrs-value, cljrs-gc
+cljrs-stdlib --------> cljrs-runtime (via shims), cljrs-ir
     |
-cljrs-eval ----------> cljrs-interp, cljrs-env, cljrs-ir, cljrs-value
-    |
-cljrs-stdlib --------> cljrs-eval, cljrs-interp, cljrs-ir
-    |
-cljrs-compiler ------> cljrs-eval, cljrs-ir, cljrs-stdlib (Cranelift AOT)
+cljrs-compiler ------> cljrs-runtime (via shims), cljrs-ir, cljrs-stdlib
+    |                    (Cranelift AOT)
     |                  + cljrs-async, cljrs-io, cljrs-net, cljrs-charset,
     |                    cljrs-base64 — extensions its AOT harness initializes
     |
-cljrs-jit -----------> cljrs-compiler, cljrs-eval, cljrs-ir (Cranelift JIT)
+cljrs-jit -----------> cljrs-compiler, cljrs-runtime (via shims), cljrs-ir
+    |                    (Cranelift JIT)
     |
 cljrs (binary) ------> cljrs-stdlib, cljrs-compiler, cljrs-jit, cljrs-lsp,
                        cljrs-nrepl, cljrs-deps, cljrs-vcs, cljrs-ir-viz,
@@ -316,14 +316,14 @@ crates/
   cljrs-reader/          # lexer + parser
   cljrs-value/           # Value enum, collections, hashing
   cljrs-gc/              # tracing GC + scratch regions
-  cljrs-env/             # runtime environment, dynamic bindings, loader
-  cljrs-builtins/        # native Clojure core functions
-  cljrs-interp/          # tree-walking interpreter
+  cljrs-runtime/         # env + builtins + interp + tiered (the merged runtime)
+  cljrs-env/             # deprecated shim -> cljrs_runtime::env
+  cljrs-builtins/        # deprecated shim -> cljrs_runtime::builtins
+  cljrs-interp/          # deprecated shim -> cljrs_runtime::interp
+  cljrs-eval/            # deprecated shim -> cljrs_runtime::tiered
   cljrs-ir/              # IR types + lowering + serialization
-  cljrs-eval/            # IR-accelerated evaluation + tiering state
   cljrs-stdlib/          # embedded standard library namespaces
   cljrs-logging/         # feature-gated debug/trace logging
-  cljrs-runtime/         # placeholder (stub; see docs/crate-consolidation-plan.md)
   # compilation
   cljrs-compiler/        # Cranelift codegen + AOT
   cljrs-jit/             # in-process JIT
