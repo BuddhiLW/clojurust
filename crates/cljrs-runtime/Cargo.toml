@@ -2,14 +2,35 @@
 name = "cljrs-runtime"
 version = "0.1.0"
 edition = "2024"
-description = "Core standard library (clojure.core equivalent) for clojurust"
+description = "clojurust runtime: environment, builtins, tree-walking interpreter, and tiered evaluation"
 license.workspace = true
 repository.workspace = true
 
 [features]
-no-gc = ["cljrs-gc/no-gc"]
+no-gc = ["cljrs-gc/no-gc", "cljrs-value/no-gc"]
 
 [dependencies]
-cljrs-types = { workspace = true }
-cljrs-gc    = { workspace = true }
-cljrs-eval  = { workspace = true }
+cljrs-types   = { workspace = true }
+cljrs-gc      = { workspace = true }
+cljrs-value   = { workspace = true }
+cljrs-reader  = { workspace = true }
+cljrs-logging = { workspace = true }
+cljrs-deps    = { workspace = true }
+cljrs-ir      = { workspace = true }
+log          = "0.4.29"
+thiserror    = "2.0.18"
+num-bigint   = { workspace = true }
+num-rational = { workspace = true }
+bigdecimal   = { workspace = true }
+num-traits   = { workspace = true }
+rand         = { workspace = true }
+rpds         = { workspace = true }
+uuid         = { workspace = true, features = ["v4"] }
+regex        = { workspace = true }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+cljrs-vcs = { workspace = true }
+
+[dev-dependencies]
+proptest = "1"
+tempfile = "3"

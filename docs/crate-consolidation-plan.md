@@ -16,13 +16,15 @@ This plan does not remove the tree-walking interpreter, JIT, AOT compiler, no-GC
 |---|---|---|
 | 0. Record the baseline | Complete | [`consolidation-baseline.md`](consolidation-baseline.md) |
 | 1. Remove obsolete debris | Complete | `cljrs-ir-prebuild` folded into `cljrs::commands::ir`; 34 packages → 33 |
-| 2. Create the merged runtime | Not started | |
+| 2. Create the merged runtime | Complete | `cljrs-env`/`-builtins`/`-interp`/`-eval` merged into `cljrs-runtime`; the four remain as re-export shims until Stage 6 |
 | 3. Simplify runtime state | Not started | |
 | 4. Merge JIT and compiler packages | Not started | |
 | 5. Consolidate project and CLI tools | Not started | |
 | 6. Remove compatibility packages | Not started | |
 
-Package count: 34 at baseline, 33 now, approximately 23 at target.
+Package count: 34 at baseline, 33 now, approximately 23 at target. Stage 2 does
+not change the count — it moves four packages' code into `cljrs-runtime` and
+leaves them as re-export shims; Stage 6 deletes the shims and takes 33 → 29.
 
 ### Corrections found while measuring the baseline
 
@@ -339,6 +341,105 @@ Validation gate:
 - Tiered evaluation passes its current tests.
 - Default and `no-gc` builds pass.
 - Existing public paths work through temporary re-exports.
+
+#### Stage 2 outcome
+
+`cljrs-runtime` is no longer a stub. The four packages moved in whole, one
+module each, with `git mv` so history follows the files:
+
+| Former package | Now |
+|---|---|
+| `cljrs-env` | `cljrs_runtime::env` |
+| `cljrs-builtins` | `cljrs_runtime::builtins` |
+| `cljrs-interp` | `cljrs_runtime::interp` |
+| `cljrs-eval` | `cljrs_runtime::tiered` |
+
+Each former `src/lib.rs` became the module's `mod.rs`; its crate-level
+`#![allow(...)]` attributes now apply to the module, and the union sits at the
+new crate root. The 29 integration tests in `cljrs-interp/tests` and
+`cljrs-eval/tests` moved to `cljrs-runtime/tests`.
+
+The only edits to moved code were path rewrites, applied mechanically:
+
+- inside `env`: `crate::` → `crate::env::`
+- inside `builtins`: `crate::` → `crate::builtins::`, `cljrs_env::` → `crate::env::`
+- inside `interp`: `crate::` → `crate::interp::`, plus `cljrs_env::`/`cljrs_builtins::`
+- inside `tiered`: `crate::` → `crate::tiered::`, plus `cljrs_env::`/`cljrs_builtins::`/`cljrs_interp::`
+- in the moved tests: `cljrs_env::`/`cljrs_builtins::`/`cljrs_interp::`/`cljrs_eval::`
+  → `cljrs_runtime::env::`/`::builtins::`/`::interp::`/`::tiered::`
+
+Re-applying those same rewrites to the pre-merge files and diffing against the
+merged tree leaves only `cargo fmt` re-wrapping (longer paths), rustfmt's
+`use`-statement reordering, and four intentional edits: three stale comments
+that named `cljrs_eval` paths, and two `#[allow(clippy::module_inception)]`
+attributes — `env::env` and `builtins::builtins` keep their names so
+`cljrs_runtime::env::env::GlobalEnv` matches the pre-merge
+`cljrs_env::env::GlobalEnv`. No behavior changed.
+
+`cljrs-env`, `cljrs-builtins`, `cljrs-interp`, and `cljrs-eval` are now
+one-line shims (`pub use cljrs_runtime::<module>::*;`) that depend only on
+`cljrs-runtime` and forward `no-gc` to it. **No file outside the four moved
+packages and `cljrs-runtime` changed** — every downstream `Cargo.toml`, import,
+and CLI source is untouched, so CLI help and command behavior are unchanged by
+construction.
+
+Deferred by design, per the plan's own staging: the `Runtime` / `RuntimeBuilder`
+/ `ExecutionMode` API and the removal of the `GlobalEnv` callback seams are
+Stage 3; `interp::standard_env{,_minimal,_with_paths}` and
+`tiered::standard_env*` still coexist as before. The `env::add` template
+function and its test moved unchanged rather than being deleted mid-move.
+Prose in the twelve other crate READMEs that names `cljrs-eval`/`cljrs-interp`
+as owning code is left for Stage 6, which is where the plan puts "update every
+affected crate README"; their dependency tables are still literally correct
+because the shims still exist.
+
+Gate results:
+
+| Check | Result |
+|---|---|
+| `cargo fmt --all --check` | pass |
+| `cargo clippy --workspace --all-targets -- -D warnings` | pass |
+| `cargo test --workspace` | 1148 passed, 0 failed, 24 ignored, 150 targets |
+| Tree-walk-only tests (moved from `cljrs-interp`) | pass |
+| Tiered tests (moved from `cljrs-eval`) | pass |
+| Existing public paths through the shims | pass — the whole workspace, examples included, compiles with no import changes |
+| `cljrs eval` / `cljrs run samples/graph.cljrs` | pass |
+| `cljrs compile -o life-sample samples/life.cljrs` + run | pass (final population 355) |
+
+The `cargo test` totals are measured against this branch's merge base, not
+against the Stage 0 baseline's 1077 — `main` gained tests between the two. No
+test was lost or skipped: the diff above shows the moved test files are
+byte-identical modulo the path rewrites and formatting.
+
+One incidental fix: `tests/defonce_metadata.rs` had an
+`assert_eq!(x.contains(..), true)` that `clippy::bool_assert_comparison`
+rejects. It never fired before because the documented gate runs clippy without
+`--all-targets`, so test targets went unlinted. Rewritten as `assert!`.
+
+`no-gc` — better than baseline, still not green:
+
+| Package | Baseline | Now |
+|---|---|---|
+| `cljrs-env` | fail | **pass** |
+| `cljrs-builtins` | fail | **pass** |
+| `cljrs-runtime` | (stub) | pass |
+| `cljrs-interp`, `cljrs-eval`, `cljrs-gc`, `cljrs-value`, `cljrs-tx` | pass | pass |
+| `cljrs-stdlib` | fail | fail |
+| `cljrs-async` | fail | fail |
+| `cljrs` (both feature sets) | fail | fail |
+
+The merge fixed baseline defect 3 outright: one `no-gc` feature on
+`cljrs-runtime` forwards both `cljrs-gc/no-gc` and `cljrs-value/no-gc`, so the
+env and builtins code no longer depends on a downstream package to unify its
+features.
+
+Baseline defect 2 was misdiagnosed. `cljrs-stdlib`'s `no-gc` feature *does*
+reach the environment layer now, and it still fails — because
+`cljrs-stdlib/src/lib.rs` calls `cljrs_gc::HEAP.set_config_from_env()` at two
+sites and that method only exists in the GC build. That is `cljrs-stdlib`'s own
+defect, not a feature-wiring bug, and it is left for Stage 3, which rewrites
+this file to `install(&Runtime)`. Defect 1 (`cljrs-async` has no `no-gc`
+feature) is untouched and remains Stage 4's.
 
 ### Stage 3: Simplify runtime state
 

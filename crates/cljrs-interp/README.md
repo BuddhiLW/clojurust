@@ -1,30 +1,14 @@
 # cljrs-interp
 
-Self-contained tree-walking interpreter for Clojure.
+**Deprecated re-export shim.** This package holds no code.
 
-**Phase:** Core interpreter — implemented.  `no-gc` region/static-sink support (Phases 4–5), blacklist integration (Phase 6), and integration tests (Phase 8) of `docs/no-gc-plan.md` — implemented.
+The tree-walking interpreter — special forms, macro expansion, destructuring, and the recur trampoline — moved into `cljrs_runtime::interp` in Stage 2 of
+[`docs/crate-consolidation-plan.md`](../../docs/crate-consolidation-plan.md).
+This package exists only so downstream packages can migrate one at a time;
+Stage 6 removes it.
 
----
-
-## Purpose
-
-Evaluates Clojure `Form` ASTs produced by `cljrs-reader`, managing lexical
-environments, special forms, function application, and the recur trampoline.
-
-Allocations are scoped per function call and per loop iteration: under GC, each
-trampoline iteration (`call_cljrs_fn`, `eval_loop`) runs inside its own
-`cljrs_gc::push_alloc_frame()`, so that iteration's intermediates — and a
-`recur`'s now-dead values — become collectable when the frame drops, instead of
-being pinned in `ALLOC_ROOTS` for the lifetime of the enclosing top-level form.
-The return value / recur args are moved out before the frame drops and re-rooted
-at the next iteration (or by the caller on return); no GC safepoint runs in the
-interval (GC fires only at explicit safepoints, with a one-cycle grace period —
-see `cljrs-gc`). Under the `no-gc` Cargo feature the same scoping is achieved
-with the allocation-context stack protocol (scratch regions for function/loop
-scopes; `StaticArena` for static-sink expressions).
-When `cljrs-env`'s transaction policy and `InvocationGuard` are active, the
-same tree walker denies external capabilities and routes all allocations into
-one invocation-lifetime region instead.
+Replace `cljrs_interp::x` with `cljrs_runtime::interp::x`, and the
+`cljrs-interp` dependency with `cljrs-runtime`.
 
 ---
 
@@ -32,155 +16,28 @@ one invocation-lifetime region instead.
 
 ```
 src/
-  lib.rs         — crate entry point; re-exports Interpreter
-  eval.rs        — top-level eval dispatch; symbol/keyword/collection eval
-  special.rs     — special form evaluators: def, defn, defmacro, fn*, if, let*,
-                   loop*, recur, quote, var, set!, throw, try, do, ns, require,
-                   letfn, in-ns, alias, defprotocol, extend-type, extend-protocol,
-                   defmulti, defmethod, defrecord, reify, binding, with-out-str.
-                   parse_arity peels primitive type hints (`^long x`, `^doubles a`)
-                   off params into CljxFnArity::param_hints; let*/loop* binding
-                   hints are stripped via bind_pattern's Meta arm (destructure.rs);
-                   desugar_pre_post_conditions rewrites {:pre [...] :post [...]} maps
-                   into assertion forms (binds % to return value in :post conditions);
-                   spec_element resolves a reader conditional in ANY slot of an
-                   `ns` require spec, namespace included, so
-                   `[#?(:clj clojure.core :cljs cljs.core) :as core]` reads; an
-                   option selecting no branch is dropped, a namespace selecting
-                   none is an error
-  apply.rs       — eval_call: macro expansion, native-fn dispatch, CljxFn
-                   application, recur trampoline; special env-needing handlers
-                   (apply, atom, reset!, swap!, volatile!, vreset!, vswap!,
-                   agent, send/send-off, with-bindings*, alter-var-root,
-                   vary-meta, find-ns, all-ns, create-ns, ns-aliases, remove-ns,
-                   alter-meta!, ns-resolve, resolve, intern, bound-fn*,
-                   ns-interns, ns-publics, ns-refers, ns-map — the latter four
-                   resolve their argument via `the_ns` (namespace, symbol,
-                   string, or keyword name), matching Clojure's `the-ns`)
-  arity.rs       — fresh arity ID generator (pub; `fresh_arity_id`, plus `next_arity_id`
-                   for the Phase 10.7 bootstrap watermark snapshot)
-  destructure.rs — pattern destructuring (vector, map, & rest)
-  macros.rs      — macro expansion helpers
-  syntax_quote.rs — syntax-quote (backtick) expansion
-  virtualize.rs  — let-chain virtualization: assoc/conj chains → transients
-  versioned.rs   — tree-walker entry point for versioned symbol resolution;
-                   thin shim over the shared resolver in `cljrs_env::versioned`
-                   (whole-namespace `ns@commit` loading, native HEAD fallback)
-tests/
-  no_gc_eval.rs  — (no-gc mode) integration tests: arithmetic, def/defn provenance,
-                   function-call region stack, loop/recur accumulation,
-                   atom/reset!/swap! static-sink correctness
-  versioned_resolution.rs — end-to-end versioned resolution against a real git
-                   fixture: pinned symbols, HEAD-clobber regression, versioned
-                   require, GC survival of versioned values
-  require_spec_reader_conditional.rs - `ns` require specs carrying a reader
-                   conditional in the namespace slot; each case goes through an
-                   `ns` form, since a quoted `require` resolves the conditional
-                   before the spec parser sees it
+  lib.rs — `pub use cljrs_runtime::interp::*;`
 ```
 
 ---
 
 ## Public API
 
-### `eval(form, env) -> EvalResult`
+Everything public in [`cljrs_runtime::interp`](../cljrs-runtime/README.md), re-exported
+unchanged. See that crate's README for the documented surface.
 
-Evaluate a single `Form` in `env`.  Entry point for the interpreter.
+---
 
-### `eval_with_gas(form, env, credits) -> EvalResult`
+## Features
 
-Evaluate a form with a cooperative execution-credit budget. Tree-walker form
-entries cost one credit; Tier-1 IR and JIT basic blocks use the same weighted
-`phis + instructions + terminator` approximation. Exhaustion returns
-`EvalError::GasExhausted`; ordinary `eval` calls remain unmetered.
-
-This is a cooperative mechanism and currently a host API rather than a CLI or
-nREPL policy. Native builtins that do substantial work without re-entering the
-evaluator may consume fewer credits than equivalent interpreted code. Compiled
-code emits a checkpoint call at every basic block even when no meter is active;
-avoiding that always-on JIT cost requires a future metering-mode fast path.
-
-### `eval_call(func_form, arg_forms, env) -> EvalResult`
-
-Evaluate a function-call form.  Handles macros, native-function special cases,
-and user-defined `CljxFn` application with the recur trampoline.
-
-### `eval_body(forms, env) -> EvalResult`
-
-Evaluate a sequence of forms, returning the value of the last one.
-
-### `eval_loop(args, env) -> EvalResult`
-
-Evaluate a `loop*` form.  Each iteration is scoped in its own allocation frame
-so intermediate allocations are freed per iteration: under GC a
-`cljrs_gc::push_alloc_frame()` that drops at the end of the iteration; under
-`no-gc` a `ScratchGuard` popped before the tail expression (recur args or return
-value).
-
-### `eval_defn(args, env) -> EvalResult`
-
-Evaluate a `defn` form.  Accepts metadata on the name (`(defn ^:async f …)`) and
-an attr-map (`(defn f {:async true} …)`); `^:async` marks the resulting `CljxFn`
-as async.  Under `no-gc`, wraps fn creation in `StaticCtxGuard` so the `CljxFn`
-object lands in the `StaticArena`.
-
-### Docstring / `:arglists` metadata (`def`, `defn`, `defmacro`)
-
-`eval_def`, `eval_defn`, and `eval_defmacro` all recognize an optional
-docstring positional arg (`(def name "doc" val)`, `(defn name "doc" [..] ..)`,
-`(defmacro name "doc" [..] ..)`) and store it as `{:doc "..."}` in the
-resulting Var's metadata, merged with any reader/attr-map metadata via
-`merge_meta`.  `defn`/`defmacro` additionally derive `{:arglists (...)}` from
-the evaluated `CljxFn`'s parsed arities (`arglists_meta`, in `special.rs`);
-for `defmacro` the implicit `&form`/`&env` params are elided from the shown
-signature.  This is what `clojure.core/doc` and `doc-data` (in
-`cljrs-builtins`) read back, and what `cljrs-nrepl`'s `op_lookup` surfaces to
-editors.
-
-### `meta_form_is_async(meta: &Form) -> bool`
-
-Returns true when a `^meta` form (or attr-map literal) requests `:async` — either
-the keyword shorthand `^:async` or an explicit `{:async true}` map.  `fn`/`defn`
-use it to set `CljxFn::is_async`, which `cljrs-env::apply::dispatch_if_async`
-checks at call time to route through the async runtime.
-
-### Special handlers in `apply.rs`
-
-Each handler evaluates its key expressions under the correct allocation context:
-
-| Handler | Static-sink guard coverage |
+| Feature | Effect |
 |---|---|
-| `handle_atom_call` | initial value |
-| `handle_reset_bang` | new value |
-| `handle_swap_call` | function return value |
-| `handle_volatile` | initial value |
-| `handle_vreset` | new value |
-| `handle_vswap` | function return value |
-| `handle_agent_call` | initial value |
-| `handle_alter_var_root` | function return value |
-| `handle_intern` | value expression (3-arg form) |
+| `no-gc` | Forwards to `cljrs-runtime/no-gc`. |
 
-### Value-level special form helpers (IR interpreter API)
+---
 
-The IR interpreter receives already-evaluated `Vec<Value>` arguments rather than
-`&[Form]` AST nodes.  These public functions mirror the `handle_*` form-level
-handlers but accept pre-evaluated args, allowing the IR interpreter to
-implement sentinel operations without hitting the stub errors registered in
-`clojure.core`:
+## Dependencies
 
-| Function | Operation |
-|---|---|
-| `eval_swap_bang(args, env)` | `swap!` — apply f to atom, store result |
-| `eval_volatile(args)` | `volatile!` — create a new volatile |
-| `eval_vreset_bang(args)` | `vreset!` — reset volatile value |
-| `eval_vswap_bang(args, env)` | `vswap!` — apply f to volatile value, store result |
-| `make_delay_from_fn(f, globals, ns)` | `make-delay` — wrap zero-arg fn in a `Delay` |
-| `eval_alter_var_root(args, env)` | `alter-var-root` — apply f to var root, store result |
-| `eval_vary_meta(args, env)` | `vary-meta` — apply f to obj metadata |
-| `eval_with_bindings_star(args, env)` | `with-bindings*` — push binding frame, call f |
-| `eval_send_to_agent(args, env)` | `send` / `send-off` — dispatch action to agent |
-| `dispatch_method(method, target, args)` | `(.method target args…)` — interop method dispatch on an evaluated target (strings, vectors, seqs) |
-
-`make_lazy_seq_from_fn(f, globals, ns)` (already public) creates a `LazySeq`
-from a zero-arg callable; the above `make_delay_from_fn` is the analogous
-helper for `Delay`.
+| Crate | Role |
+|-------|------|
+| `cljrs-runtime` (workspace) | the package this shim re-exports |

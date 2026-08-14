@@ -1,0 +1,8741 @@
+//! All native (Rust) built-in functions registered in `clojure.core`.
+
+use crate::builtins::array_list::{
+    builtin_array_list, builtin_array_list_clear, builtin_array_list_length,
+    builtin_array_list_push, builtin_array_list_remove, builtin_array_list_to_array,
+};
+use crate::builtins::bitops::{
+    builtin_bit_and_not, builtin_bit_clear, builtin_bit_flip, builtin_bit_set, builtin_bit_test,
+};
+use crate::builtins::new::{builtin_exception_dot, builtin_new};
+use crate::builtins::regex::{
+    builtin_re_find, builtin_re_groups, builtin_re_matcher, builtin_re_matches, builtin_re_pattern,
+};
+use crate::builtins::time::builtin_nanotime;
+use crate::builtins::transients::{
+    builtin_assoc_bang, builtin_conj_bang, builtin_disj_bang, builtin_dissoc_bang,
+    builtin_persistent_bang, builtin_pop_bang, builtin_transient,
+};
+use crate::builtins::util::numeric_as_i64;
+use crate::env::env::GlobalEnv;
+use bigdecimal::{BigDecimal, RoundingMode};
+use cljrs_gc::GcPtr;
+use cljrs_value::value::{PrintValue, SetValue};
+use cljrs_value::{
+    Arity, Atom, CljxCons, CljxPromise, ExceptionInfo, FutureState, Keyword, LazySeq, MapValue,
+    Namespace, NativeFn, ObjectArray, PersistentHashMap, PersistentHashSet, PersistentList,
+    PersistentQueue, PersistentVector, SharedAtom, SortedSet, Symbol, Thunk, TypeInstance, Value,
+    ValueError, ValueResult, Volatile, demote, promote,
+};
+use num_bigint::{BigInt, Sign, ToBigInt};
+use num_rational::Ratio;
+use num_traits::{FromPrimitive, Signed as _, ToPrimitive, Zero as _};
+use rand::prelude::SliceRandom;
+use std::cmp::Ordering;
+use std::collections::HashMap;
+use std::num::ParseFloatError;
+use std::ops::{Add, Sub};
+use std::str::FromStr;
+use std::sync::{Arc, Mutex};
+use std::thread::sleep;
+use std::time::Duration;
+// ── Output capture (for with-out-str) ─────────────────────────────────────────
+
+thread_local! {
+    static OUTPUT_CAPTURE: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+// BigDecimal precision
+
+struct BigDecimalPrecision {
+    precision: u64,
+    rounding: Option<RoundingMode>,
+    unnecessary: bool,
+}
+
+thread_local! {
+    static BIG_DECIMAL_SCALE: std::cell::RefCell<Vec<BigDecimalPrecision>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+fn round_bigdecimal(result: BigDecimal, prec: &BigDecimalPrecision) -> ValueResult<BigDecimal> {
+    let precision: u64 = prec.precision;
+    if prec.unnecessary {
+        // UNNECESSARY: error if rounding would change the value
+        let rounded = result.with_prec(precision);
+        if rounded != result {
+            return Err(ValueError::Other("rounding necessary".to_string()));
+        }
+        return Ok(rounded);
+    }
+    Ok(if let Some(rounding) = prec.rounding {
+        result.with_precision_round(precision.try_into().unwrap(), rounding)
+    } else {
+        result.with_prec(precision)
+    })
+}
+
+/// Apply the current `with-precision` context (if any) to a BigDecimal result.
+fn apply_precision(result: BigDecimal) -> ValueResult<BigDecimal> {
+    BIG_DECIMAL_SCALE.with_borrow(|stack| {
+        if let Some(prec) = stack.last() {
+            round_bigdecimal(result, prec)
+        } else {
+            Ok(result)
+        }
+    })
+}
+
+/// Like `apply_precision` but uses a default (precision=10, HALF_UP) when no
+/// `with-precision` context is active. Used by division which always needs rounding.
+fn apply_precision_or_default(result: BigDecimal) -> ValueResult<BigDecimal> {
+    BIG_DECIMAL_SCALE.with_borrow(|stack| {
+        let default = BigDecimalPrecision {
+            precision: 10,
+            rounding: Some(RoundingMode::HalfUp),
+            unnecessary: false,
+        };
+        let prec = stack.last().unwrap_or(&default);
+        round_bigdecimal(result, prec)
+    })
+}
+
+/// Push a new capture buffer onto the stack.
+pub fn push_output_capture() {
+    OUTPUT_CAPTURE.with(|stack| stack.borrow_mut().push(String::new()));
+}
+
+/// Pop the top capture buffer and return its contents.
+pub fn pop_output_capture() -> Option<String> {
+    OUTPUT_CAPTURE.with(|stack| stack.borrow_mut().pop())
+}
+
+/// Write to the current capture buffer if active, otherwise to stdout.
+/// Returns true if captured, false if written to stdout.
+fn capture_or_print(s: &str) -> bool {
+    OUTPUT_CAPTURE.with(|stack| {
+        let mut stack = stack.borrow_mut();
+        if let Some(buf) = stack.last_mut() {
+            buf.push_str(s);
+            true
+        } else {
+            false
+        }
+    })
+}
+
+// ── Docstrings ───────────────────────────────────────────────────────────────
+
+/// `:doc` metadata for native builtins, keyed by the name they're interned
+/// under in `register_all`. Not every builtin has an entry — special-form
+/// stub vars (`if`, `let`, `def`, ...) and rarely-used internals are skipped
+/// — but any builtin *may* carry a docstring by adding it here; `doc` and
+/// `doc-data` read it back off the var's metadata like any other docstring.
+const BUILTIN_DOCS: &[(&str, &str)] = &[
+    // Arithmetic
+    ("+", "Returns the sum of nums. (+) returns 0."),
+    (
+        "+'",
+        "Returns the sum of nums, promoting to BigInt on overflow. (+') returns 0.",
+    ),
+    ("-", "Negates x, or subtracts the rest of ys from x."),
+    (
+        "-'",
+        "Negates x, or subtracts the rest of ys from x, promoting to BigInt on overflow.",
+    ),
+    ("*", "Returns the product of nums. (*) returns 1."),
+    (
+        "*'",
+        "Returns the product of nums, promoting to BigInt on overflow. (*') returns 1.",
+    ),
+    (
+        "/",
+        "If no denominators are supplied, returns 1/numerator; otherwise returns numerator divided by all the denominators.",
+    ),
+    (
+        "mod",
+        "Modulus of num and div; result has the same sign as div.",
+    ),
+    (
+        "rem",
+        "Remainder of dividing num by div; result has the same sign as num.",
+    ),
+    ("quot", "Quotient of dividing num by div."),
+    ("inc", "Returns a number one greater than x."),
+    ("dec", "Returns a number one less than x."),
+    ("abs", "Returns the absolute value of x."),
+    (
+        "unchecked-add",
+        "Adds two ints, wrapping on overflow instead of promoting or throwing.",
+    ),
+    (
+        "unchecked-add-int",
+        "Adds two ints, wrapping on overflow instead of promoting or throwing.",
+    ),
+    (
+        "unchecked-subtract",
+        "Subtracts two ints, wrapping on overflow instead of promoting or throwing.",
+    ),
+    (
+        "unchecked-subtract-int",
+        "Subtracts two ints, wrapping on overflow instead of promoting or throwing.",
+    ),
+    (
+        "unchecked-multiply",
+        "Multiplies two ints, wrapping on overflow instead of promoting or throwing.",
+    ),
+    (
+        "unchecked-multiply-int",
+        "Multiplies two ints, wrapping on overflow instead of promoting or throwing.",
+    ),
+    (
+        "unchecked-inc",
+        "Returns a number one greater than x, wrapping on overflow.",
+    ),
+    (
+        "unchecked-inc-int",
+        "Returns a number one greater than x, wrapping on overflow.",
+    ),
+    (
+        "unchecked-dec",
+        "Returns a number one less than x, wrapping on overflow.",
+    ),
+    (
+        "unchecked-dec-int",
+        "Returns a number one less than x, wrapping on overflow.",
+    ),
+    ("unchecked-negate", "Negates x, wrapping on overflow."),
+    ("unchecked-negate-int", "Negates x, wrapping on overflow."),
+    ("bigdec", "Coerces x to a BigDecimal."),
+    ("bigint", "Coerces x to a BigInt."),
+    ("num", "Coerces x to a Number."),
+    ("numerator", "Returns the numerator of a ratio."),
+    ("denominator", "Returns the denominator of a ratio."),
+    (
+        "rationalize",
+        "Returns the rational value of x, reduced to lowest terms.",
+    ),
+    ("byte", "Coerces x to a byte."),
+    ("short", "Coerces x to a short."),
+    ("int", "Coerces x to an int."),
+    ("long", "Coerces x to a long."),
+    ("float", "Coerces x to a float."),
+    ("double", "Coerces x to a double."),
+    (
+        "boolean",
+        "Coerces x to a boolean; false and nil become false, everything else true.",
+    ),
+    (
+        "char",
+        "Coerces x (an int or a single-char string) to a Character.",
+    ),
+    // Comparison / predicates
+    (
+        "=",
+        "Equality. Returns true if all args are equal (value equality for collections/numbers).",
+    ),
+    (
+        "==",
+        "Numeric equality; returns true only if all args are numerically equal.",
+    ),
+    // "not=" is redefined in bootstrap.cljrs and documented there.
+    (
+        "<",
+        "Returns true if nums are in monotonically increasing order.",
+    ),
+    (
+        "<=",
+        "Returns true if nums are in monotonically non-decreasing order.",
+    ),
+    (
+        ">",
+        "Returns true if nums are in monotonically decreasing order.",
+    ),
+    (
+        ">=",
+        "Returns true if nums are in monotonically non-increasing order.",
+    ),
+    (
+        "compare",
+        "Comparator; returns a negative, zero, or positive number when x is logically less than, equal to, or greater than y.",
+    ),
+    (
+        "identical?",
+        "Tests if two arguments are the same identical object.",
+    ),
+    ("zero?", "Returns true if num is zero."),
+    ("pos?", "Returns true if num is greater than zero."),
+    ("neg?", "Returns true if num is less than zero."),
+    ("even?", "Returns true if n is even."),
+    ("odd?", "Returns true if n is odd."),
+    ("true?", "Returns true if x is exactly true."),
+    ("false?", "Returns true if x is exactly false."),
+    ("nil?", "Returns true if x is nil."),
+    (
+        "not",
+        "Returns true if x is logical false (nil or false), else false.",
+    ),
+    ("number?", "Returns true if x is a number."),
+    (
+        "integer?",
+        "Returns true if x is an integer (fixnum or BigInt).",
+    ),
+    ("int?", "Returns true if x is a fixed-precision integer."),
+    ("float?", "Returns true if x is a float or double."),
+    ("double?", "Returns true if x is a double."),
+    ("decimal?", "Returns true if x is a BigDecimal."),
+    ("ratio?", "Returns true if x is a Ratio."),
+    (
+        "rational?",
+        "Returns true if x is rational (integer, ratio, or BigDecimal).",
+    ),
+    ("string?", "Returns true if x is a String."),
+    ("keyword?", "Returns true if x is a Keyword."),
+    ("symbol?", "Returns true if x is a Symbol."),
+    ("boolean?", "Returns true if x is a Boolean."),
+    ("char?", "Returns true if x is a Character."),
+    ("fn?", "Returns true if x implements IFn (is callable)."),
+    (
+        "ifn?",
+        "Returns true if x implements IFn (is callable), including keywords and collections.",
+    ),
+    (
+        "coll?",
+        "Returns true if x implements the persistent collection interface.",
+    ),
+    ("seq?", "Returns true if x is a sequence."),
+    ("map?", "Returns true if x is a map."),
+    ("vector?", "Returns true if x is a vector."),
+    ("set?", "Returns true if x is a set."),
+    ("sorted?", "Returns true if x is a sorted collection."),
+    ("sorted-map?", "Returns true if x is a sorted map."),
+    ("sorted-set?", "Returns true if x is a sorted set."),
+    ("list?", "Returns true if x is a PersistentList."),
+    ("array?", "Returns true if x is a native array."),
+    (
+        "record?",
+        "Returns true if x is an instance of a defrecord/deftype.",
+    ),
+    ("atom?", "Returns true if x is an atom."),
+    (
+        "shared-atom?",
+        "Returns true if x is a shared-atom (cross-isolate).",
+    ),
+    ("volatile?", "Returns true if x is a volatile."),
+    ("var?", "Returns true if x is a Var."),
+    ("namespace?", "Returns true if x is a Namespace value."),
+    (
+        "map-entry?",
+        "Returns true if x is a real map entry (as produced by seq'ing a map, find, or map-entry).",
+    ),
+    (
+        "distinct?",
+        "Returns true if no two of the arguments are equal.",
+    ),
+    ("empty?", "Returns true if coll has no items."),
+    ("not-empty", "Returns nil if coll is empty, else coll."),
+    (
+        "contains?",
+        "Returns true if key is present in coll (for sets and sequential collections, tests for a valid index/element membership per collection semantics).",
+    ),
+    (
+        "reduced?",
+        "Returns true if x is the result of a call to reduced.",
+    ),
+    (
+        "realized?",
+        "Returns true if the delay/lazy-seq/future/promise has been forced/realized.",
+    ),
+    ("special-symbol?", "Returns true if s names a special form."),
+    (
+        "type",
+        "Returns the type-tag of x (from metadata `:type`, or its class).",
+    ),
+    (
+        "instance?",
+        "Returns true if x is an instance of the class/type named by c.",
+    ),
+    ("satisfies?", "Returns true if x extends protocol."),
+    ("extends?", "Returns true if atype extends protocol."),
+    ("uuid?", "Returns true if x is a UUID."),
+    (
+        "native-object?",
+        "Returns true if x is a NativeObject (a value produced by Rust interop).",
+    ),
+    // Collections — general
+    (
+        "conj",
+        "Returns a new collection with x added, using the collection's own conj semantics (append for vectors, prepend for lists, etc.).",
+    ),
+    (
+        "conj!",
+        "Transient version of conj; mutates and returns the transient.",
+    ),
+    (
+        "cons",
+        "Returns a new seq with x as the first element and coll as the rest.",
+    ),
+    (
+        "into",
+        "Returns a new coll consisting of to-coll with all of the items of from-coll conjoined.",
+    ),
+    (
+        "into-array",
+        "Returns an object array with the contents of coll. An optional leading type argument is accepted but ignored.",
+    ),
+    (
+        "to-array",
+        "Returns an object array with the contents of coll.",
+    ),
+    (
+        "to-array-2d",
+        "Returns a 2-dimensional object array from a collection of collections.",
+    ),
+    (
+        "empty",
+        "Returns an empty collection of the same category as coll, or nil if coll is nil.",
+    ),
+    (
+        "get",
+        "Returns the value mapped to key in coll, not-found or nil if key is not present.",
+    ),
+    (
+        "get-in",
+        "Returns the value in a nested associative structure, per the given key sequence, or not-found/nil if not present.",
+    ),
+    (
+        "assoc",
+        "Returns a new collection with key mapped to val; a persistent-vector version accepts any number of key/val pairs.",
+    ),
+    (
+        "assoc!",
+        "Transient version of assoc; mutates and returns the transient.",
+    ),
+    (
+        "assoc-in",
+        "Returns a new nested structure with a value in a nested associative structure set, per a given key sequence.",
+    ),
+    // "update" / "update-in" are (re)defined in bootstrap.cljrs and documented there.
+    ("dissoc", "Returns a new map with the given keys removed."),
+    (
+        "dissoc!",
+        "Transient version of dissoc; mutates and returns the transient.",
+    ),
+    ("disj", "Returns a new set with the given keys removed."),
+    (
+        "disj!",
+        "Transient version of disj; mutates and returns the transient.",
+    ),
+    (
+        "merge",
+        "Returns a map that consists of the rest of the maps merged onto the first; later values win on key conflicts.",
+    ),
+    (
+        "select-keys",
+        "Returns a map containing only those entries in map whose key is in keyseq.",
+    ),
+    ("keys", "Returns a sequence of the map's keys."),
+    ("vals", "Returns a sequence of the map's values."),
+    (
+        "map-keys",
+        "Returns a map with f applied to each key, values unchanged.",
+    ),
+    (
+        "map-vals",
+        "Returns a map with f applied to each value, keys unchanged.",
+    ),
+    (
+        "zipmap",
+        "Returns a map with the keys mapped to the corresponding vals.",
+    ),
+    // "frequencies" is redefined in bootstrap.cljrs and documented there.
+    (
+        "find",
+        "Returns the map entry for key, or nil if key is not present.",
+    ),
+    (
+        "map-entry",
+        "Constructs a map entry from a key and value, or from any seqable of exactly two elements.",
+    ),
+    (
+        "hash-map",
+        "Returns a new hash map with supplied key/value pairs.",
+    ),
+    (
+        "array-map",
+        "Returns a new array map with supplied key/value pairs.",
+    ),
+    (
+        "sorted-map",
+        "Returns a new sorted map with supplied key/value pairs, sorted by key comparison.",
+    ),
+    ("hash-set", "Returns a new hash set with supplied keys."),
+    ("sorted-set", "Returns a new sorted set with supplied keys."),
+    ("set", "Returns a set of the distinct elements of coll."),
+    (
+        "vec",
+        "Creates a new vector containing the contents of coll.",
+    ),
+    ("vector", "Creates a new vector containing the args."),
+    ("list", "Creates a new list containing the args."),
+    (
+        "list*",
+        "Creates a new list from the args, with the last arg (a seqable) spliced in as the tail.",
+    ),
+    (
+        "queue",
+        "Creates a new persistent queue containing the args.",
+    ),
+    (
+        "transient",
+        "Returns a new, transient (mutable, single-threaded) version of a persistent collection.",
+    ),
+    (
+        "persistent!",
+        "Returns a new, persistent version of a transient collection.",
+    ),
+    (
+        "pop",
+        "For a vector, removes the last item; for a list/queue, removes the first item.",
+    ),
+    (
+        "pop!",
+        "Transient version of pop; mutates and returns the transient.",
+    ),
+    (
+        "peek",
+        "For a vector, returns the last item; for a list/queue, returns the first item.",
+    ),
+    (
+        "subvec",
+        "Returns a persistent vector of the items in vector from start (inclusive) to end (exclusive, default (count vector)).",
+    ),
+    // "flatten" is redefined in bootstrap.cljrs and documented there.
+    (
+        "methods",
+        "Returns a map of dispatch-value -> method for a multimethod.",
+    ),
+    (
+        "prefer-method",
+        "Causes a multimethod to prefer matches of dispatch-val-x over dispatch-val-y when both match.",
+    ),
+    (
+        "remove-method",
+        "Removes the method of a multimethod associated with dispatch-val.",
+    ),
+    (
+        "make-hierarchy",
+        "Creates a new, independent global hierarchy for use with derive/isa?.",
+    ),
+    (
+        "ancestors",
+        "Returns the immediate and indirect parents of tag, as a set.",
+    ),
+    (
+        "descendants",
+        "Returns the immediate and indirect children of tag, as a set.",
+    ),
+    ("parents", "Returns the immediate parents of tag, as a set."),
+    (
+        "isa?",
+        "Returns true if (= child parent), or child is directly or transitively derived from parent.",
+    ),
+    // Seq ops
+    ("seq", "Returns a seq on coll, or nil if coll is empty/nil."),
+    ("first", "Returns the first item in coll."),
+    (
+        "rest",
+        "Returns a possibly-empty seq of the items after the first.",
+    ),
+    (
+        "next",
+        "Returns a seq of the items after the first, or nil if there are none.",
+    ),
+    ("last", "Returns the last item in coll."),
+    (
+        "nth",
+        "Returns the value at index in coll; throws (or returns not-found) if out of bounds.",
+    ),
+    ("count", "Returns the number of items in coll."),
+    (
+        "reverse",
+        "Returns a seq of the items in coll in reverse order.",
+    ),
+    (
+        "rseq",
+        "Returns a seq of the items in a reversible collection in reverse order, in O(1) time.",
+    ),
+    (
+        "concat",
+        "Returns a lazy seq of the concatenation of the given collections.",
+    ),
+    (
+        "interleave",
+        "Returns a lazy seq of the first item in each coll, then the second, etc.",
+    ),
+    ("shuffle", "Returns a random permutation of coll."),
+    (
+        "sort",
+        "Returns a sorted seq of the items in coll, using compare or the given comparator.",
+    ),
+    // "distinct", "interpose", "take-nth", "random-sample", "range", and
+    // "partition" are (re)defined in bootstrap.cljrs and documented there.
+    (
+        "sort-by",
+        "Returns a sorted seq of the items in coll, sorted by the result of applying keyfn to each.",
+    ),
+    // Higher-order (natively implemented pieces; most of clojure.core's HOFs
+    // live in bootstrap.cljrs and carry their own docstrings)
+    (
+        "apply",
+        "Applies f to the argument list formed by prepending the fixed args to the final args.",
+    ),
+    (
+        "reduce",
+        "Reduces coll with f: (f init x1), (f (f init x1) x2), etc. Without init, uses the first item as the seed. Terminates early if f returns a reduced value.",
+    ),
+    // I/O
+    (
+        "print",
+        "Writes the args to *out*, human-readably (as with pr but strings/chars unquoted), separated by spaces.",
+    ),
+    ("println", "Same as print, followed by a newline."),
+    (
+        "pr",
+        "Writes the args to *out*, machine-readably (as by print-dup if *print-dup* is true, else as by print-method), separated by spaces.",
+    ),
+    ("prn", "Same as pr, followed by a newline."),
+    (
+        "pr-str",
+        "Returns the string that pr would have printed for the args.",
+    ),
+    (
+        "printf",
+        "Writes a formatted string to *out*, as with format.",
+    ),
+    (
+        "format",
+        "Returns a string formatted using the Rust/printf-style format string and args.",
+    ),
+    ("newline", "Writes a newline to *out*."),
+    ("flush", "Flushes *out*."),
+    ("read-string", "Reads one object from the given string."),
+    ("slurp", "Reads the contents of a file into a string."),
+    (
+        "spit",
+        "Writes content to a file, creating or overwriting it.",
+    ),
+    (
+        "str",
+        "Concatenates the string representations of the args, with nil rendered as the empty string.",
+    ),
+    // String functions
+    (
+        "join",
+        "Returns a string of all elements in coll, optionally separated by separator.",
+    ),
+    (
+        "split",
+        "Splits string on a regular expression, returning a vector of the parts.",
+    ),
+    (
+        "trim",
+        "Removes leading and trailing whitespace from string.",
+    ),
+    ("upper-case", "Converts string to all upper-case."),
+    ("lower-case", "Converts string to all lower-case."),
+    (
+        "starts-with?",
+        "Returns true if s starts with the given substring.",
+    ),
+    (
+        "ends-with?",
+        "Returns true if s ends with the given substring.",
+    ),
+    (
+        "includes?",
+        "Returns true if s contains the given substring.",
+    ),
+    (
+        "subs",
+        "Returns the substring of s beginning at start inclusive, and ending at end (default (count s)) exclusive.",
+    ),
+    (
+        "name",
+        "Returns the name string of a symbol, keyword, or string.",
+    ),
+    (
+        "namespace",
+        "Returns the namespace string of a symbol or keyword, or nil.",
+    ),
+    (
+        "symbol",
+        "Returns a Symbol with the given namespace and name, or parsed from a single string.",
+    ),
+    (
+        "keyword",
+        "Returns a Keyword with the given namespace and name, or parsed from a single string/symbol.",
+    ),
+    (
+        "gensym",
+        "Returns a new symbol with a unique name, optionally prefixed.",
+    ),
+    (
+        "char-code",
+        "Returns the integer Unicode code point of a character.",
+    ),
+    ("char-at", "Returns the character at index in string."),
+    ("string->list", "Returns a seq of the characters in string."),
+    (
+        "number->string",
+        "Returns the string representation of a number.",
+    ),
+    (
+        "string->number",
+        "Parses a number from a string, in an optional radix.",
+    ),
+    (
+        "parse-long",
+        "Parses string as a long, or returns nil if it isn't a valid long.",
+    ),
+    (
+        "parse-double",
+        "Parses string as a double, or returns nil if it isn't a valid double.",
+    ),
+    (
+        "parse-boolean",
+        "Parses string (\"true\"/\"false\") as a boolean, or returns nil otherwise.",
+    ),
+    (
+        "parse-uuid",
+        "Parses string as a UUID, or returns nil if it isn't a valid UUID.",
+    ),
+    ("random-uuid", "Returns a new random (version 4) UUID."),
+    // "clojure-version" is redefined in bootstrap.cljrs and documented there.
+    // Math
+    (
+        "floor",
+        "Returns the largest integer value less than or equal to x, as a double.",
+    ),
+    (
+        "ceil",
+        "Returns the smallest integer value greater than or equal to x, as a double.",
+    ),
+    ("round", "Returns x rounded to the nearest integer."),
+    ("sqrt", "Returns the square root of x."),
+    ("pow", "Returns x raised to the power y."),
+    ("log", "Returns the natural logarithm of x."),
+    ("log10", "Returns the base-10 logarithm of x."),
+    ("exp", "Returns Euler's number e raised to the power x."),
+    ("sin", "Returns the sine of x (in radians)."),
+    ("cos", "Returns the cosine of x (in radians)."),
+    ("tan", "Returns the tangent of x (in radians)."),
+    ("asin", "Returns the arc sine of x."),
+    ("acos", "Returns the arc cosine of x."),
+    (
+        "atan",
+        "Returns the arc tangent of x, or of y/x when given two args.",
+    ),
+    (
+        "atan2",
+        "Returns the angle theta of the polar coordinates (r, theta) that correspond to the rectangular coordinates (x, y).",
+    ),
+    (
+        "rand",
+        "Returns a random floating-point number between 0 (inclusive) and n (default 1, exclusive).",
+    ),
+    (
+        "rand-int",
+        "Returns a random integer between 0 (inclusive) and n (exclusive).",
+    ),
+    (
+        "nanotime",
+        "Returns the current value of a monotonic high-resolution time source, in nanoseconds.",
+    ),
+    (
+        "sleep",
+        "Pauses the current thread for the given number of milliseconds.",
+    ),
+    // Bit ops
+    ("bit-and", "Bitwise and."),
+    ("bit-or", "Bitwise or."),
+    ("bit-xor", "Bitwise exclusive or."),
+    ("bit-not", "Bitwise complement."),
+    ("bit-and-not", "Bitwise and with complement."),
+    ("bit-clear", "Clears bit n of x."),
+    ("bit-set", "Sets bit n of x."),
+    ("bit-flip", "Flips bit n of x."),
+    ("bit-test", "Tests bit n of x, returning a boolean."),
+    ("bit-shift-left", "Bitwise shift left."),
+    ("bit-shift-right", "Bitwise shift right (arithmetic)."),
+    (
+        "unsigned-bit-shift-right",
+        "Bitwise shift right, without sign extension.",
+    ),
+    // Arrays
+    ("aget", "Returns the value at index(es) in a native array."),
+    (
+        "aset",
+        "Sets the value at index(es) in a native array, returning the value set.",
+    ),
+    ("aset-int", "Sets an int element in an array."),
+    ("aset-long", "Sets a long element in an array."),
+    ("aset-float", "Sets a float element in an array."),
+    ("aset-short", "Sets a short element in an array."),
+    ("aset-byte", "Sets a byte element in an array."),
+    ("alength", "Returns the length of a native array."),
+    ("aclone", "Returns a shallow clone of a native array."),
+    (
+        "amap",
+        "Applies a function to every element of an array, returning a new array of the results.",
+    ),
+    (
+        "areduce",
+        "Reduces an array with an accumulator expression.",
+    ),
+    (
+        "object-array",
+        "Creates a new array of Objects, sized or seeded from a collection.",
+    ),
+    (
+        "int-array",
+        "Creates a new array of ints, sized or seeded from a collection.",
+    ),
+    (
+        "long-array",
+        "Creates a new array of longs, sized or seeded from a collection.",
+    ),
+    (
+        "float-array",
+        "Creates a new array of floats, sized or seeded from a collection.",
+    ),
+    (
+        "double-array",
+        "Creates a new array of doubles, sized or seeded from a collection.",
+    ),
+    (
+        "byte-array",
+        "Creates a new array of bytes, sized or seeded from a collection.",
+    ),
+    (
+        "char-array",
+        "Creates a new array of chars, sized or seeded from a collection.",
+    ),
+    (
+        "booleans",
+        "Type-hint cast to a boolean array; identity in this runtime.",
+    ),
+    (
+        "bytes",
+        "Type-hint cast to a byte array; identity in this runtime.",
+    ),
+    (
+        "shorts",
+        "Type-hint cast to a short array; identity in this runtime.",
+    ),
+    (
+        "ints",
+        "Type-hint cast to an int array; identity in this runtime.",
+    ),
+    (
+        "longs",
+        "Type-hint cast to a long array; identity in this runtime.",
+    ),
+    (
+        "floats",
+        "Type-hint cast to a float array; identity in this runtime.",
+    ),
+    (
+        "chars",
+        "Type-hint cast to a char array; identity in this runtime.",
+    ),
+    (
+        "array-list",
+        "Creates a new, mutable, growable array-backed list.",
+    ),
+    (
+        "array-list-push",
+        "Appends a value to an array-list, mutating it in place.",
+    ),
+    (
+        "array-list-length",
+        "Returns the number of elements in an array-list.",
+    ),
+    (
+        "array-list-remove",
+        "Removes the element at index from an array-list, mutating it in place.",
+    ),
+    (
+        "array-list-to-array",
+        "Copies an array-list's contents into a new object array.",
+    ),
+    (
+        "array-list-clear",
+        "Removes all elements from an array-list, mutating it in place.",
+    ),
+    // Regex
+    (
+        "re-pattern",
+        "Returns an instance of a regex pattern, compiled from string.",
+    ),
+    (
+        "re-matcher",
+        "Returns a matcher for a given pattern and string.",
+    ),
+    (
+        "re-find",
+        "Returns the next regex match, if any, of string to pattern (or a stateful matcher).",
+    ),
+    (
+        "re-matches",
+        "Returns the match, if the entire string matches the pattern.",
+    ),
+    (
+        "re-groups",
+        "Returns the groups from the most recent match of a matcher.",
+    ),
+    // Atoms / refs / concurrency
+    ("atom", "Creates and returns an atom with an initial value."),
+    (
+        "deref",
+        "Returns the current state of an atom/ref/agent/var, or blocks and returns the value of a delay/future/promise.",
+    ),
+    (
+        "reset!",
+        "Sets the value of atom to newval, without regard to the current value.",
+    ),
+    // "swap!" is redefined in bootstrap.cljrs (in terms of reset!/deref) and
+    // carries its own docstring there, superseding this native's.
+    (
+        "compare-and-set!",
+        "Atomically sets the value of atom to newval if and only if the current value is identical to oldval.",
+    ),
+    (
+        "shared-atom",
+        "Creates a cross-isolate atom whose contents can be mutated concurrently from multiple isolates.",
+    ),
+    (
+        "volatile!",
+        "Creates and returns a volatile (a fast, non-atomic mutable reference).",
+    ),
+    (
+        "vreset!",
+        "Sets the value of a volatile, without regard to the current value.",
+    ),
+    (
+        "vswap!",
+        "Non-atomically swaps the value of a volatile to be (apply f current-value args).",
+    ),
+    (
+        "add-watch",
+        "Adds a watch function to an atom/ref/agent/var, called on every state change.",
+    ),
+    (
+        "remove-watch",
+        "Removes a watch function from an atom/ref/agent/var.",
+    ),
+    (
+        "get-validator",
+        "Returns the validator function of a ref/atom/agent/var, or nil.",
+    ),
+    (
+        "promise",
+        "Returns a promise object that can be read with deref/@, and set (once) with deliver.",
+    ),
+    (
+        "deliver",
+        "Delivers the supplied value to the given promise, releasing any pending derefs.",
+    ),
+    (
+        "send",
+        "Dispatches an action to an agent, running f on the agent's state in a background thread.",
+    ),
+    (
+        "force",
+        "Forces a delay/promise-like value, returning its already-realized value or forcing evaluation.",
+    ),
+    (
+        "ensure-reduced",
+        "Wraps x in a reduced if it isn't already one.",
+    ),
+    (
+        "unreduced",
+        "Returns x's inner value if it's reduced, else x.",
+    ),
+    (
+        "reduced",
+        "Wraps x so that reduce will terminate the reduction early with this value.",
+    ),
+    (
+        "bound?",
+        "Returns true if all the given vars have thread-local or root bindings.",
+    ),
+    (
+        "thread-bound?",
+        "Returns true if all the given vars have thread-local bindings on the current thread.",
+    ),
+    (
+        "var-get",
+        "Returns the current value of a var (dynamic bindings respected).",
+    ),
+    (
+        "var-set!",
+        "Sets the thread-local binding of a dynamic var, or its root binding if none.",
+    ),
+    // Metadata / vars / namespaces
+    (
+        "meta",
+        "Returns the metadata of x, or nil if there is none.",
+    ),
+    (
+        "with-meta",
+        "Returns an object of the same type as x, with the given metadata attached.",
+    ),
+    (
+        "doc-data",
+        "Returns {:doc <string-or-nil> :arities <vector-or-nil>} for a Var or function value. See also `doc`.",
+    ),
+    ("ns-name", "Returns the name of a namespace as a Symbol."),
+    (
+        "ns-interns",
+        "Returns a map of unqualified symbol -> var for all vars interned in the namespace.",
+    ),
+    (
+        "ns-publics",
+        "Returns a map of unqualified symbol -> var for all public vars interned in the namespace.",
+    ),
+    (
+        "ns-refers",
+        "Returns a map of unqualified symbol -> var for all vars referred into the namespace.",
+    ),
+    (
+        "ns-map",
+        "Returns a map of all the mappings (interned and referred) for the namespace.",
+    ),
+    (
+        "ns-aliases",
+        "Returns a map of alias -> namespace for the given namespace.",
+    ),
+    // Exceptions
+    (
+        "ex-info",
+        "Creates an exception carrying a message, an ex-data map, and an optional cause.",
+    ),
+    (
+        "ex-data",
+        "Returns the ex-data map from an exception, or nil if not present.",
+    ),
+    ("ex-message", "Returns the message of an exception."),
+    ("ex-cause", "Returns the cause of an exception, or nil."),
+    // Taps
+    (
+        "add-tap",
+        "Adds f as a tap function; f will be called with any value sent via tap>.",
+    ),
+    ("remove-tap", "Removes f from the set of tap functions."),
+    (
+        "tap>",
+        "Sends val to any registered tap functions asynchronously; returns true.",
+    ),
+    // Interop
+    (
+        "new",
+        "Constructs a new instance of the named class or record.",
+    ),
+    (
+        "native-type",
+        "Returns the type tag string of a NativeObject, or nil.",
+    ),
+    ("close", "Closes a resource (e.g. a file handle)."),
+];
+
+// ── Registration ──────────────────────────────────────────────────────────────
+
+pub fn register_all(globals: &Arc<GlobalEnv>, ns: &str) {
+    let fns: Vec<(&str, Arity, fn(&[Value]) -> ValueResult<Value>)> = vec![
+        // Arithmetic
+        ("+", Arity::Variadic { min: 0 }, builtin_add),
+        ("+'", Arity::Variadic { min: 0 }, builtin_add_quote),
+        ("-", Arity::Variadic { min: 1 }, builtin_sub),
+        ("-'", Arity::Variadic { min: 1 }, builtin_sub_quote),
+        ("*", Arity::Variadic { min: 0 }, builtin_mul),
+        ("*'", Arity::Variadic { min: 0 }, builtin_mul_quote),
+        ("/", Arity::Variadic { min: 1 }, builtin_div),
+        ("mod", Arity::Fixed(2), builtin_mod),
+        ("rem", Arity::Fixed(2), builtin_rem),
+        ("quot", Arity::Fixed(2), builtin_quot),
+        ("inc", Arity::Fixed(1), builtin_inc),
+        ("dec", Arity::Fixed(1), builtin_dec),
+        ("abs", Arity::Fixed(1), builtin_abs),
+        ("unchecked-add", Arity::Fixed(2), builtin_unchecked_add),
+        ("unchecked-add-int", Arity::Fixed(2), builtin_unchecked_add),
+        (
+            "unchecked-subtract",
+            Arity::Fixed(2),
+            builtin_unchecked_subtract,
+        ),
+        (
+            "unchecked-subtract-int",
+            Arity::Fixed(2),
+            builtin_unchecked_subtract,
+        ),
+        (
+            "unchecked-multiply",
+            Arity::Fixed(2),
+            builtin_unchecked_multiply,
+        ),
+        (
+            "unchecked-multiply-int",
+            Arity::Fixed(2),
+            builtin_unchecked_multiply,
+        ),
+        ("unchecked-inc", Arity::Fixed(1), builtin_unchecked_inc),
+        ("unchecked-inc-int", Arity::Fixed(1), builtin_unchecked_inc),
+        ("unchecked-dec", Arity::Fixed(1), builtin_unchecked_dec),
+        ("unchecked-dec-int", Arity::Fixed(1), builtin_unchecked_dec),
+        (
+            "unchecked-negate",
+            Arity::Fixed(1),
+            builtin_unchecked_negate,
+        ),
+        (
+            "unchecked-negate-int",
+            Arity::Fixed(1),
+            builtin_unchecked_negate,
+        ),
+        (
+            "push-precision!",
+            Arity::Variadic { min: 1 },
+            builtin_push_precision_bang,
+        ),
+        (
+            "pop-precision!",
+            Arity::Fixed(0),
+            builtin_pop_precision_bang,
+        ),
+        ("rationalize", Arity::Fixed(1), builtin_rationalize),
+        ("denominator", Arity::Fixed(1), builtin_denominator),
+        ("numerator", Arity::Fixed(1), builtin_numerator),
+        ("parse-boolean", Arity::Fixed(1), builtin_parse_boolean),
+        ("parse-long", Arity::Fixed(1), builtin_parse_long),
+        ("parse-double", Arity::Fixed(1), builtin_parse_double),
+        // Comparison
+        ("=", Arity::Variadic { min: 1 }, builtin_eq),
+        ("==", Arity::Variadic { min: 1 }, builtin_numeric_equiv),
+        ("not=", Arity::Variadic { min: 1 }, builtin_not_eq),
+        ("<", Arity::Variadic { min: 1 }, builtin_lt),
+        (">", Arity::Variadic { min: 1 }, builtin_gt),
+        ("<=", Arity::Variadic { min: 1 }, builtin_lte),
+        (">=", Arity::Variadic { min: 1 }, builtin_gte),
+        ("identical?", Arity::Fixed(2), builtin_identical),
+        ("compare", Arity::Fixed(2), builtin_compare),
+        // Predicates
+        ("nil?", Arity::Fixed(1), builtin_nil_q),
+        ("zero?", Arity::Fixed(1), builtin_zero_q),
+        ("pos?", Arity::Fixed(1), builtin_pos_q),
+        ("neg?", Arity::Fixed(1), builtin_neg_q),
+        ("not", Arity::Fixed(1), builtin_not),
+        ("true?", Arity::Fixed(1), builtin_true_q),
+        ("false?", Arity::Fixed(1), builtin_false_q),
+        ("number?", Arity::Fixed(1), builtin_number_q),
+        ("integer?", Arity::Fixed(1), builtin_integer_q),
+        ("int?", Arity::Fixed(1), builtin_int_q),
+        ("float?", Arity::Fixed(1), builtin_float_q),
+        ("double?", Arity::Fixed(1), builtin_double_q),
+        ("decimal?", Arity::Fixed(1), builtin_decimal_q),
+        ("rational?", Arity::Fixed(1), builtin_rational_q),
+        ("string?", Arity::Fixed(1), builtin_string_q),
+        ("keyword?", Arity::Fixed(1), builtin_keyword_q),
+        ("symbol?", Arity::Fixed(1), builtin_symbol_q),
+        ("fn?", Arity::Fixed(1), builtin_fn_q),
+        ("ifn?", Arity::Fixed(1), builtin_ifn_q),
+        ("seq?", Arity::Fixed(1), builtin_seq_q),
+        ("list?", Arity::Fixed(1), builtin_list_q),
+        ("case=", Arity::Fixed(2), builtin_case_eq),
+        ("map?", Arity::Fixed(1), builtin_map_q),
+        ("map-entry?", Arity::Fixed(1), builtin_map_entry_q),
+        ("vector?", Arity::Fixed(1), builtin_vector_q),
+        ("set?", Arity::Fixed(1), builtin_set_q),
+        ("coll?", Arity::Fixed(1), builtin_coll_q),
+        ("boolean?", Arity::Fixed(1), builtin_boolean_q),
+        ("char?", Arity::Fixed(1), builtin_char_q),
+        ("var?", Arity::Fixed(1), builtin_var_q),
+        ("atom?", Arity::Fixed(1), builtin_atom_q),
+        ("empty?", Arity::Fixed(1), builtin_empty_q),
+        ("even?", Arity::Fixed(1), builtin_even_q),
+        ("odd?", Arity::Fixed(1), builtin_odd_q),
+        ("ratio?", Arity::Fixed(1), builtin_ratio_q),
+        ("sorted?", Arity::Fixed(1), builtin_sorted_q),
+        ("special-symbol?", Arity::Fixed(1), builtin_special_symbol_q),
+        ("bigdec", Arity::Fixed(1), builtin_bigdec),
+        ("bigint", Arity::Fixed(1), builtin_bigint),
+        // Collections (non-HOF)
+        ("list", Arity::Variadic { min: 0 }, builtin_list),
+        ("list*", Arity::Variadic { min: 1 }, builtin_list_star),
+        ("vector", Arity::Variadic { min: 0 }, builtin_vector),
+        ("map-entry", Arity::Variadic { min: 1 }, builtin_map_entry),
+        ("hash-map", Arity::Variadic { min: 0 }, builtin_hash_map),
+        ("array-map", Arity::Variadic { min: 0 }, builtin_array_map),
+        ("hash-set", Arity::Variadic { min: 0 }, builtin_hash_set),
+        ("conj", Arity::Variadic { min: 0 }, builtin_conj),
+        ("assoc", Arity::Variadic { min: 3 }, builtin_assoc),
+        ("dissoc", Arity::Variadic { min: 1 }, builtin_dissoc),
+        ("get", Arity::Variadic { min: 2 }, builtin_get),
+        ("get-in", Arity::Variadic { min: 2 }, builtin_get_in),
+        ("count", Arity::Fixed(1), builtin_count),
+        ("seq", Arity::Fixed(1), builtin_seq),
+        ("rseq", Arity::Fixed(1), builtin_rseq),
+        ("first", Arity::Fixed(1), builtin_first),
+        ("rest", Arity::Fixed(1), builtin_rest),
+        ("next", Arity::Fixed(1), builtin_next),
+        ("cons", Arity::Fixed(2), builtin_cons),
+        ("nth", Arity::Variadic { min: 2 }, builtin_nth),
+        ("last", Arity::Fixed(1), builtin_last),
+        ("reverse", Arity::Fixed(1), builtin_reverse),
+        ("concat", Arity::Variadic { min: 0 }, builtin_concat),
+        ("keys", Arity::Fixed(1), builtin_keys),
+        ("vals", Arity::Fixed(1), builtin_vals),
+        ("contains?", Arity::Fixed(2), builtin_contains_q),
+        ("merge", Arity::Variadic { min: 0 }, builtin_merge),
+        ("into", Arity::Variadic { min: 2 }, builtin_into),
+        ("reduce", Arity::Variadic { min: 2 }, builtin_reduce),
+        ("empty", Arity::Fixed(1), builtin_empty),
+        ("vec", Arity::Fixed(1), builtin_vec),
+        ("object-array", Arity::Fixed(1), builtin_object_array),
+        ("array?", Arity::Fixed(1), builtin_array_q),
+        ("to-array", Arity::Fixed(1), builtin_to_array),
+        ("to-array-2d", Arity::Fixed(1), builtin_to_array_2d),
+        ("into-array", Arity::Variadic { min: 1 }, builtin_into_array),
+        ("aclone", Arity::Fixed(1), builtin_aclone),
+        ("alength", Arity::Fixed(1), builtin_alength),
+        ("aget", Arity::Variadic { min: 2 }, builtin_aget),
+        ("aset", Arity::Fixed(3), builtin_aset),
+        ("amap", Arity::Fixed(1), builtin_amap_stub),
+        ("areduce", Arity::Fixed(1), builtin_areduce_stub),
+        (
+            "aset-boolean",
+            Arity::Variadic { min: 3 },
+            builtin_aset_bool,
+        ),
+        ("aset-byte", Arity::Variadic { min: 3 }, builtin_aset_byte),
+        ("aset-short", Arity::Variadic { min: 3 }, builtin_aset_short),
+        ("aset-int", Arity::Variadic { min: 3 }, builtin_aset_int),
+        ("aset-long", Arity::Variadic { min: 3 }, builtin_aset_long),
+        (
+            "aset-double",
+            Arity::Variadic { min: 3 },
+            builtin_aset_double,
+        ),
+        ("aset-float", Arity::Variadic { min: 3 }, builtin_aset_float),
+        ("int-array", Arity::Variadic { min: 1 }, builtin_int_array),
+        ("long-array", Arity::Variadic { min: 1 }, builtin_long_array),
+        (
+            "short-array",
+            Arity::Variadic { min: 1 },
+            builtin_short_array,
+        ),
+        ("byte-array", Arity::Variadic { min: 1 }, builtin_byte_array),
+        (
+            "float-array",
+            Arity::Variadic { min: 1 },
+            builtin_float_array,
+        ),
+        (
+            "double-array",
+            Arity::Variadic { min: 1 },
+            builtin_double_array,
+        ),
+        ("char-array", Arity::Variadic { min: 1 }, builtin_char_array),
+        (
+            "boolean-array",
+            Arity::Variadic { min: 1 },
+            builtin_boolean_array,
+        ),
+        ("booleans", Arity::Fixed(1), builtin_identity_cast),
+        ("bytes", Arity::Fixed(1), builtin_identity_cast),
+        ("chars", Arity::Fixed(1), builtin_identity_cast),
+        ("shorts", Arity::Fixed(1), builtin_identity_cast),
+        ("ints", Arity::Fixed(1), builtin_identity_cast),
+        ("longs", Arity::Fixed(1), builtin_identity_cast),
+        ("floats", Arity::Fixed(1), builtin_identity_cast),
+        ("doubles", Arity::Fixed(1), builtin_identity_cast),
+        ("set", Arity::Fixed(1), builtin_set_fn),
+        ("disj", Arity::Variadic { min: 1 }, builtin_disj),
+        ("peek", Arity::Fixed(1), builtin_peek),
+        ("pop", Arity::Fixed(1), builtin_pop),
+        ("subvec", Arity::Variadic { min: 2 }, builtin_subvec),
+        ("assoc-in", Arity::Fixed(3), builtin_assoc_in),
+        (
+            "update-in",
+            Arity::Variadic { min: 3 },
+            builtin_update_in_stub,
+        ),
+        ("flatten", Arity::Fixed(1), builtin_flatten),
+        ("distinct", Arity::Fixed(1), builtin_distinct),
+        ("distinct?", Arity::Variadic { min: 1 }, builtin_distinct_q),
+        ("frequencies", Arity::Fixed(1), builtin_frequencies),
+        ("interleave", Arity::Variadic { min: 0 }, builtin_interleave),
+        ("interpose", Arity::Fixed(2), builtin_interpose),
+        ("partition", Arity::Variadic { min: 2 }, builtin_partition),
+        ("zipmap", Arity::Fixed(2), builtin_zipmap),
+        ("select-keys", Arity::Fixed(2), builtin_select_keys),
+        ("find", Arity::Fixed(2), builtin_find),
+        ("map-keys", Arity::Fixed(2), builtin_map_keys_stub),
+        ("map-vals", Arity::Fixed(2), builtin_map_vals_stub),
+        ("shuffle", Arity::Fixed(1), builtin_shuffle),
+        ("queue", Arity::Variadic { min: 0 }, builtin_queue),
+        // Atoms
+        ("atom", Arity::Variadic { min: 1 }, builtin_atom),
+        // Phase B3 — cross-isolate shared-atom (two-tier ADR)
+        ("shared-atom", Arity::Fixed(1), builtin_shared_atom),
+        ("shared-atom?", Arity::Fixed(1), builtin_shared_atom_q),
+        ("deref", Arity::Variadic { min: 1 }, builtin_deref),
+        ("reset!", Arity::Fixed(2), builtin_reset_bang),
+        ("get-validator", Arity::Fixed(1), builtin_get_validator),
+        ("add-watch", Arity::Fixed(3), builtin_add_watch),
+        ("remove-watch", Arity::Fixed(2), builtin_remove_watch),
+        // Phase 7 — Concurrency primitives
+        ("compare-and-set!", Arity::Fixed(3), builtin_compare_and_set),
+        ("volatile!", Arity::Fixed(1), builtin_volatile),
+        ("vreset!", Arity::Fixed(2), builtin_vreset),
+        ("vswap!", Arity::Variadic { min: 2 }, builtin_vswap_sentinel),
+        ("volatile?", Arity::Fixed(1), builtin_volatile_q),
+        ("force", Arity::Fixed(1), builtin_force),
+        ("realized?", Arity::Fixed(1), builtin_realized_q),
+        ("reduced", Arity::Fixed(1), builtin_reduced),
+        ("reduced?", Arity::Fixed(1), builtin_reduced_q),
+        ("unreduced", Arity::Fixed(1), builtin_unreduced),
+        ("ensure-reduced", Arity::Fixed(1), builtin_ensure_reduced),
+        ("promise", Arity::Fixed(0), builtin_promise),
+        ("deliver", Arity::Fixed(2), builtin_deliver),
+        // future/agent: not yet implemented — omitted from namespace
+        // future-done?, future-cancelled?, future-cancel, future-call* are stubs
+        // agent, await-agent, agent-error, restart-agent are stubs
+        ("send", Arity::Variadic { min: 2 }, builtin_send_sentinel),
+        (
+            "send-off",
+            Arity::Variadic { min: 2 },
+            builtin_send_sentinel,
+        ),
+        ("make-delay", Arity::Fixed(1), builtin_make_delay_sentinel),
+        // I/O
+        ("print", Arity::Variadic { min: 0 }, builtin_print),
+        ("println", Arity::Variadic { min: 0 }, builtin_println),
+        ("prn", Arity::Variadic { min: 0 }, builtin_prn),
+        ("pr", Arity::Variadic { min: 0 }, builtin_pr),
+        ("pr-str", Arity::Variadic { min: 0 }, builtin_pr_str),
+        ("str", Arity::Variadic { min: 0 }, builtin_str),
+        ("read-string", Arity::Fixed(1), builtin_read_string),
+        ("spit", Arity::Fixed(2), builtin_spit),
+        ("slurp", Arity::Fixed(1), builtin_slurp),
+        ("close", Arity::Fixed(1), builtin_close),
+        // Misc
+        ("gensym", Arity::Variadic { min: 0 }, builtin_gensym),
+        ("type", Arity::Fixed(1), builtin_type),
+        ("hash", Arity::Fixed(1), builtin_hash),
+        ("name", Arity::Fixed(1), builtin_name),
+        ("namespace", Arity::Fixed(1), builtin_namespace),
+        ("ex-info", Arity::Variadic { min: 2 }, builtin_ex_info),
+        ("ex-data", Arity::Fixed(1), builtin_ex_data),
+        ("ex-message", Arity::Fixed(1), builtin_ex_message),
+        ("ex-cause", Arity::Fixed(1), builtin_ex_cause),
+        ("range", Arity::Variadic { min: 0 }, builtin_range),
+        ("replicate", Arity::Fixed(2), builtin_replicate),
+        ("symbol", Arity::Variadic { min: 1 }, builtin_symbol),
+        ("keyword", Arity::Variadic { min: 1 }, builtin_keyword_fn),
+        ("boolean", Arity::Fixed(1), builtin_boolean),
+        ("int", Arity::Fixed(1), builtin_int),
+        ("long", Arity::Fixed(1), builtin_long),
+        ("double", Arity::Fixed(1), builtin_double_fn),
+        ("float", Arity::Fixed(1), builtin_float_fn),
+        ("char", Arity::Fixed(1), builtin_char_fn),
+        ("apply", Arity::Variadic { min: 2 }, builtin_apply_sentinel),
+        ("swap!", Arity::Variadic { min: 2 }, builtin_swap_sentinel),
+        (
+            "make-lazy-seq",
+            Arity::Fixed(1),
+            builtin_make_lazy_seq_sentinel,
+        ),
+        ("format", Arity::Variadic { min: 1 }, builtin_format),
+        ("re-find", Arity::Variadic { min: 1 }, builtin_re_find),
+        ("re-matches", Arity::Fixed(2), builtin_re_matches),
+        ("re-groups", Arity::Fixed(1), builtin_re_groups),
+        ("re-pattern", Arity::Fixed(1), builtin_re_pattern),
+        ("re-matcher", Arity::Fixed(2), builtin_re_matcher),
+        ("subs", Arity::Variadic { min: 2 }, builtin_subs),
+        ("split", Arity::Variadic { min: 2 }, builtin_split_stub),
+        ("join", Arity::Variadic { min: 1 }, builtin_join),
+        ("trim", Arity::Fixed(1), builtin_trim),
+        ("upper-case", Arity::Fixed(1), builtin_upper_case),
+        ("lower-case", Arity::Fixed(1), builtin_lower_case),
+        ("starts-with?", Arity::Fixed(2), builtin_starts_with),
+        ("ends-with?", Arity::Fixed(2), builtin_ends_with),
+        ("includes?", Arity::Fixed(2), builtin_includes),
+        ("clojure-version", Arity::Fixed(0), builtin_clojure_version),
+        ("rand", Arity::Variadic { min: 0 }, builtin_rand),
+        ("rand-int", Arity::Fixed(1), builtin_rand_int),
+        ("random-sample", Arity::Fixed(2), builtin_random_sample),
+        ("sort", Arity::Variadic { min: 1 }, builtin_sort),
+        ("sort-by", Arity::Variadic { min: 2 }, builtin_sort_by),
+        ("sorted-set", Arity::Variadic { min: 0 }, builtin_sorted_set),
+        ("sorted-set?", Arity::Fixed(1), builtin_sorted_set_q),
+        ("sorted-map", Arity::Variadic { min: 0 }, builtin_sorted_map),
+        ("sorted-map?", Arity::Fixed(1), builtin_sorted_map_q),
+        ("walk", Arity::Fixed(3), builtin_walk_stub),
+        ("postwalk", Arity::Fixed(2), builtin_postwalk_stub),
+        ("prewalk", Arity::Fixed(2), builtin_prewalk_stub),
+        ("printf", Arity::Variadic { min: 1 }, builtin_printf),
+        ("newline", Arity::Fixed(0), builtin_newline),
+        ("flush", Arity::Fixed(0), builtin_flush),
+        // Special forms need stub vars so (resolve 'name) finds them.
+        // These are never called at runtime (the special form dispatch
+        // intercepts them first), but resolve/var must be able to find them.
+        ("def", Arity::Variadic { min: 1 }, builtin_stub_nil),
+        ("fn*", Arity::Variadic { min: 1 }, builtin_stub_nil),
+        ("if", Arity::Variadic { min: 2 }, builtin_stub_nil),
+        ("do", Arity::Variadic { min: 0 }, builtin_stub_nil),
+        ("let", Arity::Variadic { min: 1 }, builtin_stub_nil),
+        ("let*", Arity::Variadic { min: 1 }, builtin_stub_nil),
+        ("loop", Arity::Variadic { min: 1 }, builtin_stub_nil),
+        ("loop*", Arity::Variadic { min: 1 }, builtin_stub_nil),
+        ("recur", Arity::Variadic { min: 0 }, builtin_stub_nil),
+        ("quote", Arity::Fixed(1), builtin_stub_nil),
+        ("var", Arity::Fixed(1), builtin_stub_nil),
+        ("set!", Arity::Fixed(2), builtin_stub_nil),
+        ("throw", Arity::Fixed(1), builtin_stub_nil),
+        ("try", Arity::Variadic { min: 0 }, builtin_stub_nil),
+        ("defn", Arity::Variadic { min: 2 }, builtin_stub_nil),
+        ("defmacro", Arity::Variadic { min: 2 }, builtin_stub_nil),
+        ("defonce", Arity::Variadic { min: 2 }, builtin_stub_nil),
+        ("and", Arity::Variadic { min: 0 }, builtin_stub_nil),
+        ("or", Arity::Variadic { min: 0 }, builtin_stub_nil),
+        (".", Arity::Variadic { min: 1 }, builtin_stub_nil),
+        ("ns", Arity::Variadic { min: 1 }, builtin_stub_nil),
+        ("require", Arity::Variadic { min: 1 }, builtin_stub_nil),
+        ("letfn", Arity::Variadic { min: 1 }, builtin_stub_nil),
+        ("in-ns", Arity::Fixed(1), builtin_stub_nil),
+        ("alias", Arity::Fixed(2), builtin_stub_nil),
+        ("defprotocol", Arity::Variadic { min: 1 }, builtin_stub_nil),
+        ("extend-type", Arity::Variadic { min: 1 }, builtin_stub_nil),
+        (
+            "extend-protocol",
+            Arity::Variadic { min: 1 },
+            builtin_stub_nil,
+        ),
+        ("defmulti", Arity::Variadic { min: 1 }, builtin_stub_nil),
+        ("defmethod", Arity::Variadic { min: 2 }, builtin_stub_nil),
+        ("defrecord", Arity::Variadic { min: 2 }, builtin_stub_nil),
+        ("reify", Arity::Variadic { min: 0 }, builtin_stub_nil),
+        ("load-file", Arity::Fixed(1), builtin_stub_nil),
+        ("binding", Arity::Variadic { min: 1 }, builtin_stub_nil),
+        ("with-out-str", Arity::Variadic { min: 0 }, builtin_stub_nil),
+        ("deftype", Arity::Variadic { min: 2 }, builtin_stub_nil),
+        // Hierarchy (stubs — return global hierarchy or nil)
+        ("make-hierarchy", Arity::Fixed(0), builtin_make_hierarchy),
+        ("derive", Arity::Variadic { min: 2 }, builtin_stub_nil),
+        ("underive", Arity::Variadic { min: 2 }, builtin_stub_nil),
+        ("ancestors", Arity::Variadic { min: 1 }, builtin_ancestors),
+        (
+            "descendants",
+            Arity::Variadic { min: 1 },
+            builtin_descendants,
+        ),
+        ("parents", Arity::Variadic { min: 1 }, builtin_parents),
+        // Tap system
+        (
+            "add-tap",
+            Arity::Fixed(1),
+            crate::builtins::taps::builtin_add_tap,
+        ),
+        (
+            "remove-tap",
+            Arity::Fixed(1),
+            crate::builtins::taps::builtin_remove_tap,
+        ),
+        (
+            "tap>",
+            Arity::Fixed(1),
+            crate::builtins::taps::builtin_tap_send,
+        ),
+        // Binding capture
+        ("bound-fn*", Arity::Fixed(1), builtin_bound_fn_star),
+        // Misc
+        (
+            "intern",
+            Arity::Variadic { min: 2 },
+            builtin_intern_sentinel,
+        ),
+        ("not-empty", Arity::Fixed(1), builtin_not_empty),
+        ("take-nth", Arity::Fixed(2), builtin_take_nth),
+        ("num", Arity::Fixed(1), builtin_num),
+        ("short", Arity::Fixed(1), builtin_short),
+        ("byte", Arity::Fixed(1), builtin_byte),
+        ("bit-and", Arity::Fixed(2), builtin_bit_and),
+        ("bit-or", Arity::Fixed(2), builtin_bit_or),
+        ("bit-xor", Arity::Fixed(2), builtin_bit_xor),
+        ("bit-not", Arity::Fixed(1), builtin_bit_not),
+        ("bit-shift-left", Arity::Fixed(2), builtin_bit_shl),
+        ("bit-shift-right", Arity::Fixed(2), builtin_bit_shr),
+        (
+            "unsigned-bit-shift-right",
+            Arity::Fixed(2),
+            builtin_bit_ushr,
+        ),
+        ("char-code", Arity::Fixed(1), builtin_char_code),
+        ("char-at", Arity::Fixed(2), builtin_char_at),
+        ("string->list", Arity::Fixed(1), builtin_string_to_list),
+        ("number->string", Arity::Fixed(1), builtin_number_to_string),
+        (
+            "string->number",
+            Arity::Variadic { min: 1 },
+            builtin_string_to_number,
+        ),
+        ("floor", Arity::Fixed(1), builtin_floor),
+        ("ceil", Arity::Fixed(1), builtin_ceil),
+        ("round", Arity::Fixed(1), builtin_round),
+        ("sqrt", Arity::Fixed(1), builtin_sqrt),
+        ("pow", Arity::Fixed(2), builtin_pow),
+        ("log", Arity::Fixed(1), builtin_log),
+        ("exp", Arity::Fixed(1), builtin_exp),
+        ("Math/abs", Arity::Fixed(1), builtin_abs),
+        ("Math/floor", Arity::Fixed(1), builtin_floor),
+        ("Math/ceil", Arity::Fixed(1), builtin_ceil),
+        ("Math/round", Arity::Fixed(1), builtin_round),
+        ("Math/sqrt", Arity::Fixed(1), builtin_sqrt),
+        ("Math/pow", Arity::Fixed(2), builtin_pow),
+        ("Math/log", Arity::Fixed(1), builtin_log),
+        ("Math/log10", Arity::Fixed(1), builtin_log10),
+        ("Math/exp", Arity::Fixed(1), builtin_exp),
+        ("Math/sin", Arity::Fixed(1), builtin_sin),
+        ("Math/cos", Arity::Fixed(1), builtin_cos),
+        ("Math/tan", Arity::Fixed(1), builtin_tan),
+        ("Math/asin", Arity::Fixed(1), builtin_asin),
+        ("Math/acos", Arity::Fixed(1), builtin_acos),
+        ("Math/atan", Arity::Fixed(1), builtin_atan),
+        ("Math/atan2", Arity::Fixed(2), builtin_atan2),
+        ("Math/sinh", Arity::Fixed(1), builtin_sinh),
+        ("Math/cosh", Arity::Fixed(1), builtin_cosh),
+        ("Math/tanh", Arity::Fixed(1), builtin_tanh),
+        ("Math/hypot", Arity::Fixed(2), builtin_hypot),
+        ("log10", Arity::Fixed(1), builtin_log10),
+        ("sin", Arity::Fixed(1), builtin_sin),
+        ("cos", Arity::Fixed(1), builtin_cos),
+        ("tan", Arity::Fixed(1), builtin_tan),
+        ("asin", Arity::Fixed(1), builtin_asin),
+        ("acos", Arity::Fixed(1), builtin_acos),
+        ("atan", Arity::Fixed(1), builtin_atan),
+        ("atan2", Arity::Fixed(2), builtin_atan2),
+        // Protocols & Multimethods
+        ("satisfies?", Arity::Fixed(2), builtin_satisfies_q),
+        ("extends?", Arity::Fixed(2), builtin_extends_q),
+        ("prefer-method", Arity::Fixed(3), builtin_prefer_method),
+        ("remove-method", Arity::Fixed(2), builtin_remove_method),
+        ("methods", Arity::Fixed(1), builtin_methods),
+        ("isa?", Arity::Fixed(2), builtin_isa_q),
+        // Records / reify
+        (
+            "make-type-instance",
+            Arity::Fixed(2),
+            builtin_make_type_instance,
+        ),
+        ("record?", Arity::Fixed(1), builtin_record_q),
+        ("instance?", Arity::Fixed(2), builtin_instance_q),
+        // Native objects (Phase 9 interop)
+        ("native-object?", Arity::Fixed(1), builtin_native_object_q),
+        ("native-type", Arity::Fixed(1), builtin_native_type),
+        // Dynamic variables (Phase 9)
+        ("var-get", Arity::Fixed(1), builtin_var_get),
+        ("var-set!", Arity::Fixed(2), builtin_var_set_bang),
+        (
+            "alter-var-root",
+            Arity::Variadic { min: 2 },
+            builtin_alter_var_root_sentinel,
+        ),
+        ("bound?", Arity::Fixed(1), builtin_bound_q),
+        ("thread-bound?", Arity::Fixed(1), builtin_thread_bound_q),
+        ("meta", Arity::Fixed(1), builtin_meta),
+        ("doc-data", Arity::Fixed(1), builtin_doc_data),
+        ("with-meta", Arity::Fixed(2), builtin_with_meta),
+        (
+            "vary-meta",
+            Arity::Variadic { min: 2 },
+            builtin_vary_meta_sentinel,
+        ),
+        (
+            "with-bindings*",
+            Arity::Variadic { min: 2 },
+            builtin_with_bindings_star_sentinel,
+        ),
+        // Namespace reflection
+        ("namespace?", Arity::Fixed(1), builtin_namespace_q),
+        ("ns-name", Arity::Fixed(1), builtin_ns_name),
+        ("ns-interns", Arity::Fixed(1), builtin_ns_interns_sentinel),
+        ("ns-publics", Arity::Fixed(1), builtin_ns_publics_sentinel), // alias: no private yet
+        ("ns-refers", Arity::Fixed(1), builtin_ns_refers_sentinel),
+        ("ns-map", Arity::Fixed(1), builtin_ns_map_sentinel),
+        ("find-ns", Arity::Fixed(1), builtin_find_ns_sentinel),
+        ("all-ns", Arity::Fixed(0), builtin_all_ns_sentinel),
+        ("create-ns", Arity::Fixed(1), builtin_create_ns_sentinel),
+        ("ns-aliases", Arity::Fixed(1), builtin_ns_aliases_sentinel),
+        ("remove-ns", Arity::Fixed(1), builtin_remove_ns_sentinel),
+        ("the-ns", Arity::Fixed(1), builtin_find_ns_sentinel), // same behaviour as find-ns for now
+        (
+            "alter-meta!",
+            Arity::Variadic { min: 2 },
+            builtin_alter_meta_bang_sentinel,
+        ),
+        ("ns-resolve", Arity::Fixed(2), builtin_ns_resolve_sentinel),
+        ("resolve", Arity::Fixed(1), builtin_resolve_sentinel),
+        // uuids
+        ("uuid?", Arity::Fixed(1), builtin_uuid_q),
+        ("parse-uuid", Arity::Fixed(1), builtin_parse_uuid),
+        ("random-uuid", Arity::Fixed(0), builtin_random_uuid),
+        // special builtins for clojurust
+        ("sleep", Arity::Fixed(1), builtin_sleep),
+        // Transients
+        ("transient", Arity::Fixed(1), builtin_transient),
+        ("persistent!", Arity::Fixed(1), builtin_persistent_bang),
+        ("assoc!", Arity::Variadic { min: 3 }, builtin_assoc_bang),
+        ("conj!", Arity::Variadic { min: 0 }, builtin_conj_bang),
+        ("disj!", Arity::Variadic { min: 1 }, builtin_disj_bang),
+        ("dissoc!", Arity::Variadic { min: 2 }, builtin_dissoc_bang),
+        ("pop!", Arity::Fixed(1), builtin_pop_bang),
+        // bit ops
+        (
+            "bit-and-not",
+            Arity::Variadic { min: 2 },
+            builtin_bit_and_not,
+        ),
+        ("bit-clear", Arity::Fixed(2), builtin_bit_clear),
+        ("bit-flip", Arity::Fixed(2), builtin_bit_flip),
+        ("bit-set", Arity::Fixed(2), builtin_bit_set),
+        ("bit-test", Arity::Fixed(2), builtin_bit_test),
+        // array-list extension
+        ("array-list", Arity::Variadic { min: 0 }, builtin_array_list),
+        ("array-list-push", Arity::Fixed(2), builtin_array_list_push),
+        (
+            "array-list-remove",
+            Arity::Fixed(2),
+            builtin_array_list_remove,
+        ),
+        (
+            "array-list-length",
+            Arity::Fixed(1),
+            builtin_array_list_length,
+        ),
+        (
+            "array-list-to-array",
+            Arity::Fixed(1),
+            builtin_array_list_to_array,
+        ),
+        (
+            "array-list-clear",
+            Arity::Fixed(1),
+            builtin_array_list_clear,
+        ),
+        // interop
+        ("new", Arity::Variadic { min: 1 }, builtin_new),
+        (
+            "Exception.",
+            Arity::Variadic { min: 1 },
+            builtin_exception_dot,
+        ),
+        // time utils
+        ("nanotime", Arity::Fixed(0), builtin_nanotime),
+    ];
+
+    let docs: HashMap<&str, &str> = BUILTIN_DOCS.iter().copied().collect();
+    for (name, arity, func) in fns {
+        let nf = NativeFn::new(name, arity, func);
+        let var = globals.intern(ns, Arc::from(name), Value::NativeFunction(GcPtr::new(nf)));
+        if let Some(doc) = docs.get(name) {
+            var.get().set_meta(Value::Map(MapValue::empty().assoc(
+                Value::keyword(Keyword::parse("doc")),
+                Value::string((*doc).to_string()),
+            )));
+        }
+    }
+
+    // Math constants.
+    globals.intern(
+        ns,
+        Arc::from("Math/PI"),
+        Value::Double(std::f64::consts::PI),
+    );
+    globals.intern(ns, Arc::from("Math/E"), Value::Double(std::f64::consts::E));
+}
+
+// Bootstrap Clojure source defining higher-order functions.
+pub const BOOTSTRAP_SOURCE: &str = include_str!("bootstrap.cljrs");
+pub const CLOJURE_TEST_SOURCE: &str = include_str!("clojure_test.cljrs");
+
+// ── Helper: lazy value iterator ──────────────────────────────────────────────
+
+/// An iterator that lazily steps through any seqable `Value`, realizing
+/// `LazySeq` and `Cons` cells one at a time instead of collecting into a `Vec`.
+/// Finite collections (List, Vector, Set, Map, Str) are converted to a List
+/// on first access, which is fine since they are already fully in memory.
+struct ValueIter {
+    current: Value,
+    error: Option<String>,
+}
+
+impl ValueIter {
+    fn new(v: Value) -> Self {
+        ValueIter {
+            current: v,
+            error: None,
+        }
+    }
+
+    /// Check if an error occurred during iteration.
+    fn take_error(&mut self) -> Option<String> {
+        self.error.take()
+    }
+}
+
+impl Iterator for ValueIter {
+    type Item = Value;
+
+    fn next(&mut self) -> Option<Value> {
+        loop {
+            match &self.current {
+                Value::Nil => return None,
+                Value::WithMeta(inner, _) => {
+                    self.current = inner.as_ref().clone();
+                }
+                Value::LazySeq(ls) => {
+                    let ls = ls.clone();
+                    // Root self.current so the LazySeq (and the entire chain
+                    // it's part of) survives any GC triggered during realize().
+                    let _current_root = crate::env::gc_roots::root_value(&self.current);
+                    self.current = ls.get().realize();
+                    if let Some(err) = ls.get().error() {
+                        self.error = Some(err);
+                        self.current = Value::Nil;
+                        return None;
+                    }
+                }
+                Value::Cons(c) => {
+                    let cell = c.get();
+                    let head = cell.head.clone();
+                    self.current = cell.tail.clone();
+                    return Some(head);
+                }
+                Value::List(l) => {
+                    return if let Some(first) = l.get().first() {
+                        let head = first.clone();
+                        self.current = Value::List(GcPtr::new((*l.get().rest()).clone()));
+                        Some(head)
+                    } else {
+                        None
+                    };
+                }
+                Value::Vector(v) => {
+                    let items: Vec<Value> = v.get().iter().cloned().collect();
+                    self.current = Value::List(GcPtr::new(PersistentList::from_iter(items)));
+                }
+                Value::Set(s) => {
+                    let items: Vec<Value> = s.iter().cloned().collect();
+                    self.current = Value::List(GcPtr::new(PersistentList::from_iter(items)));
+                }
+                Value::Map(m) => {
+                    let mut pairs = Vec::new();
+                    m.for_each(|k, v| {
+                        pairs.push(Value::map_entry(k.clone(), v.clone()));
+                    });
+                    self.current = Value::List(GcPtr::new(PersistentList::from_iter(pairs)));
+                }
+                Value::Str(s) => {
+                    let chars: Vec<Value> = s.get().chars().map(Value::Char).collect();
+                    self.current = Value::List(GcPtr::new(PersistentList::from_iter(chars)));
+                }
+                Value::ObjectArray(a) => {
+                    let items = a.get().0.lock().unwrap().clone();
+                    self.current = Value::List(GcPtr::new(PersistentList::from_iter(items)));
+                }
+                Value::IntArray(a) => {
+                    let items: Vec<Value> = a
+                        .get()
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .map(|v| Value::Long(*v as i64))
+                        .collect();
+                    self.current = Value::List(GcPtr::new(PersistentList::from_iter(items)));
+                }
+                Value::LongArray(a) => {
+                    let items: Vec<Value> = a
+                        .get()
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .map(|v| Value::Long(*v))
+                        .collect();
+                    self.current = Value::List(GcPtr::new(PersistentList::from_iter(items)));
+                }
+                Value::ShortArray(a) => {
+                    let items: Vec<Value> = a
+                        .get()
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .map(|v| Value::Long(*v as i64))
+                        .collect();
+                    self.current = Value::List(GcPtr::new(PersistentList::from_iter(items)));
+                }
+                Value::ByteArray(a) => {
+                    let items: Vec<Value> = a
+                        .get()
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .map(|v| Value::Long(*v as i64))
+                        .collect();
+                    self.current = Value::List(GcPtr::new(PersistentList::from_iter(items)));
+                }
+                Value::FloatArray(a) => {
+                    let items: Vec<Value> = a
+                        .get()
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .map(|v| Value::Double(*v as f64))
+                        .collect();
+                    self.current = Value::List(GcPtr::new(PersistentList::from_iter(items)));
+                }
+                Value::DoubleArray(a) => {
+                    let items: Vec<Value> = a
+                        .get()
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .map(|v| Value::Double(*v))
+                        .collect();
+                    self.current = Value::List(GcPtr::new(PersistentList::from_iter(items)));
+                }
+                Value::BooleanArray(a) => {
+                    let items: Vec<Value> = a
+                        .get()
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .map(|v| Value::Bool(*v))
+                        .collect();
+                    self.current = Value::List(GcPtr::new(PersistentList::from_iter(items)));
+                }
+                Value::CharArray(a) => {
+                    let items: Vec<Value> = a
+                        .get()
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .map(|v| Value::Char(*v))
+                        .collect();
+                    self.current = Value::List(GcPtr::new(PersistentList::from_iter(items)));
+                }
+                Value::TypeInstance(ti) => {
+                    let mut pairs = Vec::new();
+                    ti.get().fields.for_each(|k, v| {
+                        pairs.push(Value::map_entry(k.clone(), v.clone()));
+                    });
+                    self.current = Value::List(GcPtr::new(PersistentList::from_iter(pairs)));
+                }
+                _ => return None,
+            }
+        }
+    }
+}
+
+// ── Helper: value to sequence vector (eager — use only when random access is needed) ──
+
+fn value_to_seq(v: &Value) -> ValueResult<Vec<Value>> {
+    match v {
+        Value::List(_)
+        | Value::Map(_)
+        | Value::Set(_)
+        | Value::Vector(_)
+        | Value::Cons(_)
+        | Value::LazySeq(_)
+        | Value::ObjectArray(_)
+        | Value::BooleanArray(_)
+        | Value::ByteArray(_)
+        | Value::ShortArray(_)
+        | Value::IntArray(_)
+        | Value::LongArray(_)
+        | Value::CharArray(_)
+        | Value::FloatArray(_)
+        | Value::DoubleArray(_)
+        | Value::Str(_)
+        | Value::TypeInstance(_) => {
+            let mut iter = ValueIter::new(v.clone());
+            let result: Vec<Value> = iter.by_ref().collect();
+            if let Some(err) = iter.take_error() {
+                return Err(ValueError::Other(err));
+            }
+            Ok(result)
+        }
+        Value::Nil => Ok(Vec::new()),
+        _ => Err(ValueError::WrongType {
+            expected: "seqable",
+            got: v.type_name().to_string(),
+        }),
+    }
+}
+
+fn numeric_as_f64(v: &Value) -> ValueResult<f64> {
+    match v {
+        Value::Long(n) => Ok(*n as f64),
+        Value::Double(f) => Ok(*f),
+        Value::BigInt(n) => Ok(n.get().to_f64().unwrap_or(f64::INFINITY)),
+        Value::BigDecimal(d) => Ok(d.get().to_f64().unwrap_or(f64::INFINITY)),
+        Value::Ratio(r) => Ok(r.get().to_f64().unwrap_or(f64::NAN)),
+        _ => Err(ValueError::WrongType {
+            expected: "number",
+            got: v.type_name().to_string(),
+        }),
+    }
+}
+
+fn numeric_as_f32(v: &Value) -> ValueResult<f32> {
+    let n = numeric_as_f64(v)?;
+    Ok(n as f32)
+}
+
+fn numeric_as_i8(v: &Value) -> ValueResult<i8> {
+    let v = numeric_as_f64(v)?;
+    Ok(v as i8)
+}
+
+fn numeric_as_i16(v: &Value) -> ValueResult<i16> {
+    let v = numeric_as_f64(v)?;
+    Ok(v as i16)
+}
+
+fn numeric_as_i32(v: &Value) -> ValueResult<i32> {
+    let n = numeric_as_i64(v)?;
+    if !(-2147483648..=2147483647).contains(&n) {
+        Err(ValueError::OutOfRange)
+    } else {
+        Ok(n as i32)
+    }
+}
+
+fn numeric_as_bigint(v: &Value) -> ValueResult<BigInt> {
+    match v {
+        Value::Long(n) => Ok(BigInt::from(*n)),
+        Value::BigInt(n) => Ok(n.get().clone()),
+        Value::Ratio(r) => Ok(r.get().to_integer()),
+        _ => Err(ValueError::WrongType {
+            expected: "integer",
+            got: v.type_name().to_string(),
+        }),
+    }
+}
+
+fn numeric_as_bigdecimal(v: &Value) -> ValueResult<BigDecimal> {
+    match v {
+        Value::Long(n) => Ok(BigDecimal::from(*n)),
+        Value::BigInt(n) => Ok(BigDecimal::from(n.get().clone())),
+        Value::BigDecimal(d) => Ok(d.get().clone()),
+        Value::Double(f) => Ok(BigDecimal::try_from(*f).unwrap_or_else(|_| BigDecimal::from(0))),
+        Value::Ratio(r) => {
+            let numer = BigDecimal::from(r.get().numer().clone());
+            let denom = BigDecimal::from(r.get().denom().clone());
+            Ok(numer / denom)
+        }
+        _ => Err(ValueError::WrongType {
+            expected: "number",
+            got: v.type_name().to_string(),
+        }),
+    }
+}
+
+fn numeric_as_ratio(v: &Value) -> ValueResult<Ratio<BigInt>> {
+    match v {
+        Value::Long(n) => Ok(Ratio::from(BigInt::from(*n))),
+        Value::BigInt(n) => Ok(Ratio::from(n.get().clone())),
+        Value::Ratio(r) => Ok(r.get().clone()),
+        _ => Err(ValueError::WrongType {
+            expected: "number",
+            got: v.type_name().to_string(),
+        }),
+    }
+}
+
+fn is_truthy(v: &Value) -> bool {
+    !matches!(v, Value::Nil | Value::Bool(false))
+}
+
+// ── Arithmetic ────────────────────────────────────────────────────────────────
+
+/// Determine the numeric "category" for type promotion.
+/// Double > BigDecimal > Ratio > BigInt > Long.
+/// Double is contagious; otherwise widen to the broadest non-Double type.
+#[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Copy)]
+enum NumCat {
+    Long,
+    BigInt,
+    Ratio,
+    BigDecimal,
+    Double,
+}
+
+fn num_category(v: &Value) -> ValueResult<NumCat> {
+    match v {
+        Value::Long(_) => Ok(NumCat::Long),
+        Value::BigInt(_) => Ok(NumCat::BigInt),
+        Value::Ratio(_) => Ok(NumCat::Ratio),
+        Value::BigDecimal(_) => Ok(NumCat::BigDecimal),
+        Value::Double(_) => Ok(NumCat::Double),
+        _ => Err(ValueError::WrongType {
+            expected: "number",
+            got: v.type_name().to_string(),
+        }),
+    }
+}
+
+fn widest_category(args: &[Value]) -> ValueResult<NumCat> {
+    let mut cat = NumCat::Long;
+    for v in args {
+        let c = num_category(v)?;
+        if c > cat {
+            cat = c;
+        }
+    }
+    Ok(cat)
+}
+
+/// Simplify a Ratio: if denominator is 1, return Long or BigInt.
+/// If `preserve_bigint` is true, integer results stay as BigInt (for when an operand was BigInt).
+fn simplify_ratio_with(r: Ratio<BigInt>, preserve_bigint: bool) -> Value {
+    if r.is_integer() {
+        let n = r.to_integer();
+        if preserve_bigint {
+            Value::BigInt(GcPtr::new(n))
+        } else {
+            match n.to_i64() {
+                Some(l) => Value::Long(l),
+                None => Value::BigInt(GcPtr::new(n)),
+            }
+        }
+    } else {
+        Value::Ratio(GcPtr::new(r))
+    }
+}
+
+fn simplify_ratio(r: Ratio<BigInt>) -> Value {
+    simplify_ratio_with(r, false)
+}
+
+/// Simplify a BigInt: if it fits in i64, return Long.
+/// Used only when Long arithmetic overflows — NOT when BigInt was explicitly requested.
+fn simplify_bigint(n: BigInt) -> Value {
+    match n.to_i64() {
+        Some(l) => Value::Long(l),
+        None => Value::BigInt(GcPtr::new(n)),
+    }
+}
+
+fn builtin_add(args: &[Value]) -> ValueResult<Value> {
+    let cat = widest_category(args)?;
+    match cat {
+        NumCat::Double => {
+            let mut sum = 0.0f64;
+            for v in args {
+                sum += numeric_as_f64(v)?;
+            }
+            Ok(Value::Double(sum))
+        }
+        NumCat::BigDecimal => {
+            let mut sum = BigDecimal::from(0);
+            for v in args {
+                sum += numeric_as_bigdecimal(v)?;
+            }
+            Ok(Value::BigDecimal(GcPtr::new(apply_precision(sum)?)))
+        }
+        NumCat::Ratio => {
+            let mut sum = Ratio::from(BigInt::from(0));
+            for v in args {
+                sum += numeric_as_ratio(v)?;
+            }
+            Ok(simplify_ratio(sum))
+        }
+        NumCat::BigInt => {
+            let mut sum = BigInt::from(0);
+            for v in args {
+                sum += numeric_as_bigint(v)?;
+            }
+            Ok(Value::BigInt(GcPtr::new(sum)))
+        }
+        NumCat::Long => {
+            let mut sum: i64 = 0;
+            for v in args {
+                let n = numeric_as_i64(v)?;
+                match sum.checked_add(n) {
+                    Some(s) => sum = s,
+                    None => {
+                        // Overflow: promote to BigInt for remaining args
+                        let mut big = BigInt::from(sum) + BigInt::from(n);
+                        for v2 in &args[args.iter().position(|x| std::ptr::eq(x, v)).unwrap() + 1..]
+                        {
+                            big += numeric_as_bigint(v2)?;
+                        }
+                        return Ok(simplify_bigint(big));
+                    }
+                }
+            }
+            Ok(Value::Long(sum))
+        }
+    }
+}
+
+// Addition, with automatic promotion long->bigint, double->bigdecimal
+fn builtin_add_quote(args: &[Value]) -> ValueResult<Value> {
+    let cat = widest_category(args)?;
+    match cat {
+        NumCat::Double => {
+            let mut sum = BigDecimal::from(0);
+            for v in args {
+                sum += numeric_as_bigdecimal(v)?;
+            }
+            match sum.to_f64() {
+                Some(sum) => Ok(Value::Double(sum)),
+                None => Ok(Value::BigDecimal(GcPtr::new(apply_precision(sum)?))),
+            }
+        }
+        NumCat::Long => {
+            // Do the sum as bigints, return long if it fits in i64
+            let mut sum = BigInt::from(0);
+            for v in args {
+                sum += numeric_as_bigint(v)?;
+            }
+            if sum > BigInt::from(0x7f00000000000000i64)
+                || sum < BigInt::from(-0x8000000000000000i64)
+            {
+                Ok(Value::BigInt(GcPtr::new(sum)))
+            } else {
+                Ok(Value::Long(sum.to_i64().unwrap()))
+            }
+        }
+        _ => builtin_add(args),
+    }
+}
+
+fn builtin_sub(args: &[Value]) -> ValueResult<Value> {
+    if args.is_empty() {
+        return Err(ValueError::ArityError {
+            name: "-".into(),
+            expected: "1+".into(),
+            got: 0,
+        });
+    }
+    if args.len() == 1 {
+        return match &args[0] {
+            Value::Long(n) => match n.checked_neg() {
+                Some(r) => Ok(Value::Long(r)),
+                None => Ok(Value::BigInt(GcPtr::new(-BigInt::from(*n)))),
+            },
+            Value::Double(f) => Ok(Value::Double(-f)),
+            Value::BigInt(n) => Ok(simplify_bigint(-n.get().clone())),
+            Value::BigDecimal(d) => Ok(Value::BigDecimal(GcPtr::new(-d.get().clone()))),
+            Value::Ratio(r) => Ok(simplify_ratio(-r.get().clone())),
+            v => Err(ValueError::WrongType {
+                expected: "number",
+                got: v.type_name().to_string(),
+            }),
+        };
+    }
+    let cat = widest_category(args)?;
+    match cat {
+        NumCat::Double => {
+            let mut result = numeric_as_f64(&args[0])?;
+            for v in &args[1..] {
+                result -= numeric_as_f64(v)?;
+            }
+            Ok(Value::Double(result))
+        }
+        NumCat::BigDecimal => {
+            let mut result = numeric_as_bigdecimal(&args[0])?;
+            for v in &args[1..] {
+                result -= numeric_as_bigdecimal(v)?;
+            }
+            Ok(Value::BigDecimal(GcPtr::new(apply_precision(result)?)))
+        }
+        NumCat::Ratio => {
+            let mut result = numeric_as_ratio(&args[0])?;
+            for v in &args[1..] {
+                result -= numeric_as_ratio(v)?;
+            }
+            Ok(simplify_ratio(result))
+        }
+        NumCat::BigInt => {
+            let mut result = numeric_as_bigint(&args[0])?;
+            for v in &args[1..] {
+                result -= numeric_as_bigint(v)?;
+            }
+            Ok(Value::BigInt(GcPtr::new(result)))
+        }
+        NumCat::Long => {
+            let mut result = numeric_as_i64(&args[0])?;
+            for v in &args[1..] {
+                let n = numeric_as_i64(v)?;
+                match result.checked_sub(n) {
+                    Some(r) => result = r,
+                    None => {
+                        let mut big = BigInt::from(result) - BigInt::from(n);
+                        for v2 in &args[args.iter().position(|x| std::ptr::eq(x, v)).unwrap() + 1..]
+                        {
+                            big -= numeric_as_bigint(v2)?;
+                        }
+                        return Ok(simplify_bigint(big));
+                    }
+                }
+            }
+            Ok(Value::Long(result))
+        }
+    }
+}
+
+fn builtin_sub_quote(args: &[Value]) -> ValueResult<Value> {
+    let cat = widest_category(args)?;
+    match cat {
+        NumCat::Double if !args.is_empty() => {
+            let mut sum = BigDecimal::from(0);
+            for v in args {
+                sum -= numeric_as_bigdecimal(v)?;
+            }
+            match sum.to_f64() {
+                // produces +Inf/-Inf on overflow
+                Some(f) => {
+                    if f.is_infinite() {
+                        Ok(Value::BigDecimal(GcPtr::new(sum)))
+                    } else {
+                        Ok(Value::Double(f))
+                    }
+                }
+                None => Ok(Value::BigDecimal(GcPtr::new(sum))),
+            }
+        }
+        NumCat::Long if !args.is_empty() => {
+            let mut sum = numeric_as_bigint(&args[0])?;
+            for v in args[1..].iter() {
+                sum -= numeric_as_bigint(v)?;
+            }
+            if sum < BigInt::from(-0x8000000000000000i64)
+                || sum > BigInt::from(0x7f00000000000000i64)
+            {
+                Ok(Value::BigInt(GcPtr::new(sum)))
+            } else {
+                Ok(Value::Long(sum.to_i64().unwrap()))
+            }
+        }
+        _ => builtin_sub(args),
+    }
+}
+
+fn builtin_mul_quote(args: &[Value]) -> ValueResult<Value> {
+    let cat = widest_category(args)?;
+    match cat {
+        NumCat::Double => {
+            let mut result = BigDecimal::from(1);
+            for v in args {
+                result *= numeric_as_bigdecimal(v)?;
+            }
+            match result.to_f64() {
+                Some(f) if f.is_infinite() => Ok(Value::BigDecimal(GcPtr::new(result))),
+                Some(f) => Ok(Value::Double(f)),
+                None => Ok(Value::BigDecimal(GcPtr::new(result))),
+            }
+        }
+        NumCat::Long => {
+            let mut result = BigInt::from(1);
+            for v in args {
+                result *= numeric_as_bigint(v)?;
+            }
+            if result < BigInt::from(-0x8000000000000000i64)
+                || result > BigInt::from(0x7f00000000000000i64)
+            {
+                Ok(Value::BigInt(GcPtr::new(result)))
+            } else {
+                Ok(Value::Long(result.to_i64().unwrap()))
+            }
+        }
+        _ => builtin_mul(args),
+    }
+}
+
+fn builtin_mul(args: &[Value]) -> ValueResult<Value> {
+    let cat = widest_category(args)?;
+    match cat {
+        NumCat::Double => {
+            let mut result = 1.0f64;
+            for v in args {
+                result *= numeric_as_f64(v)?;
+            }
+            Ok(Value::Double(result))
+        }
+        NumCat::BigDecimal => {
+            let mut result = BigDecimal::from(1);
+            for v in args {
+                result *= numeric_as_bigdecimal(v)?;
+            }
+            Ok(Value::BigDecimal(GcPtr::new(apply_precision(result)?)))
+        }
+        NumCat::Ratio => {
+            let mut result = Ratio::from(BigInt::from(1));
+            for v in args {
+                result *= numeric_as_ratio(v)?;
+            }
+            Ok(simplify_ratio(result))
+        }
+        NumCat::BigInt => {
+            let mut result = BigInt::from(1);
+            for v in args {
+                result *= numeric_as_bigint(v)?;
+            }
+            Ok(Value::BigInt(GcPtr::new(result)))
+        }
+        NumCat::Long => {
+            let mut result: i64 = 1;
+            for v in args {
+                let n = numeric_as_i64(v)?;
+                match result.checked_mul(n) {
+                    Some(r) => result = r,
+                    None => {
+                        let mut big = BigInt::from(result) * BigInt::from(n);
+                        for v2 in &args[args.iter().position(|x| std::ptr::eq(x, v)).unwrap() + 1..]
+                        {
+                            big *= numeric_as_bigint(v2)?;
+                        }
+                        return Ok(simplify_bigint(big));
+                    }
+                }
+            }
+            Ok(Value::Long(result))
+        }
+    }
+}
+
+fn builtin_div(args: &[Value]) -> ValueResult<Value> {
+    if args.is_empty() {
+        return Err(ValueError::ArityError {
+            name: "/".into(),
+            expected: "1+".into(),
+            got: 0,
+        });
+    }
+    if args.len() == 1 {
+        // (/ x) => 1/x — produce a ratio for integers
+        return builtin_div(&[Value::Long(1), args[0].clone()]);
+    }
+    let cat = widest_category(args)?;
+    match cat {
+        NumCat::Double => {
+            let mut result = numeric_as_f64(&args[0])?;
+            for v in &args[1..] {
+                result /= numeric_as_f64(v)?;
+            }
+            Ok(Value::Double(result))
+        }
+        NumCat::BigDecimal => {
+            let mut result = numeric_as_bigdecimal(&args[0])?;
+            for v in &args[1..] {
+                let d = numeric_as_bigdecimal(v)?;
+                if d.is_zero() {
+                    return Err(ValueError::Other("divide by zero".into()));
+                }
+                result = result / d;
+            }
+            Ok(Value::BigDecimal(GcPtr::new(apply_precision_or_default(
+                result,
+            )?)))
+        }
+        _ => {
+            // For Long, BigInt, Ratio: use Ratio arithmetic to get exact results
+            let preserve_bigint = cat == NumCat::BigInt;
+            let mut result = numeric_as_ratio(&args[0])?;
+            for v in &args[1..] {
+                let d = numeric_as_ratio(v)?;
+                if d.is_zero() {
+                    return Err(ValueError::Other("divide by zero".into()));
+                }
+                result /= d;
+            }
+            Ok(simplify_ratio_with(result, preserve_bigint))
+        }
+    }
+}
+
+fn builtin_mod(args: &[Value]) -> ValueResult<Value> {
+    // Clojure mod: result has same sign as divisor.
+    use num_bigint::BigInt;
+    match (&args[0], &args[1]) {
+        // NaN in either position → throw
+        (Value::Double(f), _) if f.is_nan() => Err(ValueError::Other("mod of NaN".into())),
+        (_, Value::Double(f)) if f.is_nan() => Err(ValueError::Other("mod by NaN".into())),
+        // Infinity as dividend → throw
+        (Value::Double(f), _) if f.is_infinite() => {
+            Err(ValueError::Other("mod of infinity".into()))
+        }
+        // Infinity as divisor → NaN
+        (_, Value::Double(f)) if f.is_infinite() => Ok(Value::Double(f64::NAN)),
+        // Double in either (but not BigDecimal) → double mod
+        // Double in either → double mod (Double contaminates, even BigDecimal)
+        (_, _) if matches!(&args[0], Value::Double(_)) || matches!(&args[1], Value::Double(_)) => {
+            let a = numeric_as_f64(&args[0])?;
+            let b = numeric_as_f64(&args[1])?;
+            if b == 0.0 {
+                return Err(ValueError::Other("mod by zero".into()));
+            }
+            let r = a % b;
+            let result = if (r > 0.0 && b < 0.0) || (r < 0.0 && b > 0.0) {
+                r + b
+            } else {
+                r
+            };
+            Ok(Value::Double(result))
+        }
+        // BigDecimal (without Double) → BigDecimal mod
+        (Value::BigDecimal(_), _) | (_, Value::BigDecimal(_)) => {
+            let a = numeric_as_bigdecimal(&args[0])?;
+            let b = numeric_as_bigdecimal(&args[1])?;
+            if b.is_zero() {
+                return Err(ValueError::Other("mod by zero".into()));
+            }
+            let r = &a % &b;
+            let result = if r.is_zero() {
+                r
+            } else if (r > 0 && b < 0) || (r < 0 && b > 0) {
+                r + &b
+            } else {
+                r
+            };
+            Ok(Value::BigDecimal(GcPtr::new(result)))
+        }
+        // Ratio in either → ratio mod, result may be BigInt if integer
+        (Value::Ratio(_), _) | (_, Value::Ratio(_)) => {
+            let a = numeric_as_ratio(&args[0])?;
+            let b = numeric_as_ratio(&args[1])?;
+            if b.is_zero() {
+                return Err(ValueError::Other("mod by zero".into()));
+            }
+            let r = &a % &b;
+            let result = if (r > Ratio::from(BigInt::from(0i64))
+                && b < Ratio::from(BigInt::from(0i64)))
+                || (r < Ratio::from(BigInt::from(0i64)) && b > Ratio::from(BigInt::from(0i64)))
+            {
+                r + &b
+            } else {
+                r
+            };
+            if result.is_integer() {
+                Ok(Value::BigInt(GcPtr::new(result.to_integer())))
+            } else {
+                Ok(Value::Ratio(GcPtr::new(result)))
+            }
+        }
+        // BigInt in either → BigInt mod
+        (Value::BigInt(_), _) | (_, Value::BigInt(_)) => {
+            let a = numeric_as_bigint(&args[0])?;
+            let b = numeric_as_bigint(&args[1])?;
+            if b.is_zero() {
+                return Err(ValueError::Other("mod by zero".into()));
+            }
+            let r = &a % &b;
+            let result = if (r > BigInt::from(0i64) && b < BigInt::from(0i64))
+                || (r < BigInt::from(0i64) && b > BigInt::from(0i64))
+            {
+                r + &b
+            } else {
+                r
+            };
+            Ok(Value::BigInt(GcPtr::new(result)))
+        }
+        // Long × Long → Long
+        _ => {
+            let a = numeric_as_i64(&args[0])?;
+            let b = numeric_as_i64(&args[1])?;
+            if b == 0 {
+                return Err(ValueError::Other("mod by zero".into()));
+            }
+            Ok(Value::Long(((a % b) + b) % b))
+        }
+    }
+}
+
+fn builtin_rem(args: &[Value]) -> ValueResult<Value> {
+    match (&args[0], &args[1]) {
+        (Value::Double(f), _) if f.is_nan() => Err(ValueError::Other("rem of NaN".into())),
+        (_, Value::Double(f)) if f.is_nan() => Err(ValueError::Other("rem by NaN".into())),
+        (Value::Double(f), _) if f.is_infinite() => {
+            Err(ValueError::Other("rem of infinity".into()))
+        }
+        (_, Value::Double(f)) if f.is_infinite() => Ok(Value::Double(f64::NAN)),
+        (_, _) if matches!(&args[0], Value::Double(_)) || matches!(&args[1], Value::Double(_)) => {
+            let a = numeric_as_f64(&args[0])?;
+            let b = numeric_as_f64(&args[1])?;
+            if b == 0.0 {
+                return Err(ValueError::Other("rem by zero".into()));
+            }
+            Ok(Value::Double(a % b))
+        }
+        (Value::BigDecimal(_), _) | (_, Value::BigDecimal(_)) => {
+            let a = numeric_as_bigdecimal(&args[0])?;
+            let b = numeric_as_bigdecimal(&args[1])?;
+            if b.is_zero() {
+                return Err(ValueError::Other("rem by zero".into()));
+            }
+            Ok(Value::BigDecimal(GcPtr::new(&a % &b)))
+        }
+        (Value::Ratio(_), _) | (_, Value::Ratio(_)) => {
+            let a = numeric_as_ratio(&args[0])?;
+            let b = numeric_as_ratio(&args[1])?;
+            if b.is_zero() {
+                return Err(ValueError::Other("rem by zero".into()));
+            }
+            let r = &a % &b;
+            if r.is_integer() {
+                Ok(Value::BigInt(GcPtr::new(r.to_integer())))
+            } else {
+                Ok(Value::Ratio(GcPtr::new(r)))
+            }
+        }
+        (Value::BigInt(_), _) | (_, Value::BigInt(_)) => {
+            let a = numeric_as_bigint(&args[0])?;
+            let b = numeric_as_bigint(&args[1])?;
+            if b.is_zero() {
+                return Err(ValueError::Other("rem by zero".into()));
+            }
+            Ok(Value::BigInt(GcPtr::new(&a % &b)))
+        }
+        _ => {
+            let a = numeric_as_i64(&args[0])?;
+            let b = numeric_as_i64(&args[1])?;
+            if b == 0 {
+                return Err(ValueError::Other("rem by zero".into()));
+            }
+            Ok(Value::Long(a % b))
+        }
+    }
+}
+
+fn builtin_quot(args: &[Value]) -> ValueResult<Value> {
+    match (&args[0], &args[1]) {
+        // Inf, -Inf not allowed as the numerator.
+        (Value::Double(f), _) if f.is_nan() || f.is_infinite() => {
+            Err(ValueError::Other("quot of NaN or Infinite".into()))
+        }
+        (_, Value::Double(f)) if f.is_nan() => Err(ValueError::Other("quot by NaN".into())),
+        (_, _) if matches!(&args[0], Value::Double(_)) || matches!(&args[1], Value::Double(_)) => {
+            let a = numeric_as_f64(&args[0])?;
+            let b = numeric_as_f64(&args[1])?;
+            if b == 0.0 {
+                return Err(ValueError::Other("quot by zero".into()));
+            }
+            Ok(Value::Double((a / b).trunc()))
+        }
+        (Value::BigDecimal(_), _) | (_, Value::BigDecimal(_)) => {
+            let a = numeric_as_bigdecimal(&args[0])?;
+            let b = numeric_as_bigdecimal(&args[1])?;
+            if b.is_zero() {
+                return Err(ValueError::Other("quot by zero".into()));
+            }
+            let q = &a / &b;
+            Ok(Value::BigDecimal(GcPtr::new(q.with_scale(0))))
+        }
+        (Value::Ratio(_), _) | (_, Value::Ratio(_)) => {
+            let a = numeric_as_ratio(&args[0])?;
+            let b = numeric_as_ratio(&args[1])?;
+            if b.is_zero() {
+                return Err(ValueError::Other("quot by zero".into()));
+            }
+            let q = &a / &b;
+            Ok(Value::BigInt(GcPtr::new(q.to_integer())))
+        }
+        (Value::BigInt(_), _) | (_, Value::BigInt(_)) => {
+            let a = numeric_as_bigint(&args[0])?;
+            let b = numeric_as_bigint(&args[1])?;
+            if b.is_zero() {
+                return Err(ValueError::Other("quot by zero".into()));
+            }
+            Ok(Value::BigInt(GcPtr::new(&a / &b)))
+        }
+        _ => {
+            let a = numeric_as_i64(&args[0])?;
+            let b = numeric_as_i64(&args[1])?;
+            if b == 0 {
+                return Err(ValueError::Other("quot by zero".into()));
+            }
+            Ok(Value::Long(a / b))
+        }
+    }
+}
+
+fn builtin_inc(args: &[Value]) -> ValueResult<Value> {
+    match &args[0] {
+        Value::Long(n) => Ok(Value::Long(n.wrapping_add(1))),
+        Value::Double(f) => Ok(Value::Double(f + 1.0)),
+        Value::Ratio(r) => Ok(Value::Ratio(GcPtr::new(
+            r.get().add(Ratio::new(BigInt::from(1), BigInt::from(1))),
+        ))),
+        Value::BigInt(i) => Ok(Value::BigInt(GcPtr::new(i.get().add(1)))),
+        Value::BigDecimal(d) => Ok(Value::BigDecimal(GcPtr::new(d.get().add(1)))),
+        v => Err(ValueError::WrongType {
+            expected: "number",
+            got: v.type_name().to_string(),
+        }),
+    }
+}
+
+fn builtin_dec(args: &[Value]) -> ValueResult<Value> {
+    match &args[0] {
+        Value::Long(n) => Ok(Value::Long(n.wrapping_sub(1))),
+        Value::Double(f) => Ok(Value::Double(f - 1.0)),
+        Value::Ratio(r) => Ok(Value::Ratio(GcPtr::new(
+            r.get().sub(Ratio::new(BigInt::from(1), BigInt::from(1))),
+        ))),
+        Value::BigInt(i) => Ok(Value::BigInt(GcPtr::new(i.get().sub(1)))),
+        Value::BigDecimal(d) => Ok(Value::BigDecimal(GcPtr::new(d.get().sub(1)))),
+        v => Err(ValueError::WrongType {
+            expected: "number",
+            got: v.type_name().to_string(),
+        }),
+    }
+}
+
+/// `unchecked-add` — wrapping long addition (no overflow check, no promotion).
+/// Doubles add normally.  Mirrors Clojure's `unchecked-*` family.
+fn builtin_unchecked_add(args: &[Value]) -> ValueResult<Value> {
+    match (&args[0], &args[1]) {
+        (Value::Long(x), Value::Long(y)) => Ok(Value::Long(x.wrapping_add(*y))),
+        _ => {
+            let x = numeric_as_f64(&args[0])?;
+            let y = numeric_as_f64(&args[1])?;
+            Ok(Value::Double(x + y))
+        }
+    }
+}
+
+fn builtin_unchecked_subtract(args: &[Value]) -> ValueResult<Value> {
+    match (&args[0], &args[1]) {
+        (Value::Long(x), Value::Long(y)) => Ok(Value::Long(x.wrapping_sub(*y))),
+        _ => {
+            let x = numeric_as_f64(&args[0])?;
+            let y = numeric_as_f64(&args[1])?;
+            Ok(Value::Double(x - y))
+        }
+    }
+}
+
+fn builtin_unchecked_multiply(args: &[Value]) -> ValueResult<Value> {
+    match (&args[0], &args[1]) {
+        (Value::Long(x), Value::Long(y)) => Ok(Value::Long(x.wrapping_mul(*y))),
+        _ => {
+            let x = numeric_as_f64(&args[0])?;
+            let y = numeric_as_f64(&args[1])?;
+            Ok(Value::Double(x * y))
+        }
+    }
+}
+
+fn builtin_unchecked_inc(args: &[Value]) -> ValueResult<Value> {
+    match &args[0] {
+        Value::Long(n) => Ok(Value::Long(n.wrapping_add(1))),
+        Value::Double(f) => Ok(Value::Double(f + 1.0)),
+        v => Err(ValueError::WrongType {
+            expected: "number",
+            got: v.type_name().to_string(),
+        }),
+    }
+}
+
+fn builtin_unchecked_dec(args: &[Value]) -> ValueResult<Value> {
+    match &args[0] {
+        Value::Long(n) => Ok(Value::Long(n.wrapping_sub(1))),
+        Value::Double(f) => Ok(Value::Double(f - 1.0)),
+        v => Err(ValueError::WrongType {
+            expected: "number",
+            got: v.type_name().to_string(),
+        }),
+    }
+}
+
+fn builtin_unchecked_negate(args: &[Value]) -> ValueResult<Value> {
+    match &args[0] {
+        Value::Long(n) => Ok(Value::Long(n.wrapping_neg())),
+        Value::Double(f) => Ok(Value::Double(-f)),
+        v => Err(ValueError::WrongType {
+            expected: "number",
+            got: v.type_name().to_string(),
+        }),
+    }
+}
+
+fn builtin_abs(args: &[Value]) -> ValueResult<Value> {
+    match &args[0] {
+        Value::Long(n) => Ok(Value::Long(n.wrapping_abs())),
+        Value::Double(f) => Ok(Value::Double(f.abs())),
+        Value::BigInt(b) => Ok(Value::BigInt(GcPtr::new(b.get().abs()))),
+        Value::BigDecimal(d) => Ok(Value::BigDecimal(GcPtr::new(d.get().abs()))),
+        Value::Ratio(r) => Ok(Value::Ratio(GcPtr::new(r.get().abs()))),
+        v => Err(ValueError::WrongType {
+            expected: "number",
+            got: v.type_name().to_string(),
+        }),
+    }
+}
+
+fn builtin_push_precision_bang(args: &[Value]) -> ValueResult<Value> {
+    let precision = numeric_as_i64(&args[0])?;
+    let precision = if precision > 0 {
+        precision as u64
+    } else {
+        return Err(ValueError::Other("negative precision".into()));
+    };
+    let prec = if args.len() == 1 {
+        BigDecimalPrecision {
+            precision,
+            rounding: Some(RoundingMode::HalfUp),
+            unnecessary: false,
+        }
+    } else if args.len() == 2 {
+        let (rounding, unnecessary) = match &args[1] {
+            Value::Symbol(s) if s.get().namespace.is_none() => {
+                match s.get().name.to_string().as_str() {
+                    "CEILING" => (Some(RoundingMode::Ceiling), false),
+                    "FLOOR" => (Some(RoundingMode::Floor), false),
+                    "HALF_UP" => (Some(RoundingMode::HalfUp), false),
+                    "HALF_DOWN" => (Some(RoundingMode::HalfDown), false),
+                    "HALF_EVEN" => (Some(RoundingMode::HalfEven), false),
+                    "UP" => (Some(RoundingMode::Up), false),
+                    "DOWN" => (Some(RoundingMode::Down), false),
+                    "UNNECESSARY" => (None, true),
+                    _ => return Err(ValueError::Other("invalid rounding mode".to_string())),
+                }
+            }
+            _ => return Err(ValueError::Other("invalid rounding mode".to_string())),
+        };
+        BigDecimalPrecision {
+            precision,
+            rounding,
+            unnecessary,
+        }
+    } else {
+        return Err(ValueError::Other(
+            "push-precision! takes 1 or 2 arguments".to_string(),
+        ));
+    };
+    BIG_DECIMAL_SCALE.with_borrow_mut(|precision| {
+        precision.push(prec);
+        Ok(Value::Nil)
+    })
+}
+
+fn builtin_pop_precision_bang(_args: &[Value]) -> ValueResult<Value> {
+    BIG_DECIMAL_SCALE.with_borrow_mut(|prec| {
+        prec.pop();
+        Ok(Value::Nil)
+    })
+}
+
+fn builtin_rationalize(args: &[Value]) -> ValueResult<Value> {
+    match &args[0] {
+        Value::Long(_) | Value::Ratio(_) | Value::BigInt(_) => Ok(args[0].clone()),
+        Value::Double(f) => {
+            if f.is_nan() || f.is_infinite() {
+                return Err(ValueError::Other(
+                    "cannot rationalize NaN or Infinity".into(),
+                ));
+            }
+            // Use Display to get exact decimal representation, then rationalize
+            let s = format!("{f}");
+            let bigdec: BigDecimal = s.parse().map_err(|e: bigdecimal::ParseBigDecimalError| {
+                ValueError::Other(format!("cannot rationalize: {e}"))
+            })?;
+            bigdec_to_ratio(bigdec)
+        }
+        Value::BigDecimal(d) => bigdec_to_ratio(d.get().clone()),
+        v => Err(ValueError::WrongType {
+            expected: "number",
+            got: v.type_name().to_string(),
+        }),
+    }
+}
+
+fn builtin_denominator(args: &[Value]) -> ValueResult<Value> {
+    match &args[0] {
+        Value::Ratio(r) => Ok(Value::BigInt(GcPtr::new(r.get().denom().clone()))),
+        v => Err(ValueError::WrongType {
+            expected: "ratio",
+            got: v.type_name().to_string(),
+        }),
+    }
+}
+
+fn builtin_numerator(args: &[Value]) -> ValueResult<Value> {
+    match &args[0] {
+        Value::Ratio(r) => Ok(Value::BigInt(GcPtr::new(r.get().numer().clone()))),
+        v => Err(ValueError::WrongType {
+            expected: "ratio",
+            got: v.type_name().to_string(),
+        }),
+    }
+}
+
+fn builtin_parse_boolean(args: &[Value]) -> ValueResult<Value> {
+    match &args[0] {
+        Value::Str(s) => match s.get().as_str() {
+            "true" => Ok(Value::Bool(true)),
+            "false" => Ok(Value::Bool(false)),
+            _ => Ok(Value::Nil),
+        },
+        v => Err(ValueError::WrongType {
+            expected: "string",
+            got: v.type_name().to_string(),
+        }),
+    }
+}
+
+fn builtin_parse_long(args: &[Value]) -> ValueResult<Value> {
+    match &args[0] {
+        Value::Str(s) => match s.get().parse::<i64>() {
+            Ok(d) => Ok(Value::Long(d)),
+            Err(_) => Ok(Value::Nil),
+        },
+        v => Err(ValueError::WrongType {
+            expected: "string",
+            got: v.type_name().to_string(),
+        }),
+    }
+}
+
+fn builtin_parse_double(args: &[Value]) -> ValueResult<Value> {
+    match &args[0] {
+        Value::Str(s) => match s.get().parse::<f64>() {
+            Ok(d) => Ok(Value::Double(d)),
+            Err(_) => Ok(Value::Nil),
+        },
+        v => Err(ValueError::WrongType {
+            expected: "string",
+            got: v.type_name().to_string(),
+        }),
+    }
+}
+
+fn bigdec_to_ratio(bigdec: BigDecimal) -> ValueResult<Value> {
+    let (digits, scale) = bigdec.into_bigint_and_scale();
+    if scale <= 0 {
+        // scale <= 0 means the value is digits * 10^(-scale), an integer
+        let result = if scale == 0 {
+            digits
+        } else {
+            digits * BigInt::from(10).pow((-scale) as u32)
+        };
+        Ok(simplify_bigint(result))
+    } else {
+        let denom = BigInt::from(10).pow(scale as u32);
+        Ok(simplify_ratio(Ratio::new(digits, denom)))
+    }
+}
+
+// ── Comparison ────────────────────────────────────────────────────────────────
+
+fn builtin_eq(args: &[Value]) -> ValueResult<Value> {
+    if args.len() < 2 {
+        return Ok(Value::Bool(true));
+    }
+    for pair in args.windows(2) {
+        if pair[0] != pair[1] {
+            return Ok(Value::Bool(false));
+        }
+    }
+    Ok(Value::Bool(true))
+}
+
+fn builtin_numeric_equiv(args: &[Value]) -> ValueResult<Value> {
+    // Clojure ==: numeric equality. All numeric types compared by value.
+    // Non-numeric values use regular =.
+    if args.len() < 2 {
+        return Ok(Value::Bool(true));
+    }
+    for pair in args.windows(2) {
+        let eq = match (&pair[0], &pair[1]) {
+            // Both numeric → compare via num_compare
+            (a, b)
+                if matches!(
+                    a,
+                    Value::Long(_)
+                        | Value::Double(_)
+                        | Value::BigInt(_)
+                        | Value::BigDecimal(_)
+                        | Value::Ratio(_)
+                ) && matches!(
+                    b,
+                    Value::Long(_)
+                        | Value::Double(_)
+                        | Value::BigInt(_)
+                        | Value::BigDecimal(_)
+                        | Value::Ratio(_)
+                ) =>
+            {
+                num_compare(a, b)? == Ordering::Equal
+            }
+            // Fallback: structural equality
+            (a, b) => a == b,
+        };
+        if !eq {
+            return Ok(Value::Bool(false));
+        }
+    }
+    Ok(Value::Bool(true))
+}
+
+fn builtin_not_eq(args: &[Value]) -> ValueResult<Value> {
+    match builtin_eq(args)? {
+        Value::Bool(b) => Ok(Value::Bool(!b)),
+        v => Ok(v),
+    }
+}
+
+fn num_compare(a: &Value, b: &Value) -> ValueResult<Ordering> {
+    let cat = widest_category(&[a.clone(), b.clone()])?;
+    let r = match cat {
+        NumCat::Double => {
+            let x = numeric_as_f64(a)?;
+            let y = numeric_as_f64(b)?;
+            x.partial_cmp(&y).unwrap_or(Ordering::Equal)
+        }
+        NumCat::BigDecimal => {
+            let x = numeric_as_bigdecimal(a)?;
+            let y = numeric_as_bigdecimal(b)?;
+            x.cmp(&y)
+        }
+        _ => {
+            // Long, BigInt, Ratio — compare as ratios for exact precision
+            let x = numeric_as_ratio(a)?;
+            let y = numeric_as_ratio(b)?;
+            x.cmp(&y)
+        }
+    };
+    Ok(r)
+}
+
+fn builtin_lt(args: &[Value]) -> ValueResult<Value> {
+    for pair in args.windows(2) {
+        if num_compare(&pair[0], &pair[1])? != Ordering::Less {
+            return Ok(Value::Bool(false));
+        }
+    }
+    Ok(Value::Bool(true))
+}
+
+fn builtin_gt(args: &[Value]) -> ValueResult<Value> {
+    for pair in args.windows(2) {
+        if num_compare(&pair[0], &pair[1])? != Ordering::Greater {
+            return Ok(Value::Bool(false));
+        }
+    }
+    Ok(Value::Bool(true))
+}
+
+fn builtin_lte(args: &[Value]) -> ValueResult<Value> {
+    for pair in args.windows(2) {
+        if let Value::Double(d) = pair[0]
+            && d.is_nan()
+        {
+            return Ok(Value::Bool(false));
+        }
+        if let Value::Double(d) = pair[1]
+            && d.is_nan()
+        {
+            return Ok(Value::Bool(false));
+        }
+        if num_compare(&pair[0], &pair[1])? == Ordering::Greater {
+            return Ok(Value::Bool(false));
+        }
+    }
+    Ok(Value::Bool(true))
+}
+
+fn builtin_gte(args: &[Value]) -> ValueResult<Value> {
+    for pair in args.windows(2) {
+        if num_compare(&pair[0], &pair[1])? == Ordering::Less {
+            return Ok(Value::Bool(false));
+        }
+    }
+    Ok(Value::Bool(true))
+}
+
+fn builtin_identical(args: &[Value]) -> ValueResult<Value> {
+    macro_rules! peq {
+        ($a:expr, $b:expr) => {
+            GcPtr::ptr_eq($a, $b)
+        };
+    }
+    let same = match (&args[0], &args[1]) {
+        (Value::Nil, Value::Nil) => true,
+        (Value::Bool(a), Value::Bool(b)) => a == b,
+        (Value::Long(a), Value::Long(b)) => a == b,
+        (Value::Double(a), Value::Double(b)) => a.to_bits() == b.to_bits(),
+        (Value::Char(a), Value::Char(b)) => a == b,
+        (Value::BigInt(a), Value::BigInt(b)) => peq!(a, b),
+        (Value::BigDecimal(a), Value::BigDecimal(b)) => peq!(a, b),
+        (Value::Ratio(a), Value::Ratio(b)) => peq!(a, b),
+        (Value::Str(a), Value::Str(b)) => peq!(a, b),
+        (Value::Symbol(a), Value::Symbol(b)) => peq!(a, b),
+        (Value::Keyword(a), Value::Keyword(b)) => a.get() == b.get(),
+        (Value::List(a), Value::List(b)) => peq!(a, b),
+        (Value::Vector(a), Value::Vector(b)) => peq!(a, b),
+        (Value::Map(a), Value::Map(b)) => match (a, b) {
+            (MapValue::Array(a), MapValue::Array(b)) => peq!(a, b),
+            (MapValue::Hash(a), MapValue::Hash(b)) => peq!(a, b),
+            (MapValue::Sorted(a), MapValue::Sorted(b)) => peq!(a, b),
+            _ => false,
+        },
+        (Value::Set(a), Value::Set(b)) => match (a, b) {
+            (SetValue::Hash(a), SetValue::Hash(b)) => peq!(a, b),
+            (SetValue::Sorted(a), SetValue::Sorted(b)) => peq!(a, b),
+            _ => false,
+        },
+        (Value::Queue(a), Value::Queue(b)) => peq!(a, b),
+        (Value::NativeFunction(a), Value::NativeFunction(b)) => peq!(a, b),
+        (Value::Fn(a), Value::Fn(b)) => peq!(a, b),
+        (Value::Macro(a), Value::Macro(b)) => peq!(a, b),
+        (Value::Var(a), Value::Var(b)) => peq!(a, b),
+        (Value::Atom(a), Value::Atom(b)) => peq!(a, b),
+        (Value::Namespace(a), Value::Namespace(b)) => peq!(a, b),
+        (Value::LazySeq(a), Value::LazySeq(b)) => peq!(a, b),
+        (Value::Cons(a), Value::Cons(b)) => peq!(a, b),
+        (Value::Protocol(a), Value::Protocol(b)) => peq!(a, b),
+        (Value::ProtocolFn(a), Value::ProtocolFn(b)) => peq!(a, b),
+        (Value::MultiFn(a), Value::MultiFn(b)) => peq!(a, b),
+        (Value::Volatile(a), Value::Volatile(b)) => peq!(a, b),
+        (Value::Delay(a), Value::Delay(b)) => peq!(a, b),
+        (Value::Promise(a), Value::Promise(b)) => peq!(a, b),
+        (Value::Future(a), Value::Future(b)) => peq!(a, b),
+        (Value::Agent(a), Value::Agent(b)) => peq!(a, b),
+        (Value::TypeInstance(a), Value::TypeInstance(b)) => peq!(a, b),
+        (Value::NativeObject(a), Value::NativeObject(b)) => peq!(a, b),
+        _ => false,
+    };
+    Ok(Value::Bool(same))
+}
+
+fn builtin_compare(args: &[Value]) -> ValueResult<Value> {
+    let ord = value_compare_result(&args[0], &args[1])?;
+    Ok(Value::Long(ord as i64))
+}
+
+// ── Predicates ────────────────────────────────────────────────────────────────
+
+fn builtin_nil_q(args: &[Value]) -> ValueResult<Value> {
+    Ok(Value::Bool(matches!(args[0], Value::Nil)))
+}
+fn builtin_zero_q(args: &[Value]) -> ValueResult<Value> {
+    let zero = match &args[0] {
+        Value::Nil => return Err(ValueError::Other("expected number, got nil".into())),
+        Value::Long(n) => *n == 0,
+        Value::Double(f) => *f == 0.0,
+        Value::Ratio(r) => r.get().numer().is_zero(),
+        Value::BigInt(i) => i.get().is_zero(),
+        Value::BigDecimal(d) => d.get().is_zero(),
+        _ => {
+            return Err(ValueError::WrongType {
+                expected: "number",
+                got: args[0].type_name().to_string(),
+            });
+        }
+    };
+    Ok(Value::Bool(zero))
+}
+fn builtin_pos_q(args: &[Value]) -> ValueResult<Value> {
+    Ok(Value::Bool(match &args[0] {
+        Value::Long(n) => *n > 0,
+        Value::Double(f) => *f > 0.0,
+        Value::Ratio(r) => r.get().numer().is_positive(),
+        Value::BigInt(i) => i.get().sign() == Sign::Plus,
+        Value::BigDecimal(d) => d.get().sign() == Sign::Plus,
+        _ => {
+            return Err(ValueError::WrongType {
+                expected: "number",
+                got: args[0].type_name().to_string(),
+            });
+        }
+    }))
+}
+fn builtin_neg_q(args: &[Value]) -> ValueResult<Value> {
+    Ok(Value::Bool(match &args[0] {
+        Value::Nil => return Err(ValueError::Other("expected number, got nil".into())),
+        Value::Long(n) => *n < 0,
+        Value::Double(f) => *f < 0.0,
+        Value::Ratio(r) => !r.get().numer().is_positive(),
+        Value::BigInt(i) => i.get().sign() == Sign::Minus,
+        Value::BigDecimal(d) => d.get().sign() == Sign::Minus,
+        _ => {
+            return Err(ValueError::WrongType {
+                expected: "number",
+                got: args[0].type_name().to_string(),
+            });
+        }
+    }))
+}
+fn builtin_not(args: &[Value]) -> ValueResult<Value> {
+    Ok(Value::Bool(!is_truthy(&args[0])))
+}
+fn builtin_true_q(args: &[Value]) -> ValueResult<Value> {
+    Ok(Value::Bool(matches!(args[0], Value::Bool(true))))
+}
+fn builtin_false_q(args: &[Value]) -> ValueResult<Value> {
+    Ok(Value::Bool(matches!(args[0], Value::Bool(false))))
+}
+fn builtin_number_q(args: &[Value]) -> ValueResult<Value> {
+    Ok(Value::Bool(matches!(
+        args[0],
+        Value::Long(_)
+            | Value::Double(_)
+            | Value::BigInt(_)
+            | Value::BigDecimal(_)
+            | Value::Ratio(_)
+    )))
+}
+fn builtin_integer_q(args: &[Value]) -> ValueResult<Value> {
+    Ok(Value::Bool(matches!(
+        args[0],
+        Value::Long(_) | Value::BigInt(_)
+    )))
+}
+
+fn builtin_int_q(args: &[Value]) -> ValueResult<Value> {
+    Ok(Value::Bool(matches!(args[0], Value::Long(_))))
+}
+
+fn builtin_double_q(args: &[Value]) -> ValueResult<Value> {
+    Ok(Value::Bool(matches!(args[0], Value::Double(_))))
+}
+
+fn builtin_decimal_q(args: &[Value]) -> ValueResult<Value> {
+    Ok(Value::Bool(matches!(args[0], Value::BigDecimal(_))))
+}
+
+fn builtin_rational_q(args: &[Value]) -> ValueResult<Value> {
+    Ok(Value::Bool(matches!(
+        args[0],
+        Value::Long(_) | Value::BigInt(_) | Value::Ratio(_) | Value::BigDecimal(_)
+    )))
+}
+
+fn builtin_float_q(args: &[Value]) -> ValueResult<Value> {
+    Ok(Value::Bool(matches!(args[0], Value::Double(_))))
+}
+fn builtin_string_q(args: &[Value]) -> ValueResult<Value> {
+    Ok(Value::Bool(matches!(args[0], Value::Str(_))))
+}
+fn builtin_keyword_q(args: &[Value]) -> ValueResult<Value> {
+    Ok(Value::Bool(matches!(args[0], Value::Keyword(_))))
+}
+fn builtin_symbol_q(args: &[Value]) -> ValueResult<Value> {
+    Ok(Value::Bool(matches!(args[0], Value::Symbol(_))))
+}
+fn builtin_fn_q(args: &[Value]) -> ValueResult<Value> {
+    Ok(Value::Bool(matches!(
+        args[0],
+        Value::Fn(_) | Value::BoundFn(_) | Value::NativeFunction(_)
+    )))
+}
+fn builtin_ifn_q(args: &[Value]) -> ValueResult<Value> {
+    Ok(Value::Bool(matches!(
+        args[0],
+        Value::Fn(_)
+            | Value::BoundFn(_)
+            | Value::NativeFunction(_)
+            | Value::Macro(_)
+            | Value::Keyword(_)
+            | Value::Map(_)
+            | Value::Set(_)
+            | Value::Vector(_)
+            | Value::Symbol(_)
+            | Value::Var(_)
+            | Value::Promise(_)
+            | Value::MultiFn(_)
+            | Value::ProtocolFn(_)
+    )))
+}
+fn builtin_seq_q(args: &[Value]) -> ValueResult<Value> {
+    Ok(Value::Bool(matches!(
+        args[0],
+        Value::List(_) | Value::Cons(_) | Value::LazySeq(_)
+    )))
+}
+
+fn builtin_list_q(args: &[Value]) -> ValueResult<Value> {
+    Ok(Value::Bool(matches!(args[0].unwrap_meta(), Value::List(_))))
+}
+
+/// Type-strict equality for `case`: numbers only match if they are the same numeric type.
+/// e.g. 1 (Long) != 1.0 (Double), 3.0 (Double) != 3.0M (BigDecimal).
+/// Long and BigInt ARE considered equivalent (matching Clojure JVM behavior).
+fn builtin_case_eq(args: &[Value]) -> ValueResult<Value> {
+    let a = args[0].unwrap_meta();
+    let b = args[1].unwrap_meta();
+    let same_numeric_type = match (a, b) {
+        // Long and BigInt are interchangeable in case (Clojure JVM behavior)
+        (Value::Long(_) | Value::BigInt(_), Value::Long(_) | Value::BigInt(_)) => true,
+        (Value::Double(_), Value::Double(_)) => true,
+        (Value::BigDecimal(_), Value::BigDecimal(_)) => true,
+        (Value::Ratio(_), Value::Ratio(_)) => true,
+        // Non-numeric types: fall through to regular equality
+        (
+            Value::Long(_)
+            | Value::BigInt(_)
+            | Value::Double(_)
+            | Value::BigDecimal(_)
+            | Value::Ratio(_),
+            Value::Long(_)
+            | Value::BigInt(_)
+            | Value::Double(_)
+            | Value::BigDecimal(_)
+            | Value::Ratio(_),
+        ) => false,
+        _ => {
+            // Non-numeric: use regular equality
+            return Ok(Value::Bool(args[0] == args[1]));
+        }
+    };
+    Ok(Value::Bool(same_numeric_type && args[0] == args[1]))
+}
+fn builtin_map_q(args: &[Value]) -> ValueResult<Value> {
+    Ok(Value::Bool(matches!(
+        args[0].unwrap_meta(),
+        Value::Map(_) | Value::TypeInstance(_)
+    )))
+}
+fn builtin_vector_q(args: &[Value]) -> ValueResult<Value> {
+    Ok(Value::Bool(matches!(
+        args[0].unwrap_meta(),
+        Value::Vector(_)
+    )))
+}
+fn builtin_map_entry_q(args: &[Value]) -> ValueResult<Value> {
+    Ok(Value::Bool(args[0].is_map_entry()))
+}
+fn builtin_set_q(args: &[Value]) -> ValueResult<Value> {
+    Ok(Value::Bool(matches!(args[0].unwrap_meta(), Value::Set(_))))
+}
+fn builtin_coll_q(args: &[Value]) -> ValueResult<Value> {
+    Ok(Value::Bool(args[0].is_coll()))
+}
+fn builtin_boolean_q(args: &[Value]) -> ValueResult<Value> {
+    Ok(Value::Bool(matches!(args[0], Value::Bool(_))))
+}
+fn builtin_char_q(args: &[Value]) -> ValueResult<Value> {
+    Ok(Value::Bool(matches!(args[0], Value::Char(_))))
+}
+fn builtin_var_q(args: &[Value]) -> ValueResult<Value> {
+    Ok(Value::Bool(matches!(args[0], Value::Var(_))))
+}
+fn builtin_atom_q(args: &[Value]) -> ValueResult<Value> {
+    Ok(Value::Bool(matches!(args[0], Value::Atom(_))))
+}
+fn builtin_empty_q(args: &[Value]) -> ValueResult<Value> {
+    let empty = match args[0].unwrap_meta() {
+        Value::Nil => true,
+        Value::List(l) => l.get().is_empty(),
+        Value::Vector(v) => v.get().is_empty(),
+        Value::Map(m) => m.count() == 0,
+        Value::Set(s) => s.is_empty(),
+        Value::Str(s) => s.get().is_empty(),
+        Value::BooleanArray(a) => a.get().lock().unwrap().is_empty(),
+        Value::ByteArray(a) => a.get().lock().unwrap().is_empty(),
+        Value::ShortArray(a) => a.get().lock().unwrap().is_empty(),
+        Value::IntArray(a) => a.get().lock().unwrap().is_empty(),
+        Value::LongArray(a) => a.get().lock().unwrap().is_empty(),
+        Value::CharArray(a) => a.get().lock().unwrap().is_empty(),
+        Value::FloatArray(a) => a.get().lock().unwrap().is_empty(),
+        Value::DoubleArray(a) => a.get().lock().unwrap().is_empty(),
+        Value::ObjectArray(a) => a.get().0.lock().unwrap().is_empty(),
+        Value::LazySeq(s) => {
+            let realized = s.get().realize();
+            return builtin_empty_q(&[realized]);
+        }
+        Value::Cons(c) => matches!(c.get().head, Value::Nil),
+        Value::Queue(q) => q.get().count() == 0,
+        _ => {
+            return Err(ValueError::WrongType {
+                expected: "seqable",
+                got: args[0].type_name().to_string(),
+            });
+        }
+    };
+    Ok(Value::Bool(empty))
+}
+fn builtin_even_q(args: &[Value]) -> ValueResult<Value> {
+    match &args[0] {
+        Value::Long(n) => Ok(Value::Bool(n % 2 == 0)),
+        Value::BigInt(n) => Ok(Value::Bool(!n.get().bit(0))),
+        _ => Err(ValueError::WrongType {
+            expected: "int",
+            got: args[0].type_name().to_string(),
+        }),
+    }
+}
+fn builtin_odd_q(args: &[Value]) -> ValueResult<Value> {
+    match &args[0] {
+        Value::Long(n) => Ok(Value::Bool(n % 2 != 0)),
+        Value::BigInt(n) => Ok(Value::Bool(n.get().bit(0))),
+        _ => Err(ValueError::WrongType {
+            expected: "int",
+            got: args[0].type_name().to_string(),
+        }),
+    }
+}
+
+fn builtin_ratio_q(args: &[Value]) -> ValueResult<Value> {
+    Ok(Value::Bool(matches!(args[0], Value::Ratio(_))))
+}
+
+fn builtin_sorted_q(args: &[Value]) -> ValueResult<Value> {
+    Ok(Value::Bool(
+        matches!(&args[0], Value::Map(MapValue::Sorted(_)))
+            || matches!(&args[0], Value::Set(SetValue::Sorted(_))),
+    ))
+}
+
+fn builtin_special_symbol_q(args: &[Value]) -> ValueResult<Value> {
+    let is_special = match &args[0] {
+        Value::Symbol(sym) if sym.get().namespace.is_none() => {
+            crate::builtins::SPECIAL_FORMS.contains(&sym.get().name.as_ref())
+        }
+        _ => false,
+    };
+    Ok(Value::Bool(is_special))
+}
+
+fn builtin_bigdec(args: &[Value]) -> ValueResult<Value> {
+    if let Value::Str(s) = &args[0] {
+        BigDecimal::from_str(s.get().as_str())
+            .map(|d| Value::BigDecimal(GcPtr::new(d)))
+            .map_err(|e| ValueError::Other(format!("{}", e)))
+    } else {
+        numeric_as_bigdecimal(&args[0]).map(|n| Value::BigDecimal(GcPtr::new(n)))
+    }
+}
+
+fn builtin_bigint(args: &[Value]) -> ValueResult<Value> {
+    match &args[0] {
+        Value::Str(s) => match BigInt::from_str(s.get().as_str()) {
+            Ok(n) => Ok(Value::BigInt(GcPtr::new(n))),
+            Err(e) => Err(ValueError::Other(format!("{}", e))),
+        },
+        Value::Long(_) | Value::BigInt(_) => {
+            numeric_as_bigint(&args[0]).map(|n| Value::BigInt(GcPtr::new(n)))
+        }
+        Value::Double(_) | Value::BigDecimal(_) => {
+            let d = numeric_as_bigdecimal(&args[0])?;
+            let d = d.to_bigint().map(|d| Value::BigInt(GcPtr::new(d)));
+            Ok(d.unwrap_or(Value::Nil))
+        }
+        _ => Err(ValueError::WrongType {
+            expected: "number",
+            got: args[0].type_name().to_string(),
+        }),
+    }
+}
+
+// ── Collections ───────────────────────────────────────────────────────────────
+
+fn builtin_list(args: &[Value]) -> ValueResult<Value> {
+    Ok(Value::List(GcPtr::new(PersistentList::from_iter(
+        args.iter().cloned(),
+    ))))
+}
+
+fn builtin_list_star(args: &[Value]) -> ValueResult<Value> {
+    if args.is_empty() {
+        return Err(ValueError::ArityError {
+            name: "list*".into(),
+            expected: "1+".into(),
+            got: 0,
+        });
+    }
+    let last = &args[args.len() - 1];
+    let mut items: Vec<Value> = args[..args.len() - 1].to_vec();
+    let mut iter = ValueIter::new(last.clone());
+    items.extend(iter.by_ref());
+    if let Some(err) = iter.take_error() {
+        return Err(ValueError::Other(err));
+    }
+    Ok(Value::List(GcPtr::new(PersistentList::from_iter(items))))
+}
+
+fn builtin_vector(args: &[Value]) -> ValueResult<Value> {
+    Ok(Value::Vector(GcPtr::new(PersistentVector::from_iter(
+        args.iter().cloned(),
+    ))))
+}
+
+/// `(map-entry k v)` or `(map-entry [k v])` — build a map entry from a key
+/// and value, or from any seqable of exactly two elements.
+fn builtin_map_entry(args: &[Value]) -> ValueResult<Value> {
+    match args {
+        [key, val] => Ok(Value::map_entry(key.clone(), val.clone())),
+        [coll] => {
+            let items = value_to_seq(coll)?;
+            if items.len() != 2 {
+                return Err(ValueError::Other(format!(
+                    "map-entry requires exactly 2 elements, got {}",
+                    items.len()
+                )));
+            }
+            let mut items = items.into_iter();
+            let key = items.next().unwrap();
+            let val = items.next().unwrap();
+            Ok(Value::map_entry(key, val))
+        }
+        _ => Err(ValueError::Other(format!(
+            "map-entry expects 1 or 2 arguments, got {}",
+            args.len()
+        ))),
+    }
+}
+
+fn builtin_hash_map(args: &[Value]) -> ValueResult<Value> {
+    if !args.len().is_multiple_of(2) {
+        return Err(ValueError::OddMap { count: args.len() });
+    }
+    let mut m = MapValue::empty();
+    for pair in args.chunks(2) {
+        m = m.assoc(pair[0].clone(), pair[1].clone());
+    }
+    Ok(Value::Map(m))
+}
+
+fn builtin_array_map(args: &[Value]) -> ValueResult<Value> {
+    if !args.len().is_multiple_of(2) {
+        return Err(ValueError::OddMap { count: args.len() });
+    }
+    // Build as a regular map — starts as ArrayMap, promotes to HashMap if >8 entries.
+    let mut m = MapValue::empty();
+    for pair in args.chunks(2) {
+        m = m.assoc(pair[0].clone(), pair[1].clone());
+    }
+    Ok(Value::Map(m))
+}
+
+fn builtin_hash_set(args: &[Value]) -> ValueResult<Value> {
+    let set = args
+        .iter()
+        .cloned()
+        .fold(PersistentHashSet::empty(), |s, v| s.conj(v));
+    Ok(Value::Set(SetValue::Hash(GcPtr::new(set))))
+}
+
+fn builtin_conj(args: &[Value]) -> ValueResult<Value> {
+    if args.is_empty() {
+        return Ok(Value::Vector(GcPtr::new(PersistentVector::empty())));
+    }
+    let meta = args[0].get_meta().cloned();
+    let mut result = args[0].unwrap_meta().clone();
+    for v in &args[1..] {
+        result = match result {
+            Value::Nil => Value::List(GcPtr::new(PersistentList::from_iter([v.clone()]))),
+            Value::List(l) => {
+                let tail_clone: Arc<PersistentList> = Arc::new((*l.get()).clone());
+                Value::List(GcPtr::new(PersistentList::cons(v.clone(), tail_clone)))
+            }
+            Value::Vector(vec) => Value::Vector(GcPtr::new(vec.get().conj(v.clone()))),
+            Value::Set(s) => Value::Set(s.conj(v.clone())),
+            Value::Map(m) => {
+                // v can be a [key val] pair or another map.
+                match v.unwrap_meta() {
+                    Value::Map(other) => {
+                        let mut merged = m;
+                        other.for_each(|k, val| {
+                            merged = merged.assoc(k.clone(), val.clone());
+                        });
+                        Value::Map(merged)
+                    }
+                    Value::Vector(_) => {
+                        // Must be a 2-element vector [key val].
+                        let seq_v = builtin_seq(std::slice::from_ref(v))?;
+                        if matches!(seq_v, Value::Nil) {
+                            return Err(ValueError::Other(
+                                "conj on map requires [key val] pairs".into(),
+                            ));
+                        }
+                        let k = builtin_first(std::slice::from_ref(&seq_v))?;
+                        let rest_v = builtin_rest(std::slice::from_ref(&seq_v))?;
+                        if matches!(builtin_seq(std::slice::from_ref(&rest_v))?, Value::Nil) {
+                            return Err(ValueError::Other(
+                                "conj on map requires [key val] pairs".into(),
+                            ));
+                        }
+                        let val = builtin_first(std::slice::from_ref(&rest_v))?;
+                        let extra = builtin_rest(std::slice::from_ref(&rest_v))?;
+                        if !matches!(builtin_seq(std::slice::from_ref(&extra))?, Value::Nil) {
+                            return Err(ValueError::Other(
+                                "conj on map requires [key val] pairs".into(),
+                            ));
+                        }
+                        Value::Map(m.assoc(k, val))
+                    }
+                    _ => {
+                        return Err(ValueError::WrongType {
+                            expected: "map-entry",
+                            got: v.type_name().to_string(),
+                        });
+                    }
+                }
+            }
+            // Conj onto lazy seq / cons: prepend like a list.
+            Value::LazySeq(_) | Value::Cons(_) => Value::Cons(GcPtr::new(CljxCons {
+                head: v.clone(),
+                tail: result,
+            })),
+            Value::Queue(q) => Value::Queue(GcPtr::new(q.get().conj(v.clone()))),
+            _ => {
+                return Err(ValueError::WrongType {
+                    expected: "collection",
+                    got: result.type_name().to_string(),
+                });
+            }
+        };
+    }
+    Ok(match meta {
+        Some(m) => result.with_meta(m),
+        None => result,
+    })
+}
+
+fn builtin_assoc(args: &[Value]) -> ValueResult<Value> {
+    if args.len() < 3 || !(args.len() - 1).is_multiple_of(2) {
+        return Err(ValueError::Other(
+            "assoc requires map followed by key-value pairs".into(),
+        ));
+    }
+    // Capture metadata from the input to preserve on the result.
+    let meta = args[0].get_meta().cloned();
+    let coll = args[0].unwrap_meta();
+
+    let apply_meta = |v: Value| -> Value {
+        match meta {
+            Some(ref m) => v.with_meta(m.clone()),
+            None => v,
+        }
+    };
+
+    // assoc on a TypeInstance: update field(s), return new TypeInstance.
+    if let Value::TypeInstance(ti) = coll {
+        let mut fields = ti.get().fields.clone();
+        for pair in args[1..].chunks(2) {
+            fields = fields.assoc(pair[0].clone(), pair[1].clone());
+        }
+        return Ok(apply_meta(Value::TypeInstance(GcPtr::new(TypeInstance {
+            type_tag: ti.get().type_tag.clone(),
+            fields,
+        }))));
+    }
+    let mut result = match coll {
+        Value::Nil => MapValue::empty(),
+        Value::Map(m) => m.clone(),
+        Value::Vector(_) => {
+            // assoc on vector: (assoc v idx val)
+            let mut result = coll.clone();
+            for pair in args[1..].chunks(2) {
+                let idx = numeric_as_i64(&pair[0])? as usize;
+                let val = pair[1].clone();
+                if let Value::Vector(v) = &result {
+                    result = Value::Vector(GcPtr::new(v.get().assoc_nth(idx, val).ok_or_else(
+                        || ValueError::IndexOutOfBounds {
+                            idx,
+                            count: v.get().count(),
+                        },
+                    )?));
+                }
+            }
+            return Ok(apply_meta(result));
+        }
+        v => {
+            return Err(ValueError::WrongType {
+                expected: "map or vector",
+                got: v.type_name().to_string(),
+            });
+        }
+    };
+    for pair in args[1..].chunks(2) {
+        result = result.assoc(pair[0].clone(), pair[1].clone());
+    }
+    Ok(apply_meta(Value::Map(result)))
+}
+
+fn builtin_dissoc(args: &[Value]) -> ValueResult<Value> {
+    let meta = args[0].get_meta().cloned();
+    match args[0].unwrap_meta() {
+        Value::Nil => Ok(Value::Nil),
+        Value::Map(m) => {
+            let mut result = m.clone();
+            for k in &args[1..] {
+                result = result.dissoc(k);
+            }
+            let v = Value::Map(result);
+            Ok(match meta {
+                Some(m) => v.with_meta(m),
+                None => v,
+            })
+        }
+        v => Err(ValueError::WrongType {
+            expected: "map",
+            got: v.type_name().to_string(),
+        }),
+    }
+}
+
+fn builtin_get(args: &[Value]) -> ValueResult<Value> {
+    let default = args.get(2).cloned().unwrap_or(Value::Nil);
+    match args[0].unwrap_meta() {
+        Value::Nil => Ok(default),
+        Value::Map(m) => Ok(m.get(&args[1]).unwrap_or(default)),
+        Value::TypeInstance(ti) => Ok(ti.get().fields.get(&args[1]).unwrap_or(default)),
+        Value::Vector(v) => {
+            if let Value::Long(idx) = &args[1] {
+                Ok(v.get().nth(*idx as usize).cloned().unwrap_or(default))
+            } else {
+                Ok(default)
+            }
+        }
+        Value::Set(s) => {
+            if s.contains(&args[1]) {
+                Ok(args[1].clone())
+            } else {
+                Ok(default)
+            }
+        }
+        Value::Str(s) => {
+            if let Value::Long(idx) = &args[1] {
+                Ok(s.get()
+                    .chars()
+                    .nth(*idx as usize)
+                    .map(Value::Char)
+                    .unwrap_or(default))
+            } else {
+                Ok(default)
+            }
+        }
+        Value::BooleanArray(a) => {
+            let array = a.get().lock().unwrap();
+            if let Value::Long(idx) = &args[1]
+                && *idx >= 0
+                && *idx < array.len() as i64
+            {
+                Ok(Value::Bool(*array.get(*idx as usize).unwrap()))
+            } else {
+                Ok(default)
+            }
+        }
+        Value::ByteArray(a) => {
+            let array = a.get().lock().unwrap();
+            if let Value::Long(idx) = &args[1]
+                && *idx >= 0
+                && *idx < array.len() as i64
+            {
+                Ok(Value::Long(*array.get(*idx as usize).unwrap() as i64))
+            } else {
+                Ok(default)
+            }
+        }
+        Value::ShortArray(a) => {
+            let array = a.get().lock().unwrap();
+            if let Value::Long(idx) = &args[1]
+                && *idx >= 0
+                && *idx < array.len() as i64
+            {
+                Ok(Value::Long(*array.get(*idx as usize).unwrap() as i64))
+            } else {
+                Ok(default)
+            }
+        }
+        Value::IntArray(a) => {
+            let array = a.get().lock().unwrap();
+            if let Value::Long(idx) = &args[1]
+                && *idx >= 0
+                && *idx < array.len() as i64
+            {
+                Ok(Value::Long(*array.get(*idx as usize).unwrap() as i64))
+            } else {
+                Ok(default)
+            }
+        }
+        Value::LongArray(a) => {
+            let array = a.get().lock().unwrap();
+            if let Value::Long(idx) = &args[1]
+                && *idx >= 0
+                && *idx < array.len() as i64
+            {
+                Ok(Value::Long(*array.get(*idx as usize).unwrap()))
+            } else {
+                Ok(default)
+            }
+        }
+        Value::CharArray(a) => {
+            let array = a.get().lock().unwrap();
+            if let Value::Long(idx) = &args[1]
+                && *idx >= 0
+                && *idx < array.len() as i64
+            {
+                Ok(Value::Char(*array.get(*idx as usize).unwrap()))
+            } else {
+                Ok(default)
+            }
+        }
+        Value::FloatArray(a) => {
+            let array = a.get().lock().unwrap();
+            if let Value::Long(idx) = &args[1]
+                && *idx >= 0
+                && *idx < array.len() as i64
+            {
+                Ok(Value::Double(*array.get(*idx as usize).unwrap() as f64))
+            } else {
+                Ok(default)
+            }
+        }
+        Value::DoubleArray(a) => {
+            let array = a.get().lock().unwrap();
+            if let Value::Long(idx) = &args[1]
+                && *idx >= 0
+                && *idx < array.len() as i64
+            {
+                Ok(Value::Double(*array.get(*idx as usize).unwrap()))
+            } else {
+                Ok(default)
+            }
+        }
+        Value::ObjectArray(a) => {
+            let array = a.get().0.lock().unwrap();
+            if let Value::Long(idx) = &args[1]
+                && *idx >= 0
+                && *idx < array.len() as i64
+            {
+                let value = (*array).get(*idx as usize).unwrap().clone();
+                Ok(value)
+            } else {
+                Ok(default)
+            }
+        }
+        _ => Ok(default),
+    }
+}
+
+fn builtin_get_in(args: &[Value]) -> ValueResult<Value> {
+    if matches!(&args[0], Value::Nil) {
+        return Ok(Value::Nil);
+    }
+    let mut current = args[0].clone();
+    let default = args.get(2).cloned().unwrap_or(Value::Nil);
+    for k in ValueIter::new(args[1].clone()) {
+        current = match current {
+            Value::Map(m) => m.get(&k).unwrap_or(Value::Nil),
+            Value::Vector(v) => {
+                if let Value::Long(idx) = &k {
+                    v.get().nth(*idx as usize).cloned().unwrap_or(Value::Nil)
+                } else {
+                    Value::Nil
+                }
+            }
+            Value::Str(s) => {
+                if let Value::Long(idx) = &k {
+                    match s.get().chars().nth(*idx as usize) {
+                        Some(c) => Value::Char(c),
+                        None => return Ok(default),
+                    }
+                } else {
+                    return Ok(default);
+                }
+            }
+            Value::Nil => {
+                return Ok(default);
+            }
+            _ => {
+                return Ok(default);
+            }
+        };
+    }
+    if current == Value::Nil {
+        Ok(default)
+    } else {
+        Ok(current)
+    }
+}
+
+fn builtin_count(args: &[Value]) -> ValueResult<Value> {
+    let v = args[0].unwrap_meta();
+    match v {
+        Value::LazySeq(_) | Value::Cons(_) => {
+            // Walk and count elements lazily (linear time, no Vec alloc).
+            let mut iter = ValueIter::new(v.clone());
+            let n = iter.by_ref().count();
+            if let Some(err) = iter.take_error() {
+                return Err(ValueError::Other(err));
+            }
+            return Ok(Value::Long(n as i64));
+        }
+        _ => {}
+    }
+    let n = match v {
+        Value::Nil => 0,
+        Value::List(l) => l.get().count(),
+        Value::Vector(v) => v.get().count(),
+        Value::Map(m) => m.count(),
+        Value::Set(s) => s.count(),
+        Value::Str(s) => s.get().chars().count(),
+        Value::TypeInstance(ti) => ti.get().fields.count(),
+        Value::Queue(q) => q.get().count(),
+        Value::TransientVector(v) => v.get().count(),
+        Value::TransientMap(m) => m.get().count(),
+        Value::TransientSet(s) => s.get().count(),
+        _ => {
+            return Err(ValueError::WrongType {
+                expected: "collection",
+                got: v.type_name().to_string(),
+            });
+        }
+    };
+    Ok(Value::Long(n as i64))
+}
+
+/// Build a Cons chain from an iterator of Values (not a List, so list? returns false).
+fn cons_from_iter(items: impl IntoIterator<Item = Value>) -> Value {
+    let items: Vec<Value> = items.into_iter().collect();
+    let mut result = Value::Nil;
+    for item in items.into_iter().rev() {
+        result = Value::Cons(GcPtr::new(CljxCons {
+            head: item,
+            tail: result,
+        }));
+    }
+    result
+}
+
+// TODO: rseq is O(n) — collects then reverses. Clojure's rseq is O(1) via
+// APersistentVector.RSeq which iterates backwards by index. To match, we'd
+// need a dedicated RSeq value type that wraps a vector and lazily yields
+// elements in reverse order.
+fn builtin_rseq(args: &[Value]) -> ValueResult<Value> {
+    match args[0].unwrap_meta() {
+        Value::Vector(v) => {
+            if v.get().is_empty() {
+                Ok(Value::Nil)
+            } else {
+                let items: Vec<Value> = v.get().iter().cloned().collect();
+                Ok(cons_from_iter(items.into_iter().rev()))
+            }
+        }
+        Value::Map(MapValue::Sorted(m)) => {
+            if m.get().is_empty() {
+                Ok(Value::Nil)
+            } else {
+                let pairs: Vec<Value> = m
+                    .get()
+                    .iter()
+                    .map(|(k, v)| Value::map_entry(k.clone(), v.clone()))
+                    .collect();
+                Ok(cons_from_iter(pairs.into_iter().rev()))
+            }
+        }
+        v => Err(ValueError::WrongType {
+            expected: "reversible collection",
+            got: v.type_name().to_string(),
+        }),
+    }
+}
+
+fn builtin_seq(args: &[Value]) -> ValueResult<Value> {
+    // Iteratively unwrap lazy seqs to avoid stack overflow.
+    let mut val = args[0].unwrap_meta().clone();
+    while let Value::LazySeq(ls) = &val {
+        let realized = ls.get().realize();
+        if let Some(err) = ls.get().error() {
+            return Err(ValueError::Other(err));
+        }
+        val = realized;
+    }
+    match &val {
+        Value::Cons(_) => Ok(val), // cons is always non-empty
+        Value::Nil => Ok(Value::Nil),
+        Value::List(l) => {
+            if l.get().is_empty() {
+                Ok(Value::Nil)
+            } else {
+                Ok(val)
+            }
+        }
+        Value::Vector(v) => {
+            if v.get().is_empty() {
+                Ok(Value::Nil)
+            } else {
+                Ok(cons_from_iter(v.get().iter().cloned()))
+            }
+        }
+        Value::Map(m) => {
+            if m.count() == 0 {
+                return Ok(Value::Nil);
+            }
+            let mut pairs = Vec::new();
+            m.for_each(|k, v| {
+                let pair = Value::map_entry(k.clone(), v.clone());
+                pairs.push(pair);
+            });
+            Ok(cons_from_iter(pairs))
+        }
+        Value::Set(s) => {
+            if s.is_empty() {
+                Ok(Value::Nil)
+            } else {
+                Ok(cons_from_iter(s.iter().cloned()))
+            }
+        }
+        Value::Str(s) => {
+            if s.get().is_empty() {
+                Ok(Value::Nil)
+            } else {
+                Ok(cons_from_iter(s.get().chars().map(Value::Char)))
+            }
+        }
+        Value::ObjectArray(a) => {
+            let array = a.get().0.lock().unwrap().clone();
+            if array.is_empty() {
+                Ok(Value::Nil)
+            } else {
+                Ok(cons_from_iter(array))
+            }
+        }
+        Value::BooleanArray(a) => {
+            let array = a.get().lock().unwrap().clone();
+            if array.is_empty() {
+                Ok(Value::Nil)
+            } else {
+                Ok(cons_from_iter(array.iter().map(|b| Value::Bool(*b))))
+            }
+        }
+        Value::ByteArray(a) => {
+            let array = a.get().lock().unwrap().clone();
+            if array.is_empty() {
+                Ok(Value::Nil)
+            } else {
+                Ok(cons_from_iter(array.iter().map(|i| Value::Long(*i as i64))))
+            }
+        }
+        Value::ShortArray(a) => {
+            let array = a.get().lock().unwrap().clone();
+            if array.is_empty() {
+                Ok(Value::Nil)
+            } else {
+                Ok(cons_from_iter(array.iter().map(|i| Value::Long(*i as i64))))
+            }
+        }
+        Value::IntArray(a) => {
+            let array = a.get().lock().unwrap().clone();
+            if array.is_empty() {
+                Ok(Value::Nil)
+            } else {
+                Ok(cons_from_iter(array.iter().map(|i| Value::Long(*i as i64))))
+            }
+        }
+        Value::LongArray(a) => {
+            let array = a.get().lock().unwrap().clone();
+            if array.is_empty() {
+                Ok(Value::Nil)
+            } else {
+                Ok(cons_from_iter(array.iter().map(|i| Value::Long(*i))))
+            }
+        }
+        Value::CharArray(a) => {
+            let array = a.get().lock().unwrap().clone();
+            if array.is_empty() {
+                Ok(Value::Nil)
+            } else {
+                Ok(cons_from_iter(array.iter().map(|i| Value::Char(*i))))
+            }
+        }
+        Value::FloatArray(a) => {
+            let array = a.get().lock().unwrap().clone();
+            if array.is_empty() {
+                Ok(Value::Nil)
+            } else {
+                Ok(cons_from_iter(
+                    array.iter().map(|f| Value::Double(*f as f64)),
+                ))
+            }
+        }
+        Value::DoubleArray(a) => {
+            let array = a.get().lock().unwrap().clone();
+            if array.is_empty() {
+                Ok(Value::Nil)
+            } else {
+                Ok(cons_from_iter(array.iter().map(|f| Value::Double(*f))))
+            }
+        }
+        Value::TypeInstance(ti) => {
+            let mut pairs = Vec::new();
+            ti.get().fields.for_each(|k, v| {
+                pairs.push(Value::map_entry(k.clone(), v.clone()));
+            });
+            if pairs.is_empty() {
+                Ok(Value::Nil)
+            } else {
+                Ok(cons_from_iter(pairs))
+            }
+        }
+        v => Err(ValueError::WrongType {
+            expected: "seqable",
+            got: v.type_name().to_string(),
+        }),
+    }
+}
+
+fn builtin_first(args: &[Value]) -> ValueResult<Value> {
+    match args[0].unwrap_meta() {
+        Value::LazySeq(ls) => {
+            let v = ls.get().realize();
+            if let Some(err) = ls.get().error() {
+                return Err(ValueError::Other(err));
+            }
+            builtin_first(&[v])
+        }
+        Value::Cons(c) => Ok(c.get().head.clone()),
+        Value::Nil => Ok(Value::Nil),
+        Value::List(l) => Ok(l.get().first().cloned().unwrap_or(Value::Nil)),
+        Value::Vector(v) => Ok(v.get().nth(0).cloned().unwrap_or(Value::Nil)),
+        Value::Map(m) => {
+            let mut result = None;
+            m.for_each(|k, v| {
+                if result.is_none() {
+                    result = Some(Value::map_entry(k.clone(), v.clone()));
+                }
+            });
+            Ok(result.unwrap_or(Value::Nil))
+        }
+        Value::Set(s) => Ok(s.iter().next().cloned().unwrap_or(Value::Nil)),
+        Value::Str(s) => Ok(s
+            .get()
+            .chars()
+            .next()
+            .map(Value::Char)
+            .unwrap_or(Value::Nil)),
+        Value::Queue(q) => {
+            if let Some(result) = q.get().peek() {
+                Ok(result.clone())
+            } else {
+                Ok(Value::Nil)
+            }
+        }
+        _ => Err(ValueError::WrongType {
+            expected: "seqable",
+            got: args[0].type_name().to_string(),
+        }),
+    }
+}
+
+fn builtin_rest(args: &[Value]) -> ValueResult<Value> {
+    match args[0].unwrap_meta() {
+        Value::LazySeq(ls) => {
+            let v = ls.get().realize();
+            if let Some(err) = ls.get().error() {
+                return Err(ValueError::Other(err));
+            }
+            builtin_rest(&[v])
+        }
+        Value::Cons(c) => {
+            // Return the tail directly; it may be another LazySeq, Cons, List, or Nil.
+            match &c.get().tail {
+                Value::Nil => Ok(Value::List(GcPtr::new(PersistentList::empty()))),
+                tail => Ok(tail.clone()),
+            }
+        }
+        Value::Nil => Ok(Value::List(GcPtr::new(PersistentList::empty()))),
+        Value::List(l) => {
+            // rest() returns Arc<PersistentList>; clone the pointed-to list.
+            Ok(Value::List(GcPtr::new((*l.get().rest()).clone())))
+        }
+        Value::Vector(v) => {
+            let items: Vec<Value> = v.get().iter().skip(1).cloned().collect();
+            Ok(Value::List(GcPtr::new(PersistentList::from_iter(items))))
+        }
+        Value::Map(m) => {
+            let items: Vec<Value> = m
+                .iter()
+                .skip(1)
+                .map(|(k, v)| Value::map_entry(k.clone(), v.clone()))
+                .collect();
+            Ok(Value::List(GcPtr::new(PersistentList::from_iter(items))))
+        }
+        Value::Set(s) => {
+            let items: Vec<Value> = s.iter().skip(1).cloned().collect();
+            Ok(Value::List(GcPtr::new(PersistentList::from_iter(items))))
+        }
+        Value::Str(s) => {
+            let items: Vec<Value> = s.get().chars().skip(1).map(Value::Char).collect();
+            Ok(Value::List(GcPtr::new(PersistentList::from_iter(items))))
+        }
+        _ => Err(ValueError::WrongType {
+            expected: "seqable",
+            got: args[0].type_name().to_string(),
+        }),
+    }
+}
+
+fn builtin_next(args: &[Value]) -> ValueResult<Value> {
+    // next = (seq (rest x)) — returns nil for empty, seq otherwise.
+    let rest = builtin_rest(args)?;
+    builtin_seq(&[rest])
+}
+
+fn builtin_cons(args: &[Value]) -> ValueResult<Value> {
+    let head = args[0].clone();
+    match &args[1] {
+        // Lazy tails produce a CljxCons to preserve laziness.
+        Value::LazySeq(_) | Value::Cons(_) => Ok(Value::Cons(GcPtr::new(CljxCons {
+            head,
+            tail: args[1].clone(),
+        }))),
+        Value::Nil => {
+            let new_list = PersistentList::cons(head, Arc::new(PersistentList::empty()));
+            Ok(Value::List(GcPtr::new(new_list)))
+        }
+        Value::List(l) => {
+            let new_list = PersistentList::cons(head, Arc::new((*l.get()).clone()));
+            Ok(Value::List(GcPtr::new(new_list)))
+        }
+        Value::Vector(v) => {
+            let tail = PersistentList::from_iter(v.get().iter().cloned());
+            let new_list = PersistentList::cons(head, Arc::new(tail));
+            Ok(Value::List(GcPtr::new(new_list)))
+        }
+        Value::Map(m) => {
+            let kvs = m
+                .iter()
+                .map(|e| Value::map_entry(e.0.clone(), e.1.clone()))
+                .collect::<Vec<_>>();
+            let tail = PersistentList::from_iter(kvs.iter().cloned());
+            let new_list = PersistentList::cons(head, Arc::new(tail));
+            Ok(Value::List(GcPtr::new(new_list)))
+        }
+        Value::Set(s) => {
+            let tail = PersistentList::from_iter(s.iter().cloned());
+            let new_list = PersistentList::cons(head, Arc::new(tail));
+            Ok(Value::List(GcPtr::new(new_list)))
+        }
+        Value::Str(s) => {
+            let tail = PersistentList::from_iter(s.get().chars().map(Value::Char));
+            let new_list = PersistentList::cons(head, Arc::new(tail));
+            Ok(Value::List(GcPtr::new(new_list)))
+        }
+        v => Err(ValueError::WrongType {
+            expected: "seq",
+            got: v.type_name().to_string(),
+        }),
+    }
+}
+
+fn builtin_nth(args: &[Value]) -> ValueResult<Value> {
+    let raw = numeric_as_i64(&args[1])?;
+    let default = args.get(2).cloned();
+    // A negative index is always out of range.  Handle it before the `as usize`
+    // cast so the seq paths below don't walk a (possibly infinite) lazy seq up
+    // to usize::MAX.  Matches Clojure: throw, or return the not-found default.
+    if raw < 0 {
+        return match default {
+            Some(d) => Ok(d),
+            None => Err(ValueError::IndexOutOfBounds {
+                idx: raw as usize,
+                count: 0,
+            }),
+        };
+    }
+    let idx = raw as usize;
+    match &args[0].unwrap_meta() {
+        Value::LazySeq(_) | Value::Cons(_) => {
+            let mut iter = ValueIter::new(args[0].clone());
+            let result = iter.nth(idx).or(default).unwrap_or(Value::Nil);
+            if let Some(err) = iter.take_error() {
+                return Err(ValueError::Other(err));
+            }
+            Ok(result)
+        }
+        Value::List(l) => Ok(l
+            .get()
+            .iter()
+            .nth(idx)
+            .cloned()
+            .or(default)
+            .unwrap_or(Value::Nil)),
+        Value::Vector(v) => {
+            if idx >= v.get().count() && default.is_none() {
+                Err(ValueError::IndexOutOfBounds {
+                    idx,
+                    count: v.get().count(),
+                })
+            } else {
+                Ok(v.get().nth(idx).cloned().or(default).unwrap_or(Value::Nil))
+            }
+        }
+        Value::Str(s) => Ok(s
+            .get()
+            .chars()
+            .nth(idx)
+            .map(Value::Char)
+            .or(default)
+            .unwrap_or(Value::Nil)),
+        Value::Nil => Ok(default.unwrap_or(Value::Nil)),
+        v => Err(ValueError::WrongType {
+            expected: "sequential",
+            got: v.type_name().to_string(),
+        }),
+    }
+}
+
+fn builtin_last(args: &[Value]) -> ValueResult<Value> {
+    match &args[0] {
+        Value::Nil => Ok(Value::Nil),
+        Value::Vector(v) => Ok(v.get().peek().cloned().unwrap_or(Value::Nil)),
+        _ => {
+            // Walk the seq to find the last element.
+            let mut s = builtin_seq(&[args[0].clone()])?;
+            if s == Value::Nil {
+                return Ok(Value::Nil);
+            }
+            loop {
+                let r = builtin_rest(&[s.clone()])?;
+                let next_s = builtin_seq(&[r])?;
+                if next_s == Value::Nil {
+                    return builtin_first(&[s]);
+                }
+                s = next_s;
+            }
+        }
+    }
+}
+
+fn builtin_reverse(args: &[Value]) -> ValueResult<Value> {
+    match &args[0] {
+        Value::Char(_) | Value::Long(_) | Value::Double(_) => Err(ValueError::WrongType {
+            expected: "seq",
+            got: args[0].type_name().to_string(),
+        }),
+        _ => {
+            let items = value_to_seq(&args[0])?;
+            let reversed: Vec<Value> = items.into_iter().rev().collect();
+            Ok(Value::List(GcPtr::new(PersistentList::from_iter(reversed))))
+        }
+    }
+}
+
+fn builtin_concat(args: &[Value]) -> ValueResult<Value> {
+    // Collect the argument collections (unevaluated lazy seqs stay lazy).
+    let colls: Vec<Value> = args.to_vec();
+    Ok(concat_lazy(colls))
+}
+
+/// Build a lazy concat of the given collections.
+///
+/// Returns a lazy-seq that walks through each collection in order,
+/// producing cons cells on demand.
+fn concat_lazy(mut colls: Vec<Value>) -> Value {
+    // Skip leading nils and empty collections eagerly to find the first element.
+    loop {
+        if colls.is_empty() {
+            return Value::List(GcPtr::new(PersistentList::empty()));
+        }
+        let first_coll = &colls[0];
+        // Check if the first collection is nil or empty without fully realizing it.
+        match first_coll {
+            Value::Nil => {
+                colls.remove(0);
+                continue;
+            }
+            Value::List(l) if l.get().is_empty() => {
+                colls.remove(0);
+                continue;
+            }
+            _ => break,
+        }
+    }
+
+    // Return a lazy-seq thunk that produces cons(first, concat_lazy(rest)).
+    Value::LazySeq(GcPtr::new(LazySeq::new(Box::new(ConcatThunk { colls }))))
+}
+
+/// Thunk for lazy concat: holds remaining collections to iterate.
+#[derive(Debug)]
+struct ConcatThunk {
+    colls: Vec<Value>,
+}
+
+impl cljrs_gc::Trace for ConcatThunk {
+    fn trace(&self, visitor: &mut cljrs_gc::MarkVisitor) {
+        for c in &self.colls {
+            c.trace(visitor);
+        }
+    }
+}
+
+impl Thunk for ConcatThunk {
+    fn force(&self) -> Result<Value, String> {
+        // Root the collections so they survive GC while we iterate.
+        let _colls_root = crate::env::gc_roots::root_values(&self.colls);
+        let mut colls = self.colls.clone();
+        // Walk through collections iteratively (no recursion) to find the
+        // first element.  This avoids stack overflow on deeply nested
+        // lazy-seq chains.
+        loop {
+            if colls.is_empty() {
+                return Ok(Value::Nil);
+            }
+
+            // Peel through any lazy-seq wrappers on the head iteratively.
+            let mut head = colls[0].clone();
+            while let Value::LazySeq(ls) = &head {
+                let realized = ls.get().realize();
+                if let Some(err) = ls.get().error() {
+                    return Err(err);
+                }
+                head = realized;
+            }
+
+            // Now head is a non-lazy value.
+            match &head {
+                Value::Nil => {
+                    colls.remove(0);
+                    continue;
+                }
+                Value::List(l) if l.get().is_empty() => {
+                    colls.remove(0);
+                    continue;
+                }
+                _ => {}
+            }
+
+            let (first, rest) = concat_first_rest(&head);
+            match first {
+                Some(f) => {
+                    colls[0] = rest;
+                    // Build the tail as a lazy-seq (no recursive call on the
+                    // Rust stack — the next element is produced when the tail
+                    // lazy-seq is realized later).
+                    let tail = concat_lazy(colls);
+                    return Ok(Value::Cons(GcPtr::new(CljxCons { head: f, tail })));
+                }
+                None => {
+                    colls.remove(0);
+                    continue;
+                }
+            }
+        }
+    }
+}
+
+/// Extract first element and rest from a seq-like value without fully realizing it.
+/// Used by the lazy concat implementation.  Iteratively unwraps LazySeq to
+/// avoid stack overflow on deeply nested lazy chains.
+fn concat_first_rest(val: &Value) -> (Option<Value>, Value) {
+    // Iteratively unwrap lazy seqs first.
+    let mut current = val.clone();
+    while let Value::LazySeq(ls) = current {
+        current = ls.get().realize();
+    }
+    let val = &current;
+
+    match val {
+        Value::Nil => (None, Value::Nil),
+        Value::Cons(c) => {
+            let c = c.get();
+            (Some(c.head.clone()), c.tail.clone())
+        }
+        Value::List(l) => {
+            let l = l.get();
+            if l.is_empty() {
+                (None, Value::Nil)
+            } else {
+                let mut iter = l.iter();
+                let first = iter.next().cloned();
+                let rest: Vec<Value> = iter.cloned().collect();
+                let rest_val = if rest.is_empty() {
+                    Value::Nil
+                } else {
+                    Value::List(GcPtr::new(PersistentList::from_iter(rest)))
+                };
+                (first, rest_val)
+            }
+        }
+        Value::Vector(v) => {
+            let v = v.get();
+            if v.is_empty() {
+                (None, Value::Nil)
+            } else {
+                let first = v.iter().next().cloned();
+                let rest: Vec<Value> = v.iter().skip(1).cloned().collect();
+                let rest_val = if rest.is_empty() {
+                    Value::Nil
+                } else {
+                    Value::List(GcPtr::new(PersistentList::from_iter(rest)))
+                };
+                (first, rest_val)
+            }
+        }
+        Value::Map(m) => {
+            // seq on a map produces [k v] pairs.
+            let mut pairs = Vec::new();
+            m.for_each(|k, v| {
+                pairs.push(Value::map_entry(k.clone(), v.clone()));
+            });
+            if pairs.is_empty() {
+                (None, Value::Nil)
+            } else {
+                let first = Some(pairs.remove(0));
+                let rest_val = if pairs.is_empty() {
+                    Value::Nil
+                } else {
+                    Value::List(GcPtr::new(PersistentList::from_iter(pairs)))
+                };
+                (first, rest_val)
+            }
+        }
+        Value::LazySeq(_) => {
+            // Should not reach here — LazySeq is unwrapped iteratively above.
+            unreachable!("LazySeq should have been unwrapped before concat_first_rest match")
+        }
+        Value::Str(s) => {
+            let s = s.get();
+            let mut chars = s.chars();
+            match chars.next() {
+                None => (None, Value::Nil),
+                Some(c) => {
+                    let rest: String = chars.collect();
+                    let rest_val = if rest.is_empty() {
+                        Value::Nil
+                    } else {
+                        Value::Str(GcPtr::new(rest))
+                    };
+                    (Some(Value::Char(c)), rest_val)
+                }
+            }
+        }
+        _ => (None, Value::Nil),
+    }
+}
+
+fn builtin_keys(args: &[Value]) -> ValueResult<Value> {
+    match &args[0] {
+        Value::Nil => Ok(Value::Nil),
+        Value::Map(m) => {
+            let mut keys = Vec::new();
+            m.for_each(|k, _| keys.push(k.clone()));
+            if keys.is_empty() {
+                Ok(Value::Nil)
+            } else {
+                Ok(Value::List(GcPtr::new(PersistentList::from_iter(keys))))
+            }
+        }
+        Value::Vector(_)
+        | Value::List(_)
+        | Value::Set(_)
+        | Value::Str(_)
+        | Value::LazySeq(_)
+        | Value::Cons(_)
+        | Value::ObjectArray(_)
+        | Value::BooleanArray(_)
+        | Value::ShortArray(_)
+        | Value::IntArray(_)
+        | Value::LongArray(_)
+        | Value::FloatArray(_)
+        | Value::DoubleArray(_)
+        | Value::CharArray(_) => Ok(Value::Nil),
+        v => Err(ValueError::WrongType {
+            expected: "map",
+            got: v.type_name().to_string(),
+        }),
+    }
+}
+
+fn builtin_vals(args: &[Value]) -> ValueResult<Value> {
+    match &args[0] {
+        Value::Nil => Ok(Value::Nil),
+        Value::Map(m) => {
+            let mut vals = Vec::new();
+            m.for_each(|_, v| vals.push(v.clone()));
+            if vals.is_empty() {
+                Ok(Value::Nil)
+            } else {
+                Ok(Value::List(GcPtr::new(PersistentList::from_iter(vals))))
+            }
+        }
+        Value::List(_) => Ok(Value::Nil),
+        Value::Set(_) => Ok(Value::Nil),
+        Value::Vector(_) => Ok(Value::Nil),
+        v => Err(ValueError::WrongType {
+            expected: "map",
+            got: v.type_name().to_string(),
+        }),
+    }
+}
+
+fn builtin_contains_q(args: &[Value]) -> ValueResult<Value> {
+    Ok(Value::Bool(match args[0].unwrap_meta() {
+        Value::Map(m) => m.contains_key(&args[1]),
+        Value::Set(s) => s.contains(&args[1]),
+        Value::Vector(v) => {
+            if let Value::Long(idx) = &args[1] {
+                *idx >= 0 && (*idx as usize) < v.get().count()
+            } else {
+                false
+            }
+        }
+        Value::Str(s) => {
+            if let Value::Long(idx) = &args[1] {
+                *idx >= 0 && (*idx as usize) < s.get().len()
+            } else {
+                return Err(ValueError::WrongType {
+                    expected: "int",
+                    got: args[1].type_name().to_string(),
+                });
+            }
+        }
+        Value::Nil => false,
+        _ => false,
+    }))
+}
+
+fn builtin_merge(args: &[Value]) -> ValueResult<Value> {
+    // Clojure: (reduce #(conj (or %1 {}) %2) maps)
+    // reduce with no init: first element is the initial accumulator.
+    if args.is_empty() {
+        return Ok(Value::Nil);
+    }
+    let mut result = args[0].clone();
+    for arg in &args[1..] {
+        if matches!(arg, Value::Nil) {
+            continue;
+        }
+        let base = if matches!(result, Value::Nil) {
+            Value::Map(MapValue::empty())
+        } else {
+            result
+        };
+        result = builtin_conj(&[base, arg.clone()])?;
+    }
+    Ok(result)
+}
+
+fn builtin_into(args: &[Value]) -> ValueResult<Value> {
+    if args.len() == 3 {
+        // (into to xform from) — apply xform to conj, then reduce
+        let to = &args[0];
+        let xform = &args[1];
+        let from = &args[2];
+        // conj is already a NativeFunction, look it up isn't straightforward,
+        // so we build it inline as a plain fn pointer
+        let conj_rf = Value::NativeFunction(GcPtr::new(NativeFn::new(
+            "conj",
+            Arity::Variadic { min: 0 },
+            builtin_conj,
+        )));
+        // Apply xform to conj
+        let xf_rf = crate::env::callback::invoke(xform, vec![conj_rf])?;
+        // Reduce over from with xf_rf
+        let mut acc = to.clone();
+        let mut iter = ValueIter::new(from.clone());
+        for item in iter.by_ref() {
+            acc = crate::env::callback::invoke(&xf_rf, vec![acc, item])?;
+            if let Value::Reduced(inner) = acc {
+                acc = *inner;
+                break;
+            }
+        }
+        if let Some(err) = iter.take_error() {
+            return Err(ValueError::Other(err));
+        }
+        // Call completion arity
+        acc = crate::env::callback::invoke(&xf_rf, vec![acc])?;
+        if let Value::Reduced(inner) = acc {
+            acc = *inner;
+        }
+        return Ok(acc);
+    }
+    let meta = args[0].get_meta().cloned();
+    let mut result = args[0].unwrap_meta().clone();
+    let mut iter = ValueIter::new(args[1].clone());
+    for item in iter.by_ref() {
+        result = match result {
+            Value::Nil => Value::List(GcPtr::new(PersistentList::from_iter([item]))),
+            Value::List(l) => {
+                let tail = std::sync::Arc::new((*l.get()).clone());
+                Value::List(GcPtr::new(PersistentList::cons(item, tail)))
+            }
+            Value::Vector(v) => Value::Vector(GcPtr::new(v.get().conj(item))),
+            Value::Set(s) => Value::Set(s.conj(item)),
+            Value::Map(m) => {
+                let pair = value_to_seq(&item)?;
+                if pair.len() != 2 {
+                    return Err(ValueError::Other("into map requires [k v] pairs".into()));
+                }
+                Value::Map(m.assoc(pair[0].clone(), pair[1].clone()))
+            }
+            Value::LazySeq(_) | Value::Cons(_) => Value::Cons(GcPtr::new(CljxCons {
+                head: item,
+                tail: result,
+            })),
+            Value::Queue(q) => Value::Queue(GcPtr::new(q.get().conj(item))),
+            other => {
+                return Err(ValueError::WrongType {
+                    expected: "collection",
+                    got: other.type_name().to_string(),
+                });
+            }
+        };
+    }
+    if let Some(err) = iter.take_error() {
+        return Err(ValueError::Other(err));
+    }
+    Ok(match meta {
+        Some(m) => result.with_meta(m),
+        None => result,
+    })
+}
+
+fn builtin_reduce(args: &[Value]) -> ValueResult<Value> {
+    let f = &args[0];
+    match args.len() {
+        2 => {
+            // (reduce f coll) — no init value
+            let mut iter = ValueIter::new(args[1].clone());
+            let Some(first) = iter.next() else {
+                // empty coll: call (f) for init
+                return crate::env::callback::invoke(f, vec![]);
+            };
+            let mut acc = first;
+            for item in iter.by_ref() {
+                acc = crate::env::callback::invoke(f, vec![acc, item])?;
+                if let Value::Reduced(inner) = acc {
+                    return Ok(*inner);
+                }
+            }
+            if let Some(err) = iter.take_error() {
+                return Err(ValueError::Other(err));
+            }
+            Ok(acc)
+        }
+        3 => {
+            // (reduce f init coll)
+            let mut acc = args[1].clone();
+            let mut iter = ValueIter::new(args[2].clone());
+            for item in iter.by_ref() {
+                acc = crate::env::callback::invoke(f, vec![acc, item])?;
+                if let Value::Reduced(inner) = acc {
+                    return Ok(*inner);
+                }
+            }
+            if let Some(err) = iter.take_error() {
+                return Err(ValueError::Other(err));
+            }
+            Ok(acc)
+        }
+        n => Err(ValueError::Other(format!(
+            "reduce requires 2 or 3 args, got {n}"
+        ))),
+    }
+}
+
+fn builtin_empty(args: &[Value]) -> ValueResult<Value> {
+    let meta = args[0].get_meta().cloned();
+    let apply_meta = |v: Value| -> Value {
+        match meta {
+            Some(ref m) => v.with_meta(m.clone()),
+            None => v,
+        }
+    };
+    Ok(apply_meta(match args[0].unwrap_meta() {
+        Value::List(_) => Value::List(GcPtr::new(PersistentList::empty())),
+        Value::Vector(_) => Value::Vector(GcPtr::new(PersistentVector::empty())),
+        Value::Map(_) => Value::Map(MapValue::empty()),
+        Value::Set(_) => Value::Set(SetValue::Hash(GcPtr::new(PersistentHashSet::empty()))),
+        Value::LazySeq(_) => Value::List(GcPtr::new(PersistentList::empty())),
+        Value::Nil => Value::Nil,
+        _ => Value::Nil,
+    }))
+}
+
+fn builtin_vec(args: &[Value]) -> ValueResult<Value> {
+    let meta = args[0].get_meta().cloned();
+    let coll = args[0].unwrap_meta();
+    match coll {
+        Value::List(_)
+        | Value::Cons(_)
+        | Value::Set(_)
+        | Value::Vector(_)
+        | Value::Map(_)
+        | Value::LazySeq(_)
+        | Value::Queue(_)
+        | Value::Str(_)
+        | Value::ObjectArray(_)
+        | Value::IntArray(_)
+        | Value::LongArray(_)
+        | Value::ShortArray(_)
+        | Value::ByteArray(_)
+        | Value::FloatArray(_)
+        | Value::DoubleArray(_)
+        | Value::BooleanArray(_)
+        | Value::CharArray(_)
+        | Value::Nil => {
+            let mut iter = ValueIter::new(coll.clone());
+            let v: Vec<Value> = iter.by_ref().collect();
+            if let Some(err) = iter.take_error() {
+                return Err(ValueError::Other(err));
+            }
+            let result = Value::Vector(GcPtr::new(PersistentVector::from_iter(v)));
+            Ok(match meta {
+                Some(m) => result.with_meta(m),
+                None => result,
+            })
+        }
+
+        other => Err(ValueError::WrongType {
+            expected: "seq",
+            got: other.type_name().to_string(),
+        }),
+    }
+}
+
+fn builtin_array_q(args: &[Value]) -> ValueResult<Value> {
+    Ok(Value::Bool(matches!(
+        &args[0],
+        Value::ObjectArray(_)
+            | Value::BooleanArray(_)
+            | Value::ByteArray(_)
+            | Value::ShortArray(_)
+            | Value::IntArray(_)
+            | Value::LongArray(_)
+            | Value::CharArray(_)
+            | Value::FloatArray(_)
+            | Value::DoubleArray(_)
+    )))
+}
+
+/// `(object-array size-or-coll)` — if given a number, creates a vector of nils;
+/// if given a collection, converts it to a vector.
+fn builtin_object_array(args: &[Value]) -> ValueResult<Value> {
+    match &args[0] {
+        Value::Long(n) => {
+            let size = *n as usize;
+            Ok(Value::ObjectArray(GcPtr::new(ObjectArray::new(
+                vec![Value::Nil; size],
+            ))))
+        }
+        Value::Double(f) => {
+            let size = *f as usize;
+            Ok(Value::ObjectArray(GcPtr::new(ObjectArray::new(
+                vec![Value::Nil; size],
+            ))))
+        }
+        _ => {
+            let v: Vec<Value> = ValueIter::new(args[0].clone()).collect();
+            Ok(Value::ObjectArray(GcPtr::new(ObjectArray::new(v))))
+        }
+    }
+}
+
+/// `(to-array coll)` — converts any collection to an object array.
+fn builtin_to_array(args: &[Value]) -> ValueResult<Value> {
+    let v: Vec<Value> = ValueIter::new(args[0].clone()).collect();
+    Ok(Value::ObjectArray(GcPtr::new(ObjectArray::new(v))))
+}
+
+/// `(to-array-2d coll)` — converts a collection of collections to an array of arrays.
+fn builtin_to_array_2d(args: &[Value]) -> ValueResult<Value> {
+    let outer: Vec<Value> = ValueIter::new(args[0].clone())
+        .map(|inner| {
+            let v: Vec<Value> = ValueIter::new(inner).collect();
+            Value::ObjectArray(GcPtr::new(ObjectArray::new(v)))
+        })
+        .collect();
+    Ok(Value::ObjectArray(GcPtr::new(ObjectArray::new(outer))))
+}
+
+/// `(into-array coll)` or `(into-array type coll)` — converts to an object array (type arg ignored).
+fn builtin_into_array(args: &[Value]) -> ValueResult<Value> {
+    let coll = if args.len() >= 2 { &args[1] } else { &args[0] };
+    let t = if args.len() >= 2 {
+        Some(&args[0])
+    } else {
+        None
+    };
+    match t {
+        Some(Value::Keyword(k)) if k.get().namespace.is_none() => {
+            let items: Vec<Value> = ValueIter::new(coll.clone()).collect();
+            match k.get().name.to_string().as_str() {
+                "boolean" => {
+                    let v: Vec<bool> = items.iter().map(is_truthy).collect();
+                    Ok(Value::BooleanArray(GcPtr::new(Mutex::new(v))))
+                }
+                "byte" => {
+                    let mut v = Vec::with_capacity(items.len());
+                    for item in &items {
+                        v.push(numeric_as_i8(item)?);
+                    }
+                    Ok(Value::ByteArray(GcPtr::new(Mutex::new(v))))
+                }
+                "char" => {
+                    // TODO this could optimize fully for the String -> chars case.
+                    let mut v = Vec::with_capacity(items.len());
+                    for item in &items {
+                        match item {
+                            Value::Char(c) => v.push(*c),
+                            Value::Long(n) => {
+                                v.push(char::from_u32(*n as u32).ok_or_else(|| {
+                                    ValueError::Other(format!("invalid char code: {n}"))
+                                })?);
+                            }
+                            _ => {
+                                return Err(ValueError::WrongType {
+                                    expected: "char",
+                                    got: item.type_name().to_string(),
+                                });
+                            }
+                        }
+                    }
+                    Ok(Value::CharArray(GcPtr::new(Mutex::new(v))))
+                }
+                "short" => {
+                    let mut v = Vec::with_capacity(items.len());
+                    for item in &items {
+                        v.push(numeric_as_i16(item)?);
+                    }
+                    Ok(Value::ShortArray(GcPtr::new(Mutex::new(v))))
+                }
+                "int" => {
+                    let mut v = Vec::with_capacity(items.len());
+                    for item in &items {
+                        v.push(numeric_as_i32(item)?);
+                    }
+                    Ok(Value::IntArray(GcPtr::new(Mutex::new(v))))
+                }
+                "long" => {
+                    let mut v = Vec::with_capacity(items.len());
+                    for item in &items {
+                        v.push(numeric_as_i64(item)?);
+                    }
+                    Ok(Value::LongArray(GcPtr::new(Mutex::new(v))))
+                }
+                "float" => {
+                    let mut v = Vec::with_capacity(items.len());
+                    for item in &items {
+                        v.push(numeric_as_f32(item)?);
+                    }
+                    Ok(Value::FloatArray(GcPtr::new(Mutex::new(v))))
+                }
+                "double" => {
+                    let mut v = Vec::with_capacity(items.len());
+                    for item in &items {
+                        v.push(numeric_as_f64(item)?);
+                    }
+                    Ok(Value::DoubleArray(GcPtr::new(Mutex::new(v))))
+                }
+                _ => Err(ValueError::Other("unknown array type".to_string())),
+            }
+        }
+        None => {
+            let v: Vec<Value> = ValueIter::new(coll.clone()).collect();
+            Ok(Value::ObjectArray(GcPtr::new(ObjectArray::new(v))))
+        }
+        _ => Err(ValueError::Other(
+            "second arg to into-array must be a keyword giving a primitive type".to_string(),
+        )),
+    }
+}
+
+/// `(aclone arr)` — clone an array.
+fn builtin_aclone(args: &[Value]) -> ValueResult<Value> {
+    match &args[0] {
+        Value::ObjectArray(a) => {
+            let cloned = a.get().0.lock().unwrap().clone();
+            Ok(Value::ObjectArray(GcPtr::new(ObjectArray::new(cloned))))
+        }
+        Value::IntArray(a) => Ok(Value::IntArray(GcPtr::new(Mutex::new(
+            a.get().lock().unwrap().clone(),
+        )))),
+        Value::LongArray(a) => Ok(Value::LongArray(GcPtr::new(Mutex::new(
+            a.get().lock().unwrap().clone(),
+        )))),
+        Value::ShortArray(a) => Ok(Value::ShortArray(GcPtr::new(Mutex::new(
+            a.get().lock().unwrap().clone(),
+        )))),
+        Value::ByteArray(a) => Ok(Value::ByteArray(GcPtr::new(Mutex::new(
+            a.get().lock().unwrap().clone(),
+        )))),
+        Value::FloatArray(a) => Ok(Value::FloatArray(GcPtr::new(Mutex::new(
+            a.get().lock().unwrap().clone(),
+        )))),
+        Value::DoubleArray(a) => Ok(Value::DoubleArray(GcPtr::new(Mutex::new(
+            a.get().lock().unwrap().clone(),
+        )))),
+        Value::BooleanArray(a) => Ok(Value::BooleanArray(GcPtr::new(Mutex::new(
+            a.get().lock().unwrap().clone(),
+        )))),
+        Value::CharArray(a) => Ok(Value::CharArray(GcPtr::new(Mutex::new(
+            a.get().lock().unwrap().clone(),
+        )))),
+        _ => Err(ValueError::WrongType {
+            expected: "array",
+            got: args[0].type_name().to_string(),
+        }),
+    }
+}
+
+/// `(alength arr)` — length of an array.
+fn builtin_alength(args: &[Value]) -> ValueResult<Value> {
+    let len = match &args[0] {
+        Value::ObjectArray(a) => a.get().0.lock().unwrap().len(),
+        Value::IntArray(a) => a.get().lock().unwrap().len(),
+        Value::LongArray(a) => a.get().lock().unwrap().len(),
+        Value::ShortArray(a) => a.get().lock().unwrap().len(),
+        Value::ByteArray(a) => a.get().lock().unwrap().len(),
+        Value::FloatArray(a) => a.get().lock().unwrap().len(),
+        Value::DoubleArray(a) => a.get().lock().unwrap().len(),
+        Value::BooleanArray(a) => a.get().lock().unwrap().len(),
+        Value::CharArray(a) => a.get().lock().unwrap().len(),
+        _ => {
+            return Err(ValueError::WrongType {
+                expected: "array",
+                got: args[0].type_name().to_string(),
+            });
+        }
+    };
+    Ok(Value::Long(len as i64))
+}
+
+/// `(aget arr idx & idxs)` — get element from an array, supports nested access.
+///
+/// An out-of-bounds index throws `IndexOutOfBounds` (Clojure semantics, and
+/// consistent with `aset` and the compiled `rt_aget_*` bridges).
+fn builtin_aget(args: &[Value]) -> ValueResult<Value> {
+    /// Map an `Option<T>` element to a converted `Value`, or an OOB error.
+    fn at<T>(
+        elem: Option<T>,
+        idx: usize,
+        len: usize,
+        f: impl FnOnce(T) -> Value,
+    ) -> ValueResult<Value> {
+        match elem {
+            Some(v) => Ok(f(v)),
+            None => Err(ValueError::IndexOutOfBounds { idx, count: len }),
+        }
+    }
+    let mut current = args[0].clone();
+    for idx_val in &args[1..] {
+        let idx = numeric_as_i64(idx_val)? as usize;
+        current = match &current {
+            Value::ObjectArray(a) => {
+                let g = a.get().0.lock().unwrap();
+                at(g.get(idx).cloned(), idx, g.len(), |v| v)?
+            }
+            Value::IntArray(a) => {
+                let g = a.get().lock().unwrap();
+                at(g.get(idx).copied(), idx, g.len(), |v| Value::Long(v as i64))?
+            }
+            Value::LongArray(a) => {
+                let g = a.get().lock().unwrap();
+                at(g.get(idx).copied(), idx, g.len(), Value::Long)?
+            }
+            Value::ShortArray(a) => {
+                let g = a.get().lock().unwrap();
+                at(g.get(idx).copied(), idx, g.len(), |v| Value::Long(v as i64))?
+            }
+            Value::ByteArray(a) => {
+                let g = a.get().lock().unwrap();
+                at(g.get(idx).copied(), idx, g.len(), |v| Value::Long(v as i64))?
+            }
+            Value::FloatArray(a) => {
+                let g = a.get().lock().unwrap();
+                at(g.get(idx).copied(), idx, g.len(), |v| {
+                    Value::Double(v as f64)
+                })?
+            }
+            Value::DoubleArray(a) => {
+                let g = a.get().lock().unwrap();
+                at(g.get(idx).copied(), idx, g.len(), Value::Double)?
+            }
+            Value::BooleanArray(a) => {
+                let g = a.get().lock().unwrap();
+                at(g.get(idx).copied(), idx, g.len(), Value::Bool)?
+            }
+            Value::CharArray(a) => {
+                let g = a.get().lock().unwrap();
+                at(g.get(idx).copied(), idx, g.len(), Value::Char)?
+            }
+            _ => {
+                return Err(ValueError::WrongType {
+                    expected: "array",
+                    got: current.type_name().to_string(),
+                });
+            }
+        };
+    }
+    Ok(current)
+}
+
+/// `(aset arr idx val)` — set element in an array (mutates in place, returns the value set).
+fn builtin_aset(args: &[Value]) -> ValueResult<Value> {
+    let idx = numeric_as_i64(&args[1])? as usize;
+    let newval = args[2].clone();
+    match &args[0] {
+        Value::ObjectArray(a) => {
+            let mut guard = a.get().0.lock().unwrap();
+            if idx >= guard.len() {
+                return Err(ValueError::IndexOutOfBounds {
+                    idx,
+                    count: guard.len(),
+                });
+            }
+            guard[idx] = newval.clone();
+            Ok(newval)
+        }
+        Value::IntArray(_) => builtin_aset_int(args),
+        Value::LongArray(_) => builtin_aset_long(args),
+        Value::ShortArray(_) => builtin_aset_short(args),
+        Value::ByteArray(_) => builtin_aset_byte(args),
+        Value::FloatArray(_) => builtin_aset_float(args),
+        Value::DoubleArray(_) => builtin_aset_double(args),
+        Value::BooleanArray(_) => builtin_aset_bool(args),
+        // TODO CharArray, need aset-char builtin
+        _ => Err(ValueError::WrongType {
+            expected: "array",
+            got: args[0].type_name().to_string(),
+        }),
+    }
+}
+
+// amap and areduce are macros in Clojure; stubs for now.
+fn builtin_amap_stub(_args: &[Value]) -> ValueResult<Value> {
+    Err(ValueError::Other(
+        "amap is a macro — not yet implemented".into(),
+    ))
+}
+fn builtin_areduce_stub(_args: &[Value]) -> ValueResult<Value> {
+    Err(ValueError::Other(
+        "areduce is a macro — not yet implemented".into(),
+    ))
+}
+
+/// Helper: build a typed array. `(xxx-array size init-or-coll)` or `(xxx-array size-or-coll)`.
+/// `coerce` converts each element to the target type.
+fn make_typed_array<T: Clone>(
+    args: &[Value],
+    default: T,
+    coerce: fn(&Value) -> ValueResult<T>,
+    value_builder: fn(Vec<T>) -> Value,
+) -> ValueResult<Value> {
+    match args.len() {
+        1 => {
+            // Single arg: size (numeric) or collection
+            match &args[0] {
+                Value::Long(n) => {
+                    let size = *n as usize;
+                    let vec: Vec<T> = Vec::from_iter(std::iter::repeat_n(default, size));
+                    Ok(value_builder(vec))
+                }
+                _ => {
+                    let vec: Vec<T> = ValueIter::new(args[0].clone())
+                        .map(|v| coerce(&v))
+                        .collect::<ValueResult<Vec<T>>>()?;
+                    Ok(value_builder(vec))
+                }
+            }
+        }
+        2 => {
+            // Two args: (xxx-array size init-coll)
+            let size = numeric_as_i64(&args[0])? as usize;
+            let items: ValueResult<Vec<T>> = ValueIter::new(args[1].clone())
+                .map(|v| coerce(&v))
+                .collect();
+            let mut vec: Vec<T> = items?;
+            vec.resize(size, default);
+            Ok(value_builder(vec))
+        }
+        _ => Err(ValueError::ArityError {
+            name: "typed-array".into(),
+            expected: "1 or 2".into(),
+            got: args.len(),
+        }),
+    }
+}
+
+fn coerce_to_char_native(v: &Value) -> ValueResult<char> {
+    match v {
+        Value::Char(c) => Ok(*c),
+        Value::Long(n) => char::from_u32(*n as u32)
+            .ok_or_else(|| ValueError::Other(format!("invalid char code point: {n}"))),
+        _ => Err(ValueError::WrongType {
+            expected: "char",
+            got: v.type_name().to_string(),
+        }),
+    }
+}
+
+// aset methods
+fn builtin_aset_bool(args: &[Value]) -> ValueResult<Value> {
+    match args.len() {
+        3 => match &args[0] {
+            Value::BooleanArray(b) => {
+                let mut v = b.get().lock().unwrap();
+                let index = numeric_as_i64(&args[1])? as usize;
+                let newval = is_truthy(&args[2]);
+                if index >= v.len() {
+                    Err(ValueError::IndexOutOfBounds {
+                        idx: index,
+                        count: v.len(),
+                    })
+                } else {
+                    v[index] = newval;
+                    Ok(Value::Bool(newval))
+                }
+            }
+            _ => Err(ValueError::WrongType {
+                expected: "boolean-array",
+                got: args[0].type_name().to_string(),
+            }),
+        },
+        _ => Err(ValueError::Unsupported),
+    }
+}
+
+fn builtin_aset_byte(args: &[Value]) -> ValueResult<Value> {
+    match args.len() {
+        3 => match &args[0] {
+            Value::ByteArray(b) => {
+                let mut v = b.get().lock().unwrap();
+                let index = numeric_as_i64(&args[1])? as usize;
+                let newval = numeric_as_i8(&args[2])?;
+                if index >= v.len() {
+                    Err(ValueError::IndexOutOfBounds {
+                        idx: index,
+                        count: v.len(),
+                    })
+                } else {
+                    v[index] = newval;
+                    Ok(Value::Long(newval as i64))
+                }
+            }
+            _ => Err(ValueError::WrongType {
+                expected: "byte-array",
+                got: args[0].type_name().to_string(),
+            }),
+        },
+        _ => Err(ValueError::Unsupported),
+    }
+}
+
+fn builtin_aset_int(args: &[Value]) -> ValueResult<Value> {
+    match args.len() {
+        3 => match &args[0] {
+            Value::IntArray(b) => {
+                let mut v = b.get().lock().unwrap();
+                let index = numeric_as_i64(&args[1])? as usize;
+                let newval = numeric_as_i32(&args[2])?;
+                if index >= v.len() {
+                    Err(ValueError::IndexOutOfBounds {
+                        idx: index,
+                        count: v.len(),
+                    })
+                } else {
+                    v[index] = newval;
+                    Ok(Value::Long(newval as i64))
+                }
+            }
+            _ => Err(ValueError::WrongType {
+                expected: "int-array",
+                got: args[0].type_name().to_string(),
+            }),
+        },
+        _ => Err(ValueError::Unsupported),
+    }
+}
+
+fn builtin_aset_short(args: &[Value]) -> ValueResult<Value> {
+    match args.len() {
+        3 => match &args[0] {
+            Value::ShortArray(b) => {
+                let mut v = b.get().lock().unwrap();
+                let index = numeric_as_i64(&args[1])? as usize;
+                let newval = numeric_as_i16(&args[2])?;
+                if index >= v.len() {
+                    Err(ValueError::IndexOutOfBounds {
+                        idx: index,
+                        count: v.len(),
+                    })
+                } else {
+                    v[index] = newval;
+                    Ok(Value::Long(newval as i64))
+                }
+            }
+            _ => Err(ValueError::WrongType {
+                expected: "short-array",
+                got: args[0].type_name().to_string(),
+            }),
+        },
+        _ => Err(ValueError::Unsupported),
+    }
+}
+
+fn builtin_aset_long(args: &[Value]) -> ValueResult<Value> {
+    match args.len() {
+        3 => match &args[0] {
+            Value::LongArray(b) => {
+                let mut v = b.get().lock().unwrap();
+                let index = numeric_as_i64(&args[1])? as usize;
+                let newval = numeric_as_i64(&args[2])?;
+                if index >= v.len() {
+                    Err(ValueError::IndexOutOfBounds {
+                        idx: index,
+                        count: v.len(),
+                    })
+                } else {
+                    v[index] = newval;
+                    Ok(Value::Long(newval))
+                }
+            }
+            _ => Err(ValueError::WrongType {
+                expected: "long-array",
+                got: args[0].type_name().to_string(),
+            }),
+        },
+        _ => Err(ValueError::Unsupported),
+    }
+}
+
+fn builtin_aset_double(args: &[Value]) -> ValueResult<Value> {
+    match args.len() {
+        3 => match &args[0] {
+            Value::DoubleArray(b) => {
+                let mut v = b.get().lock().unwrap();
+                let index = numeric_as_i64(&args[1])? as usize;
+                let newval = numeric_as_f64(&args[2])?;
+                if index >= v.len() {
+                    Err(ValueError::IndexOutOfBounds {
+                        idx: index,
+                        count: v.len(),
+                    })
+                } else {
+                    v[index] = newval;
+                    Ok(Value::Long(newval as i64))
+                }
+            }
+            _ => Err(ValueError::WrongType {
+                expected: "double-array",
+                got: args[0].type_name().to_string(),
+            }),
+        },
+        _ => Err(ValueError::Unsupported),
+    }
+}
+
+fn builtin_aset_float(args: &[Value]) -> ValueResult<Value> {
+    match args.len() {
+        3 => match &args[0] {
+            Value::FloatArray(b) => {
+                let mut v = b.get().lock().unwrap();
+                let index = numeric_as_i64(&args[1])? as usize;
+                let newval = numeric_as_f32(&args[2])?;
+                if index >= v.len() {
+                    Err(ValueError::IndexOutOfBounds {
+                        idx: index,
+                        count: v.len(),
+                    })
+                } else {
+                    v[index] = newval;
+                    Ok(Value::Long(newval as i64))
+                }
+            }
+            _ => Err(ValueError::WrongType {
+                expected: "float-array",
+                got: args[0].type_name().to_string(),
+            }),
+        },
+        _ => Err(ValueError::Unsupported),
+    }
+}
+
+fn builtin_int_array(args: &[Value]) -> ValueResult<Value> {
+    make_typed_array(args, 0, numeric_as_i32, |v| {
+        Value::IntArray(GcPtr::new(Mutex::new(v)))
+    })
+}
+
+fn builtin_long_array(args: &[Value]) -> ValueResult<Value> {
+    make_typed_array(args, 0i64, numeric_as_i64, |v| {
+        Value::LongArray(GcPtr::new(Mutex::new(v)))
+    })
+}
+
+fn builtin_short_array(args: &[Value]) -> ValueResult<Value> {
+    make_typed_array(args, 0i16, numeric_as_i16, |v| {
+        Value::ShortArray(GcPtr::new(Mutex::new(v)))
+    })
+}
+
+fn builtin_byte_array(args: &[Value]) -> ValueResult<Value> {
+    make_typed_array(args, 0i8, numeric_as_i8, |v| {
+        Value::ByteArray(GcPtr::new(Mutex::new(v)))
+    })
+}
+
+fn builtin_float_array(args: &[Value]) -> ValueResult<Value> {
+    make_typed_array(args, 0f32, numeric_as_f32, |v| {
+        Value::FloatArray(GcPtr::new(Mutex::new(v)))
+    })
+}
+
+fn builtin_double_array(args: &[Value]) -> ValueResult<Value> {
+    make_typed_array(args, 0f64, numeric_as_f64, |v| {
+        Value::DoubleArray(GcPtr::new(Mutex::new(v)))
+    })
+}
+
+fn builtin_char_array(args: &[Value]) -> ValueResult<Value> {
+    match args.len() {
+        1 => match &args[0] {
+            Value::Long(n) => {
+                let size = *n as usize;
+                let vec = Vec::from_iter(std::iter::repeat_n('\0', size));
+                Ok(Value::CharArray(GcPtr::new(Mutex::new(vec))))
+            }
+            Value::Str(s) => {
+                let vec = Vec::from_iter(s.get().chars());
+                Ok(Value::CharArray(GcPtr::new(Mutex::new(vec))))
+            }
+            _ => make_typed_array(args, '\0', coerce_to_char_native, |v| {
+                Value::CharArray(GcPtr::new(Mutex::new(v)))
+            }),
+        },
+        2 => make_typed_array(args, '\0', coerce_to_char_native, |v| {
+            Value::CharArray(GcPtr::new(Mutex::new(v)))
+        }),
+        _ => Err(ValueError::ArityError {
+            name: "char-array".into(),
+            expected: "1 or 2".into(),
+            got: args.len(),
+        }),
+    }
+}
+
+fn builtin_boolean_array(args: &[Value]) -> ValueResult<Value> {
+    make_typed_array(
+        args,
+        false,
+        |v| Ok(is_truthy(v)),
+        |v| Value::BooleanArray(GcPtr::new(Mutex::new(v))),
+    )
+}
+
+/// `(booleans x)`, `(ints x)`, etc. — type hint casts, identity in our runtime.
+fn builtin_identity_cast(args: &[Value]) -> ValueResult<Value> {
+    Ok(args[0].clone())
+}
+
+fn builtin_set_fn(args: &[Value]) -> ValueResult<Value> {
+    if !matches!(
+        args[0],
+        Value::List(_)
+            | Value::Set(_)
+            | Value::Map(_)
+            | Value::LazySeq(_)
+            | Value::Cons(_)
+            | Value::Vector(_)
+            | Value::Str(_)
+            | Value::Nil
+    ) {
+        return Err(ValueError::WrongType {
+            expected: "seq",
+            got: args[0].type_name().to_string(),
+        });
+    }
+    let set = ValueIter::new(args[0].clone()).fold(PersistentHashSet::empty(), |s, v| s.conj(v));
+    Ok(Value::Set(SetValue::Hash(GcPtr::new(set))))
+}
+
+fn builtin_disj(args: &[Value]) -> ValueResult<Value> {
+    let meta = args[0].get_meta().cloned();
+    let apply_meta = |v: Value| -> Value {
+        match meta {
+            Some(ref m) => v.with_meta(m.clone()),
+            None => v,
+        }
+    };
+    match args[0].unwrap_meta() {
+        Value::Set(s) => {
+            let mut result = s.clone();
+            for k in &args[1..] {
+                result = result.disj(k);
+            }
+            Ok(apply_meta(Value::Set(result)))
+        }
+        Value::Nil => Ok(Value::Nil),
+        v => Err(ValueError::WrongType {
+            expected: "set",
+            got: v.type_name().to_string(),
+        }),
+    }
+}
+
+fn builtin_peek(args: &[Value]) -> ValueResult<Value> {
+    match &args[0] {
+        Value::List(l) => Ok(l.get().first().cloned().unwrap_or(Value::Nil)),
+        Value::Vector(v) => Ok(v.get().peek().cloned().unwrap_or(Value::Nil)),
+        Value::Queue(q) => Ok(q.get().peek().cloned().unwrap_or(Value::Nil)),
+        Value::Nil => Ok(Value::Nil),
+        v => Err(ValueError::WrongType {
+            expected: "stack",
+            got: v.type_name().to_string(),
+        }),
+    }
+}
+
+fn builtin_pop(args: &[Value]) -> ValueResult<Value> {
+    match &args[0] {
+        Value::List(l) => {
+            if l.get().is_empty() {
+                Err(ValueError::OutOfRange)
+            } else {
+                let rest = l.get().rest();
+                Ok(Value::List(GcPtr::new((*rest).clone())))
+            }
+        }
+        Value::Vector(v) => {
+            if v.get().is_empty() {
+                Err(ValueError::Other("pop on empty vector".into()))
+            } else {
+                Ok(Value::Vector(GcPtr::new(v.get().pop().unwrap())))
+            }
+        }
+        Value::Queue(q) => {
+            if let Some(result) = q.get().pop() {
+                Ok(Value::Queue(GcPtr::new(result)))
+            } else {
+                Ok(Value::Nil)
+            }
+        }
+        Value::Nil => Ok(Value::Nil),
+        v => Err(ValueError::WrongType {
+            expected: "stack",
+            got: v.type_name().to_string(),
+        }),
+    }
+}
+
+fn builtin_subvec(args: &[Value]) -> ValueResult<Value> {
+    match &args[0] {
+        Value::Vector(v) => {
+            let len = v.get().count();
+            // NaN converts to 0 via (int) cast in Clojure
+            let start_i = match &args[1] {
+                Value::Double(f) if f.is_nan() => 0,
+                _ => numeric_as_i64(&args[1])?,
+            };
+            let end_i = if let Some(e) = args.get(2) {
+                match e {
+                    Value::Double(f) if f.is_nan() => 0,
+                    _ => numeric_as_i64(e)?,
+                }
+            } else {
+                len as i64
+            };
+            if start_i < 0
+                || end_i < 0
+                || (start_i as usize) > len
+                || (end_i as usize) > len
+                || start_i > end_i
+            {
+                return Err(ValueError::Other(format!(
+                    "subvec index out of range: start={}, end={}, count={}",
+                    start_i, end_i, len
+                )));
+            }
+            let items: Vec<Value> = v
+                .get()
+                .iter()
+                .skip(start_i as usize)
+                .take((end_i - start_i) as usize)
+                .cloned()
+                .collect();
+            Ok(Value::Vector(GcPtr::new(PersistentVector::from_iter(
+                items,
+            ))))
+        }
+        v => Err(ValueError::WrongType {
+            expected: "vector",
+            got: v.type_name().to_string(),
+        }),
+    }
+}
+
+fn builtin_assoc_in(args: &[Value]) -> ValueResult<Value> {
+    let keys = value_to_seq(&args[1])?;
+    let val = args[2].clone();
+    assoc_in_impl(args[0].clone(), &keys, val)
+}
+
+fn assoc_in_impl(m: Value, keys: &[Value], val: Value) -> ValueResult<Value> {
+    if keys.is_empty() {
+        return Ok(val);
+    }
+    // Unwrap metadata (like `get`/`assoc` do) so a map carrying meta isn't
+    // mistaken for a non-map and blown away to a fresh single-key map.
+    let meta = m.get_meta().cloned();
+    let base = m.unwrap_meta();
+    let k = &keys[0];
+    let inner = match base {
+        Value::Map(map) => map.get(k).unwrap_or(Value::Nil),
+        Value::TypeInstance(ti) => ti.get().fields.get(k).unwrap_or(Value::Nil),
+        _ => Value::Nil,
+    };
+    let updated = assoc_in_impl(inner, &keys[1..], val)?;
+    let result = match base {
+        Value::Map(map) => Value::Map(map.assoc(k.clone(), updated)),
+        Value::TypeInstance(ti) => Value::TypeInstance(GcPtr::new(TypeInstance {
+            type_tag: ti.get().type_tag.clone(),
+            fields: ti.get().fields.assoc(k.clone(), updated),
+        })),
+        _ => Value::Map(MapValue::empty().assoc(k.clone(), updated)),
+    };
+    Ok(match meta {
+        Some(meta) => result.with_meta(meta),
+        None => result,
+    })
+}
+
+fn builtin_update_in_stub(_args: &[Value]) -> ValueResult<Value> {
+    // update-in needs to call a function, stubs to nil for now.
+    Ok(Value::Nil)
+}
+
+fn builtin_flatten(args: &[Value]) -> ValueResult<Value> {
+    fn flatten_val(v: &Value) -> Vec<Value> {
+        match v {
+            Value::Nil => vec![],
+            Value::List(l) => l.get().iter().flat_map(flatten_val).collect(),
+            Value::Vector(v) => v.get().iter().flat_map(flatten_val).collect(),
+            other => vec![other.clone()],
+        }
+    }
+    Ok(Value::List(GcPtr::new(PersistentList::from_iter(
+        flatten_val(&args[0]),
+    ))))
+}
+
+fn builtin_distinct(args: &[Value]) -> ValueResult<Value> {
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for v in ValueIter::new(args[0].clone()) {
+        use cljrs_value::ClojureHash;
+        let h = v.clojure_hash();
+        if !seen.contains(&h) {
+            seen.insert(h);
+            out.push(v);
+        }
+    }
+    Ok(Value::List(GcPtr::new(PersistentList::from_iter(out))))
+}
+
+fn builtin_distinct_q(args: &[Value]) -> ValueResult<Value> {
+    use cljrs_value::ClojureHash;
+    let mut seen = std::collections::HashSet::new();
+    for v in args {
+        let h = v.clojure_hash();
+        if !seen.insert(h) {
+            return Ok(Value::Bool(false));
+        }
+    }
+    Ok(Value::Bool(true))
+}
+
+fn builtin_frequencies(args: &[Value]) -> ValueResult<Value> {
+    let mut m = MapValue::empty();
+    for v in ValueIter::new(args[0].clone()) {
+        let count = m
+            .get(&v)
+            .and_then(|c| {
+                if let Value::Long(n) = c {
+                    Some(n)
+                } else {
+                    None
+                }
+            })
+            .unwrap_or(0);
+        m = m.assoc(v, Value::Long(count + 1));
+    }
+    Ok(Value::Map(m))
+}
+
+fn builtin_interleave(args: &[Value]) -> ValueResult<Value> {
+    if args.is_empty() {
+        return Ok(Value::List(GcPtr::new(PersistentList::empty())));
+    }
+    // Step through all seqs in lockstep using first/rest, stopping when any is exhausted.
+    let mut seqs: Vec<Value> = args.to_vec();
+    let mut out = Vec::new();
+    loop {
+        // First pass: decompose all seqs into (first, rest). If any is empty, stop.
+        let mut firsts = Vec::with_capacity(seqs.len());
+        let mut rests = Vec::with_capacity(seqs.len());
+        for seq in &seqs {
+            match seq_first_rest(seq)? {
+                Some((first, rest)) => {
+                    firsts.push(first);
+                    rests.push(rest);
+                }
+                None => {
+                    return Ok(if out.is_empty() {
+                        Value::List(GcPtr::new(PersistentList::empty()))
+                    } else {
+                        Value::List(GcPtr::new(PersistentList::from_iter(out)))
+                    });
+                }
+            }
+        }
+        out.extend(firsts);
+        seqs = rests;
+    }
+}
+
+fn builtin_interpose(args: &[Value]) -> ValueResult<Value> {
+    let sep = &args[0];
+    let mut out = Vec::new();
+    for (i, v) in ValueIter::new(args[1].clone()).enumerate() {
+        if i > 0 {
+            out.push(sep.clone());
+        }
+        out.push(v);
+    }
+    Ok(Value::List(GcPtr::new(PersistentList::from_iter(out))))
+}
+
+fn builtin_partition(args: &[Value]) -> ValueResult<Value> {
+    let n = numeric_as_i64(&args[0])? as usize;
+
+    let (step, pad_val, items) = match args.len() {
+        2 => (n, None, value_to_seq(&args[1])?),
+        3 => {
+            let step = numeric_as_i64(&args[1])? as usize;
+            (step, None, value_to_seq(&args[2])?)
+        }
+        4 => {
+            let step = numeric_as_i64(&args[1])? as usize;
+            (step, Some(args[2].clone()), value_to_seq(&args[3])?)
+        }
+        _ => unreachable!("arity enforced by registration"),
+    };
+
+    if step == 0 {
+        return Err(ValueError::Other("partition: step cannot be zero".into()));
+    }
+
+    let mut chunks: Vec<Value> = Vec::new();
+    let mut start = 0;
+    while start < items.len() {
+        let end = start + n;
+        if end <= items.len() {
+            let chunk = &items[start..end];
+            chunks.push(Value::List(GcPtr::new(PersistentList::from_iter(
+                chunk.iter().cloned(),
+            ))));
+        } else if let Some(ref pad) = pad_val {
+            // Pad the incomplete last chunk from the pad sequence lazily.
+            let existing = &items[start..];
+            let need = n - existing.len();
+            let mut padded: Vec<Value> = existing.to_vec();
+            let mut pad_cursor = pad.clone();
+            for _ in 0..need {
+                match seq_first_rest(&pad_cursor)? {
+                    Some((head, tail)) => {
+                        padded.push(head);
+                        pad_cursor = tail;
+                    }
+                    None => break,
+                }
+            }
+            if padded.len() == n {
+                chunks.push(Value::List(GcPtr::new(PersistentList::from_iter(padded))));
+            }
+        }
+        start += step;
+    }
+    Ok(Value::List(GcPtr::new(PersistentList::from_iter(chunks))))
+}
+
+fn builtin_zipmap(args: &[Value]) -> ValueResult<Value> {
+    let mut ks = args[0].clone();
+    let mut vs = args[1].clone();
+    let mut m = MapValue::empty();
+    loop {
+        let Some((k, ks_rest)) = seq_first_rest(&ks)? else {
+            break;
+        };
+        let Some((v, vs_rest)) = seq_first_rest(&vs)? else {
+            break;
+        };
+        m = m.assoc(k, v);
+        ks = ks_rest;
+        vs = vs_rest;
+    }
+    Ok(Value::Map(m))
+}
+
+/// Step one element from a sequence lazily. Returns `(first, rest)` or `None` if empty.
+fn seq_first_rest(v: &Value) -> ValueResult<Option<(Value, Value)>> {
+    match v {
+        Value::Nil => Ok(None),
+        Value::LazySeq(ls) => seq_first_rest(&ls.get().realize()),
+        Value::Cons(c) => {
+            let cell = c.get();
+            Ok(Some((cell.head.clone(), cell.tail.clone())))
+        }
+        Value::List(l) => match l.get().first() {
+            None => Ok(None),
+            Some(first) => {
+                let rest = l.get().rest();
+                Ok(Some((
+                    first.clone(),
+                    Value::List(GcPtr::new((*rest).clone())),
+                )))
+            }
+        },
+        Value::Vector(vec) => {
+            let mut iter = vec.get().iter();
+            match iter.next() {
+                None => Ok(None),
+                Some(first) => {
+                    let rest = PersistentVector::from_iter(iter.cloned());
+                    Ok(Some((first.clone(), Value::Vector(GcPtr::new(rest)))))
+                }
+            }
+        }
+        Value::Set(s) => {
+            let mut iter = s.iter();
+            match iter.next() {
+                None => Ok(None),
+                Some(first) => {
+                    let rest: Vec<Value> = iter.cloned().collect();
+                    Ok(Some((
+                        first.clone(),
+                        Value::List(GcPtr::new(PersistentList::from_iter(rest))),
+                    )))
+                }
+            }
+        }
+        Value::Map(m) => {
+            let mut pairs = Vec::new();
+            m.for_each(|k, v| {
+                pairs.push(Value::map_entry(k.clone(), v.clone()));
+            });
+            if pairs.is_empty() {
+                Ok(None)
+            } else {
+                let first = pairs.remove(0);
+                Ok(Some((
+                    first,
+                    Value::List(GcPtr::new(PersistentList::from_iter(pairs))),
+                )))
+            }
+        }
+        Value::Str(s) => {
+            let mut chars = s.get().chars();
+            match chars.next() {
+                None => Ok(None),
+                Some(ch) => {
+                    let rest: Vec<Value> = chars.map(Value::Char).collect();
+                    Ok(Some((
+                        Value::Char(ch),
+                        Value::List(GcPtr::new(PersistentList::from_iter(rest))),
+                    )))
+                }
+            }
+        }
+        _ => Err(ValueError::WrongType {
+            expected: "seq",
+            got: v.type_name().to_string(),
+        }),
+    }
+}
+
+fn builtin_select_keys(args: &[Value]) -> ValueResult<Value> {
+    let mut map = PersistentHashMap::empty();
+    match &args[0] {
+        Value::Map(src) => {
+            if matches!(
+                &args[1],
+                Value::Map(_)
+                    | Value::Vector(_)
+                    | Value::List(_)
+                    | Value::Set(_)
+                    | Value::Cons(_)
+                    | Value::LazySeq(_)
+                    | Value::Nil
+            ) {
+                for k in ValueIter::new(args[1].clone()) {
+                    if let Some(v) = src.get(&k) {
+                        map = map.assoc(k.clone(), v.clone());
+                    }
+                }
+                Ok(Value::Map(MapValue::Hash(GcPtr::new(map))))
+            } else {
+                Err(ValueError::WrongType {
+                    expected: "seqable",
+                    got: args[0].type_name().to_string(),
+                })
+            }
+        }
+        Value::Set(_) => match &args[1] {
+            Value::Vector(v) if v.get().is_empty() => Ok(Value::Map(MapValue::empty())),
+            Value::Map(m) if m.count() == 0 => Ok(Value::Map(MapValue::empty())),
+            _ => Err(ValueError::Other("nth not supported for set".to_string())),
+        },
+        Value::Nil => Ok(Value::Map(MapValue::empty())),
+        _ => Err(ValueError::WrongType {
+            expected: "map",
+            got: args[0].type_name().to_string(),
+        }),
+    }
+}
+
+fn builtin_find(args: &[Value]) -> ValueResult<Value> {
+    match &args[0] {
+        Value::Map(m) => {
+            if let Some(v) = m.get(&args[1]) {
+                Ok(Value::map_entry(args[1].clone(), v))
+            } else {
+                Ok(Value::Nil)
+            }
+        }
+        Value::TransientMap(m) => {
+            if let Some((k, v)) = m.get().find(&args[1]) {
+                Ok(Value::map_entry(k.clone(), v.clone()))
+            } else {
+                Ok(Value::Nil)
+            }
+        }
+        Value::Vector(v) => {
+            if let Value::Long(idx) = &args[1] {
+                let idx = *idx;
+                if idx >= 0 && (idx as usize) < v.get().count() {
+                    let val = v.get().nth(idx as usize).cloned().unwrap();
+                    Ok(Value::map_entry(args[1].clone(), val))
+                } else {
+                    Ok(Value::Nil)
+                }
+            } else {
+                Ok(Value::Nil)
+            }
+        }
+        _ => Ok(Value::Nil),
+    }
+}
+
+fn builtin_map_keys_stub(_args: &[Value]) -> ValueResult<Value> {
+    Ok(Value::Nil)
+}
+fn builtin_map_vals_stub(_args: &[Value]) -> ValueResult<Value> {
+    Ok(Value::Nil)
+}
+
+fn builtin_shuffle(args: &[Value]) -> ValueResult<Value> {
+    let mut rng = rand::rng();
+    match &args[0] {
+        // Collections, but not maps.
+        Value::List(_) | Value::Vector(_) | Value::Set(_) | Value::LazySeq(_) | Value::Cons(_) => {
+            let mut items = value_to_seq(&args[0])?;
+            items.shuffle(&mut rng);
+            Ok(Value::Vector(GcPtr::new(PersistentVector::from_iter(
+                items.iter().cloned(),
+            ))))
+        }
+        v => Err(ValueError::WrongType {
+            expected: "coll",
+            got: v.type_name().to_string(),
+        }),
+    }
+}
+
+fn builtin_queue(args: &[Value]) -> ValueResult<Value> {
+    let queue = if args.is_empty() {
+        PersistentQueue::empty()
+    } else {
+        match &args[0] {
+            Value::WithMeta(..)
+            | Value::List(_)
+            | Value::Vector(_)
+            | Value::Set(_)
+            | Value::Map(_)
+            | Value::LazySeq(_)
+            | Value::Cons(_)
+            | Value::ObjectArray(_)
+            | Value::BooleanArray(_)
+            | Value::ByteArray(_)
+            | Value::CharArray(_)
+            | Value::IntArray(_)
+            | Value::LongArray(_)
+            | Value::FloatArray(_)
+            | Value::DoubleArray(_)
+            | Value::Str(_) => {
+                let iter = ValueIter::new(args[0].clone());
+                PersistentQueue::new(PersistentList::from_iter(iter), PersistentVector::empty())
+            }
+            Value::Nil => PersistentQueue::empty(),
+            v => {
+                return Err(ValueError::WrongType {
+                    expected: "seqable",
+                    got: v.type_name().to_string(),
+                });
+            }
+        }
+    };
+    Ok(Value::Queue(GcPtr::new(queue)))
+}
+
+// ── Atoms ─────────────────────────────────────────────────────────────────────
+
+fn builtin_atom(args: &[Value]) -> ValueResult<Value> {
+    // Actual option parsing (meta/validator) is handled in apply.rs handle_atom_call.
+    // This fallback is only hit by direct Value-level calls (e.g. tests via apply).
+    Ok(Value::Atom(GcPtr::new(Atom::new(args[0].clone()))))
+}
+
+// ── shared-atom (Phase B3, two-tier ADR) ──────────────────────────────────────
+
+/// `(shared-atom x)` — create a cross-isolate atom holding `x`.
+///
+/// Unlike `atom` (isolate-local, GC-backed), a `shared-atom` stores its contents
+/// as a `SharedValue` behind a lock-free `ArcSwap`, so the same reference can be
+/// handed to another isolate and mutated concurrently.  The initial value is
+/// promoted immediately; non-promotable values (closures, native resources,
+/// isolate-bound collections) are rejected here rather than at first write.
+fn builtin_shared_atom(args: &[Value]) -> ValueResult<Value> {
+    let sv = promote(&args[0]).map_err(|e| ValueError::Other(e.to_string()))?;
+    Ok(Value::SharedAtom(std::sync::Arc::new(SharedAtom::new(sv))))
+}
+
+/// `(shared-atom? x)` — true iff `x` is a `shared-atom`.
+fn builtin_shared_atom_q(args: &[Value]) -> ValueResult<Value> {
+    Ok(Value::Bool(matches!(args[0], Value::SharedAtom(_))))
+}
+
+fn builtin_get_validator(args: &[Value]) -> ValueResult<Value> {
+    match &args[0] {
+        Value::Atom(a) => Ok(a.get().get_validator().unwrap_or(Value::Nil)),
+        v => Err(ValueError::WrongType {
+            expected: "atom",
+            got: v.type_name().to_string(),
+        }),
+    }
+}
+
+fn add_watch_to(watches: &Mutex<Vec<(Value, Value)>>, key: Value, f: Value) {
+    let mut ws = watches.lock().unwrap();
+    if let Some(entry) = ws.iter_mut().find(|(k, _)| k == &key) {
+        entry.1 = f;
+    } else {
+        ws.push((key, f));
+    }
+}
+
+fn remove_watch_from(watches: &Mutex<Vec<(Value, Value)>>, key: &Value) {
+    watches.lock().unwrap().retain(|(k, _)| k != key);
+}
+
+fn builtin_add_watch(args: &[Value]) -> ValueResult<Value> {
+    let key = args[1].clone();
+    let f = args[2].clone();
+    match &args[0] {
+        Value::Atom(a) => add_watch_to(&a.get().watches, key, f),
+        Value::Var(v) => add_watch_to(&v.get().watches, key, f),
+        Value::Agent(a) => add_watch_to(&a.get().watches, key, f),
+        v => {
+            return Err(ValueError::WrongType {
+                expected: "atom, var, or agent",
+                got: v.type_name().to_string(),
+            });
+        }
+    }
+    Ok(args[0].clone())
+}
+
+fn builtin_remove_watch(args: &[Value]) -> ValueResult<Value> {
+    let key = &args[1];
+    match &args[0] {
+        Value::Atom(a) => remove_watch_from(&a.get().watches, key),
+        Value::Var(v) => remove_watch_from(&v.get().watches, key),
+        Value::Agent(a) => remove_watch_from(&a.get().watches, key),
+        v => {
+            return Err(ValueError::WrongType {
+                expected: "atom, var, or agent",
+                got: v.type_name().to_string(),
+            });
+        }
+    }
+    Ok(args[0].clone())
+}
+
+fn builtin_deref(args: &[Value]) -> ValueResult<Value> {
+    let with_timeout = args.len() == 3;
+    match &args[0] {
+        Value::Atom(a) => Ok(a.get().deref()),
+        Value::SharedAtom(sa) => Ok(demote(&sa.deref_val())),
+        Value::Var(v) => Ok(v.get().deref().unwrap_or(Value::Nil)),
+        Value::Delay(d) => d.get().force().map_err(ValueError::Other),
+        Value::Agent(a) => Ok(a.get().get_state()),
+        Value::Promise(p) => {
+            if with_timeout {
+                let timeout_ms = match &args[1] {
+                    Value::Long(n) => *n as u64,
+                    v => {
+                        return Err(ValueError::WrongType {
+                            expected: "long (timeout-ms)",
+                            got: v.type_name().to_string(),
+                        });
+                    }
+                };
+                let timeout_val = args[2].clone();
+                let guard = p.get().value.lock().unwrap();
+                if guard.is_some() {
+                    return Ok(guard.as_ref().unwrap().clone());
+                }
+                let (guard, _) = p
+                    .get()
+                    .cond
+                    .wait_timeout(guard, std::time::Duration::from_millis(timeout_ms))
+                    .unwrap();
+                Ok(guard.as_ref().cloned().unwrap_or(timeout_val))
+            } else {
+                Ok(p.get().deref_blocking())
+            }
+        }
+        Value::Future(f) => {
+            // `deref` blocks the OS thread; inside an `^:async` function that
+            // would park the single LocalSet executor. Steer callers to `await`.
+            if crate::env::callback::current_is_async() {
+                return Err(ValueError::Other(
+                    "deref on a future is not allowed inside an ^:async function; use (await ...) instead".into(),
+                ));
+            }
+            if with_timeout {
+                let timeout_ms = match &args[1] {
+                    Value::Long(n) => *n as u64,
+                    v => {
+                        return Err(ValueError::WrongType {
+                            expected: "long (timeout-ms)",
+                            got: v.type_name().to_string(),
+                        });
+                    }
+                };
+                let timeout_val = args[2].clone();
+                let guard = f.get().state.lock().unwrap();
+                match &*guard {
+                    FutureState::Done(v) => {
+                        f.get().mark_observed();
+                        Ok(v.clone())
+                    }
+                    FutureState::Failed(v) => {
+                        f.get().mark_observed();
+                        Err(ValueError::Thrown(v.clone()))
+                    }
+                    FutureState::GasExhausted => {
+                        f.get().mark_observed();
+                        Err(ValueError::GasExhausted)
+                    }
+                    FutureState::Cancelled => Err(ValueError::Other("future was cancelled".into())),
+                    FutureState::Running => {
+                        let (guard, _) = f
+                            .get()
+                            .cond
+                            .wait_timeout(guard, std::time::Duration::from_millis(timeout_ms))
+                            .unwrap();
+                        match &*guard {
+                            FutureState::Done(v) => {
+                                f.get().mark_observed();
+                                Ok(v.clone())
+                            }
+                            FutureState::Failed(v) => {
+                                f.get().mark_observed();
+                                Err(ValueError::Thrown(v.clone()))
+                            }
+                            FutureState::GasExhausted => {
+                                f.get().mark_observed();
+                                Err(ValueError::GasExhausted)
+                            }
+                            FutureState::Cancelled => {
+                                Err(ValueError::Other("future was cancelled".into()))
+                            }
+                            FutureState::Running => Ok(timeout_val),
+                        }
+                    }
+                }
+            } else {
+                let mut guard = f.get().state.lock().unwrap();
+                loop {
+                    match &*guard {
+                        FutureState::Done(v) => {
+                            f.get().mark_observed();
+                            return Ok(v.clone());
+                        }
+                        FutureState::Failed(v) => {
+                            f.get().mark_observed();
+                            return Err(ValueError::Thrown(v.clone()));
+                        }
+                        FutureState::GasExhausted => {
+                            f.get().mark_observed();
+                            return Err(ValueError::GasExhausted);
+                        }
+                        FutureState::Cancelled => {
+                            return Err(ValueError::Other("future was cancelled".into()));
+                        }
+                        FutureState::Running => {
+                            guard = f.get().cond.wait(guard).unwrap();
+                        }
+                    }
+                }
+            }
+        }
+        Value::Volatile(v) => Ok(v.get().deref()),
+        Value::Reduced(inner) => Ok((**inner).clone()),
+        v => Err(ValueError::WrongType {
+            expected: "atom, var, delay, promise, future, or agent",
+            got: v.type_name().to_string(),
+        }),
+    }
+}
+
+fn builtin_reset_bang(args: &[Value]) -> ValueResult<Value> {
+    match &args[0] {
+        Value::Atom(a) => Ok(a.get().reset(args[1].clone())),
+        Value::SharedAtom(sa) => {
+            let sv = promote(&args[1]).map_err(|e| ValueError::Other(e.to_string()))?;
+            sa.reset(sv);
+            Ok(args[1].clone())
+        }
+        v => Err(ValueError::WrongType {
+            expected: "atom",
+            got: v.type_name().to_string(),
+        }),
+    }
+}
+
+// apply and swap! are handled specially in apply.rs; these are sentinels.
+fn builtin_apply_sentinel(_args: &[Value]) -> ValueResult<Value> {
+    Err(ValueError::Other(
+        "apply must be invoked through the evaluator".into(),
+    ))
+}
+fn builtin_swap_sentinel(_args: &[Value]) -> ValueResult<Value> {
+    Err(ValueError::Other(
+        "swap! must be invoked through the evaluator".into(),
+    ))
+}
+
+// ── I/O ───────────────────────────────────────────────────────────────────────
+
+fn print_vals(args: &[Value], sep: &str, readably: bool) -> String {
+    use cljrs_value::value::PrintValue;
+    args.iter()
+        .map(|v| {
+            if readably {
+                format!("{}", v)
+            } else {
+                match v {
+                    Value::Str(s) => s.get().to_string(),
+                    Value::Char(c) => c.to_string(),
+                    other => format!("{}", PrintValue(other)),
+                }
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(sep)
+}
+
+/// Write to the output capture buffer if active, otherwise to stdout (no newline).
+pub fn emit_output(s: &str) {
+    if !capture_or_print(s) {
+        print!("{}", s);
+    }
+}
+
+/// Write to the output capture buffer if active, otherwise to stdout (with newline).
+pub fn emit_output_ln(s: &str) {
+    if !capture_or_print(&format!("{s}\n")) {
+        println!("{}", s);
+    }
+}
+
+fn builtin_print(args: &[Value]) -> ValueResult<Value> {
+    emit_output(&print_vals(args, " ", false));
+    Ok(Value::Nil)
+}
+fn builtin_println(args: &[Value]) -> ValueResult<Value> {
+    emit_output_ln(&print_vals(args, " ", false));
+    Ok(Value::Nil)
+}
+fn builtin_prn(args: &[Value]) -> ValueResult<Value> {
+    emit_output_ln(&print_vals(args, " ", true));
+    Ok(Value::Nil)
+}
+fn builtin_pr(args: &[Value]) -> ValueResult<Value> {
+    emit_output(&print_vals(args, " ", true));
+    Ok(Value::Nil)
+}
+fn builtin_pr_str(args: &[Value]) -> ValueResult<Value> {
+    Ok(Value::string(print_vals(args, " ", true)))
+}
+fn builtin_str(args: &[Value]) -> ValueResult<Value> {
+    use cljrs_value::value::PrintValue;
+    let s: String = args
+        .iter()
+        .map(|v| match v {
+            Value::Nil => String::new(),
+            Value::Str(s) => s.get().to_string(),
+            Value::Char(c) => c.to_string(),
+            other => format!("{}", PrintValue(other)),
+        })
+        .collect();
+    Ok(Value::string(s))
+}
+
+fn builtin_read_string(args: &[Value]) -> ValueResult<Value> {
+    match &args[0] {
+        Value::Str(s) => {
+            let src = s.get().clone();
+            let mut parser = cljrs_reader::Parser::new(src, "<read-string>".into());
+            match parser.parse_one() {
+                Ok(Some(form)) => crate::builtins::form::form_to_value(&form)
+                    .map_err(|e| ValueError::Other(e.to_string())),
+                Ok(None) => Ok(Value::Nil),
+                Err(e) => Err(ValueError::Other(e.to_string())),
+            }
+        }
+        v => Err(ValueError::WrongType {
+            expected: "string",
+            got: v.type_name().to_string(),
+        }),
+    }
+}
+
+fn builtin_spit(args: &[Value]) -> ValueResult<Value> {
+    let path = match &args[0] {
+        Value::Str(s) => s.get().clone(),
+        v => {
+            return Err(ValueError::WrongType {
+                expected: "string",
+                got: v.type_name().to_string(),
+            });
+        }
+    };
+    let content = match &args[1] {
+        Value::Str(s) => s.get().clone(),
+        v => v.to_string(),
+    };
+    std::fs::write(&path, &content).map_err(|e| ValueError::Other(e.to_string()))?;
+    Ok(Value::Nil)
+}
+
+fn builtin_slurp(args: &[Value]) -> ValueResult<Value> {
+    let path = match &args[0] {
+        Value::Str(s) => s.get().clone(),
+        v => {
+            return Err(ValueError::WrongType {
+                expected: "string",
+                got: v.type_name().to_string(),
+            });
+        }
+    };
+    let content = std::fs::read_to_string(&path).map_err(|e| ValueError::Other(e.to_string()))?;
+    Ok(Value::string(content))
+}
+
+fn builtin_close(args: &[Value]) -> ValueResult<Value> {
+    match &args[0] {
+        Value::Resource(r) => {
+            r.close()?;
+            Ok(Value::Nil)
+        }
+        v => Err(ValueError::WrongType {
+            expected: "resource",
+            got: v.type_name().to_string(),
+        }),
+    }
+}
+
+fn builtin_make_lazy_seq_sentinel(_args: &[Value]) -> ValueResult<Value> {
+    // Actual work is done in apply.rs handle_make_lazy_seq.
+    Err(ValueError::Other(
+        "make-lazy-seq must be called from eval context".into(),
+    ))
+}
+
+// ── Misc ──────────────────────────────────────────────────────────────────────
+
+pub static GENSYM_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn builtin_gensym(args: &[Value]) -> ValueResult<Value> {
+    let prefix = match args.first() {
+        Some(Value::Str(s)) => s.get().to_string(),
+        None => "G__".to_string(),
+        _ => "G__".to_string(),
+    };
+    let n = GENSYM_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    Ok(Value::symbol(Symbol::simple(format!("{}{}", prefix, n))))
+}
+
+fn builtin_type(args: &[Value]) -> ValueResult<Value> {
+    use crate::env::apply::type_tag_of;
+    let tag = type_tag_of(&args[0]);
+    Ok(Value::symbol(Symbol::simple(tag.as_ref())))
+}
+
+fn builtin_hash(args: &[Value]) -> ValueResult<Value> {
+    use cljrs_value::ClojureHash;
+    Ok(Value::Long(args[0].clojure_hash() as i64))
+}
+
+fn builtin_name(args: &[Value]) -> ValueResult<Value> {
+    match &args[0] {
+        Value::Keyword(k) => Ok(Value::string(k.get().name.as_ref().to_string())),
+        Value::Symbol(s) => Ok(Value::string(s.get().name.as_ref().to_string())),
+        Value::Str(s) => Ok(Value::Str(s.clone())),
+        v => Err(ValueError::WrongType {
+            expected: "named",
+            got: v.type_name().to_string(),
+        }),
+    }
+}
+
+fn builtin_namespace(args: &[Value]) -> ValueResult<Value> {
+    match &args[0] {
+        Value::Keyword(k) => Ok(match &k.get().namespace {
+            Some(ns) => Value::string(ns.as_ref().to_string()),
+            None => Value::Nil,
+        }),
+        Value::Symbol(s) => Ok(match &s.get().namespace {
+            Some(ns) => Value::string(ns.as_ref().to_string()),
+            None => Value::Nil,
+        }),
+        v => Err(ValueError::WrongType {
+            expected: "named",
+            got: v.type_name().to_string(),
+        }),
+    }
+}
+
+fn builtin_ex_info(args: &[Value]) -> ValueResult<Value> {
+    let msg = match &args[0] {
+        Value::Str(s) => s.get().clone(),
+        v => format!("{}", v),
+    };
+    let data = args.get(1).cloned();
+    let data = match data {
+        Some(Value::Map(m)) => Some(m),
+        None => None,
+        Some(v) => {
+            return Err(ValueError::WrongType {
+                expected: "associative",
+                got: v.type_name().to_string(),
+            });
+        }
+    };
+    let cause = match args.get(2).cloned() {
+        Some(Value::Error(e)) => Some(e),
+        None => None,
+        Some(v) => {
+            return Err(ValueError::WrongType {
+                expected: "error",
+                got: v.type_name().to_string(),
+            });
+        }
+    };
+    Ok(Value::Error(GcPtr::new(ExceptionInfo::new(
+        ValueError::Other(msg.to_string()),
+        msg.to_string(),
+        data,
+        cause,
+    ))))
+}
+
+fn builtin_ex_data(args: &[Value]) -> ValueResult<Value> {
+    match &args[0] {
+        Value::Error(e) => Ok(if let Some(data) = e.get().data() {
+            Value::Map(data)
+        } else {
+            Value::Nil
+        }),
+        Value::Map(m) => Ok(m
+            .get(&Value::keyword(Keyword::simple("data")))
+            .unwrap_or(Value::Nil)),
+        _ => Ok(Value::Nil),
+    }
+}
+
+fn builtin_ex_message(args: &[Value]) -> ValueResult<Value> {
+    match &args[0] {
+        Value::Error(e) => Ok(Value::string(e.get().message())),
+        Value::Map(m) => Ok(m
+            .get(&Value::keyword(Keyword::simple("message")))
+            .unwrap_or(Value::Nil)),
+        _ => Ok(Value::Nil),
+    }
+}
+
+fn builtin_ex_cause(args: &[Value]) -> ValueResult<Value> {
+    match &args[0] {
+        Value::Error(e) => Ok(if let Some(cause) = e.get().cause() {
+            Value::Error(cause.clone())
+        } else {
+            Value::Nil
+        }),
+        Value::Map(m) => Ok(m
+            .get(&Value::keyword(Keyword::simple("cause")))
+            .unwrap_or(Value::Nil)),
+        _ => Ok(Value::Nil),
+    }
+}
+
+fn builtin_range(args: &[Value]) -> ValueResult<Value> {
+    let (start, end, step) = match args.len() {
+        0 => return Err(ValueError::Other("infinite range not supported".into())),
+        1 => (0i64, numeric_as_i64(&args[0])?, 1i64),
+        2 => (numeric_as_i64(&args[0])?, numeric_as_i64(&args[1])?, 1i64),
+        _ => (
+            numeric_as_i64(&args[0])?,
+            numeric_as_i64(&args[1])?,
+            numeric_as_i64(&args[2])?,
+        ),
+    };
+    if step == 0 {
+        return Err(ValueError::Other("range step cannot be zero".into()));
+    }
+    let mut items = Vec::new();
+    let mut i = start;
+    while if step > 0 { i < end } else { i > end } {
+        items.push(Value::Long(i));
+        i = i.wrapping_add(step);
+    }
+    Ok(Value::List(GcPtr::new(PersistentList::from_iter(items))))
+}
+
+fn builtin_replicate(args: &[Value]) -> ValueResult<Value> {
+    let n = numeric_as_i64(&args[0])? as usize;
+    let v = args[1].clone();
+    Ok(Value::List(GcPtr::new(PersistentList::from_iter(
+        std::iter::repeat_n(v, n),
+    ))))
+}
+
+fn builtin_symbol(args: &[Value]) -> ValueResult<Value> {
+    match args.len() {
+        1 => match &args[0] {
+            Value::Str(s) => Ok(Value::symbol(Symbol::parse(s.get()))),
+            Value::Keyword(kw) => Ok(Value::symbol(Symbol::parse(&kw.get().full_name()))),
+            Value::Symbol(s) => Ok(Value::Symbol(s.clone())),
+            Value::Var(v) => Ok(Value::symbol(Symbol::parse(&v.get().full_name()))),
+            v => Err(ValueError::WrongType {
+                expected: "string",
+                got: v.type_name().to_string(),
+            }),
+        },
+        2 => {
+            let ns = match &args[0] {
+                Value::Str(s) => s.get().clone(),
+                Value::Nil => {
+                    return Ok(Value::symbol(match &args[1] {
+                        Value::Str(s) => Symbol::simple(s.get().as_str()),
+                        v => {
+                            return Err(ValueError::WrongType {
+                                expected: "string",
+                                got: v.type_name().to_string(),
+                            });
+                        }
+                    }));
+                }
+                v => {
+                    return Err(ValueError::WrongType {
+                        expected: "string",
+                        got: v.type_name().to_string(),
+                    });
+                }
+            };
+            let name = match &args[1] {
+                Value::Str(s) => s.get().clone(),
+                v => {
+                    return Err(ValueError::WrongType {
+                        expected: "string",
+                        got: v.type_name().to_string(),
+                    });
+                }
+            };
+            Ok(Value::symbol(Symbol::qualified(ns, name)))
+        }
+        n => Err(ValueError::ArityError {
+            name: "symbol".into(),
+            expected: "1-2".into(),
+            got: n,
+        }),
+    }
+}
+
+fn builtin_keyword_fn(args: &[Value]) -> ValueResult<Value> {
+    match args.len() {
+        1 => match &args[0] {
+            Value::Str(s) => Ok(Value::keyword(Keyword::parse(s.get()))),
+            Value::Keyword(k) => Ok(Value::Keyword(k.clone())),
+            Value::Symbol(s) => Ok(Value::keyword(Keyword::parse(&s.get().full_name()))),
+            _ => Ok(Value::Nil),
+        },
+        2 => {
+            let ns: Option<String> = match &args[0] {
+                Value::Str(s) => Some(s.get().clone()),
+                Value::Nil => None,
+                _ => {
+                    return Err(ValueError::WrongType {
+                        expected: "str",
+                        got: args[0].type_name().to_string(),
+                    });
+                }
+            };
+            let name = match &args[1] {
+                Value::Str(s) => s.get().clone(),
+                _ => {
+                    return Err(ValueError::WrongType {
+                        expected: "str",
+                        got: args[0].type_name().to_string(),
+                    });
+                }
+            };
+            match ns {
+                Some(ns) => Ok(Value::keyword(Keyword::qualified(ns, name))),
+                None => Ok(Value::keyword(Keyword::parse(name.as_str()))),
+            }
+        }
+        n => Err(ValueError::ArityError {
+            name: "keyword".into(),
+            expected: "1-2".into(),
+            got: n,
+        }),
+    }
+}
+
+fn builtin_boolean(args: &[Value]) -> ValueResult<Value> {
+    Ok(Value::Bool(is_truthy(&args[0])))
+}
+
+fn builtin_int(args: &[Value]) -> ValueResult<Value> {
+    Ok(Value::Long(numeric_as_i32(&args[0])? as i64))
+}
+
+fn builtin_long(args: &[Value]) -> ValueResult<Value> {
+    match &args[0] {
+        Value::Str(_) => Err(ValueError::WrongType {
+            expected: "number",
+            got: args[0].type_name().to_string(),
+        }),
+        _ => Ok(Value::Long(numeric_as_i64(&args[0])?)),
+    }
+}
+
+fn builtin_double_fn(args: &[Value]) -> ValueResult<Value> {
+    Ok(Value::Double(numeric_as_f64(&args[0])?))
+}
+
+fn builtin_float_fn(args: &[Value]) -> ValueResult<Value> {
+    if let Value::Str(s) = &args[0] {
+        let num: Result<f32, ParseFloatError> = s.get().parse();
+        match num {
+            Ok(n) => Ok(Value::Double(n as f64)),
+            Err(e) => Err(ValueError::Other(e.to_string())),
+        }
+    } else {
+        Ok(Value::Double(numeric_as_f32(&args[0])? as f64))
+    }
+}
+
+fn builtin_char_fn(args: &[Value]) -> ValueResult<Value> {
+    match &args[0] {
+        Value::Long(n) => char::from_u32(*n as u32)
+            .map(Value::Char)
+            .ok_or_else(|| ValueError::Other("invalid char code".into())),
+        Value::Char(c) => Ok(Value::Char(*c)),
+        v => Err(ValueError::WrongType {
+            expected: "integer",
+            got: v.type_name().to_string(),
+        }),
+    }
+}
+
+fn builtin_num(args: &[Value]) -> ValueResult<Value> {
+    match &args[0] {
+        Value::Long(_)
+        | Value::Double(_)
+        | Value::Ratio(_)
+        | Value::BigInt(_)
+        | Value::BigDecimal(_)
+        | Value::Nil => Ok(args[0].clone()),
+        v => Err(ValueError::WrongType {
+            expected: "number",
+            got: v.type_name().to_string(),
+        }),
+    }
+}
+
+fn builtin_short(args: &[Value]) -> ValueResult<Value> {
+    let num = builtin_num(args)?;
+    let num = numeric_as_i64(&num)?;
+    if !(-0x8000..=0x7fff).contains(&num) {
+        Err(ValueError::OutOfRange)
+    } else {
+        Ok(Value::Long(num))
+    }
+}
+
+fn builtin_byte(args: &[Value]) -> ValueResult<Value> {
+    // Special-case double and BigDecimal
+    if let Value::Double(d) = &args[0]
+        && (*d < -128.0 || *d > 127.0)
+    {
+        return Err(ValueError::OutOfRange);
+    }
+    if let Value::BigDecimal(d) = &args[0]
+        && (d.get().cmp(&BigDecimal::from_f64(-128.0f64).unwrap()) == Ordering::Less
+            || d.get().cmp(&BigDecimal::from_f64(127.0).unwrap()) == Ordering::Greater)
+    {
+        return Err(ValueError::OutOfRange);
+    }
+    let num = builtin_num(args)?;
+    let num = numeric_as_i64(&num)?;
+    if !(-0x80..=0x7f).contains(&num) {
+        Err(ValueError::OutOfRange)
+    } else {
+        Ok(Value::Long(num))
+    }
+}
+
+// ── format helpers ────────────────────────────────────────────────────────────
+
+/// Pad `s` to at least `width` characters, space-padding only (for strings /
+/// non-numeric values).
+fn fmt_pad(out: &mut String, s: &str, width: Option<usize>, left: bool) {
+    let slen = s.chars().count();
+    match width {
+        Some(w) if w > slen => {
+            let n = w - slen;
+            if left {
+                out.push_str(s);
+                for _ in 0..n {
+                    out.push(' ');
+                }
+            } else {
+                for _ in 0..n {
+                    out.push(' ');
+                }
+                out.push_str(s);
+            }
+        }
+        _ => out.push_str(s),
+    }
+}
+
+/// Pad a numeric string to `width`.  When zero-padding the sign character (if
+/// any) is emitted before the zeros.
+fn fmt_pad_num(out: &mut String, s: &str, width: Option<usize>, left: bool, zero: bool) {
+    let slen = s.chars().count();
+    match width {
+        Some(w) if w > slen => {
+            let n = w - slen;
+            if left {
+                out.push_str(s);
+                for _ in 0..n {
+                    out.push(' ');
+                }
+            } else if zero {
+                let first = s.chars().next().unwrap_or(' ');
+                if matches!(first, '-' | '+' | ' ') {
+                    out.push(first);
+                    for _ in 0..n {
+                        out.push('0');
+                    }
+                    out.push_str(&s[first.len_utf8()..]);
+                } else {
+                    for _ in 0..n {
+                        out.push('0');
+                    }
+                    out.push_str(s);
+                }
+            } else {
+                for _ in 0..n {
+                    out.push(' ');
+                }
+                out.push_str(s);
+            }
+        }
+        _ => out.push_str(s),
+    }
+}
+
+/// Format `n` with comma thousands-separators.
+fn fmt_grouped(n: u64) -> String {
+    let s = n.to_string();
+    let mut buf = String::with_capacity(s.len() + s.len() / 3);
+    for (i, c) in s.chars().rev().enumerate() {
+        if i > 0 && i % 3 == 0 {
+            buf.push(',');
+        }
+        buf.push(c);
+    }
+    buf.chars().rev().collect()
+}
+
+/// Prepend the appropriate sign to an absolute-value digit string.
+fn fmt_signed(negative: bool, abs: &str, plus: bool, space: bool, paren: bool) -> String {
+    if negative {
+        if paren {
+            format!("({})", abs)
+        } else {
+            format!("-{}", abs)
+        }
+    } else if plus {
+        format!("+{}", abs)
+    } else if space {
+        format!(" {}", abs)
+    } else {
+        abs.to_string()
+    }
+}
+
+/// Format `f` as scientific notation matching Java's `%e` / `%E`.
+/// Exponent always has a sign and at least two digits: `1.234568e+02`.
+fn fmt_scientific(
+    f: f64,
+    prec: usize,
+    upper: bool,
+    plus: bool,
+    space: bool,
+    paren: bool,
+) -> String {
+    if f.is_nan() {
+        return "NaN".to_string();
+    }
+    if f.is_infinite() {
+        let s = if f > 0.0 { "Infinity" } else { "-Infinity" };
+        return s.to_string();
+    }
+    let negative = f.is_sign_negative();
+    let f_abs = f.abs();
+    let e_char = if upper { 'E' } else { 'e' };
+
+    let (mantissa_str, exp) = if f_abs == 0.0 {
+        let frac = if prec > 0 {
+            format!(".{}", "0".repeat(prec))
+        } else {
+            String::new()
+        };
+        (format!("0{}", frac), 0i32)
+    } else {
+        let exp = f_abs.log10().floor() as i32;
+        let mantissa = f_abs / 10f64.powi(exp);
+        let ms = format!("{:.prec$}", mantissa);
+        // Rounding can push mantissa to 10.0
+        if ms.starts_with("10") {
+            (format!("{:.prec$}", mantissa / 10.0), exp + 1)
+        } else {
+            (ms, exp)
+        }
+    };
+
+    let exp_sign = if exp >= 0 { '+' } else { '-' };
+    let exp_abs = exp.unsigned_abs();
+    let abs_str = format!("{}{}{}{:02}", mantissa_str, e_char, exp_sign, exp_abs);
+    fmt_signed(negative, &abs_str, plus, space, paren)
+}
+
+/// Format `f` using `%g` / `%G` semantics (shortest of fixed / scientific,
+/// trailing zeros stripped).
+fn fmt_general(f: f64, prec: usize, upper: bool, plus: bool, space: bool, paren: bool) -> String {
+    if f.is_nan() {
+        return "NaN".to_string();
+    }
+    if f.is_infinite() {
+        let s = if f > 0.0 { "Infinity" } else { "-Infinity" };
+        return s.to_string();
+    }
+    let negative = f.is_sign_negative();
+    let f_abs = f.abs();
+    let exp = if f_abs == 0.0 {
+        0i32
+    } else {
+        f_abs.log10().floor() as i32
+    };
+    let e_char = if upper { 'E' } else { 'e' };
+
+    let abs_str = if exp < -4 || exp >= prec as i32 {
+        let sci_prec = prec.saturating_sub(1);
+        let mantissa = if f_abs == 0.0 {
+            0.0
+        } else {
+            f_abs / 10f64.powi(exp)
+        };
+        let ms = format!("{:.prec$}", mantissa, prec = sci_prec);
+        let ms = ms.trim_end_matches('0');
+        let ms = ms.trim_end_matches('.');
+        let exp_sign = if exp >= 0 { '+' } else { '-' };
+        format!("{}{}{}{:02}", ms, e_char, exp_sign, exp.unsigned_abs())
+    } else {
+        let decimal_places = ((prec as i32) - 1 - exp).max(0) as usize;
+        let s = format!("{:.prec$}", f_abs, prec = decimal_places);
+        if s.contains('.') {
+            s.trim_end_matches('0').trim_end_matches('.').to_string()
+        } else {
+            s
+        }
+    };
+    fmt_signed(negative, &abs_str, plus, space, paren)
+}
+
+// ── builtin_format ────────────────────────────────────────────────────────────
+
+fn builtin_format(args: &[Value]) -> ValueResult<Value> {
+    let fmt = match &args[0] {
+        Value::Str(s) => s.get().clone(),
+        v => {
+            return Err(ValueError::WrongType {
+                expected: "string",
+                got: v.type_name().to_string(),
+            });
+        }
+    };
+
+    let chars: Vec<char> = fmt.chars().collect();
+    let len = chars.len();
+    let mut i = 0;
+    let mut arg_idx = 1usize;
+    let mut out = String::new();
+
+    while i < len {
+        if chars[i] != '%' {
+            out.push(chars[i]);
+            i += 1;
+            continue;
+        }
+        i += 1; // consume '%'
+        if i >= len {
+            out.push('%');
+            break;
+        }
+
+        // ── Parse flags ───────────────────────────────────────────────────────
+        let mut flag_left = false;
+        let mut flag_plus = false;
+        let mut flag_space = false;
+        let mut flag_zero = false;
+        let mut flag_paren = false;
+        let mut flag_comma = false;
+        let mut flag_alt = false;
+
+        loop {
+            match chars.get(i).copied() {
+                Some('-') => {
+                    flag_left = true;
+                    i += 1;
+                }
+                Some('+') => {
+                    flag_plus = true;
+                    i += 1;
+                }
+                Some(' ') => {
+                    flag_space = true;
+                    i += 1;
+                }
+                // '0' is the zero-pad flag only before width digits; consumed
+                // at most once — subsequent '0's become part of the width.
+                Some('0') if !flag_zero => {
+                    flag_zero = true;
+                    i += 1;
+                }
+                Some('(') => {
+                    flag_paren = true;
+                    i += 1;
+                }
+                Some(',') => {
+                    flag_comma = true;
+                    i += 1;
+                }
+                Some('#') => {
+                    flag_alt = true;
+                    i += 1;
+                }
+                _ => break,
+            }
+        }
+
+        // ── Parse width ───────────────────────────────────────────────────────
+        let width_start = i;
+        while i < len && chars[i].is_ascii_digit() {
+            i += 1;
+        }
+        let width: Option<usize> = if i > width_start {
+            chars[width_start..i]
+                .iter()
+                .collect::<String>()
+                .parse()
+                .ok()
+        } else {
+            None
+        };
+
+        // ── Parse precision ───────────────────────────────────────────────────
+        let precision: Option<usize> = if i < len && chars[i] == '.' {
+            i += 1;
+            let prec_start = i;
+            while i < len && chars[i].is_ascii_digit() {
+                i += 1;
+            }
+            if i > prec_start {
+                chars[prec_start..i].iter().collect::<String>().parse().ok()
+            } else {
+                Some(0)
+            }
+        } else {
+            None
+        };
+
+        if i >= len {
+            out.push('%');
+            break;
+        }
+
+        let conv = chars[i];
+        i += 1;
+
+        match conv {
+            // ── Literal % / newline ───────────────────────────────────────────
+            '%' => out.push('%'),
+            'n' => out.push('\n'),
+
+            // ── String ───────────────────────────────────────────────────────
+            's' | 'S' => {
+                let s = match args.get(arg_idx) {
+                    Some(v) => {
+                        arg_idx += 1;
+                        let raw = match v {
+                            Value::Nil => "null".to_string(),
+                            Value::Str(s) => s.get().clone(),
+                            other => format!("{}", other),
+                        };
+                        match precision {
+                            Some(p) => raw.chars().take(p).collect(),
+                            None => raw,
+                        }
+                    }
+                    None => String::new(),
+                };
+                let s = if conv == 'S' { s.to_uppercase() } else { s };
+                fmt_pad(&mut out, &s, width, flag_left);
+            }
+
+            // ── Decimal integer ───────────────────────────────────────────────
+            'd' => {
+                let n = match args.get(arg_idx) {
+                    Some(v) => {
+                        arg_idx += 1;
+                        numeric_as_i64(v).unwrap_or(0)
+                    }
+                    None => 0,
+                };
+                let abs_digits = if flag_comma {
+                    fmt_grouped(n.unsigned_abs())
+                } else {
+                    n.unsigned_abs().to_string()
+                };
+                let s = fmt_signed(n < 0, &abs_digits, flag_plus, flag_space, flag_paren);
+                fmt_pad_num(&mut out, &s, width, flag_left, flag_zero && !flag_left);
+            }
+
+            // ── Fixed-point float ─────────────────────────────────────────────
+            'f' => {
+                let f = match args.get(arg_idx) {
+                    Some(v) => {
+                        arg_idx += 1;
+                        numeric_as_f64(v).unwrap_or(0.0)
+                    }
+                    None => 0.0,
+                };
+                let prec = precision.unwrap_or(6);
+                let negative = f.is_sign_negative();
+                let f_abs = f.abs();
+                let abs_str = if flag_comma {
+                    let s = format!("{:.prec$}", f_abs);
+                    match s.find('.') {
+                        Some(idx) => {
+                            let int_n: u64 = s[..idx].parse().unwrap_or(0);
+                            format!("{}{}", fmt_grouped(int_n), &s[idx..])
+                        }
+                        None => {
+                            let int_n: u64 = s.parse().unwrap_or(0);
+                            fmt_grouped(int_n)
+                        }
+                    }
+                } else {
+                    format!("{:.prec$}", f_abs)
+                };
+                let s = fmt_signed(negative, &abs_str, flag_plus, flag_space, flag_paren);
+                fmt_pad_num(&mut out, &s, width, flag_left, flag_zero && !flag_left);
+            }
+
+            // ── Scientific notation ───────────────────────────────────────────
+            'e' | 'E' => {
+                let f = match args.get(arg_idx) {
+                    Some(v) => {
+                        arg_idx += 1;
+                        numeric_as_f64(v).unwrap_or(0.0)
+                    }
+                    None => 0.0,
+                };
+                let prec = precision.unwrap_or(6);
+                let s = fmt_scientific(f, prec, conv == 'E', flag_plus, flag_space, flag_paren);
+                fmt_pad_num(&mut out, &s, width, flag_left, flag_zero && !flag_left);
+            }
+
+            // ── General float ─────────────────────────────────────────────────
+            'g' | 'G' => {
+                let f = match args.get(arg_idx) {
+                    Some(v) => {
+                        arg_idx += 1;
+                        numeric_as_f64(v).unwrap_or(0.0)
+                    }
+                    None => 0.0,
+                };
+                let prec = match precision {
+                    Some(0) | None => 6,
+                    Some(p) => p,
+                };
+                let s = fmt_general(f, prec, conv == 'G', flag_plus, flag_space, flag_paren);
+                fmt_pad_num(&mut out, &s, width, flag_left, flag_zero && !flag_left);
+            }
+
+            // ── Hex integer ───────────────────────────────────────────────────
+            'x' | 'X' => {
+                let n = match args.get(arg_idx) {
+                    Some(v) => {
+                        arg_idx += 1;
+                        numeric_as_i64(v).unwrap_or(0) as u64
+                    }
+                    None => 0,
+                };
+                let digits = if conv == 'X' {
+                    format!("{:X}", n)
+                } else {
+                    format!("{:x}", n)
+                };
+                let s = if flag_alt {
+                    let prefix = if conv == 'X' { "0X" } else { "0x" };
+                    format!("{}{}", prefix, digits)
+                } else {
+                    digits
+                };
+                fmt_pad_num(&mut out, &s, width, flag_left, flag_zero && !flag_left);
+            }
+
+            // ── Octal integer ─────────────────────────────────────────────────
+            'o' => {
+                let n = match args.get(arg_idx) {
+                    Some(v) => {
+                        arg_idx += 1;
+                        numeric_as_i64(v).unwrap_or(0) as u64
+                    }
+                    None => 0,
+                };
+                let s = format!("{:o}", n);
+                fmt_pad_num(&mut out, &s, width, flag_left, flag_zero && !flag_left);
+            }
+
+            // ── Boolean ───────────────────────────────────────────────────────
+            'b' | 'B' => {
+                let s = match args.get(arg_idx) {
+                    Some(v) => {
+                        arg_idx += 1;
+                        match v {
+                            Value::Nil | Value::Bool(false) => "false".to_string(),
+                            _ => "true".to_string(),
+                        }
+                    }
+                    None => "false".to_string(),
+                };
+                let s = if conv == 'B' { s.to_uppercase() } else { s };
+                fmt_pad(&mut out, &s, width, flag_left);
+            }
+
+            // ── Character ─────────────────────────────────────────────────────
+            'c' | 'C' => {
+                let s = match args.get(arg_idx) {
+                    Some(v) => {
+                        arg_idx += 1;
+                        match v {
+                            Value::Char(c) => c.to_string(),
+                            Value::Long(n) => char::from_u32(*n as u32)
+                                .map(|c| c.to_string())
+                                .unwrap_or_default(),
+                            _ => String::new(),
+                        }
+                    }
+                    None => String::new(),
+                };
+                let s = if conv == 'C' { s.to_uppercase() } else { s };
+                fmt_pad(&mut out, &s, width, flag_left);
+            }
+
+            // ── Unknown conversion — emit literally ───────────────────────────
+            other => {
+                out.push('%');
+                if flag_left {
+                    out.push('-');
+                }
+                if flag_plus {
+                    out.push('+');
+                }
+                if flag_space {
+                    out.push(' ');
+                }
+                if flag_zero {
+                    out.push('0');
+                }
+                if flag_paren {
+                    out.push('(');
+                }
+                if flag_comma {
+                    out.push(',');
+                }
+                if flag_alt {
+                    out.push('#');
+                }
+                if let Some(w) = width {
+                    out.push_str(&w.to_string());
+                }
+                if let Some(p) = precision {
+                    out.push('.');
+                    out.push_str(&p.to_string());
+                }
+                out.push(other);
+            }
+        }
+    }
+
+    Ok(Value::string(out))
+}
+
+fn builtin_printf(args: &[Value]) -> ValueResult<Value> {
+    let s = builtin_format(args)?;
+    if let Value::Str(s) = s {
+        emit_output(s.get());
+    }
+    Ok(Value::Nil)
+}
+
+fn builtin_newline(_args: &[Value]) -> ValueResult<Value> {
+    emit_output_ln("");
+    Ok(Value::Nil)
+}
+
+fn builtin_flush(_args: &[Value]) -> ValueResult<Value> {
+    use std::io::Write;
+    let _ = std::io::stdout().flush();
+    Ok(Value::Nil)
+}
+
+fn builtin_stub_nil(_args: &[Value]) -> ValueResult<Value> {
+    Ok(Value::Nil)
+}
+
+// ── Hierarchy stubs ──────────────────────────────────────────────────────────
+
+fn builtin_make_hierarchy(_args: &[Value]) -> ValueResult<Value> {
+    // Return an empty hierarchy map: {:parents {} :descendants {} :ancestors {}}
+    use cljrs_value::collections::PersistentHashMap;
+    let empty_map = Value::Map(MapValue::Hash(GcPtr::new(PersistentHashMap::empty())));
+    let mut m = PersistentHashMap::empty();
+    m = m.assoc(
+        Value::keyword(Keyword::simple("parents")),
+        empty_map.clone(),
+    );
+    m = m.assoc(
+        Value::keyword(Keyword::simple("descendants")),
+        empty_map.clone(),
+    );
+    m = m.assoc(Value::keyword(Keyword::simple("ancestors")), empty_map);
+    Ok(Value::Map(MapValue::Hash(GcPtr::new(m))))
+}
+
+fn builtin_ancestors(args: &[Value]) -> ValueResult<Value> {
+    // Stub: return empty set
+    let _ = args;
+    Ok(Value::Set(SetValue::Hash(GcPtr::new(
+        cljrs_value::collections::PersistentHashSet::empty(),
+    ))))
+}
+
+fn builtin_descendants(args: &[Value]) -> ValueResult<Value> {
+    let _ = args;
+    Ok(Value::Set(SetValue::Hash(GcPtr::new(
+        cljrs_value::collections::PersistentHashSet::empty(),
+    ))))
+}
+
+fn builtin_parents(args: &[Value]) -> ValueResult<Value> {
+    let _ = args;
+    Ok(Value::Nil)
+}
+
+// ── bound-fn* ────────────────────────────────────────────────────────────────
+
+fn builtin_bound_fn_star(args: &[Value]) -> ValueResult<Value> {
+    // bound-fn* wraps a fn so that when called, the current thread bindings
+    // are installed. For now, just return the fn as-is (bindings are already
+    // conveyed in most contexts).
+    Ok(args[0].clone())
+}
+
+// ── intern ───────────────────────────────────────────────────────────────────
+
+// intern is intercepted in eval_call for real usage; this sentinel exists
+// so that (resolve 'intern) finds the var.
+fn builtin_intern_sentinel(_args: &[Value]) -> ValueResult<Value> {
+    Err(ValueError::Other(
+        "intern must be invoked through the evaluator".into(),
+    ))
+}
+
+// ── not-empty ────────────────────────────────────────────────────────────────
+
+fn builtin_not_empty(args: &[Value]) -> ValueResult<Value> {
+    let is_empty = match &args[0] {
+        Value::Nil => true,
+        Value::List(l) => l.get().is_empty(),
+        Value::Vector(v) => v.get().is_empty(),
+        Value::Map(m) => m.count() == 0,
+        Value::Set(s) => s.count() == 0,
+        Value::Str(s) => s.get().is_empty(),
+        v => {
+            return Err(ValueError::WrongType {
+                expected: "seqable",
+                got: v.type_name().to_string(),
+            });
+        }
+    };
+    if is_empty {
+        Ok(Value::Nil)
+    } else {
+        Ok(args[0].clone())
+    }
+}
+
+// ── take-nth ─────────────────────────────────────────────────────────────────
+
+fn builtin_take_nth(args: &[Value]) -> ValueResult<Value> {
+    let n = numeric_as_i64(&args[0])? as usize;
+    if n == 0 {
+        return Err(ValueError::Other("take-nth step must be positive".into()));
+    }
+    let items = value_to_seq(&args[1])?;
+    let result: Vec<Value> = items.into_iter().step_by(n).collect();
+    Ok(Value::List(GcPtr::new(PersistentList::from_iter(result))))
+}
+
+// Bit operations
+fn builtin_bit_and(args: &[Value]) -> ValueResult<Value> {
+    Ok(Value::Long(
+        numeric_as_i64(&args[0])? & numeric_as_i64(&args[1])?,
+    ))
+}
+fn builtin_bit_or(args: &[Value]) -> ValueResult<Value> {
+    Ok(Value::Long(
+        numeric_as_i64(&args[0])? | numeric_as_i64(&args[1])?,
+    ))
+}
+fn builtin_bit_xor(args: &[Value]) -> ValueResult<Value> {
+    Ok(Value::Long(
+        numeric_as_i64(&args[0])? ^ numeric_as_i64(&args[1])?,
+    ))
+}
+fn builtin_bit_not(args: &[Value]) -> ValueResult<Value> {
+    Ok(Value::Long(!numeric_as_i64(&args[0])?))
+}
+fn builtin_bit_shl(args: &[Value]) -> ValueResult<Value> {
+    Ok(Value::Long(
+        numeric_as_i64(&args[0])? << numeric_as_i64(&args[1])?,
+    ))
+}
+fn builtin_bit_shr(args: &[Value]) -> ValueResult<Value> {
+    Ok(Value::Long(
+        numeric_as_i64(&args[0])? >> numeric_as_i64(&args[1])?,
+    ))
+}
+fn builtin_bit_ushr(args: &[Value]) -> ValueResult<Value> {
+    Ok(Value::Long(
+        ((numeric_as_i64(&args[0])? as u64) >> numeric_as_i64(&args[1])? as u64) as i64,
+    ))
+}
+
+fn builtin_char_code(args: &[Value]) -> ValueResult<Value> {
+    match &args[0] {
+        Value::Char(c) => Ok(Value::Long(*c as i64)),
+        v => Err(ValueError::WrongType {
+            expected: "char",
+            got: v.type_name().to_string(),
+        }),
+    }
+}
+
+fn builtin_char_at(args: &[Value]) -> ValueResult<Value> {
+    match (&args[0], &args[1]) {
+        (Value::Str(s), Value::Long(idx)) => Ok(s
+            .get()
+            .chars()
+            .nth(*idx as usize)
+            .map(Value::Char)
+            .unwrap_or(Value::Nil)),
+        _ => Ok(Value::Nil),
+    }
+}
+
+fn builtin_string_to_list(args: &[Value]) -> ValueResult<Value> {
+    match &args[0] {
+        Value::Str(s) => {
+            let chars: Vec<Value> = s.get().chars().map(Value::Char).collect();
+            Ok(Value::List(GcPtr::new(PersistentList::from_iter(chars))))
+        }
+        v => Err(ValueError::WrongType {
+            expected: "string",
+            got: v.type_name().to_string(),
+        }),
+    }
+}
+
+fn builtin_number_to_string(args: &[Value]) -> ValueResult<Value> {
+    match &args[0] {
+        Value::Long(n) => Ok(Value::string(n.to_string())),
+        Value::Double(f) => Ok(Value::string(f.to_string())),
+        v => Err(ValueError::WrongType {
+            expected: "number",
+            got: v.type_name().to_string(),
+        }),
+    }
+}
+
+fn builtin_string_to_number(args: &[Value]) -> ValueResult<Value> {
+    match &args[0] {
+        Value::Str(s) => {
+            let radix = if let Some(Value::Long(r)) = args.get(1) {
+                *r as u32
+            } else {
+                10
+            };
+            if let Ok(n) = i64::from_str_radix(s.get(), radix) {
+                Ok(Value::Long(n))
+            } else if radix == 10 {
+                if let Ok(f) = s.get().parse::<f64>() {
+                    Ok(Value::Double(f))
+                } else {
+                    Ok(Value::Bool(false))
+                }
+            } else {
+                Ok(Value::Bool(false))
+            }
+        }
+        v => Err(ValueError::WrongType {
+            expected: "string",
+            got: v.type_name().to_string(),
+        }),
+    }
+}
+
+fn builtin_floor(args: &[Value]) -> ValueResult<Value> {
+    Ok(Value::Double(numeric_as_f64(&args[0])?.floor()))
+}
+fn builtin_ceil(args: &[Value]) -> ValueResult<Value> {
+    Ok(Value::Double(numeric_as_f64(&args[0])?.ceil()))
+}
+fn builtin_round(args: &[Value]) -> ValueResult<Value> {
+    Ok(Value::Long(numeric_as_f64(&args[0])?.round() as i64))
+}
+fn builtin_sqrt(args: &[Value]) -> ValueResult<Value> {
+    Ok(Value::Double(numeric_as_f64(&args[0])?.sqrt()))
+}
+fn builtin_pow(args: &[Value]) -> ValueResult<Value> {
+    Ok(Value::Double(
+        numeric_as_f64(&args[0])?.powf(numeric_as_f64(&args[1])?),
+    ))
+}
+fn builtin_log(args: &[Value]) -> ValueResult<Value> {
+    Ok(Value::Double(numeric_as_f64(&args[0])?.ln()))
+}
+fn builtin_log10(args: &[Value]) -> ValueResult<Value> {
+    Ok(Value::Double(numeric_as_f64(&args[0])?.log10()))
+}
+fn builtin_exp(args: &[Value]) -> ValueResult<Value> {
+    Ok(Value::Double(numeric_as_f64(&args[0])?.exp()))
+}
+fn builtin_sin(args: &[Value]) -> ValueResult<Value> {
+    Ok(Value::Double(numeric_as_f64(&args[0])?.sin()))
+}
+fn builtin_cos(args: &[Value]) -> ValueResult<Value> {
+    Ok(Value::Double(numeric_as_f64(&args[0])?.cos()))
+}
+fn builtin_tan(args: &[Value]) -> ValueResult<Value> {
+    Ok(Value::Double(numeric_as_f64(&args[0])?.tan()))
+}
+fn builtin_asin(args: &[Value]) -> ValueResult<Value> {
+    Ok(Value::Double(numeric_as_f64(&args[0])?.asin()))
+}
+fn builtin_acos(args: &[Value]) -> ValueResult<Value> {
+    Ok(Value::Double(numeric_as_f64(&args[0])?.acos()))
+}
+fn builtin_atan(args: &[Value]) -> ValueResult<Value> {
+    Ok(Value::Double(numeric_as_f64(&args[0])?.atan()))
+}
+fn builtin_atan2(args: &[Value]) -> ValueResult<Value> {
+    Ok(Value::Double(
+        numeric_as_f64(&args[0])?.atan2(numeric_as_f64(&args[1])?),
+    ))
+}
+fn builtin_sinh(args: &[Value]) -> ValueResult<Value> {
+    Ok(Value::Double(numeric_as_f64(&args[0])?.sinh()))
+}
+fn builtin_cosh(args: &[Value]) -> ValueResult<Value> {
+    Ok(Value::Double(numeric_as_f64(&args[0])?.cosh()))
+}
+fn builtin_tanh(args: &[Value]) -> ValueResult<Value> {
+    Ok(Value::Double(numeric_as_f64(&args[0])?.tanh()))
+}
+fn builtin_hypot(args: &[Value]) -> ValueResult<Value> {
+    Ok(Value::Double(
+        numeric_as_f64(&args[0])?.hypot(numeric_as_f64(&args[1])?),
+    ))
+}
+
+fn builtin_rand(args: &[Value]) -> ValueResult<Value> {
+    // Deterministic for testing: use a simple hash.
+    let n = if args.is_empty() {
+        1.0
+    } else {
+        numeric_as_f64(&args[0])?
+    };
+    let r = rand::random::<f64>();
+    Ok(Value::Double(r * n)) // stub
+}
+
+fn builtin_rand_int(args: &[Value]) -> ValueResult<Value> {
+    let n = numeric_as_i64(&args[0])?;
+    if n == 0 {
+        Ok(Value::Long(0))
+    } else {
+        let r = rand::random::<i64>().abs();
+        Ok(Value::Long(r % n))
+    }
+}
+
+fn builtin_random_sample(args: &[Value]) -> ValueResult<Value> {
+    let prob = match &args[0] {
+        Value::Double(d) => *d,
+        Value::Long(n) => *n as f64,
+        other => {
+            return Err(ValueError::WrongType {
+                expected: "number",
+                got: other.type_name().to_string(),
+            });
+        }
+    };
+    let items = value_to_seq(&args[1])?;
+    let mut result = Vec::new();
+    for item in items {
+        if rand::random::<f64>() < prob {
+            result.push(item);
+        }
+    }
+    Ok(Value::List(GcPtr::new(PersistentList::from_iter(result))))
+}
+
+fn value_compare_result(a: &Value, b: &Value) -> ValueResult<std::cmp::Ordering> {
+    match (a, b) {
+        (Value::Nil, Value::Nil) => Ok(std::cmp::Ordering::Equal),
+        (Value::Nil, _) => Ok(std::cmp::Ordering::Less),
+        (_, Value::Nil) => Ok(std::cmp::Ordering::Greater),
+        (Value::Bool(x), Value::Bool(y)) => Ok(x.cmp(y)),
+        // All numeric types: cross-type comparison
+        (
+            Value::Long(_)
+            | Value::Double(_)
+            | Value::BigInt(_)
+            | Value::BigDecimal(_)
+            | Value::Ratio(_),
+            Value::Long(_)
+            | Value::Double(_)
+            | Value::BigInt(_)
+            | Value::BigDecimal(_)
+            | Value::Ratio(_),
+        ) => num_compare(a, b),
+        (Value::Str(x), Value::Str(y)) => Ok(x.get().cmp(y.get())),
+        (Value::Char(x), Value::Char(y)) => Ok(x.cmp(y)),
+        (Value::Keyword(x), Value::Keyword(y)) => {
+            // Compare namespace first, then name (matching Clojure)
+            let ns_cmp = match (&x.get().namespace, &y.get().namespace) {
+                (None, None) => std::cmp::Ordering::Equal,
+                (None, Some(_)) => std::cmp::Ordering::Less,
+                (Some(_), None) => std::cmp::Ordering::Greater,
+                (Some(a), Some(b)) => a.cmp(b),
+            };
+            Ok(ns_cmp.then_with(|| x.get().name.cmp(&y.get().name)))
+        }
+        (Value::Symbol(x), Value::Symbol(y)) => {
+            let ns_cmp = match (&x.get().namespace, &y.get().namespace) {
+                (None, None) => std::cmp::Ordering::Equal,
+                (None, Some(_)) => std::cmp::Ordering::Less,
+                (Some(_), None) => std::cmp::Ordering::Greater,
+                (Some(a), Some(b)) => a.cmp(b),
+            };
+            Ok(ns_cmp.then_with(|| x.get().name.cmp(&y.get().name)))
+        }
+        (Value::Vector(x), Value::Vector(y)) => {
+            // Lexicographic comparison
+            let x = x.get();
+            let y = y.get();
+            let mut xi = x.iter();
+            let mut yi = y.iter();
+            loop {
+                match (xi.next(), yi.next()) {
+                    (None, None) => return Ok(std::cmp::Ordering::Equal),
+                    (None, Some(_)) => return Ok(std::cmp::Ordering::Less),
+                    (Some(_), None) => return Ok(std::cmp::Ordering::Greater),
+                    (Some(a), Some(b)) => {
+                        let cmp = value_compare_result(a, b)?;
+                        if cmp != std::cmp::Ordering::Equal {
+                            return Ok(cmp);
+                        }
+                    }
+                }
+            }
+        }
+        _ => Err(ValueError::Other(format!(
+            "cannot compare {} to {}",
+            a.type_name(),
+            b.type_name()
+        ))),
+    }
+}
+
+/// Fallible merge sort — propagates errors from the comparator.
+fn merge_sort<F>(items: &mut [Value], compare: &F) -> ValueResult<()>
+where
+    F: Fn(&Value, &Value) -> ValueResult<std::cmp::Ordering>,
+{
+    let len = items.len();
+    if len <= 1 {
+        return Ok(());
+    }
+    let mid = len / 2;
+    merge_sort(&mut items[..mid], compare)?;
+    merge_sort(&mut items[mid..], compare)?;
+    // Merge into temp buffer
+    let left = items[..mid].to_vec();
+    let right = items[mid..].to_vec();
+    let (mut i, mut j, mut k) = (0, 0, 0);
+    while i < left.len() && j < right.len() {
+        if compare(&left[i], &right[j])? != std::cmp::Ordering::Greater {
+            items[k] = left[i].clone();
+            i += 1;
+        } else {
+            items[k] = right[j].clone();
+            j += 1;
+        }
+        k += 1;
+    }
+    while i < left.len() {
+        items[k] = left[i].clone();
+        i += 1;
+        k += 1;
+    }
+    while j < right.len() {
+        items[k] = right[j].clone();
+        j += 1;
+        k += 1;
+    }
+    Ok(())
+}
+
+fn builtin_sort(args: &[Value]) -> ValueResult<Value> {
+    if args.len() == 2 {
+        // (sort comp coll)
+        let comp = args[0].clone();
+        let mut items = value_to_seq(&args[1])?;
+        merge_sort(&mut items, &|a, b| invoke_compare(&comp, a, b))?;
+        match &args[1] {
+            Value::Nil => Ok(Value::List(GcPtr::new(PersistentList::Empty))),
+            _ => Ok(cons_from_iter(items)),
+        }
+    } else {
+        // (sort coll)
+        let mut items = value_to_seq(&args[0])?;
+        merge_sort(&mut items, &|a, b| value_compare_result(a, b))?;
+        match &args[0] {
+            Value::Nil => Ok(Value::List(GcPtr::new(PersistentList::Empty))),
+            _ => Ok(cons_from_iter(items)),
+        }
+    }
+}
+
+/// Interpret the result of calling a Clojure comparator.
+/// Clojure comparators return either:
+/// - a number (negative/zero/positive) like `compare`
+/// - a boolean (true = first arg comes first) like `<`
+fn interpret_compare_result(v: &Value) -> ValueResult<std::cmp::Ordering> {
+    match v {
+        Value::Long(n) => Ok(if *n < 0 {
+            std::cmp::Ordering::Less
+        } else if *n > 0 {
+            std::cmp::Ordering::Greater
+        } else {
+            std::cmp::Ordering::Equal
+        }),
+        Value::Double(f) => Ok(if *f < 0.0 {
+            std::cmp::Ordering::Less
+        } else if *f > 0.0 {
+            std::cmp::Ordering::Greater
+        } else {
+            std::cmp::Ordering::Equal
+        }),
+        Value::Bool(true) => Ok(std::cmp::Ordering::Less),
+        Value::Bool(false) => Ok(std::cmp::Ordering::Greater),
+        other => Err(ValueError::Other(format!(
+            "comparator must return a number or boolean, got {}",
+            other.type_name()
+        ))),
+    }
+}
+
+/// Call a Clojure comparator function and interpret the result.
+fn invoke_compare(comp: &Value, a: &Value, b: &Value) -> ValueResult<std::cmp::Ordering> {
+    let result = crate::env::callback::invoke(comp, vec![a.clone(), b.clone()])?;
+    interpret_compare_result(&result)
+}
+
+fn builtin_sorted_set(args: &[Value]) -> ValueResult<Value> {
+    let set = SortedSet::from_iter(args.iter().cloned());
+    Ok(Value::Set(SetValue::Sorted(GcPtr::new(set))))
+}
+
+fn builtin_sorted_set_q(args: &[Value]) -> ValueResult<Value> {
+    Ok(Value::Bool(matches!(
+        &args[0],
+        Value::Set(SetValue::Sorted(_))
+    )))
+}
+
+fn builtin_sorted_map(args: &[Value]) -> ValueResult<Value> {
+    if !args.len().is_multiple_of(2) {
+        return Err(ValueError::OddMap { count: args.len() });
+    }
+    let sm = cljrs_value::SortedMap::from_pairs(
+        args.chunks(2)
+            .map(|pair| (pair[0].clone(), pair[1].clone())),
+    );
+    Ok(Value::Map(MapValue::Sorted(GcPtr::new(sm))))
+}
+
+fn builtin_sorted_map_q(args: &[Value]) -> ValueResult<Value> {
+    Ok(Value::Bool(matches!(
+        &args[0],
+        Value::Map(MapValue::Sorted(_))
+    )))
+}
+
+fn builtin_sort_by(args: &[Value]) -> ValueResult<Value> {
+    // (sort-by keyfn coll) or (sort-by keyfn comp coll)
+    let keyfn = &args[0];
+    let (comp, coll) = if args.len() == 3 {
+        (Some(&args[1]), &args[2])
+    } else {
+        (None, &args[1])
+    };
+    let items = value_to_seq(coll)?;
+    // Pre-compute keys to avoid calling keyfn O(n log n) times
+    let mut keys: Vec<Value> = Vec::with_capacity(items.len());
+    for item in &items {
+        keys.push(crate::env::callback::invoke(keyfn, vec![item.clone()])?);
+    }
+    // Build index array and sort by keys
+    let mut indices: Vec<usize> = (0..items.len()).collect();
+    let mut sort_error: Option<ValueError> = None;
+    indices.sort_by(|&i, &j| {
+        if sort_error.is_some() {
+            return std::cmp::Ordering::Equal;
+        }
+        let result = if let Some(comp) = comp {
+            invoke_compare(comp, &keys[i], &keys[j])
+        } else {
+            value_compare_result(&keys[i], &keys[j])
+        };
+        match result {
+            Ok(ord) => ord,
+            Err(e) => {
+                sort_error = Some(e);
+                std::cmp::Ordering::Equal
+            }
+        }
+    });
+    if let Some(err) = sort_error {
+        return Err(err);
+    }
+    let sorted: Vec<Value> = indices.into_iter().map(|i| items[i].clone()).collect();
+    match coll {
+        Value::Nil => Ok(Value::List(GcPtr::new(PersistentList::Empty))),
+        _ => Ok(cons_from_iter(sorted)),
+    }
+}
+
+fn builtin_walk_stub(_args: &[Value]) -> ValueResult<Value> {
+    Ok(Value::Nil)
+}
+
+fn builtin_postwalk_stub(_args: &[Value]) -> ValueResult<Value> {
+    Ok(Value::Nil)
+}
+
+fn builtin_prewalk_stub(_args: &[Value]) -> ValueResult<Value> {
+    Ok(Value::Nil)
+}
+
+// String functions
+fn builtin_subs(args: &[Value]) -> ValueResult<Value> {
+    match &args[0] {
+        Value::Str(s) => {
+            let len = s.get().chars().count();
+            let start_i = numeric_as_i64(&args[1])?;
+            let end_i = if let Some(e) = args.get(2) {
+                numeric_as_i64(e)?
+            } else {
+                len as i64
+            };
+            if start_i < 0
+                || end_i < 0
+                || (start_i as usize) > len
+                || (end_i as usize) > len
+                || start_i > end_i
+            {
+                return Err(ValueError::Other(format!(
+                    "String index out of range: start={}, end={}, length={}",
+                    start_i, end_i, len
+                )));
+            }
+            let substr: String = s
+                .get()
+                .chars()
+                .skip(start_i as usize)
+                .take((end_i - start_i) as usize)
+                .collect();
+            Ok(Value::string(substr))
+        }
+        v => Err(ValueError::WrongType {
+            expected: "string",
+            got: v.type_name().to_string(),
+        }),
+    }
+}
+
+fn builtin_split_stub(_args: &[Value]) -> ValueResult<Value> {
+    Ok(Value::Vector(GcPtr::new(PersistentVector::empty())))
+}
+
+fn builtin_join(args: &[Value]) -> ValueResult<Value> {
+    let (sep, coll) = if args.len() == 1 {
+        ("".to_string(), &args[0])
+    } else {
+        (
+            match &args[0] {
+                Value::Nil => String::new(),
+                Value::Str(s) => s.get().to_string(),
+                Value::Char(c) => c.to_string(),
+                v => format!("{}", PrintValue(v)),
+            },
+            &args[1],
+        )
+    };
+    let joined: String = ValueIter::new(coll.clone())
+        .map(|v| match &v {
+            Value::Nil => String::new(),
+            Value::Str(s) => s.get().to_string(),
+            Value::Char(c) => c.to_string(),
+            other => format!("{}", PrintValue(other)),
+        })
+        .collect::<Vec<_>>()
+        .join(&sep);
+    Ok(Value::string(joined))
+}
+
+fn builtin_trim(args: &[Value]) -> ValueResult<Value> {
+    match &args[0] {
+        Value::Str(s) => Ok(Value::string(s.get().trim().to_string())),
+        v => Err(ValueError::WrongType {
+            expected: "string",
+            got: v.type_name().to_string(),
+        }),
+    }
+}
+
+fn builtin_upper_case(args: &[Value]) -> ValueResult<Value> {
+    match &args[0] {
+        Value::Str(s) => Ok(Value::string(s.get().to_uppercase())),
+        v => Err(ValueError::WrongType {
+            expected: "string",
+            got: v.type_name().to_string(),
+        }),
+    }
+}
+
+fn builtin_lower_case(args: &[Value]) -> ValueResult<Value> {
+    match &args[0] {
+        Value::Str(s) => Ok(Value::string(s.get().to_lowercase())),
+        v => Err(ValueError::WrongType {
+            expected: "string",
+            got: v.type_name().to_string(),
+        }),
+    }
+}
+
+fn builtin_starts_with(args: &[Value]) -> ValueResult<Value> {
+    match (&args[0], &args[1]) {
+        (Value::Str(s), Value::Str(prefix)) => {
+            Ok(Value::Bool(s.get().starts_with(prefix.get().as_str())))
+        }
+        _ => Ok(Value::Bool(false)),
+    }
+}
+
+fn builtin_ends_with(args: &[Value]) -> ValueResult<Value> {
+    match (&args[0], &args[1]) {
+        (Value::Str(s), Value::Str(suffix)) => {
+            Ok(Value::Bool(s.get().ends_with(suffix.get().as_str())))
+        }
+        _ => Ok(Value::Bool(false)),
+    }
+}
+
+fn builtin_includes(args: &[Value]) -> ValueResult<Value> {
+    match (&args[0], &args[1]) {
+        (Value::Str(s), Value::Str(needle)) => {
+            Ok(Value::Bool(s.get().contains(needle.get().as_str())))
+        }
+        _ => Ok(Value::Bool(false)),
+    }
+}
+
+fn builtin_clojure_version(_args: &[Value]) -> ValueResult<Value> {
+    Ok(Value::string("cljrs-0.1.0"))
+}
+
+// ── Protocol & Multimethod builtins ───────────────────────────────────────────
+
+fn builtin_satisfies_q(args: &[Value]) -> ValueResult<Value> {
+    use crate::env::apply::type_tag_of;
+    let proto = match &args[0] {
+        Value::Protocol(p) => p.clone(),
+        v => {
+            return Err(ValueError::WrongType {
+                expected: "protocol",
+                got: v.type_name().to_string(),
+            });
+        }
+    };
+    let tag = type_tag_of(&args[1]);
+    let impls = proto.get().impls.lock().unwrap();
+    Ok(Value::Bool(impls.contains_key(tag.as_ref())))
+}
+
+fn builtin_extends_q(args: &[Value]) -> ValueResult<Value> {
+    let proto = match &args[0] {
+        Value::Protocol(p) => p.clone(),
+        v => {
+            return Err(ValueError::WrongType {
+                expected: "protocol",
+                got: v.type_name().to_string(),
+            });
+        }
+    };
+    let type_tag: Arc<str> = match &args[1] {
+        Value::Symbol(s) => Arc::from(s.get().name.as_ref()),
+        Value::Str(s) => Arc::from(s.get().as_str()),
+        Value::Keyword(k) => Arc::from(k.get().name.as_ref()),
+        v => {
+            return Err(ValueError::WrongType {
+                expected: "symbol or string",
+                got: v.type_name().to_string(),
+            });
+        }
+    };
+    let impls = proto.get().impls.lock().unwrap();
+    Ok(Value::Bool(impls.contains_key(type_tag.as_ref())))
+}
+
+fn builtin_prefer_method(args: &[Value]) -> ValueResult<Value> {
+    let mf = match &args[0] {
+        Value::MultiFn(m) => m.clone(),
+        v => {
+            return Err(ValueError::WrongType {
+                expected: "multimethod",
+                got: v.type_name().to_string(),
+            });
+        }
+    };
+    let preferred = format!("{}", args[1]);
+    let over = format!("{}", args[2]);
+    let mut prefers = mf.get().prefers.lock().unwrap();
+    prefers.entry(preferred).or_default().push(over);
+    Ok(Value::MultiFn(mf.clone()))
+}
+
+fn builtin_remove_method(args: &[Value]) -> ValueResult<Value> {
+    let mf = match &args[0] {
+        Value::MultiFn(m) => m.clone(),
+        v => {
+            return Err(ValueError::WrongType {
+                expected: "multimethod",
+                got: v.type_name().to_string(),
+            });
+        }
+    };
+    let key = format!("{}", args[1]);
+    mf.get().methods.lock().unwrap().remove(&key);
+    Ok(Value::MultiFn(mf.clone()))
+}
+
+fn builtin_methods(args: &[Value]) -> ValueResult<Value> {
+    let mf = match &args[0] {
+        Value::MultiFn(m) => m.clone(),
+        v => {
+            return Err(ValueError::WrongType {
+                expected: "multimethod",
+                got: v.type_name().to_string(),
+            });
+        }
+    };
+    let methods = mf.get().methods.lock().unwrap();
+    let mut m = cljrs_value::MapValue::empty();
+    for (k, v) in methods.iter() {
+        m = m.assoc(Value::string(k.clone()), v.clone());
+    }
+    Ok(Value::Map(m))
+}
+
+fn builtin_isa_q(args: &[Value]) -> ValueResult<Value> {
+    // Stub: equality only; full hierarchy deferred.
+    Ok(Value::Bool(args[0] == args[1]))
+}
+
+// ── Phase 7 — Concurrency primitives ─────────────────────────────────────────
+
+fn builtin_compare_and_set(args: &[Value]) -> ValueResult<Value> {
+    match &args[0] {
+        Value::Atom(a) => {
+            let mut guard = a.get().value.lock().unwrap();
+            if *guard == args[1] {
+                *guard = args[2].clone();
+                Ok(Value::Bool(true))
+            } else {
+                Ok(Value::Bool(false))
+            }
+        }
+        Value::SharedAtom(sa) => {
+            // Lock-free CAS: succeed only if the live value still equals the
+            // expected one, by content, at the moment of the atomic store.
+            let cur = sa.deref_val();
+            if demote(&cur) != args[1] {
+                return Ok(Value::Bool(false));
+            }
+            let sv = promote(&args[2]).map_err(|e| ValueError::Other(e.to_string()))?;
+            Ok(Value::Bool(sa.compare_and_set(&cur, sv)))
+        }
+        v => Err(ValueError::WrongType {
+            expected: "atom",
+            got: v.type_name().to_string(),
+        }),
+    }
+}
+
+fn builtin_volatile(args: &[Value]) -> ValueResult<Value> {
+    Ok(Value::Volatile(GcPtr::new(Volatile::new(args[0].clone()))))
+}
+
+fn builtin_vreset(args: &[Value]) -> ValueResult<Value> {
+    match &args[0] {
+        Value::Volatile(v) => Ok(v.get().reset(args[1].clone())),
+        v => Err(ValueError::WrongType {
+            expected: "volatile",
+            got: v.type_name().to_string(),
+        }),
+    }
+}
+
+fn builtin_vswap_sentinel(_args: &[Value]) -> ValueResult<Value> {
+    Err(ValueError::Other(
+        "vswap! must be invoked through the evaluator".into(),
+    ))
+}
+
+fn builtin_volatile_q(args: &[Value]) -> ValueResult<Value> {
+    Ok(Value::Bool(matches!(args[0], Value::Volatile(_))))
+}
+
+fn builtin_force(args: &[Value]) -> ValueResult<Value> {
+    match &args[0] {
+        Value::Delay(d) => d.get().force().map_err(ValueError::Other),
+        other => Ok(other.clone()), // non-delay passes through
+    }
+}
+
+fn builtin_realized_q(args: &[Value]) -> ValueResult<Value> {
+    let realized = match &args[0] {
+        Value::Delay(d) => d.get().is_realized(),
+        Value::Promise(p) => p.get().is_realized(),
+        Value::Future(f) => f.get().is_done(),
+        Value::LazySeq(ls) => {
+            matches!(
+                &*ls.get().state.lock().unwrap(),
+                cljrs_value::types::LazySeqState::Forced(_)
+            )
+        }
+        v => {
+            return Err(ValueError::WrongType {
+                expected: "IPending",
+                got: v.type_name().to_string(),
+            });
+        }
+    };
+    Ok(Value::Bool(realized))
+}
+
+// ── reduced ──────────────────────────────────────────────────────────────────
+
+fn builtin_reduced(args: &[Value]) -> ValueResult<Value> {
+    Ok(Value::Reduced(Box::new(args[0].clone())))
+}
+
+fn builtin_reduced_q(args: &[Value]) -> ValueResult<Value> {
+    Ok(Value::Bool(matches!(args[0], Value::Reduced(_))))
+}
+
+fn builtin_unreduced(args: &[Value]) -> ValueResult<Value> {
+    match &args[0] {
+        Value::Reduced(inner) => Ok(*inner.clone()),
+        other => Ok(other.clone()),
+    }
+}
+
+fn builtin_ensure_reduced(args: &[Value]) -> ValueResult<Value> {
+    match &args[0] {
+        Value::Reduced(_) => Ok(args[0].clone()),
+        other => Ok(Value::Reduced(Box::new(other.clone()))),
+    }
+}
+
+fn builtin_promise(_args: &[Value]) -> ValueResult<Value> {
+    Ok(Value::Promise(GcPtr::new(CljxPromise::new())))
+}
+
+fn builtin_deliver(args: &[Value]) -> ValueResult<Value> {
+    match &args[0] {
+        Value::Promise(p) => {
+            p.get().deliver(args[1].clone());
+            Ok(args[0].clone())
+        }
+        v => Err(ValueError::WrongType {
+            expected: "promise",
+            got: v.type_name().to_string(),
+        }),
+    }
+}
+
+// These functions are kept for future use but are not currently registered.
+#[allow(dead_code)]
+fn builtin_future_done_q(args: &[Value]) -> ValueResult<Value> {
+    match &args[0] {
+        Value::Future(f) => Ok(Value::Bool(f.get().is_done())),
+        v => Err(ValueError::WrongType {
+            expected: "future",
+            got: v.type_name().to_string(),
+        }),
+    }
+}
+
+#[allow(dead_code)]
+fn builtin_future_cancelled_q(args: &[Value]) -> ValueResult<Value> {
+    match &args[0] {
+        Value::Future(f) => Ok(Value::Bool(f.get().is_cancelled())),
+        v => Err(ValueError::WrongType {
+            expected: "future",
+            got: v.type_name().to_string(),
+        }),
+    }
+}
+
+#[allow(dead_code)]
+fn builtin_future_cancel(args: &[Value]) -> ValueResult<Value> {
+    match &args[0] {
+        Value::Future(f) => {
+            let mut state = f.get().state.lock().unwrap();
+            if matches!(&*state, FutureState::Running) {
+                *state = FutureState::Cancelled;
+                f.get().cond.notify_all();
+            }
+            Ok(Value::Bool(true))
+        }
+        v => Err(ValueError::WrongType {
+            expected: "future",
+            got: v.type_name().to_string(),
+        }),
+    }
+}
+
+#[allow(dead_code)]
+fn builtin_future_call_star(_args: &[Value]) -> ValueResult<Value> {
+    Err(ValueError::Other("future is not yet implemented".into()))
+}
+
+#[allow(dead_code)]
+fn builtin_agent(_args: &[Value]) -> ValueResult<Value> {
+    Err(ValueError::Other("agent is not yet implemented".into()))
+}
+
+#[allow(dead_code)]
+fn builtin_await_agent(_args: &[Value]) -> ValueResult<Value> {
+    Ok(Value::Nil)
+}
+
+#[allow(dead_code)]
+fn builtin_agent_error(args: &[Value]) -> ValueResult<Value> {
+    match &args[0] {
+        Value::Agent(a) => match a.get().get_error() {
+            Some(e) => Ok(e),
+            None => Ok(Value::Nil),
+        },
+        v => Err(ValueError::WrongType {
+            expected: "agent",
+            got: v.type_name().to_string(),
+        }),
+    }
+}
+
+#[allow(dead_code)]
+fn builtin_restart_agent(args: &[Value]) -> ValueResult<Value> {
+    match &args[0] {
+        Value::Agent(a) => {
+            a.get().clear_error();
+            *a.get().state.lock().unwrap() = args[1].clone();
+            Ok(args[0].clone())
+        }
+        v => Err(ValueError::WrongType {
+            expected: "agent",
+            got: v.type_name().to_string(),
+        }),
+    }
+}
+
+fn builtin_send_sentinel(_args: &[Value]) -> ValueResult<Value> {
+    Err(ValueError::Other(
+        "send/send-off must be invoked through the evaluator".into(),
+    ))
+}
+
+fn builtin_make_delay_sentinel(_args: &[Value]) -> ValueResult<Value> {
+    Err(ValueError::Other(
+        "make-delay must be invoked through the evaluator".into(),
+    ))
+}
+
+// ── Records / reify ──────────────────────────────────────────────────────────
+
+/// `(make-type-instance type-tag-str fields-map)` — low-level constructor.
+/// Used by `defrecord` constructors and `reify` implementations.
+fn builtin_make_type_instance(args: &[Value]) -> ValueResult<Value> {
+    let type_tag = match &args[0] {
+        Value::Str(s) => Arc::from(s.get().as_str()),
+        Value::Symbol(s) => Arc::from(s.get().name.as_ref()),
+        v => {
+            return Err(ValueError::WrongType {
+                expected: "string or symbol",
+                got: v.type_name().to_string(),
+            });
+        }
+    };
+    let fields = match &args[1] {
+        Value::Map(m) => m.clone(),
+        Value::Nil => MapValue::empty(),
+        v => {
+            return Err(ValueError::WrongType {
+                expected: "map",
+                got: v.type_name().to_string(),
+            });
+        }
+    };
+    Ok(Value::TypeInstance(GcPtr::new(TypeInstance {
+        type_tag,
+        fields,
+    })))
+}
+
+/// `(record? x)` — true if x is a TypeInstance.
+fn builtin_record_q(args: &[Value]) -> ValueResult<Value> {
+    Ok(Value::Bool(matches!(args[0], Value::TypeInstance(_))))
+}
+
+/// `(instance? TypeName x)` — true if x is a TypeInstance with the given type tag.
+/// TypeName may be a Symbol or String.
+fn builtin_instance_q(args: &[Value]) -> ValueResult<Value> {
+    let expected_tag: String = match &args[0] {
+        Value::Symbol(s) => s.get().full_name(),
+        Value::Str(s) => s.get().clone(),
+        _ => return Ok(Value::Bool(false)),
+    };
+    let val = &args[1];
+    let result = match expected_tag.as_ref() {
+        "clojure.lang.BigInt" | "BigInt" => matches!(val, Value::BigInt(_)),
+        "java.math.BigDecimal" | "BigDecimal" => matches!(val, Value::BigDecimal(_)),
+        "clojure.lang.Ratio" | "Ratio" => matches!(val, Value::Ratio(_)),
+        "java.lang.Long" | "Long" => matches!(val, Value::Long(_)),
+        "java.lang.Double" | "Double" => matches!(val, Value::Double(_)),
+        "java.lang.String" | "String" => matches!(val, Value::Str(_)),
+        "java.lang.Boolean" | "Boolean" => matches!(val, Value::Bool(_)),
+        "java.lang.Character" | "Character" => matches!(val, Value::Char(_)),
+        "clojure.lang.Symbol" | "Symbol" => matches!(val, Value::Symbol(_)),
+        "clojure.lang.Keyword" | "Keyword" => matches!(val, Value::Keyword(_)),
+        "clojure.lang.PersistentList" | "List" => matches!(val, Value::List(_)),
+        "clojure.lang.PersistentVector" | "Vector" => matches!(val, Value::Vector(_)),
+        "clojure.lang.PersistentHashMap" | "PersistentHashMap" | "Map" => {
+            matches!(val, Value::Map(_))
+        }
+        "clojure.lang.PersistentHashSet" | "PersistentHashSet" | "Set" => {
+            matches!(val, Value::Set(_))
+        }
+        "clojure.lang.IFn" | "IFn" => {
+            matches!(
+                val,
+                Value::Fn(_) | Value::NativeFunction(_) | Value::Keyword(_)
+            )
+        }
+        "clojure.lang.ISeq" | "ISeq" => {
+            matches!(val, Value::List(_) | Value::Cons(_) | Value::LazySeq(_))
+        }
+        "java.lang.Number" | "Number" => matches!(
+            val,
+            Value::Long(_)
+                | Value::Double(_)
+                | Value::BigInt(_)
+                | Value::BigDecimal(_)
+                | Value::Ratio(_)
+        ),
+        "java.util.UUID" => matches!(val, Value::Uuid(_)),
+        "clojure.lang.IPending" | "IPending" => matches!(
+            val,
+            Value::Promise(_) | Value::Future(_) | Value::Delay(_) | Value::LazySeq(_)
+        ),
+        "clojure.lang.IEditableCollection" => match val {
+            Value::List(_) | Value::Set(_) | Value::Map(_) | Value::Vector(_) => true,
+            Value::WithMeta(inner, _) => matches!(
+                **inner,
+                Value::List(_) | Value::Set(_) | Value::Map(_) | Value::Vector(_)
+            ),
+            _ => false,
+        },
+        "clojure.lang.PersistentQueue" => matches!(
+            val,
+            Value::Queue(_) | Value::List(_) // Compatibility with clojure
+        ),
+        "java.util.regex.Pattern" => matches!(val, Value::Pattern(_)),
+        "ExceptionInfo" | "clojure.lang.ExceptionInfo" | "Exception" | "java.lang.Exception" => {
+            matches!(val, Value::Error(_))
+        }
+        _ => match val {
+            Value::TypeInstance(ti) => ti.get().type_tag.as_ref() == expected_tag.as_str(),
+            Value::NativeObject(obj) => obj.get().type_tag() == expected_tag.as_str(),
+            _ => false,
+        },
+    };
+    Ok(Value::Bool(result))
+}
+
+// ── Dynamic variables (Phase 9) ───────────────────────────────────────────────
+
+/// `(var-get v)` — return the current value of a var (dynamic bindings respected).
+fn builtin_var_get(args: &[Value]) -> ValueResult<Value> {
+    match &args[0] {
+        Value::Var(vp) => Ok(crate::env::dynamics::deref_var(vp).unwrap_or(Value::Nil)),
+        v => Err(ValueError::WrongType {
+            expected: "var",
+            got: v.type_name().to_string(),
+        }),
+    }
+}
+
+/// `(var-set! v val)` — set the thread-local binding for `v`; if none, set root.
+fn builtin_var_set_bang(args: &[Value]) -> ValueResult<Value> {
+    match &args[0] {
+        Value::Var(vp) => {
+            let val = args[1].clone();
+            if !crate::env::dynamics::set_thread_local(vp, val.clone()) {
+                vp.get().bind(val.clone());
+            }
+            Ok(val)
+        }
+        v => Err(ValueError::WrongType {
+            expected: "var",
+            got: v.type_name().to_string(),
+        }),
+    }
+}
+
+/// Sentinel — `alter-var-root` is intercepted in `eval_call` because it needs env.
+fn builtin_alter_var_root_sentinel(_args: &[Value]) -> ValueResult<Value> {
+    Err(ValueError::WrongType {
+        expected: "intercepted",
+        got: "alter-var-root sentinel should not be called directly".to_string(),
+    })
+}
+
+/// `(bound? v)` — true if var has any binding (thread-local or root).
+fn builtin_bound_q(args: &[Value]) -> ValueResult<Value> {
+    match &args[0] {
+        Value::Var(vp) => Ok(Value::Bool(crate::env::dynamics::deref_var(vp).is_some())),
+        _ => Ok(Value::Bool(false)),
+    }
+}
+
+/// `(thread-bound? v)` — true if var has a thread-local binding on this thread.
+fn builtin_thread_bound_q(args: &[Value]) -> ValueResult<Value> {
+    match &args[0] {
+        Value::Var(vp) => Ok(Value::Bool(crate::env::dynamics::is_thread_bound(vp))),
+        _ => Ok(Value::Bool(false)),
+    }
+}
+
+/// `(meta x)` — return the metadata map of a var, or nil.
+fn builtin_meta(args: &[Value]) -> ValueResult<Value> {
+    match &args[0] {
+        Value::Var(vp) => Ok(vp.get().get_meta().unwrap_or(Value::Nil)),
+        Value::Atom(a) => Ok(a.get().get_meta().unwrap_or(Value::Nil)),
+        Value::Namespace(ns) => Ok(ns.get().get_meta().unwrap_or(Value::Nil)),
+        Value::WithMeta(_, meta) => Ok(meta.as_ref().clone()),
+        _ => Ok(Value::Nil),
+    }
+}
+
+/// `(doc-data x)` — structured docs for a Var or function value:
+/// `{:doc <string-or-nil> :arities <vector-or-nil>}`. Accepts a `Var`
+/// (`#'foo`), any value carrying attached metadata (`with-meta`), or a bare
+/// function value (native or interpreted), for which only `:arities` can be
+/// derived (functions don't carry `:doc` on their own — only their Var does).
+fn builtin_doc_data(args: &[Value]) -> ValueResult<Value> {
+    let (meta, target) = match &args[0] {
+        Value::Var(vp) => (vp.get().get_meta(), vp.get().deref().unwrap_or(Value::Nil)),
+        Value::WithMeta(inner, m) => (Some((**m).clone()), (**inner).clone()),
+        other => (None, other.clone()),
+    };
+    let doc = meta
+        .as_ref()
+        .and_then(|m| map_val_get(m, "doc"))
+        .unwrap_or(Value::Nil);
+    let arities = meta
+        .as_ref()
+        .and_then(|m| map_val_get(m, "arglists"))
+        .or_else(|| fn_arities(&target))
+        .unwrap_or(Value::Nil);
+    Ok(Value::Map(
+        MapValue::empty()
+            .assoc(Value::keyword(Keyword::parse("doc")), doc)
+            .assoc(Value::keyword(Keyword::parse("arities")), arities),
+    ))
+}
+
+/// Look up a keyword-keyed entry in a `Value::Map`.
+fn map_val_get(m: &Value, key: &str) -> Option<Value> {
+    match m {
+        Value::Map(m) => m.get(&Value::keyword(Keyword::parse(key))),
+        _ => None,
+    }
+}
+
+/// Compute a Clojure-style arglists vector (`([x] [x y & more])`) for a
+/// function value that has no `:arglists` metadata of its own — used for
+/// native builtins, whose arities are known but whose parameter names are
+/// not.
+fn fn_arities(v: &Value) -> Option<Value> {
+    match v {
+        Value::Fn(f) | Value::Macro(f) => {
+            let skip = if matches!(v, Value::Macro(_)) { 2 } else { 0 };
+            let lists: Vec<Value> = f
+                .get()
+                .arities
+                .iter()
+                .map(|a| {
+                    let mut syms: Vec<Value> = a
+                        .params
+                        .iter()
+                        .skip(skip)
+                        .map(|p| Value::symbol(Symbol::simple(p.as_ref())))
+                        .collect();
+                    if let Some(rest) = &a.rest_param {
+                        syms.push(Value::symbol(Symbol::simple("&")));
+                        syms.push(Value::symbol(Symbol::simple(rest.as_ref())));
+                    }
+                    Value::Vector(GcPtr::new(PersistentVector::from_iter(syms)))
+                })
+                .collect();
+            Some(Value::Vector(GcPtr::new(PersistentVector::from_iter(
+                lists,
+            ))))
+        }
+        Value::NativeFunction(nf) => {
+            let params = synthetic_params(&nf.get().arity);
+            Some(Value::Vector(GcPtr::new(PersistentVector::from_iter(
+                vec![Value::Vector(GcPtr::new(PersistentVector::from_iter(
+                    params,
+                )))],
+            ))))
+        }
+        _ => None,
+    }
+}
+
+/// Generate placeholder parameter symbols for a native fn's `Arity` — its
+/// real parameter names aren't tracked, only the arity shape is.
+fn synthetic_params(arity: &Arity) -> Vec<Value> {
+    let name = |i: usize| Value::symbol(Symbol::simple(format!("arg{}", i + 1)));
+    match arity {
+        Arity::Fixed(n) => (0..*n).map(name).collect(),
+        Arity::Variadic { min } => {
+            let mut params: Vec<Value> = (0..*min).map(name).collect();
+            params.push(Value::symbol(Symbol::simple("&")));
+            params.push(Value::symbol(Symbol::simple("more")));
+            params
+        }
+    }
+}
+
+/// `(with-meta v m)` — attach metadata to a value.
+fn builtin_with_meta(args: &[Value]) -> ValueResult<Value> {
+    match &args[0] {
+        Value::Var(vp) => {
+            vp.get().set_meta(args[1].clone());
+            Ok(args[0].clone())
+        }
+        Value::Namespace(ns) => {
+            ns.get().set_meta(args[1].clone());
+            Ok(args[0].clone())
+        }
+        _ => Ok(args[0].clone().with_meta(args[1].clone())),
+    }
+}
+
+/// Sentinel — `vary-meta` is intercepted in `eval_call` because it needs env.
+fn builtin_vary_meta_sentinel(_args: &[Value]) -> ValueResult<Value> {
+    Err(ValueError::WrongType {
+        expected: "intercepted",
+        got: "vary-meta sentinel should not be called directly".to_string(),
+    })
+}
+
+/// Sentinel — `with-bindings*` is intercepted in `eval_call` (needs env).
+fn builtin_with_bindings_star_sentinel(_args: &[Value]) -> ValueResult<Value> {
+    Err(ValueError::WrongType {
+        expected: "intercepted",
+        got: "with-bindings* sentinel should not be called directly".to_string(),
+    })
+}
+
+// ── Namespace reflection ──────────────────────────────────────────────────────
+
+fn ns_from_arg(v: &Value) -> ValueResult<&cljrs_gc::GcPtr<Namespace>> {
+    match v {
+        Value::Namespace(ns) => Ok(ns),
+        other => Err(ValueError::WrongType {
+            expected: "namespace",
+            got: other.type_name().to_string(),
+        }),
+    }
+}
+
+/// `(namespace? x)` — true if x is a Namespace value.
+fn builtin_namespace_q(args: &[Value]) -> ValueResult<Value> {
+    Ok(Value::Bool(matches!(args[0], Value::Namespace(_))))
+}
+
+/// `(ns-name ns)` — return the name of a namespace as a Symbol.
+fn builtin_ns_name(args: &[Value]) -> ValueResult<Value> {
+    let ns = ns_from_arg(&args[0])?;
+    let name = ns.get().name.clone();
+    Ok(Value::symbol(Symbol::simple(name)))
+}
+
+/// `(ns-interns ns)` — map of unqualified Symbol → Var for all interned vars.
+///
+/// Public so `cljrs-interp::apply` can call it after resolving a namespace
+/// name/symbol to an actual `Namespace` (see `the-ns` semantics there);
+/// intercepted via a sentinel in the builtin dispatch table below.
+pub fn builtin_ns_interns(args: &[Value]) -> ValueResult<Value> {
+    let ns = ns_from_arg(&args[0])?;
+    let interns = ns.get().interns.lock().unwrap();
+    let mut m = MapValue::empty();
+    for (name, var) in interns.iter() {
+        let sym = Value::symbol(Symbol::simple(name.clone()));
+        m = m.assoc(sym, Value::Var(var.clone()));
+    }
+    Ok(Value::Map(m))
+}
+
+/// `(ns-refers ns)` — map of Symbol → Var for all referred vars.
+///
+/// Public for the same reason as [`builtin_ns_interns`].
+pub fn builtin_ns_refers(args: &[Value]) -> ValueResult<Value> {
+    let ns = ns_from_arg(&args[0])?;
+    let refers = ns.get().refers.lock().unwrap();
+    let mut m = MapValue::empty();
+    for (name, var) in refers.iter() {
+        let sym = Value::symbol(Symbol::simple(name.clone()));
+        m = m.assoc(sym, Value::Var(var.clone()));
+    }
+    Ok(Value::Map(m))
+}
+
+/// `(ns-map ns)` — map of Symbol → Var for all visible names (interns + refers).
+/// Interns take priority over refers on name collision.
+///
+/// Public for the same reason as [`builtin_ns_interns`].
+pub fn builtin_ns_map(args: &[Value]) -> ValueResult<Value> {
+    let ns = ns_from_arg(&args[0])?;
+    let mut m = MapValue::empty();
+    // refers first (lower priority)
+    {
+        let refers = ns.get().refers.lock().unwrap();
+        for (name, var) in refers.iter() {
+            let sym = Value::symbol(Symbol::simple(name.clone()));
+            m = m.assoc(sym, Value::Var(var.clone()));
+        }
+    }
+    // interns override
+    {
+        let interns = ns.get().interns.lock().unwrap();
+        for (name, var) in interns.iter() {
+            let sym = Value::symbol(Symbol::simple(name.clone()));
+            m = m.assoc(sym, Value::Var(var.clone()));
+        }
+    }
+    Ok(Value::Map(m))
+}
+
+/// Sentinel — `ns-interns` accepts a namespace, symbol, or string (like
+/// `the-ns`) and needs GlobalEnv to resolve names; intercepted in `eval_call`.
+fn builtin_ns_interns_sentinel(_args: &[Value]) -> ValueResult<Value> {
+    Err(ValueError::WrongType {
+        expected: "intercepted",
+        got: "ns-interns sentinel should not be called directly".to_string(),
+    })
+}
+
+/// Sentinel — `ns-publics` needs GlobalEnv; intercepted in `eval_call`.
+fn builtin_ns_publics_sentinel(_args: &[Value]) -> ValueResult<Value> {
+    Err(ValueError::WrongType {
+        expected: "intercepted",
+        got: "ns-publics sentinel should not be called directly".to_string(),
+    })
+}
+
+/// Sentinel — `ns-refers` needs GlobalEnv; intercepted in `eval_call`.
+fn builtin_ns_refers_sentinel(_args: &[Value]) -> ValueResult<Value> {
+    Err(ValueError::WrongType {
+        expected: "intercepted",
+        got: "ns-refers sentinel should not be called directly".to_string(),
+    })
+}
+
+/// Sentinel — `ns-map` needs GlobalEnv; intercepted in `eval_call`.
+fn builtin_ns_map_sentinel(_args: &[Value]) -> ValueResult<Value> {
+    Err(ValueError::WrongType {
+        expected: "intercepted",
+        got: "ns-map sentinel should not be called directly".to_string(),
+    })
+}
+
+/// Sentinel — `find-ns` / `the-ns` need GlobalEnv; intercepted in `eval_call`.
+fn builtin_find_ns_sentinel(_args: &[Value]) -> ValueResult<Value> {
+    Err(ValueError::WrongType {
+        expected: "intercepted",
+        got: "find-ns sentinel should not be called directly".to_string(),
+    })
+}
+
+/// Sentinel — `all-ns` needs GlobalEnv; intercepted in `eval_call`.
+fn builtin_all_ns_sentinel(_args: &[Value]) -> ValueResult<Value> {
+    Err(ValueError::WrongType {
+        expected: "intercepted",
+        got: "all-ns sentinel should not be called directly".to_string(),
+    })
+}
+
+/// Sentinel — `create-ns` needs GlobalEnv; intercepted in `eval_call`.
+fn builtin_create_ns_sentinel(_args: &[Value]) -> ValueResult<Value> {
+    Err(ValueError::WrongType {
+        expected: "intercepted",
+        got: "create-ns sentinel should not be called directly".to_string(),
+    })
+}
+
+/// Sentinel — `ns-aliases` needs GlobalEnv (to look up target ns); intercepted in `eval_call`.
+fn builtin_ns_aliases_sentinel(_args: &[Value]) -> ValueResult<Value> {
+    Err(ValueError::WrongType {
+        expected: "intercepted",
+        got: "ns-aliases sentinel should not be called directly".to_string(),
+    })
+}
+
+/// Sentinel — `remove-ns` needs GlobalEnv; intercepted in `eval_call`.
+fn builtin_remove_ns_sentinel(_args: &[Value]) -> ValueResult<Value> {
+    Err(ValueError::WrongType {
+        expected: "intercepted",
+        got: "remove-ns sentinel should not be called directly".to_string(),
+    })
+}
+
+/// Sentinel — `alter-meta!` needs apply_value; intercepted in `eval_call`.
+fn builtin_alter_meta_bang_sentinel(_args: &[Value]) -> ValueResult<Value> {
+    Err(ValueError::WrongType {
+        expected: "intercepted",
+        got: "alter-meta! sentinel should not be called directly".to_string(),
+    })
+}
+
+/// Sentinel — `ns-resolve` needs GlobalEnv; intercepted in `eval_call`.
+fn builtin_ns_resolve_sentinel(_args: &[Value]) -> ValueResult<Value> {
+    Err(ValueError::WrongType {
+        expected: "intercepted",
+        got: "ns-resolve sentinel should not be called directly".to_string(),
+    })
+}
+
+/// Sentinel — `resolve` needs GlobalEnv + current ns; intercepted in `eval_call`.
+fn builtin_resolve_sentinel(_args: &[Value]) -> ValueResult<Value> {
+    Err(ValueError::WrongType {
+        expected: "intercepted",
+        got: "resolve sentinel should not be called directly".to_string(),
+    })
+}
+
+/// Sleep -- pause current thread for N ms
+fn builtin_sleep(args: &[Value]) -> ValueResult<Value> {
+    sleep(Duration::from_millis(
+        i64::max(0, numeric_as_i64(&args[0])?) as u64,
+    ));
+    Ok(Value::Nil)
+}
+
+/// uuid?
+fn builtin_uuid_q(args: &[Value]) -> ValueResult<Value> {
+    Ok(Value::Bool(matches!(&args[0], Value::Uuid(_))))
+}
+
+/// parse-uuid
+fn builtin_parse_uuid(args: &[Value]) -> ValueResult<Value> {
+    match &args[0] {
+        Value::Str(s) => {
+            let uuid = uuid::Uuid::parse_str(s.get());
+            match uuid {
+                Ok(uuid) => Ok(Value::Uuid(uuid.as_u128())),
+                Err(_) => Ok(Value::Nil),
+            }
+        }
+        v => Err(ValueError::WrongType {
+            expected: "str",
+            got: v.type_name().to_string(),
+        }),
+    }
+}
+
+fn builtin_random_uuid(_args: &[Value]) -> ValueResult<Value> {
+    let uuid = uuid::Uuid::new_v4();
+    Ok(Value::Uuid(uuid.as_u128()))
+}
+
+// ── Native objects (Phase 9 interop) ─────────────────────────────────────────
+
+/// `(native-object? x)` — true if x is a NativeObject.
+fn builtin_native_object_q(args: &[Value]) -> ValueResult<Value> {
+    Ok(Value::Bool(matches!(args[0], Value::NativeObject(_))))
+}
+
+/// `(native-type x)` — returns the type tag string of a NativeObject, or nil.
+fn builtin_native_type(args: &[Value]) -> ValueResult<Value> {
+    match &args[0] {
+        Value::NativeObject(obj) => Ok(Value::Str(GcPtr::new(obj.get().type_tag().to_string()))),
+        _ => Ok(Value::Nil),
+    }
+}
+
+#[cfg(test)]
+mod doc_tests {
+    use super::*;
+    use crate::env::env::{Env, GlobalEnv};
+    use crate::env::error::EvalResult;
+    use cljrs_reader::Form;
+
+    // `register_all` never calls back into the evaluator, so these stubs are
+    // never invoked; they only satisfy `GlobalEnv::new`'s signature.
+    fn stub_eval_fn(_form: &Form, _env: &mut Env) -> EvalResult {
+        Ok(Value::Nil)
+    }
+    fn stub_call_cljrs_fn(_f: &cljrs_value::CljxFn, _args: &[Value], _env: &mut Env) -> EvalResult {
+        Ok(Value::Nil)
+    }
+
+    fn test_globals() -> std::sync::Arc<GlobalEnv> {
+        let globals = GlobalEnv::new(stub_eval_fn, stub_call_cljrs_fn, None);
+        register_all(&globals, "clojure.core");
+        globals
+    }
+
+    /// Every `BUILTIN_DOCS` entry must name a builtin that's actually
+    /// registered — an entry for a typo'd or renamed name would silently
+    /// never attach, so catch that here instead.
+    #[test]
+    fn builtin_docs_names_are_all_registered() {
+        let globals = test_globals();
+        for (name, _) in BUILTIN_DOCS {
+            assert!(
+                globals.lookup_var("clojure.core", name).is_some(),
+                "BUILTIN_DOCS has an entry for {name:?}, but no builtin is registered under that name"
+            );
+        }
+    }
+
+    #[test]
+    fn builtin_docs_has_no_duplicate_names() {
+        let mut seen = std::collections::HashSet::new();
+        for (name, _) in BUILTIN_DOCS {
+            assert!(seen.insert(*name), "duplicate BUILTIN_DOCS entry: {name:?}");
+        }
+    }
+
+    /// Docs attach as `:doc` var metadata, readable via `meta`/`doc-data`.
+    #[test]
+    fn builtin_doc_attaches_as_var_meta() {
+        let globals = test_globals();
+        let var = globals
+            .lookup_var("clojure.core", "+")
+            .expect("+ should be registered");
+        let meta = var.get().get_meta().expect("+ should carry :doc metadata");
+        let doc = map_val_get(&meta, "doc").expect(":doc key should be present");
+        let expected = BUILTIN_DOCS.iter().find(|(n, _)| *n == "+").unwrap().1;
+        assert_eq!(doc, Value::string(expected.to_string()));
+    }
+}
