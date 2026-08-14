@@ -147,16 +147,15 @@ fn jit_native_code_resolves_pinned_symbols() {
     cljrs_jit::init();
 
     let _mutator = cljrs_gc::register_mutator();
-    let globals = cljrs_stdlib::standard_env_with_paths(vec![repo.src_dir.clone()]);
-
-    // Wait for the background compiler-namespace load (see
-    // compiler_clojure_tests.rs for why).
-    while !globals
-        .compiler_ready
-        .load(std::sync::atomic::Ordering::Acquire)
-    {
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
+    let globals = {
+        let runtime = cljrs_runtime::Runtime::builder()
+            .execution_mode(cljrs_runtime::ExecutionMode::Tiered)
+            .source_paths(vec![repo.src_dir.clone()])
+            .build()
+            .expect("runtime");
+        cljrs_stdlib::install(&runtime);
+        runtime.into_globals()
+    };
 
     let mut env = Env::new(globals.clone(), "user");
     cljrs_env::callback::push_eval_context(&env);

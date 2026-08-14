@@ -8,7 +8,14 @@ fn forms(src: &str) -> Vec<cljrs_reader::Form> {
 }
 
 fn env() -> cljrs_runtime::tiered::Env {
-    cljrs_runtime::tiered::Env::new(cljrs_runtime::tiered::standard_env(), "user")
+    cljrs_runtime::tiered::Env::new(
+        cljrs_runtime::Runtime::builder()
+            .execution_mode(cljrs_runtime::ExecutionMode::Tiered)
+            .build()
+            .expect("runtime")
+            .into_globals(),
+        "user",
+    )
 }
 
 #[test]

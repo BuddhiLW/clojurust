@@ -34,15 +34,14 @@ fn async_fn_compiles_to_native_state_machine_on_call() {
     cljrs_jit::init();
     let _mutator = cljrs_gc::register_mutator();
 
-    let globals = cljrs_stdlib::standard_env();
-
-    // Wait for the background compiler-namespace load (mirrors versioned_jit.rs).
-    while !globals
-        .compiler_ready
-        .load(std::sync::atomic::Ordering::Acquire)
-    {
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
+    let globals = {
+        let runtime = cljrs_runtime::Runtime::builder()
+            .execution_mode(cljrs_runtime::ExecutionMode::Tiered)
+            .build()
+            .expect("runtime");
+        cljrs_stdlib::install(&runtime);
+        runtime.into_globals()
+    };
 
     block_on_local(async move {
         cljrs_async::init(&globals);
@@ -87,13 +86,14 @@ fn async_fn_compiles_to_native_state_machine_on_call() {
 fn async_loop_with_await_is_correct() {
     cljrs_jit::init();
     let _mutator = cljrs_gc::register_mutator();
-    let globals = cljrs_stdlib::standard_env();
-    while !globals
-        .compiler_ready
-        .load(std::sync::atomic::Ordering::Acquire)
-    {
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
+    let globals = {
+        let runtime = cljrs_runtime::Runtime::builder()
+            .execution_mode(cljrs_runtime::ExecutionMode::Tiered)
+            .build()
+            .expect("runtime");
+        cljrs_stdlib::install(&runtime);
+        runtime.into_globals()
+    };
 
     block_on_local(async move {
         cljrs_async::init(&globals);
@@ -134,13 +134,14 @@ fn async_loop_with_await_is_correct() {
 fn async_fn_using_channels_is_not_compiled() {
     cljrs_jit::init();
     let _mutator = cljrs_gc::register_mutator();
-    let globals = cljrs_stdlib::standard_env();
-    while !globals
-        .compiler_ready
-        .load(std::sync::atomic::Ordering::Acquire)
-    {
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
+    let globals = {
+        let runtime = cljrs_runtime::Runtime::builder()
+            .execution_mode(cljrs_runtime::ExecutionMode::Tiered)
+            .build()
+            .expect("runtime");
+        cljrs_stdlib::install(&runtime);
+        runtime.into_globals()
+    };
 
     block_on_local(async move {
         cljrs_async::init(&globals);

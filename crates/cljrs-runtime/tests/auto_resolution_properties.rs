@@ -141,7 +141,12 @@ fn nodes(f: &Form) -> usize {
 }
 
 fn run(check: impl Fn(&Form, &Env) -> Result<(), TestCaseError>) {
-    let globals = cljrs_runtime::interp::standard_env(None, None, None);
+    let globals = cljrs_runtime::Runtime::builder()
+        .execution_mode(cljrs_runtime::ExecutionMode::TreeWalk)
+        .eager_clojure_test(true)
+        .build()
+        .expect("runtime")
+        .into_globals();
     let env = Env::new(globals, "my.app");
     TestRunner::default()
         .run(&any_form(), |f| check(&f, &env))

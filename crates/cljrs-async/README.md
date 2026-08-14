@@ -350,7 +350,9 @@ Rust embedders call `init` from within a Tokio `LocalSet` context:
 let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
 let local = tokio::task::LocalSet::new();
 rt.block_on(local.run_until(async {
-    let globals = cljrs_stdlib::standard_env();
+    let runtime = cljrs_runtime::Runtime::builder().build()?;
+    cljrs_stdlib::install(&runtime);
+    let globals = runtime.into_globals();
     cljrs_async::init(&globals);
     // ... eval code ...
 }));

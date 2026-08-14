@@ -199,7 +199,7 @@ impl Resource for StringReader {
 
 // ── Native builtins ──────────────────────────────────────────────────────────
 
-pub fn register(globals: &Arc<cljrs_eval::GlobalEnv>, ns: &str) {
+pub fn register(globals: &Arc<cljrs_runtime::env::env::GlobalEnv>, ns: &str) {
     register_fns!(
         globals,
         ns,

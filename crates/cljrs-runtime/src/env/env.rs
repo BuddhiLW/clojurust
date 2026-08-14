@@ -1,12 +1,13 @@
 //! Lexical environment: local frames, global namespace table, and current Env.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Condvar, Mutex, RwLock};
 
 use crate::env::async_hook::AsyncRuntime;
 
 use crate::env::error::EvalResult;
+use crate::mode::{ExecutionMode, TierState};
 use cljrs_gc::{GcConfig, GcPtr};
 use cljrs_logging::feat_trace;
 use cljrs_reader::Form;
@@ -72,6 +73,13 @@ impl Frame {
 
 /// The global mutable store of all namespaces.
 pub struct GlobalEnv {
+    /// Process-unique identity of this runtime instance.
+    ///
+    /// Allocated from a counter, not derived from the `Arc`'s address: an
+    /// address is only unique while the allocation is live, so a dropped
+    /// runtime could hand its key to the next one and let it inherit stale
+    /// cross-defn IR.  Used to scope per-instance registries.
+    id: u64,
     pub namespaces: RwLock<HashMap<Arc<str>, GcPtr<Namespace>>>,
     /// Directories to search when resolving namespace names to files.
     pub source_paths: RwLock<Vec<std::path::PathBuf>>,
@@ -88,15 +96,18 @@ pub struct GlobalEnv {
     pub builtin_sources: RwLock<HashMap<Arc<str>, &'static str>>,
     /// GC configuration for automatic collection based on memory pressure.
     pub gc_config: RwLock<Option<Arc<GcConfig>>>,
-    /// True once the Clojure compiler namespaces have been loaded and IR
-    /// lowering is available.  Before this, all functions use tree-walking.
-    pub compiler_ready: std::sync::atomic::AtomicBool,
-    /// Evaluator function. Evaluates form given env, produces an EvalResult.
-    pub eval_fn: fn(&Form, &mut Env) -> EvalResult,
-    /// Call a cljrs function.
-    pub call_cljrs_fn: fn(&CljxFn, &[Value], &mut Env) -> EvalResult,
-    /// Hook for customization when a new fn* is defined.
-    on_fn_defined: Option<fn(&CljxFn, &mut Env)>,
+    /// How this runtime executes function calls.  Fixed when the runtime is
+    /// built; see [`crate::RuntimeBuilder::execution_mode`].
+    execution_mode: ExecutionMode,
+    /// Which tiers are live right now (see [`TierState`]).  Starts at
+    /// [`TierState::TreeWalk`] — nothing can be lowered until `clojure.core`
+    /// exists — and is raised once to `execution_mode.target_tier()` when the
+    /// builder finishes bootstrapping.
+    tier_state: AtomicU8,
+    /// This runtime's cache of lowered IR, keyed by arity id.  Instance
+    /// state: two runtimes in one process never read or evict each other's
+    /// entries, and the cache dies with the runtime.
+    ir_cache: Arc<crate::tiered::ir_cache::IrCache>,
     /// Optional async runtime registered by `cljrs-async`.
     /// `None` when the library is not linked; `Some` after `cljrs_async::init`.
     pub async_rt: RwLock<Option<Arc<dyn AsyncRuntime>>>,
@@ -185,6 +196,9 @@ pub type PinnedNativeLoader =
 /// (see `GlobalEnv::native_require_loader`).
 pub type NativeRequireLoader = Arc<dyn Fn(&Arc<GlobalEnv>, &str) -> EvalResult<bool> + Send + Sync>;
 
+/// Source of [`GlobalEnv::id`] values.
+static NEXT_GLOBAL_ENV_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
 impl std::fmt::Debug for GlobalEnv {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "GlobalEnv {{ ... }}")
@@ -192,12 +206,14 @@ impl std::fmt::Debug for GlobalEnv {
 }
 
 impl GlobalEnv {
-    pub fn new(
-        eval_fn: fn(&Form, &mut Env) -> EvalResult,
-        call_cljrs_fn: fn(&CljxFn, &[Value], &mut Env) -> EvalResult,
-        on_fn_defined: Option<fn(&CljxFn, &mut Env)>,
-    ) -> Arc<Self> {
+    /// Create an empty global environment for the given execution mode.
+    ///
+    /// This is the *raw* constructor: no builtins, no bootstrap, no source
+    /// paths.  Use [`crate::Runtime::builder`] unless you are the builder.
+    pub fn new(execution_mode: ExecutionMode) -> Arc<Self> {
+        let id = NEXT_GLOBAL_ENV_ID.fetch_add(1, Ordering::Relaxed);
         Arc::new(Self {
+            id,
             namespaces: RwLock::new(HashMap::new()),
             source_paths: RwLock::new(Vec::new()),
             loaded: Mutex::new(std::collections::HashSet::new()),
@@ -205,10 +221,9 @@ impl GlobalEnv {
             loading_done: Condvar::new(),
             builtin_sources: RwLock::new(HashMap::new()),
             gc_config: RwLock::new(None),
-            compiler_ready: std::sync::atomic::AtomicBool::new(false),
-            eval_fn,
-            call_cljrs_fn,
-            on_fn_defined,
+            execution_mode,
+            tier_state: AtomicU8::new(TierState::TreeWalk as u8),
+            ir_cache: crate::tiered::ir_cache::IrCache::new(id),
             async_rt: RwLock::new(None),
             version_cache: Mutex::new(HashMap::new()),
             deps_config: RwLock::new(None),
@@ -441,29 +456,79 @@ impl GlobalEnv {
         aliases.insert(Arc::from(alias), Arc::from(full_ns));
     }
 
-    /// Evaluate form given env.
+    /// Process-unique identity of this runtime instance.
+    #[inline(always)]
+    pub fn id(&self) -> u64 {
+        self.id
+    }
+
+    /// This runtime's cache of lowered IR.
+    #[inline(always)]
+    pub fn ir_cache(&self) -> &Arc<crate::tiered::ir_cache::IrCache> {
+        &self.ir_cache
+    }
+
+    // ── Execution mode and tier state ────────────────────────────────────
+
+    /// How this runtime executes function calls.
+    #[inline(always)]
+    pub fn execution_mode(&self) -> ExecutionMode {
+        self.execution_mode
+    }
+
+    /// Which tiers are live right now.
+    #[inline(always)]
+    pub fn tier_state(&self) -> TierState {
+        TierState::from_u8(self.tier_state.load(Ordering::Acquire))
+    }
+
+    /// Raise the live tier state.  Called once by the runtime builder after
+    /// the bootstrap completes; lowering the tier is not supported, so a
+    /// request below the current state is ignored.
+    pub fn set_tier_state(&self, tier: TierState) {
+        let _ = self.tier_state.fetch_max(tier as u8, Ordering::AcqRel);
+    }
+
+    /// True when IR may be lowered, cached, and interpreted.  This is the
+    /// gate the old `compiler_ready` flag served.
+    #[inline(always)]
+    pub fn ir_enabled(&self) -> bool {
+        self.tier_state().ir_enabled()
+    }
+
+    // ── Evaluation entry points ──────────────────────────────────────────
+
+    /// Evaluate `form` in `env`.
     #[inline(always)]
     pub fn eval(&self, form: &Form, env: &mut Env) -> EvalResult {
-        (self.eval_fn)(form, env)
+        crate::interp::eval::eval(form, env)
     }
 
-    /// Call the given cljrs function.
+    /// Call a Clojure function, taking the path this runtime's
+    /// [`ExecutionMode`] selects.
+    ///
+    /// This is the single function-call dispatch point: tree walk, tier-1 IR,
+    /// and JIT-native execution are all reached from here.
     #[inline(always)]
     pub fn call_cljrs_fn(&self, func: &CljxFn, args: &[Value], env: &mut Env) -> EvalResult {
-        (self.call_cljrs_fn)(func, args, env)
-    }
-
-    /// Callback hook for new functions defined.
-    #[inline(always)]
-    pub fn on_fn_defined(&self, f: &CljxFn, env: &mut Env) {
-        if let Some(hook) = self.on_fn_defined {
-            hook(f, env);
+        match self.execution_mode {
+            ExecutionMode::TreeWalk => crate::interp::apply::call_cljrs_fn(func, args, env),
+            ExecutionMode::Tiered | ExecutionMode::TieredNoJit => {
+                crate::tiered::apply::call_cljrs_fn(func, args, env)
+            }
+            ExecutionMode::NoGcTransaction => crate::env::depth::call_cljrs_fn(func, args, env),
         }
     }
 
-    /// Sets the on-new-function-defined hook.
-    pub fn set_on_fn_defined(&mut self, hook: fn(&CljxFn, &mut Env)) {
-        self.on_fn_defined = Some(hook);
+    /// Notify the active tier that a new `fn*` was defined.
+    ///
+    /// In a tiered runtime with IR enabled this eagerly lowers the function
+    /// (when eager lowering is on); in every other mode it does nothing.
+    #[inline(always)]
+    pub fn on_fn_defined(&self, f: &CljxFn, env: &mut Env) {
+        if self.execution_mode.is_tiered() && self.ir_enabled() {
+            crate::tiered::ir_interp::eager_lower_fn(f, env);
+        }
     }
 
     /// Install an async runtime. Called once by `cljrs_async::init`.

@@ -8685,21 +8685,13 @@ fn builtin_native_type(args: &[Value]) -> ValueResult<Value> {
 #[cfg(test)]
 mod doc_tests {
     use super::*;
-    use crate::env::env::{Env, GlobalEnv};
-    use crate::env::error::EvalResult;
-    use cljrs_reader::Form;
+    use crate::ExecutionMode;
+    use crate::env::env::GlobalEnv;
 
-    // `register_all` never calls back into the evaluator, so these stubs are
-    // never invoked; they only satisfy `GlobalEnv::new`'s signature.
-    fn stub_eval_fn(_form: &Form, _env: &mut Env) -> EvalResult {
-        Ok(Value::Nil)
-    }
-    fn stub_call_cljrs_fn(_f: &cljrs_value::CljxFn, _args: &[Value], _env: &mut Env) -> EvalResult {
-        Ok(Value::Nil)
-    }
-
+    // `register_all` never calls back into the evaluator, so the mode here
+    // only picks which dispatch path an (unreachable) call would take.
     fn test_globals() -> std::sync::Arc<GlobalEnv> {
-        let globals = GlobalEnv::new(stub_eval_fn, stub_call_cljrs_fn, None);
+        let globals = GlobalEnv::new(ExecutionMode::TreeWalk);
         register_all(&globals, "clojure.core");
         globals
     }

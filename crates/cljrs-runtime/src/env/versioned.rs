@@ -406,15 +406,6 @@ fn check_native_provenance(globals: &GlobalEnv, base_ns: &str, commit: &str) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cljrs_reader::Form;
-    use cljrs_value::CljxFn;
-
-    fn dummy_eval(_: &Form, _: &mut Env) -> EvalResult {
-        Ok(Value::Nil)
-    }
-    fn dummy_call(_: &CljxFn, _: &[Value], _: &mut Env) -> EvalResult {
-        Ok(Value::Nil)
-    }
 
     /// In offline (AOT) mode a versioned namespace with no embedded source
     /// fails with the clear "not embedded at compile time" error — never a
@@ -422,7 +413,7 @@ mod tests {
     #[test]
     fn offline_load_without_embedded_source_errors() {
         let _mutator = cljrs_gc::register_mutator();
-        let globals = GlobalEnv::new(dummy_eval, dummy_call, None);
+        let globals = GlobalEnv::new(crate::ExecutionMode::TreeWalk);
         globals.set_versioned_offline(true);
 
         let err = ensure_versioned_ns_loaded(&globals, "mylib", "abc1234abcdef")
@@ -438,7 +429,7 @@ mod tests {
     #[test]
     fn offline_load_with_embedded_source_succeeds() {
         let _mutator = cljrs_gc::register_mutator();
-        let globals = GlobalEnv::new(dummy_eval, dummy_call, None);
+        let globals = GlobalEnv::new(crate::ExecutionMode::TreeWalk);
         globals.set_versioned_offline(true);
         globals.register_builtin_source("mylib@abc1234abcdef", "(def x 1)");
 

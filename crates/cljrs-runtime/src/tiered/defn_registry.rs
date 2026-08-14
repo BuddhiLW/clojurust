@@ -49,9 +49,12 @@ struct RegisteredDefn {
     arities: Vec<RegisteredArity>,
 }
 
-/// Key: (GlobalEnv identity, ns, name).  The identity component keeps
-/// same-named defns in different isolates from cross-contaminating.
-type DefnKey = (usize, Arc<str>, Arc<str>);
+/// Key: (`GlobalEnv::id`, ns, name).  The identity component keeps same-named
+/// defns in different isolates from cross-contaminating.  It is a counter
+/// value, not the environment's address: an address is unique only while its
+/// allocation is live, so a dropped runtime could hand its key to the next
+/// one and let it inherit — and inline — the dead runtime's IR.
+type DefnKey = (u64, Arc<str>, Arc<str>);
 
 static REGISTRY: LazyLock<RwLock<HashMap<DefnKey, RegisteredDefn>>> =
     LazyLock::new(|| RwLock::new(HashMap::new()));
@@ -71,7 +74,7 @@ static RELOWER_PENDING: AtomicUsize = AtomicUsize::new(0);
 
 /// Mangle a process-unique registry key for one arity.  Never emitted as a
 /// symbol — stage-4 clones are renamed `…__rgN` before codegen sees them.
-fn arity_key(globals_id: usize, ns: &str, name: &str, param_count: usize) -> Arc<str> {
+fn arity_key(globals_id: u64, ns: &str, name: &str, param_count: usize) -> Arc<str> {
     Arc::from(format!("{name}__{ns}__g{globals_id:x}__ext{param_count}").as_str())
 }
 
@@ -80,7 +83,7 @@ fn arity_key(globals_id: usize, ns: &str, name: &str, param_count: usize) -> Arc
 /// `arities` supplies `(param_count, is_variadic, ir)` per arity.  Call after
 /// every arity of the fn has been lowered and optimized.
 pub fn register_defn(
-    globals_id: usize,
+    globals_id: u64,
     ns: &Arc<str>,
     name: &Arc<str>,
     arities: Vec<(usize, bool, Arc<IrFunction>)>,
@@ -106,7 +109,7 @@ pub fn register_defn(
 /// `referenced` (the `(ns, name)` pairs the function's IR loads as globals)
 /// for this GlobalEnv.
 pub fn externals_for(
-    globals_id: usize,
+    globals_id: u64,
     referenced: &HashSet<(Arc<str>, Arc<str>)>,
 ) -> Vec<ExternalDefn> {
     if referenced.is_empty() {
@@ -154,7 +157,7 @@ pub fn record_dependents(arity_id: u64, used: impl IntoIterator<Item = (Arc<str>
 /// publishing).  Edges are recorded only for defns actually present in the
 /// registry — exactly the set the optimizer can inline.
 pub fn snapshot_externals(
-    globals_id: usize,
+    globals_id: u64,
     arity_id: u64,
     referenced: &HashSet<(Arc<str>, Arc<str>)>,
 ) -> Vec<ExternalDefn> {
@@ -279,7 +282,7 @@ mod tests {
     fn snapshot_externals_records_edges_drained_by_rebind() {
         // Unique globals_id / names so parallel tests sharing the global
         // registry never collide.
-        let gid = 0xD500_0001usize;
+        let gid = 0xD500_0001u64;
         let ns: Arc<str> = Arc::from("test.snapshot-ns");
         let name: Arc<str> = Arc::from("callee-fn");
         let dep_id = 0xD500_0002u64;

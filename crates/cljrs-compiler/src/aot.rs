@@ -349,9 +349,24 @@ pub fn lower_file_to_ir(
     note!("[aot] parsed {} top-level form(s)", forms.len());
 
     let globals = if src_dirs.is_empty() {
-        cljrs_stdlib::standard_env()
+        {
+            let runtime = cljrs_runtime::Runtime::builder()
+                .execution_mode(cljrs_runtime::ExecutionMode::Tiered)
+                .build()
+                .expect("runtime");
+            cljrs_stdlib::install(&runtime);
+            runtime.into_globals()
+        }
     } else {
-        cljrs_stdlib::standard_env_with_paths(src_dirs.to_vec())
+        {
+            let runtime = cljrs_runtime::Runtime::builder()
+                .execution_mode(cljrs_runtime::ExecutionMode::Tiered)
+                .source_paths(src_dirs.to_vec())
+                .build()
+                .expect("runtime");
+            cljrs_stdlib::install(&runtime);
+            runtime.into_globals()
+        }
     };
     let mut env = cljrs_eval::Env::new(globals, "user");
 
@@ -431,9 +446,24 @@ fn lower_file_to_ir_bundle(
     // Boot the same environment `compile_file` does so `require`d namespaces (and
     // the async/io/net/charset/base64 builtins they may pull in) resolve.
     let globals = if src_dirs.is_empty() {
-        cljrs_stdlib::standard_env()
+        {
+            let runtime = cljrs_runtime::Runtime::builder()
+                .execution_mode(cljrs_runtime::ExecutionMode::Tiered)
+                .build()
+                .expect("runtime");
+            cljrs_stdlib::install(&runtime);
+            runtime.into_globals()
+        }
     } else {
-        cljrs_stdlib::standard_env_with_paths(src_dirs.to_vec())
+        {
+            let runtime = cljrs_runtime::Runtime::builder()
+                .execution_mode(cljrs_runtime::ExecutionMode::Tiered)
+                .source_paths(src_dirs.to_vec())
+                .build()
+                .expect("runtime");
+            cljrs_stdlib::install(&runtime);
+            runtime.into_globals()
+        }
     };
     cljrs_async::init(&globals);
     cljrs_io::init(&globals);
@@ -635,9 +665,24 @@ pub fn compile_file(
     // ── 2. Macro-expand ─────────────────────────────────────────────────
     // Boot a full environment so macros resolve correctly.
     let globals = if src_dirs.is_empty() {
-        cljrs_stdlib::standard_env()
+        {
+            let runtime = cljrs_runtime::Runtime::builder()
+                .execution_mode(cljrs_runtime::ExecutionMode::Tiered)
+                .build()
+                .expect("runtime");
+            cljrs_stdlib::install(&runtime);
+            runtime.into_globals()
+        }
     } else {
-        cljrs_stdlib::standard_env_with_paths(src_dirs.to_vec())
+        {
+            let runtime = cljrs_runtime::Runtime::builder()
+                .execution_mode(cljrs_runtime::ExecutionMode::Tiered)
+                .source_paths(src_dirs.to_vec())
+                .build()
+                .expect("runtime");
+            cljrs_stdlib::install(&runtime);
+            runtime.into_globals()
+        }
     };
     if verify_commit_signatures {
         globals
@@ -2058,7 +2103,12 @@ async fn run() {{
 
     // Initialize the standard environment so that rt_call and other
     // runtime bridge functions can look up builtins.
-    let globals = cljrs_stdlib::standard_env();
+    let runtime = cljrs_runtime::Runtime::builder()
+        .execution_mode(cljrs_runtime::ExecutionMode::Tiered)
+        .build()
+        .expect("runtime");
+    cljrs_stdlib::install(&runtime);
+    let globals = runtime.into_globals();
 
     // Versioned namespaces resolve only from sources embedded at compile
     // time — an AOT binary never fetches from git at runtime.
@@ -2139,6 +2189,7 @@ const HARNESS_RUNTIME_CRATES: &[&str] = &[
     "cljrs-reader",
     "cljrs-env",
     "cljrs-eval",
+    "cljrs-runtime",
     "cljrs-stdlib",
     "cljrs-compiler",
     "cljrs-async",
@@ -2160,6 +2211,7 @@ const TEST_HARNESS_RUNTIME_CRATES: &[&str] = &[
     "cljrs-reader",
     "cljrs-env",
     "cljrs-eval",
+    "cljrs-runtime",
     "cljrs-stdlib",
     "cljrs-compiler",
 ];
@@ -2482,7 +2534,14 @@ use cljrs_value::Value;
     // The test harness interprets Clojure at runtime; there is no benefit to
     // eagerly compiling test functions to IR, and doing so fills IR_CACHE with
     // entries that are never evicted (non-GC memory, leaks across all 233 namespaces).
-    let globals = cljrs_stdlib::standard_env_no_ir();
+    let globals = {
+        let runtime = cljrs_runtime::Runtime::builder()
+            .execution_mode(cljrs_runtime::ExecutionMode::TreeWalk)
+            .build()
+            .expect("runtime");
+        cljrs_stdlib::install(&runtime);
+        runtime.into_globals()
+    };
 
     // Override GC soft limit to a small value so the collector fires during
     // test execution.  standard_env_no_ir() calls set_config_from_env() which
@@ -2736,7 +2795,15 @@ pub fn compile_test_harness(
     // each namespace (and the macros it defines or requires) can be loaded
     // before lowering — `lower_namespace` macro-expands against `globals` and
     // needs the namespace's own `require`s already resolved.
-    let globals = cljrs_stdlib::standard_env_with_paths(search_dirs.clone());
+    let globals = {
+        let runtime = cljrs_runtime::Runtime::builder()
+            .execution_mode(cljrs_runtime::ExecutionMode::Tiered)
+            .source_paths(search_dirs.clone())
+            .build()
+            .expect("runtime");
+        cljrs_stdlib::install(&runtime);
+        runtime.into_globals()
+    };
     let mut env = cljrs_eval::Env::new(globals, "user");
 
     let test_ns_set: std::collections::HashSet<&str> =

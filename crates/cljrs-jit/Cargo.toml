@@ -15,6 +15,7 @@ no-gc = [
 ]
 
 [dependencies]
+cljrs-runtime = { workspace = true }
 cljrs-eval     = { workspace = true }
 cljrs-compiler = { workspace = true }
 cljrs-ir       = { workspace = true }

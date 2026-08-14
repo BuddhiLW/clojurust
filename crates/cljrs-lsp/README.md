@@ -65,5 +65,5 @@ Point your editor's generic LSP client at one of the above for `*.cljrs` /
   the whole buffer, so a `String` suffices; `Document` keeps that swappable.
 - **Semantic seam.** `analysis::run` is the only place documents are analyzed.
   A v2 would give it an optional `&cljrs_eval::GlobalEnv` (from
-  `cljrs_eval::standard_env` / `standard_env_with_paths`) to back hover,
+  `cljrs_runtime::Runtime::builder`) to back hover,
   completion, and go-to-definition via each `Var`'s `:file`/`:line` metadata.

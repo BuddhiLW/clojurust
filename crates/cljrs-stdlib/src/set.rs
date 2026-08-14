@@ -7,7 +7,7 @@ use cljrs_gc::GcPtr;
 use cljrs_value::value::SetValue;
 use cljrs_value::{Arity, MapValue, PersistentHashSet, Value, ValueError, ValueResult};
 
-pub fn register(globals: &Arc<cljrs_eval::GlobalEnv>, ns: &str) {
+pub fn register(globals: &Arc<cljrs_runtime::env::env::GlobalEnv>, ns: &str) {
     register_fns!(
         globals,
         ns,

@@ -6,14 +6,14 @@
 
 use std::sync::Arc;
 
-use cljrs_builtins::form::form_to_value;
 use cljrs_reader::Parser;
+use cljrs_runtime::builtins::form::form_to_value;
 use cljrs_value::{Arity, Keyword, ResourceHandle, Value, ValueError, ValueResult};
 
 use crate::io::{IoReader, StringReader};
 use crate::register_fns;
 
-pub fn register(globals: &Arc<cljrs_eval::GlobalEnv>, ns: &str) {
+pub fn register(globals: &Arc<cljrs_runtime::env::env::GlobalEnv>, ns: &str) {
     register_fns!(
         globals,
         ns,

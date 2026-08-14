@@ -14,7 +14,12 @@ use cljrs_reader::Parser;
 use cljrs_value::Value;
 
 fn async_env() -> Arc<GlobalEnv> {
-    let globals = cljrs_interp::standard_env(None, None, None);
+    let globals = cljrs_runtime::Runtime::builder()
+        .execution_mode(cljrs_runtime::ExecutionMode::TreeWalk)
+        .eager_clojure_test(true)
+        .build()
+        .expect("runtime")
+        .into_globals();
     cljrs_async::init(&globals);
     globals
 }

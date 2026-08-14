@@ -9,14 +9,24 @@ use cljrs_value::Value;
 
 /// Build a standard environment with the async runtime registered.
 fn async_env() -> Arc<GlobalEnv> {
-    let globals = cljrs_interp::standard_env(None, None, None);
+    let globals = cljrs_runtime::Runtime::builder()
+        .execution_mode(cljrs_runtime::ExecutionMode::TreeWalk)
+        .eager_clojure_test(true)
+        .build()
+        .expect("runtime")
+        .into_globals();
     cljrs_async::init(&globals);
     globals
 }
 
 /// Build a standard environment *without* an async runtime.
 fn sync_env() -> Arc<GlobalEnv> {
-    cljrs_interp::standard_env(None, None, None)
+    cljrs_runtime::Runtime::builder()
+        .execution_mode(cljrs_runtime::ExecutionMode::TreeWalk)
+        .eager_clojure_test(true)
+        .build()
+        .expect("runtime")
+        .into_globals()
 }
 
 fn parse_one(src: &str) -> cljrs_reader::Form {

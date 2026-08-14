@@ -28,6 +28,7 @@ name = "cljrs"
 path = "src/main.rs"
 
 [dependencies]
+cljrs-runtime = { workspace = true }
 cljrs-types    = { workspace = true }
 cljrs-gc       = { workspace = true }
 cljrs-reader   = { workspace = true }

@@ -100,7 +100,14 @@ fn eval(client: &mut Client, session: &str, code: &str) -> Vec<Msg> {
 
 #[test]
 fn nrepl_end_to_end() {
-    let globals = cljrs_stdlib::standard_env();
+    let globals = {
+        let runtime = cljrs_runtime::Runtime::builder()
+            .execution_mode(cljrs_runtime::ExecutionMode::Tiered)
+            .build()
+            .expect("runtime");
+        cljrs_stdlib::install(&runtime);
+        runtime.into_globals()
+    };
     let server = cljrs_nrepl::start(cljrs_nrepl::Config::default(), globals).expect("start");
     let port = server.port();
     let shutdown = server.shutdown_handle();

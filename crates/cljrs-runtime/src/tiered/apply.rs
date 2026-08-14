@@ -37,8 +37,12 @@ pub fn call_cljrs_fn(f: &CljxFn, args: &[Value], caller_env: &mut Env) -> EvalRe
     if !f.is_macro {
         let arity_id = arity.ir_arity_id;
 
-        // 1. JIT-native: fastest path — skip interpreter entirely.
-        if let Some((fn_ptr, epoch)) = crate::tiered::jit_state::get_native_fn(arity_id) {
+        // 1. JIT-native: fastest path — skip interpreter entirely.  Only
+        //    `ExecutionMode::Tiered` reaches native code; `TieredNoJit` stops
+        //    at Tier 1 even when a JIT backend is linked in.
+        if caller_env.globals.tier_state().jit_enabled()
+            && let Some((fn_ptr, epoch)) = crate::tiered::jit_state::get_native_fn(arity_id)
+        {
             return call_jit_native(f, fn_ptr, epoch, arity, args, caller_env);
         }
 
@@ -96,7 +100,7 @@ fn try_ir_path(
     }
 
     // Only use IR if already cached.
-    let ir_func = crate::tiered::ir_cache::get_cached(arity_id)?;
+    let ir_func = caller_env.globals.ir_cache().get(arity_id)?;
 
     // Async IR functions fall back to tree-walking.
     if ir_func.is_async {
@@ -161,10 +165,7 @@ fn maybe_request_lowering(f: &CljxFn, arity_id: u64, caller_env: &mut Env) {
         || named_without_global
         || crate::tiered::jit_state::is_bootstrap_arity(arity_id)
         || no_ir()
-        || !caller_env
-            .globals
-            .compiler_ready
-            .load(std::sync::atomic::Ordering::Acquire)
+        || !caller_env.globals.ir_enabled()
     {
         return;
     }
@@ -187,7 +188,7 @@ fn maybe_request_lowering(f: &CljxFn, arity_id: u64, caller_env: &mut Env) {
     // A previous lowering attempt may have marked this arity Unsupported
     // (e.g. an eager-lowering failure); pin the queued flag so the per-call
     // gates above stay the steady-state cost.
-    if !crate::tiered::ir_cache::should_attempt(arity_id) {
+    if !caller_env.globals.ir_cache().should_attempt(arity_id) {
         crate::tiered::jit_state::mark_lower_queued(arity_id);
         return;
     }
@@ -226,7 +227,7 @@ fn request_background_lower(f: &CljxFn, caller_env: &mut Env) {
 
     let accepted =
         crate::tiered::lower_worker::enqueue(crate::tiered::lower_worker::LowerRequest {
-            globals_id: crate::tiered::lower::globals_id(caller_env),
+            globals_id: caller_env.globals.id(),
             name: f.name.clone(),
             ns: f.defining_ns.clone(),
             is_async: f.is_async,
@@ -382,7 +383,7 @@ fn call_jit_native(
     // recompile is published.
     if crate::tiered::jit_state::is_deopt_result(result_ptr) {
         crate::tiered::jit_state::record_deopt(arity.ir_arity_id);
-        if let Some(ir_func) = crate::tiered::ir_cache::get_cached(arity.ir_arity_id) {
+        if let Some(ir_func) = caller_env.globals.ir_cache().get(arity.ir_arity_id) {
             return execute_ir(f, arity, &ir_func, args, caller_env);
         }
         return crate::interp::apply::call_cljrs_fn(f, args, caller_env);

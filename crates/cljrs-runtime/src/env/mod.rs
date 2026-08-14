@@ -4,6 +4,7 @@
 pub mod apply;
 pub mod async_hook;
 pub mod callback;
+pub mod depth;
 pub mod dynamics;
 // The `env` module keeps its name so the `cljrs_runtime::env::env`
 // path matches the pre-merge `cljrs_env::env` path.
@@ -19,18 +20,3 @@ pub mod taps;
 pub mod versioned;
 
 pub use async_hook::AsyncRuntime;
-
-pub fn add(left: u64, right: u64) -> u64 {
-    left + right
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
-    }
-}

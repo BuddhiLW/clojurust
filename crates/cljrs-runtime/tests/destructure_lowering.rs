@@ -18,7 +18,6 @@ use std::sync::Arc;
 use cljrs_ir::lower::lower_fn_body_destructured;
 use cljrs_ir::{Inst, IrFunction};
 use cljrs_reader::{Form, Parser};
-use cljrs_runtime::interp::standard_env_minimal;
 use cljrs_runtime::tiered::{Env, ir_interp::interpret_ir};
 use cljrs_value::{PersistentVector, Value};
 
@@ -56,7 +55,11 @@ fn run_destructured(pattern_src: &str, body_src: &str, arg: Value) -> Value {
         "destructured body lowered to a LoadGlobal — pattern names did not bind"
     );
 
-    let globals = standard_env_minimal(None, None, None);
+    let globals = cljrs_runtime::Runtime::builder()
+        .execution_mode(cljrs_runtime::ExecutionMode::TreeWalk)
+        .build()
+        .expect("runtime")
+        .into_globals();
     let mut env = Env::new(globals.clone(), "user");
     let ns: Arc<str> = Arc::from("user");
     cljrs_runtime::env::callback::push_eval_context(&env);

@@ -968,6 +968,11 @@ mod nogc_stubs {
             Self
         }
         pub fn set_config(&self, _: Arc<GcConfig>) {}
+        /// No-op counterpart of the GC build's env-driven configuration.
+        /// Region allocation has no soft limit to configure, but the runtime
+        /// builder calls this unconditionally, so the method must exist in
+        /// both builds.
+        pub fn set_config_from_env(&self) {}
         pub fn register_root_tracer(&self, _: impl Fn(&mut MarkVisitor) + 'static) {}
         pub fn trace_registered_roots(&self, _: &mut MarkVisitor) {}
         pub fn memory_in_use(&self) -> usize {

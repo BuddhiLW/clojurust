@@ -54,16 +54,15 @@ fn run_clojure_blake3_tests() {
 
     let _mutator = cljrs_gc::register_mutator();
 
-    let globals = cljrs_stdlib::standard_env_with_paths(vec![test_dir]);
-
-    // Wait for the background compiler-namespace loader to finish so that
-    // `require` doesn't race against it and trigger spurious circular-require errors.
-    while !globals
-        .compiler_ready
-        .load(std::sync::atomic::Ordering::Acquire)
-    {
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
+    let globals = {
+        let runtime = cljrs_runtime::Runtime::builder()
+            .execution_mode(cljrs_runtime::ExecutionMode::Tiered)
+            .source_paths(vec![test_dir])
+            .build()
+            .expect("runtime");
+        cljrs_stdlib::install(&runtime);
+        runtime.into_globals()
+    };
 
     // Register blake3 native functions before any Clojure code is evaluated.
     let mut registry = Registry::new(globals.clone());

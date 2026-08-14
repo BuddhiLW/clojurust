@@ -12,7 +12,7 @@ Phase 12-ext — async browser REPL.  Targets `wasm32-unknown-unknown`; no AOT/I
 
 | File | Description |
 |------|-------------|
-| `src/lib.rs` | `Repl` and `EvalResult` wasm-bindgen exports; bootstraps `standard_env_minimal`, initialises `cljrs-async`, drives a persistent `LocalSet` pump |
+| `src/lib.rs` | `Repl` and `EvalResult` wasm-bindgen exports; bootstraps a `Runtime` in `ExecutionMode::TreeWalk`, initialises `cljrs-async`, drives a persistent `LocalSet` pump |
 | `www/index.html` | Self-contained browser REPL UI (pure JS, no bundler required once wasm-pack output is present) |
 
 ## Public API

@@ -20,6 +20,7 @@ cljrs-value   = { workspace = true }
 blake3        = "1"
 
 [dev-dependencies]
+cljrs-runtime = { workspace = true }
 cljrs-eval    = { workspace = true }
 cljrs-stdlib  = { workspace = true }
 cljrs-env     = { workspace = true }

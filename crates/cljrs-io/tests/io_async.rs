@@ -11,7 +11,12 @@ use cljrs_value::Value;
 
 /// Standard env with both the async runtime and async I/O registered.
 fn io_env() -> Arc<GlobalEnv> {
-    let globals = cljrs_interp::standard_env(None, None, None);
+    let globals = cljrs_runtime::Runtime::builder()
+        .execution_mode(cljrs_runtime::ExecutionMode::TreeWalk)
+        .eager_clojure_test(true)
+        .build()
+        .expect("runtime")
+        .into_globals();
     cljrs_async::init(&globals);
     cljrs_io::init(&globals);
     globals

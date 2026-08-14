@@ -22,7 +22,12 @@
 //! # Usage
 //!
 //! ```no_run
-//! let globals = cljrs_stdlib::standard_env();
+//! let runtime = cljrs_runtime::Runtime::builder()
+//!     .execution_mode(cljrs_runtime::ExecutionMode::Tiered)
+//!     .build()
+//!     .unwrap();
+//! cljrs_stdlib::install(&runtime);
+//! let globals = runtime.globals().clone();
 //! let config = cljrs_nrepl::Config::default();
 //! let server = cljrs_nrepl::start(config, globals).unwrap();
 //! println!("nREPL listening on port {}", server.port());

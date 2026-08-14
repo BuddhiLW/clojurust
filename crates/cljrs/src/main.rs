@@ -777,7 +777,17 @@ fn setup_globals(
     gc_config: Arc<GcConfig>,
     versioning: VersioningFlags,
 ) -> Arc<GlobalEnv> {
-    let globals = cljrs_stdlib::standard_env_with_paths_and_config(src_paths, gc_config);
+    let runtime = cljrs_runtime::Runtime::builder()
+        .execution_mode(cljrs_runtime::ExecutionMode::Tiered)
+        .source_paths(src_paths)
+        .gc_config(gc_config)
+        .build()
+        .unwrap_or_else(|e| {
+            eprintln!("failed to start the runtime: {e}");
+            std::process::exit(1);
+        });
+    cljrs_stdlib::install(&runtime);
+    let globals = runtime.into_globals();
     if versioning.verify_commit_signatures {
         globals
             .verify_commit_signatures

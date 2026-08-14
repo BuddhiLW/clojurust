@@ -104,12 +104,13 @@ fn make_lib_repo() -> LibRepo {
 // ── Eval helpers ──────────────────────────────────────────────────────────────
 
 fn make_env(src_dir: &Path) -> (Arc<GlobalEnv>, Env) {
-    let globals = cljrs_runtime::interp::standard_env_with_paths(
-        None,
-        None,
-        None,
-        vec![src_dir.to_path_buf()],
-    );
+    let globals = cljrs_runtime::Runtime::builder()
+        .execution_mode(cljrs_runtime::ExecutionMode::TreeWalk)
+        .eager_clojure_test(true)
+        .source_paths(vec![src_dir.to_path_buf()])
+        .build()
+        .expect("runtime")
+        .into_globals();
     let env = Env::new(globals.clone(), "user");
     (globals, env)
 }

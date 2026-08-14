@@ -15,7 +15,7 @@ use cljrs_interop::export;
 use cljrs_interop::{
     FromValue, IntoValue, NativeObject, Registry, gc_native_object, wrap_fn1, wrap_fn2, wrap_result,
 };
-use cljrs_stdlib::standard_env;
+use cljrs_runtime::{ExecutionMode, Runtime};
 use cljrs_value::{Arity, NativeFn, Value, ValueError, ValueResult};
 
 // ── Step 1: Define a Rust struct ─────────────────────────────────────────────
@@ -235,7 +235,12 @@ fn register_math_fns(env: &mut Env) {
 }
 
 fn main() {
-    let globals = standard_env();
+    let runtime = Runtime::builder()
+        .execution_mode(ExecutionMode::Tiered)
+        .build()
+        .expect("runtime");
+    cljrs_stdlib::install(&runtime);
+    let globals = runtime.into_globals();
     let mut env = Env::new(globals, "user");
 
     // Register our Counter native functions in the "counter" namespace.

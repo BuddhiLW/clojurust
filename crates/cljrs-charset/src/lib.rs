@@ -16,7 +16,11 @@
 //! # Usage
 //!
 //! ```rust,ignore
-//! let globals = cljrs_stdlib::standard_env();
+//! let runtime = cljrs_runtime::Runtime::builder()
+//!     .execution_mode(cljrs_runtime::ExecutionMode::Tiered)
+//!     .build()?;
+//! cljrs_stdlib::install(&runtime);
+//! let globals = runtime.globals().clone();
 //!
 //! // Synchronous codecs
 //! cljrs_charset::init(&globals);

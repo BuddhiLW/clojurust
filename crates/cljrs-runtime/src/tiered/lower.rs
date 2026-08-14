@@ -194,7 +194,7 @@ fn lower_arity_inner(
         destructure_rest,
         &expanded_body,
         ns,
-        globals_id(env),
+        env.globals.id(),
         None,
         do_optimize,
         is_async,
@@ -225,8 +225,8 @@ pub fn macroexpand_body(body: &[Form], env: &mut Env) -> Vec<Form> {
 /// Lower an already macro-expanded arity body to (optionally optimized) IR.
 ///
 /// Env-free and callable from the background lowering worker (Phase 10.7):
-/// everything below operates on plain `Form`/IR data.  `globals_id` scopes
-/// the cross-defn registry lookups (see [`globals_id`]).
+/// everything below operates on plain `Form`/IR data.  `globals_id` is
+/// `GlobalEnv::id`, scoping the cross-defn registry lookups to one runtime.
 ///
 /// `arity_id` selects the externals protocol:
 /// - `Some(id)` (background worker): externals are fetched via
@@ -245,7 +245,7 @@ pub fn lower_expanded_arity(
     destructure_rest: Option<&Form>,
     expanded_body: &[Form],
     ns: &Arc<str>,
-    globals_id: usize,
+    globals_id: u64,
     arity_id: Option<u64>,
     do_optimize: bool,
     is_async: bool,
@@ -296,12 +296,6 @@ pub fn lower_expanded_arity(
     };
     let (ir, used) = cljrs_ir::lower::optimize_with_externals(ir, &externals);
     Ok((ir, used.into_iter().collect()))
-}
-
-/// Identity of the `GlobalEnv` behind `env`, used to scope the cross-defn
-/// registry per isolate.
-pub fn globals_id(env: &Env) -> usize {
-    Arc::as_ptr(&env.globals) as usize
 }
 
 /// Collect every `(ns, name)` pair the IR tree loads as a global — the

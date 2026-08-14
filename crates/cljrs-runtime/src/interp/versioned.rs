@@ -34,7 +34,11 @@ mod tests {
     use cljrs_value::{NativeFn, Value};
 
     fn make_env(ns: &str) -> (Arc<GlobalEnv>, Env) {
-        let globals = crate::interp::standard_env_minimal(None, None, None);
+        let globals = crate::Runtime::builder()
+            .execution_mode(crate::ExecutionMode::TreeWalk)
+            .build()
+            .expect("runtime")
+            .into_globals();
         globals.get_or_create_ns(ns);
         let env = Env::new(globals.clone(), ns);
         (globals, env)

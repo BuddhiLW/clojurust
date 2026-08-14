@@ -60,7 +60,6 @@
 use std::sync::Arc;
 
 use cljrs_ir::{BlockId, Const, Inst, IrFunction, KnownFn, RegionAllocKind, Terminator, VarId};
-use cljrs_runtime::interp::standard_env_minimal;
 use cljrs_runtime::tiered::{Env, ir_interp::interpret_ir};
 use cljrs_value::Value;
 
@@ -165,7 +164,11 @@ fn build_phi_over_regions_ir() -> IrFunction {
 fn region_phi_uaf_reproduces_under_interpreter() {
     let _mutator = cljrs_gc::register_mutator();
 
-    let globals = standard_env_minimal(None, None, None);
+    let globals = cljrs_runtime::Runtime::builder()
+        .execution_mode(cljrs_runtime::ExecutionMode::TreeWalk)
+        .build()
+        .expect("runtime")
+        .into_globals();
     let mut env = Env::new(globals.clone(), "user");
 
     let ir = build_phi_over_regions_ir();

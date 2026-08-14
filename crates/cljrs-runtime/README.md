@@ -6,7 +6,8 @@ evaluator.
 
 **Status:** implemented. Stage 2 of
 [`docs/crate-consolidation-plan.md`](../../docs/crate-consolidation-plan.md)
-merged four packages into this one, one per module:
+merged four packages into this one, one per module; Stage 3 gave it one
+construction path and one dispatch path:
 
 | Module | Former package | Responsibility |
 |---|---|---|
@@ -19,9 +20,14 @@ The four former packages still exist as re-export shims so downstream packages
 can migrate one at a time; Stage 6 removes them. New code should use
 `cljrs_runtime::{env, builtins, interp, tiered}`.
 
-Stage 2 moved files and rewrote import paths only. The `Runtime` /
-`RuntimeBuilder` / `ExecutionMode` API described in the plan, and the removal of
-the `GlobalEnv` callback seams, are Stage 3.
+Stage 3 added [`Runtime` / `RuntimeBuilder` / `ExecutionMode`](#runtime-construction)
+at the crate root and removed the `GlobalEnv` callback seams: the `eval_fn`,
+`call_cljrs_fn`, and `on_fn_defined` function pointers and the `compiler_ready`
+flag are gone, replaced by an execution mode chosen at build time and a
+[`TierState`](#execution-modes-and-tier-state) raised once when the bootstrap
+finishes. The IR cache is now per-runtime instance state, and the cross-defn
+registry is keyed by a counter-allocated `GlobalEnv::id` instead of the
+environment's address.
 
 ---
 
@@ -29,7 +35,10 @@ the `GlobalEnv` callback seams, are Stage 3.
 
 ```
 src/
-  lib.rs                — crate root; declares the four modules
+  lib.rs                — crate root; declares the modules; re-exports Runtime,
+                          RuntimeBuilder, BuildError, ExecutionMode, TierState
+  mode.rs               — ExecutionMode (build-time choice) and TierState (live tiers)
+  runtime.rs            — Runtime and RuntimeBuilder: the one construction path
 
   env/
     mod.rs              — module declarations; re-exports AsyncRuntime
@@ -45,6 +54,7 @@ src/
     policy.rs           — capability policy for isolated transaction functions
     taps.rs             — tap> / add-tap registry
     async_hook.rs       — AsyncRuntime seam and the async-JIT compile hook
+    depth.rs            — call-depth cap for ExecutionMode::NoGcTransaction
     versioned.rs        — (non-WASM) versioned symbol/namespace resolution
 
   builtins/
@@ -64,7 +74,7 @@ src/
     clojure_test.cljrs  — embedded clojure.test source
 
   interp/
-    mod.rs              — standard_env_minimal / standard_env / standard_env_with_paths
+    mod.rs              — module declarations
     eval.rs             — top-level eval dispatch; symbol/keyword/collection eval
     special.rs          — special-form evaluators (def, fn*, let*, loop*, try, ns, …)
     apply.rs            — eval_call: macro expansion, native dispatch, recur trampoline
@@ -76,10 +86,10 @@ src/
     versioned.rs        — (non-WASM) tree-walker entry point for versioned resolution
 
   tiered/
-    mod.rs              — re-exports; standard_env*; mark_compiler_ready; load_prebuilt_ir
+    mod.rs              — re-exports; load_prebuilt_ir
     apply.rs            — IR-aware dispatch: JIT → IR cache → tree-walk fallback
     ir_interp.rs        — tier-1 IR interpreter over a VarId→Value register file
-    ir_cache.rs         — thread-safe cache of lowered IR keyed by arity ID
+    ir_cache.rs         — IrCache: per-runtime cache of lowered IR keyed by arity ID
     lower.rs            — orchestrates the pure-Rust cljrs_ir::lower pipeline
     lower_worker.rs     — background IR-lowering worker thread ("cljrs-ir-lower")
     defn_registry.rs    — cross-defn IR registry and invalidation edges
@@ -101,14 +111,145 @@ tests/
 
 ---
 
+## Runtime construction
+
+One path builds a runtime. Execution mode, source paths, GC configuration, and
+embedded namespace sources are builder inputs; extensions install themselves
+into a finished runtime.
+
+```rust
+use cljrs_runtime::{ExecutionMode, Runtime};
+
+let runtime = Runtime::builder()
+    .execution_mode(ExecutionMode::Tiered)
+    .source_paths(paths)
+    .gc_config(config)
+    .build()?;
+cljrs_stdlib::install(&runtime);
+```
+
+### `Runtime`
+
+A cheap, cloneable handle. All instance state lives in the shared `GlobalEnv`,
+so clones name the same runtime rather than a new one.
+
+```rust
+pub fn builder() -> RuntimeBuilder;
+/// Adopt an existing environment (AOT harness, embedding host, package loader).
+pub fn from_globals(globals: Arc<GlobalEnv>) -> Runtime;
+pub fn globals(&self) -> &Arc<GlobalEnv>;
+pub fn into_globals(self) -> Arc<GlobalEnv>;
+pub fn env(&self, ns: &str) -> Env;
+pub fn execution_mode(&self) -> ExecutionMode;
+pub fn tier_state(&self) -> TierState;
+```
+
+### `RuntimeBuilder`
+
+```rust
+pub fn execution_mode(self, mode: ExecutionMode) -> Self;   // default Tiered
+pub fn source_paths(self, paths: Vec<PathBuf>) -> Self;
+pub fn gc_config(self, config: Arc<GcConfig>) -> Self;
+pub fn gc_config_from_env(self, enabled: bool) -> Self;     // default true
+pub fn register_gc_roots(self, enabled: bool) -> Self;      // default true
+pub fn builtin_source(self, ns: impl Into<String>, src: &'static str) -> Self;
+pub fn eager_clojure_test(self, enabled: bool) -> Self;     // default false
+pub fn build(self) -> Result<Runtime, BuildError>;
+```
+
+`build` registers native `clojure.core`, evaluates `bootstrap.cljrs`, sets up
+the `user` namespace, applies GC and source-path configuration, and finally
+raises the tier state — the bootstrap itself always tree-walks, because nothing
+can be lowered before `clojure.core` exists. `BuildError::EmbeddedSource` is
+returned when an embedded source fails to *parse* (the binary's own text is
+broken); an individual bootstrap form that fails to evaluate is reported on
+stderr and skipped, as before.
+
+The GC root tracer registered by `register_gc_roots` holds a **weak** handle to
+the environment, so a runtime that is dropped stops being a root instead of
+keeping itself alive forever through the heap's tracer list.
+
+## Execution modes and tier state
+
+`ExecutionMode` is chosen once, at build time, and never changes: it selects the
+function-call path. Before Stage 3 each mode was a different `fn` pointer stored
+in `GlobalEnv`, and those pointers existed only to let `cljrs-interp` reach
+`cljrs-eval` without a dependency cycle. With both in one package the mode is
+data and the dispatch is a direct call.
+
+| Mode | `GlobalEnv::call_cljrs_fn` routes to | Target tier |
+|---|---|---|
+| `TreeWalk` | `interp::apply::call_cljrs_fn` | `TreeWalk` |
+| `Tiered` (default) | `tiered::apply::call_cljrs_fn` | `Jit` |
+| `TieredNoJit` | `tiered::apply::call_cljrs_fn` | `Ir` |
+| `NoGcTransaction` | `env::depth::call_cljrs_fn` | `TreeWalk` |
+
+`TierState` is the *current* state of that mode, and it does change. It starts
+at `TreeWalk` and the builder raises it once to the mode's target tier when the
+bootstrap finishes. It replaces the `compiler_ready` flag, which said only
+"not tree-walk" and could not distinguish the IR interpreter from native JIT
+dispatch — `TieredNoJit` stops at Tier 1 even with a JIT backend linked in.
+`CLJRS_NO_IR` pins any runtime at `TreeWalk`.
+
+```rust
+pub enum ExecutionMode { TreeWalk, Tiered, TieredNoJit, NoGcTransaction }
+impl ExecutionMode {
+    pub fn target_tier(self) -> TierState;
+    pub fn is_tiered(self) -> bool;
+}
+
+pub enum TierState { TreeWalk = 0, Ir = 1, Jit = 2 }
+impl TierState {
+    pub fn ir_enabled(self) -> bool;   // >= Ir
+    pub fn jit_enabled(self) -> bool;  // == Jit
+}
+```
+
+---
+
 ## Module `env`
 
 ### `env` submodule
 
-`Env` is a lexical scope chained to a parent; `GlobalEnv` is the process-wide
-namespace registry (namespaces, interned vars, source paths, refer/alias
-tables, the version cache, and the evaluator function pointers that Stage 3
-removes).
+`Env` is a lexical scope chained to a parent; `GlobalEnv` is one runtime
+instance's namespace registry (namespaces, interned vars, source paths,
+refer/alias tables, the version cache) plus its execution mode, tier state,
+IR cache, and identity.
+
+```rust
+/// Raw constructor: no builtins, no bootstrap. Use Runtime::builder().
+pub fn GlobalEnv::new(execution_mode: ExecutionMode) -> Arc<GlobalEnv>;
+
+/// Process-unique identity, allocated from a counter. Scopes the cross-defn
+/// registry and the IR cache index. Not the Arc's address: an address is
+/// unique only while its allocation is live, so a dropped runtime could hand
+/// its key to the next one and let it inherit the dead runtime's IR.
+pub fn id(&self) -> u64;
+
+pub fn execution_mode(&self) -> ExecutionMode;
+pub fn tier_state(&self) -> TierState;
+pub fn set_tier_state(&self, tier: TierState);   // raise only (fetch_max)
+pub fn ir_enabled(&self) -> bool;                // tier_state().ir_enabled()
+pub fn ir_cache(&self) -> &Arc<tiered::ir_cache::IrCache>;
+
+/// The single evaluation and function-call entry points. `eval` always runs
+/// the tree walker; `call_cljrs_fn` matches on the execution mode; and
+/// `on_fn_defined` eagerly lowers only for a tiered runtime with IR live.
+pub fn eval(&self, form: &Form, env: &mut Env) -> EvalResult;
+pub fn call_cljrs_fn(&self, f: &CljxFn, args: &[Value], env: &mut Env) -> EvalResult;
+pub fn on_fn_defined(&self, f: &CljxFn, env: &mut Env);
+```
+
+### `depth` submodule
+
+The call-depth cap for `ExecutionMode::NoGcTransaction`. Every interpreted
+application consumes real Rust stack, so an unbounded recursion inside a
+transaction would overflow the host thread's stack and abort the process.
+`DepthGuard::install(limit)` scopes a thread-local budget to one invocation;
+`call_cljrs_fn` refuses to nest past it and returns
+`EvalError::Runtime(DEPTH_EXCEEDED_MSG)`. This is the one call-path override
+that survived Stage 3 — as a runtime-owned mode rather than a `GlobalEnv` hook
+installed by `cljrs-tx`.
 
 ### `error` submodule
 
@@ -398,18 +539,6 @@ When the `env` module's transaction policy and `InvocationGuard` are active, the
 same tree walker denies external capabilities and routes all allocations into
 one invocation-lifetime region instead.
 
-### Environment constructors
-
-```rust
-pub fn standard_env_minimal(eval_fn, call_cljrs_fn, on_fn_defined) -> Arc<GlobalEnv>;
-pub fn standard_env(eval_fn, call_cljrs_fn, on_fn_defined) -> Arc<GlobalEnv>;
-pub fn standard_env_with_paths(eval_fn, call_cljrs_fn, on_fn_defined, source_paths) -> Arc<GlobalEnv>;
-```
-
-`standard_env_minimal` registers native builtins into `clojure.core`, evaluates
-`bootstrap.cljrs`, and sets up the `user` namespace. `standard_env` also eagerly
-loads `clojure.test`. Stage 3 replaces all three with `Runtime::builder()`.
-
 ### `eval(form, env) -> EvalResult`
 
 Evaluate a single `Form` in `env`.  Entry point for the interpreter.
@@ -550,24 +679,6 @@ pub use crate::interp::eval::{eval, eval_with_gas};
 pub use crate::env::callback::invoke;
 pub use crate::env::loader::load_ns;
 
-/// Create a minimal GlobalEnv with IR-accelerated eval/call dispatch.
-/// Passes tiered::apply::call_cljrs_fn (IR + tree-walk fallback)
-/// and eager_lower_fn hook to interp::standard_env_minimal.
-pub fn standard_env_minimal() -> Arc<GlobalEnv>;
-
-/// Like standard_env_minimal() but without the eager-lowering hook.
-pub fn standard_env_minimal_no_ir() -> Arc<GlobalEnv>;
-
-/// Like standard_env_minimal() but also registers compiler sources.
-pub fn standard_env() -> Arc<GlobalEnv>;
-
-/// Like standard_env() but also sets user source paths.
-pub fn standard_env_with_paths(source_paths: Vec<PathBuf>) -> Arc<GlobalEnv>;
-
-/// Mark the IR compiler ready (lowering is pure Rust — nothing to load),
-/// snapshotting the bootstrap arity watermark. Honors CLJRS_NO_IR. Idempotent.
-pub fn mark_compiler_ready(globals: &Arc<GlobalEnv>) -> bool;
-
 /// Load pre-built IR from a serialized bundle into the IR cache.
 /// Walks all namespaces, matches bundle keys to runtime arity IDs.
 /// Returns the number of arities loaded.
@@ -605,17 +716,17 @@ pub mod lower {
     /// dependent recording, required off the mutator thread); `None` uses the
     /// legacy externals_for (synchronous callers record dependents themselves).
     pub fn lower_expanded_arity(name, params, rest, destructure_params,
-        destructure_rest, expanded_body, ns, globals_id: usize,
+        destructure_rest, expanded_body, ns, globals_id: u64,
         arity_id: Option<u64>, do_optimize: bool, is_async: bool)
         -> Result<(IrFunction, Vec<(Arc<str>, Arc<str>)>), LowerError>;
-    /// Identity of the GlobalEnv behind `env` (scopes the cross-defn registry).
-    pub fn globals_id(env: &Env) -> usize;
 }
 
 /// Cross-defn IR registry (in submodule `defn_registry`, Phase 10.5):
+/// `globals_id` is `GlobalEnv::id` — a counter value, so a dropped runtime
+/// never leaks its registrations to the next one built.
 pub mod defn_registry {
-    pub fn register_defn(globals_id, ns, name, arities: Vec<(usize, bool, Arc<IrFunction>)>);
-    pub fn externals_for(globals_id, referenced) -> Vec<ExternalDefn>;
+    pub fn register_defn(globals_id: u64, ns, name, arities: Vec<(usize, bool, Arc<IrFunction>)>);
+    pub fn externals_for(globals_id: u64, referenced) -> Vec<ExternalDefn>;
     pub fn record_dependents(arity_id, used);
     /// Phase 10.7: externals_for + record_dependents in one step, atomic with
     /// respect to on_redefined (holds the registry lock across the edge write).
@@ -631,8 +742,9 @@ pub mod defn_registry {
 
 ### IR dispatch flow
 
-1. `tiered::apply::call_cljrs_fn` is registered as the `call_cljrs_fn` function pointer in `GlobalEnv`
-2. On each call, it checks `ir_cache::get_cached(arity_id)` for a lowered IR function
+1. `GlobalEnv::call_cljrs_fn` routes to `tiered::apply::call_cljrs_fn` when the runtime's
+   `ExecutionMode` is `Tiered` or `TieredNoJit`
+2. On each call, it checks `globals.ir_cache().get(arity_id)` for a lowered IR function
 3. If cached **and not async**: executes via `ir_interp::interpret_ir` (register-file interpreter)
 4. If not cached **or async**: counts the call (`jit_state::record_interp_call`, Phase 10.7 —
    see "Background lowering" below) and falls back to `interp::apply::call_cljrs_fn`
@@ -643,17 +755,18 @@ pub mod defn_registry {
      tree-walked call count crosses `ir_threshold()` (default 50), the dispatch seam
      macro-expands its arity bodies on the calling thread and enqueues them to the
      `cljrs-ir-lower` worker, which lowers + optimizes off-thread and publishes via
-     `ir_cache::store_cached`.
-   - **Eager lowering (opt-in, `CLJRS_EAGER_LOWER=1`)**: `ir_interp::eager_lower_fn` is
-     registered as the `on_fn_defined` hook; when `compiler_ready` is true, new `fn*`
-     definitions are lowered immediately.
+     `IrCache::store`.
+   - **Eager lowering (opt-in, `CLJRS_EAGER_LOWER=1`)**: `GlobalEnv::on_fn_defined`
+     calls `ir_interp::eager_lower_fn` for a tiered runtime whose tier state has
+     reached `Ir`, so new `fn*` definitions are lowered immediately.
    - **Pre-built bundles**: `load_prebuilt_ir` — public API for embedders, called by
      nothing in this workspace. `cljrs ir build` writes the bundles it consumes.
    The resulting `IrFunction::is_async` flag matches the `CljxFn::is_async` attribute.
-6. `eval_call` in `interp` routes `Value::Fn` calls through `globals.call_cljrs_fn`
-   (the registered hook) rather than calling the tree-walker directly, so IR-cached
-   arities are used on direct call paths too
-7. JIT tier: before the IR cache, `call_cljrs_fn` checks `jit_state::get_native_fn(arity_id)`
+6. `eval_call` in `interp` routes `Value::Fn` calls through `GlobalEnv::call_cljrs_fn`
+   rather than calling the tree-walker directly, so IR-cached arities are used on
+   direct call paths too
+7. JIT tier: before the IR cache, and only when the tier state is `Jit`
+   (`ExecutionMode::Tiered`), `call_cljrs_fn` checks `jit_state::get_native_fn(arity_id)`
    for compiled native code and, if present, dispatches to it.  `call_jit_native` brackets
    the native call with: a frame epoch (code unloading), GC roots for the caller env and
    args, **an eval context** (rt_abi bridges — `rt_call`, `rt_load_global`, the HOF
@@ -676,7 +789,7 @@ Tier 1 IR ──(jit_threshold, 1000 calls; counter restarts at IR publish)─�
   ships a `LowerRequest` (plain `Form` data) to the `cljrs-ir-lower` worker.
   The worker is not a GC mutator: it only runs the Env-free half of lowering.
 - Skipped: macros, async fns, capturing closures, bootstrap-era definitions
-  (arity id below the watermark snapshotted by `mark_compiler_ready`), and
+  (arity id below the watermark the runtime builder snapshots), and
   fns defined in builtin-source namespaces (clojure.test, clojure.string, …).  Background lowering targets **user code only**:
   shipped namespaces only ever reached the IR tiers under opt-in eager
   lowering, and some of their patterns are known to miscompile (see TODO.md
@@ -687,7 +800,8 @@ Tier 1 IR ──(jit_threshold, 1000 calls; counter restarts at IR publish)─�
   rebind landed mid-flight.  The dispatch seam only peeks
   (`relower_marked` + `lower_queued` dedup) and enqueues.
 - Cold eviction: `Cached` entries track last access; `ir_cache::sweep_idle`
-  runs at the stop-the-world reclaim pass and evicts entries idle past
+  runs at the stop-the-world reclaim pass over every live runtime's cache and
+  evicts entries idle past
   `CLJRS_IR_CACHE_TTL` (default 600 s) — deliberately *colder* than native
   code.  Entries backing published native code or an in-flight compile are
   never evicted (deopt fallback); `Unsupported` markers are kept forever.
@@ -715,7 +829,7 @@ pub fn on_ir_published(arity_id);                 // worker: restart counter at 
 pub fn evict_entry_if_cold(arity_id) -> bool;     // TTL sweep: drop entry unless native/queued
 pub fn stale_osr_code(arity_id);                  // TTL sweep: stale published OSR entries
 pub fn compile_queued(arity_id) -> bool;          // TTL sweep: in-flight JIT needs the IR
-pub fn set_bootstrap_arity_watermark(w: u64);     // mark_compiler_ready snapshots the boundary
+pub fn set_bootstrap_arity_watermark(w: u64);     // the runtime builder snapshots the boundary
 pub fn is_bootstrap_arity(arity_id) -> bool;      // bootstrap fns excluded from background lowering
 pub fn record_call(arity_id, ir_func, profile_args);  // bump counter + arg-type profile; enqueue when hot
 pub fn arg_type_profile(arity_id) -> Option<Vec<u8>>; // per-param type bitmasks (PROFILE_LONG/_DOUBLE/_OTHER)

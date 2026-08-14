@@ -15,6 +15,7 @@ cljrs-logging = { workspace = true }
 libloading    = "0.8"
 
 [dev-dependencies]
+cljrs-runtime = { workspace = true }
 cljrs-interp = { workspace = true }
 cljrs-value  = { workspace = true }
 cljrs-gc     = { workspace = true }
