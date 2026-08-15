@@ -33,6 +33,9 @@ use cljrs_compiler::extensions::ExtensionSet;
 /// The extensions available to programs this CLI compiles.
 ///
 /// Mirrors what [`crate::setup_globals`] registers on an interpreted runtime.
+/// `cljrs-compiler/tests/common/mod.rs` encodes the same mapping unconditionally
+/// so the compiler's end-to-end tests compile against every extension; keep the
+/// two in step when adding one here.
 pub fn default_set() -> ExtensionSet {
     #[allow(unused_mut)]
     let mut set = ExtensionSet::new();

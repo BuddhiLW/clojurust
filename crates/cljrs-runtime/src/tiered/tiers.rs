@@ -9,8 +9,13 @@
 //!   backend that produced them.
 //!
 //! Two runtimes in one process therefore never read, evict, or invalidate
-//! each other's IR or native code, and everything a runtime compiled is freed
-//! when the runtime is.
+//! each other's IR or native code.  Dropping a runtime drops its IR outright
+//! and hands every epoch it still has published to the code cache for
+//! reclamation (see [`JitState`]'s `Drop`), so its compiled modules are freed
+//! at the next safepoint at which no thread is executing them.  The one
+//! exception is `^:async` poll functions, which are registered outside the
+//! epoch-tagged cache and live for the process — see
+//! `cljrs_compiler::jit::async_jit`.
 //!
 //! ## Reaching a runtime without an `Env`
 //!

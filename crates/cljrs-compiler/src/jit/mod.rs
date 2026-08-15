@@ -152,6 +152,15 @@ fn shared_queue() -> SyncSender<jit_worker::CompileRequest> {
 /// only actually happens in a runtime whose execution mode reaches
 /// [`TierState::Jit`](cljrs_runtime::TierState) — `ExecutionMode::TieredNoJit`
 /// and `CLJRS_NO_IR` keep dispatch below Tier 2 with a backend installed.
+///
+/// **Install before the runtime warms up.**  An arity that crosses the
+/// compile threshold while no backend is attached marks itself queued and
+/// never re-enqueues, so it stays at Tier 1 for the life of the runtime even
+/// if a backend arrives later.  That is deliberate — the flag is what keeps
+/// hot dispatch from re-enqueueing the same arity on every call — but it
+/// means a host that evaluates user code first and installs afterwards
+/// silently gets no JIT for whatever ran in between.  The CLI installs in
+/// `setup_globals`, before any user code runs.
 pub fn install(runtime: &Runtime) {
     install_on(runtime.globals());
 }

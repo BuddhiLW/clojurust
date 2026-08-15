@@ -714,6 +714,52 @@ impl JitState {
             }
         }
     }
+
+    /// Every epoch this runtime still has published, whole-function and OSR.
+    ///
+    /// Only the [`Drop`] impl needs this: everywhere else, code is unpublished
+    /// one arity at a time as it is superseded.
+    fn published_epochs(&self) -> Vec<u64> {
+        let mut epochs = Vec::new();
+        for entry in self.entries.read().unwrap().values() {
+            // An entry keeps its epoch after the pointer is nulled, so the
+            // pointer — not the epoch — is what says the code is still live.
+            if !entry.native_fn_ptr.load(Ordering::Acquire).is_null() {
+                epochs.push(entry.epoch.load(Ordering::Acquire));
+            }
+        }
+        for state in self.osr.read().unwrap().values() {
+            if let OsrState::Ready(slot) = state {
+                epochs.push(slot.epoch);
+            }
+        }
+        epochs
+    }
+}
+
+/// Release this runtime's compiled code when the runtime goes away.
+///
+/// The code cache is process-global (one executable-memory budget, one
+/// worker), so nothing else would ever look at these modules again: their only
+/// referents were the tables being dropped right here.  Staling them hands
+/// them to the cache's reclaim path, which frees each one at the next
+/// stop-the-world safepoint at which no thread is executing it — the same
+/// live-frame scan that guards redefinition, so a native frame still on some
+/// thread's stack is as safe here as it is there.
+///
+/// Without this, a host that creates and drops runtimes — the case
+/// per-runtime tier state exists to support — would leak every module it ever
+/// compiled.  The CLI, with one runtime for the life of the process, never
+/// reaches it.
+impl Drop for JitState {
+    fn drop(&mut self) {
+        let Some(backend) = self.backend.get() else {
+            return;
+        };
+        for epoch in self.published_epochs() {
+            backend.mark_stale(epoch);
+        }
+    }
 }
 
 // ── Active JIT frame tracking (for code unloading) ──────────────────────────────
@@ -918,6 +964,36 @@ mod tests {
     use super::*;
     use crate::tiered::tiers::Tiers;
 
+    /// A backend that records the epochs handed to it for reclamation, so a
+    /// test can assert on what the runtime released and when.
+    #[derive(Default)]
+    struct RecordingBackend {
+        staled: Mutex<Vec<u64>>,
+    }
+
+    impl RecordingBackend {
+        fn staled(&self) -> Vec<u64> {
+            let mut v = self.staled.lock().unwrap().clone();
+            v.sort_unstable();
+            v
+        }
+    }
+
+    impl JitBackend for RecordingBackend {
+        fn enqueue_function(&self, _: Weak<Tiers>, _: u64, _: Arc<cljrs_ir::IrFunction>) {}
+        fn enqueue_osr(&self, _: Weak<Tiers>, _: u64, _: u32, _: Arc<cljrs_ir::IrFunction>) {}
+        fn mark_stale(&self, epoch: u64) {
+            self.staled.lock().unwrap().push(epoch);
+        }
+        fn take_pending_exception(&self) -> Option<Value> {
+            None
+        }
+        fn deopt_sentinel(&self) -> usize {
+            0
+        }
+        fn compile_async_arity(&self, _: &Value, _: usize, _: &mut crate::env::env::Env) {}
+    }
+
     fn jit() -> Arc<Tiers> {
         Tiers::new(0xF000_0000)
     }
@@ -946,6 +1022,45 @@ mod tests {
         assert!(a.jit().get_native_fn(id).is_some());
         assert!(b.jit().get_native_fn(id).is_none());
         assert!(!b.jit().compile_queued(id));
+    }
+
+    /// Dropping a runtime releases the code it compiled.  Nothing else ever
+    /// looks at those modules again — the tables that referenced them go away
+    /// with the runtime — so without this the process-global code cache would
+    /// hold them forever.
+    #[test]
+    fn dropping_a_runtime_stales_its_published_code() {
+        use cljrs_ir::VarId;
+        let backend = Arc::new(RecordingBackend::default());
+        let t = jit();
+        t.jit().install_backend(backend.clone());
+
+        // Two published whole-function epochs, one published OSR entry, one
+        // header that failed to compile (nothing to release), and one epoch
+        // already superseded by a redefinition before the drop.
+        t.jit()
+            .store_native_fn(0xF300_0001, 0x1000usize as *const (), 1001);
+        t.jit()
+            .store_native_fn(0xF300_0002, 0x2000usize as *const (), 1002);
+        t.jit().store_osr_fn(
+            0xF300_0001,
+            4,
+            0x3000usize as *const (),
+            1003,
+            vec![VarId(1)],
+        );
+        t.jit().mark_osr_failed(0xF300_0002, 9);
+        t.jit()
+            .store_native_fn(0xF300_0003, 0x4000usize as *const (), 1004);
+        t.jit().stale_native_code(0xF300_0003);
+        assert_eq!(backend.staled(), vec![1004], "redefinition released 1004");
+
+        drop(t);
+        assert_eq!(
+            backend.staled(),
+            vec![1001, 1002, 1003, 1004],
+            "the drop must release every epoch still published"
+        );
     }
 
     #[test]

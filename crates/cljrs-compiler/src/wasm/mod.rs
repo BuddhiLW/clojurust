@@ -9,7 +9,7 @@
 //!
 //! A wasm module cannot generate and execute native machine code at runtime —
 //! there is no `mmap(PROT_EXEC)` inside the sandbox — so the Cranelift JIT
-//! (`cljrs-jit`) cannot run in a browser.  The browser deployment story is
+//! ([`crate::jit`]) cannot run in a browser.  The browser deployment story is
 //! therefore *ahead-of-time*: compile each Clojure function to wasm bytecode at
 //! build time and ship it.  At runtime the tiers invert relative to native:
 //!

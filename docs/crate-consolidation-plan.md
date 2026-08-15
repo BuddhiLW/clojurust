@@ -644,6 +644,18 @@ id resolved through a process-wide index (`GlobalEnv` owns `GcPtr`s and is not
 that asked, or is discarded when that runtime was dropped meanwhile. Stage 3's
 weak `IrCache` index is deleted.
 
+Making the state per-runtime made runtime *teardown* meaningful for the first
+time, and exposed a leak that did not exist while everything was global:
+nothing ever released a dropped runtime's compiled code, because reclamation
+only touched epochs an explicit redefinition had staled. `JitState`'s `Drop`
+now hands every still-published epoch — whole-function and OSR — to the
+backend, so the code cache frees those modules at the next safepoint at which
+no thread is executing them, using the same live-frame scan that guards
+redefinition. `dropping_a_runtime_stales_its_published_code` covers it. The
+CLI, with one runtime for the life of the process, never reached this; a host
+that creates and drops runtimes — the case per-runtime state exists to
+support — would have leaked every module it ever compiled.
+
 Three things stay process-wide, because they describe the process rather than
 a runtime, and the outcome is stated here so a later reader does not mistake
 them for leftovers:
@@ -715,7 +727,17 @@ forwards `no-gc` to its runtime dependencies, `cljrs-compiler` forwards to it,
 and `cljrs` forwards weakly (`cljrs-async?/no-gc`) since its async dependency
 is optional.
 
-Deferred by design: `defn_registry`'s cross-defn registry stays keyed by
+Deferred by design: `^:async` poll functions are still registered outside the
+epoch-tagged code cache (`jit::async_jit`'s `KEEPALIVE`, plus `cljrs-async`'s
+process-global poll registry), so they live for the process and survive their
+runtime's drop. That is pre-existing and already documented as future work;
+the registry is keyed by the process-unique `ir_arity_id`, so a later runtime
+cannot reach a dead one's entries — it is a leak, not a hazard. Retiring it
+needs the same epoch tagging and live-frame scan the whole-function tier uses,
+plus a way to retract a registry entry, which is a change to `cljrs-async`'s
+dispatch path rather than to this stage's boundaries.
+
+`defn_registry`'s cross-defn registry stays keyed by
 `GlobalEnv::id` in process-global maps rather than moving into `Tiers`. It is
 correct as it stands (Stage 3 replaced its address-derived keys with counter
 ids), it is not JIT state, and moving it would have enlarged an already large

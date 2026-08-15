@@ -21,9 +21,18 @@ use cljrs_value::Value;
 use crate::jit::jit_compiler::{CompiledFn, compile_jit_poll};
 
 /// Compiled poll-fn modules kept alive for the process lifetime: each registered
-/// `poll_fn` pointer points into its module's executable memory.  Redefining an
-/// `^:async` var orphans the old module (a bounded leak); poll-fn code unloading
-/// is future work, mirroring the closure-escape epoch pinning elsewhere.
+/// `poll_fn` pointer points into its module's executable memory.
+///
+/// These deliberately sit outside the epoch-tagged [`code_cache`](super::code_cache),
+/// so nothing ever reclaims them: redefining an `^:async` var orphans the old
+/// module, and *dropping the runtime that compiled it* orphans all of them,
+/// along with their entries in `cljrs_async`'s process-global poll registry
+/// (which is keyed by the process-unique `ir_arity_id`, so a later runtime
+/// cannot collide with a dead one's entries — it is a leak, not a hazard).
+/// Both are bounded by how much `^:async` code a process compiles.  Poll-fn
+/// code unloading is future work: it needs the same epoch tagging and
+/// live-frame scan the whole-function tier uses, plus a way to retract a
+/// registry entry.
 static KEEPALIVE: Mutex<Vec<CompiledFn>> = Mutex::new(Vec::new());
 
 /// Lowers the called `^:async` arity to a state machine, JIT-compiles its

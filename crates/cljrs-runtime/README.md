@@ -836,7 +836,10 @@ pub fn sweep_idle(now, ttl_secs) -> Vec<u64>;      // STW reclaim hook: sweep th
 
 `GlobalEnv::tiers()`, `::ir_cache()`, `::jit()`, and `::jit_backend()` are the
 accessors dispatch uses.  Two runtimes in one process never read, evict,
-promote, or deoptimize each other's code.
+promote, or deoptimize each other's code, and dropping one releases its IR
+and stales its published native code (`^:async` poll functions excepted —
+they are registered outside the epoch-tagged code cache and live for the
+process).
 
 Background workers cannot hold an `Arc<GlobalEnv>` (it owns `GcPtr`s and is
 not `Send`); `Tiers` is `Send + Sync`, so a lowering or compile request
@@ -891,6 +894,9 @@ pub fn store_native_fn(&self, arity_id, ptr, epoch);     // worker publishes com
 pub fn get_native_fn(&self, arity_id) -> Option<(*const (), u64)>;  // (fn_ptr, epoch)
 pub fn take_native_epoch(&self, arity_id) -> Option<u64>;// on redefinition: null ptr, drop entry, return epoch
 pub fn stale_native_code(&self, arity_id);               // null ptr + hand epochs to the backend (10.5)
+// Drop: hands every still-published epoch to the backend, so a dropped
+// runtime's compiled modules are reclaimed instead of leaking in the
+// process-global code cache.
 pub fn take_pending_exception(&self) -> Option<Value>;   // uncaught native throw, taken at the dispatch seam
 
 // Deoptimization (Phase 10.6):

@@ -10,6 +10,11 @@ use std::path::PathBuf;
 use cljrs_compiler::extensions::{CompileSession, Extension, ExtensionSet};
 
 /// Every extension the default CLI build ships, in the same order.
+///
+/// This mirrors `cljrs::extensions::default_set`, minus the feature gates —
+/// the tests want all of them. That crate is the CLI and depends on this one,
+/// so the list cannot simply be imported; keep the two in step when adding an
+/// extension.
 pub fn extension_set() -> ExtensionSet {
     ExtensionSet::new()
         .with(Extension::new(

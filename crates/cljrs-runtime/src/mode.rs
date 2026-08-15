@@ -30,8 +30,9 @@ pub enum ExecutionMode {
     /// Tree walk, tier-1 IR interpreter, and native JIT promotion.
     ///
     /// The default, and what the `cljrs` CLI uses.  Native dispatch is only
-    /// reached once a JIT backend has installed its hooks (`cljrs_jit::init`);
-    /// without one this behaves like [`ExecutionMode::TieredNoJit`].
+    /// reached once a JIT backend is attached to the runtime
+    /// (`cljrs_compiler::jit::install`); without one this behaves like
+    /// [`ExecutionMode::TieredNoJit`].
     #[default]
     Tiered,
 

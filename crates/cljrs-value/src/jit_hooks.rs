@@ -1,10 +1,10 @@
 //! Cross-layer hooks upper tiers install into the value layer.
 //!
 //! Two consumers need to learn when a var is rebound:
-//! - the JIT tier (`cljrs-jit`) marks the previous definition's compiled
-//!   native code *stale* and reclaims it at the next stop-the-world safepoint
-//!   (Phase 10.2 — code unloading);
-//! - the IR tier (`cljrs-eval`) invalidates cached lowerings of *other*
+//! - the JIT tier (`cljrs_compiler::jit`) marks the previous definition's
+//!   compiled native code *stale* and reclaims it at the next stop-the-world
+//!   safepoint (Phase 10.2 — code unloading);
+//! - the IR tier (`cljrs_runtime::tiered`) invalidates cached lowerings of *other*
 //!   functions that specialized against the old definition (Phase 10.5 —
 //!   cross-defn region promotion).
 //!
