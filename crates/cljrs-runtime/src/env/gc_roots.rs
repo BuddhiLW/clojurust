@@ -11,9 +11,9 @@ use std::cell::RefCell;
 // safepoint, when every mutator thread is parked and active JIT frames can be
 // scanned safely.  GC collection is the existing STW point, so interested
 // tiers install hooks here that run at the tail of every collection while the
-// STW guard is still held.  Current registrants: `cljrs-jit` (superseded
-// native modules) and `cljrs-eval`'s lowering worker (idle Tier-1 IR,
-// Phase 10.7).
+// STW guard is still held.  Current registrants: the compiler's JIT code cache
+// (`cljrs_compiler::jit::code_cache`, superseded native modules) and this
+// crate's lowering worker (idle Tier-1 IR, Phase 10.7).
 
 type StwReclaimHook = Box<dyn Fn() + Send + Sync + 'static>;
 static STW_RECLAIM_HOOKS: std::sync::RwLock<Vec<StwReclaimHook>> =

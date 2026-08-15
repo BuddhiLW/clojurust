@@ -9,10 +9,10 @@ selected automatically based on how hot the code is:
 
 | Tier | Engine | When it runs |
 |---|---|---|
-| **0** | Tree-walking interpreter (`cljrs-interp`) | Always available; the universal fallback |
-| **1** | IR register interpreter (`cljrs-eval`) | When a function's ANF/SSA IR is cached |
-| **2** | AOT native code (`cljrs-compiler`) | After an explicit `cljrs compile` |
-| **JIT** | In-process native code (`cljrs-jit`) | *Planned* — when a function or loop gets hot at runtime |
+| **0** | Tree-walking interpreter (`cljrs-runtime::interp`) | Always available; the universal fallback |
+| **1** | IR register interpreter (`cljrs-runtime::tiered`) | When a function's ANF/SSA IR is cached |
+| **2** | AOT native code (`cljrs-compiler::aot`) | After an explicit `cljrs compile` |
+| **JIT** | In-process native code (`cljrs-compiler::jit`) | *Planned* — when a function or loop gets hot at runtime |
 
 All tiers meet at one seam — the `call_cljrs_fn` dispatch hook — and a function
 transparently moves up the tiers as it warms up, falling back when a form isn't
