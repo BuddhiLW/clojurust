@@ -33,8 +33,8 @@
 use std::any::Any;
 use std::sync::{Arc, Mutex};
 
-use cljrs_env::env::GlobalEnv;
 use cljrs_gc::{GcPtr, MarkVisitor, Trace};
+use cljrs_runtime::env::env::GlobalEnv;
 use cljrs_value::clone::CloneError;
 use cljrs_value::{
     Arity, NativeFn, NativeObject, NativeObjectBox, PersistentVector, Value, ValueError,

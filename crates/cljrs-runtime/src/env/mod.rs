@@ -7,7 +7,7 @@ pub mod callback;
 pub mod depth;
 pub mod dynamics;
 // The `env` module keeps its name so the `cljrs_runtime::env::env`
-// path matches the pre-merge `cljrs_env::env` path.
+// path matches the pre-merge `cljrs_runtime::env::env` path.
 #[allow(clippy::module_inception)]
 pub mod env;
 pub mod error;

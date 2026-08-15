@@ -4,8 +4,8 @@ use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use cljrs_env::env::GlobalEnv;
 use cljrs_gc::GcPtr;
+use cljrs_runtime::env::env::GlobalEnv;
 use cljrs_value::{
     Arity, Keyword, MapValue, NativeFn, PersistentVector, Value, ValueError, ValueResult,
 };
@@ -614,8 +614,8 @@ fn builtin_request_animation_frame(args: &[Value]) -> ValueResult<Value> {
     let closure = Closure::once(move || {
         DOM_GLOBALS.with(|g| {
             if let Some(globals) = &*g.borrow() {
-                let mut env = cljrs_env::env::Env::new(globals.clone(), "user");
-                let _ = cljrs_env::apply::apply_value(&handler, vec![], &mut env);
+                let mut env = cljrs_runtime::env::env::Env::new(globals.clone(), "user");
+                let _ = cljrs_runtime::env::apply::apply_value(&handler, vec![], &mut env);
             }
         });
     });

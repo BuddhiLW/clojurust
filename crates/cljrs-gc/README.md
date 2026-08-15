@@ -9,7 +9,7 @@ fixed **64 MB** soft limit instead of consulting total system RAM.
 
 **Phase:** 8.1 (GcVisitor + Trace infrastructure) + 8.2 (GcBox/GcHeap
 raw-pointer implementation) — implemented.  `no-gc` mode (Phases 1–8 of
-`docs/no-gc-plan.md`) — implemented.  B3 (`StaticGcPtr`, `static_alloc`) —
+`docs/archive/no-gc-plan.md`) — implemented.  B3 (`StaticGcPtr`, `static_alloc`) —
 implemented.
 
 ---

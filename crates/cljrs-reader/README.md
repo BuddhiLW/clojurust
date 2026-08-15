@@ -115,7 +115,7 @@ keyword token is already in progress is just appended to that token instead
 of ending it. This is what makes `x#` lex as the single symbol `Symbol("x#")`
 rather than `Symbol("x")` followed by a stray dispatch token — required for
 auto-gensym symbols inside syntax-quote (`` `(let [x# 1] x#) ``), which
-`cljrs-interp::syntax_quote` resolves to a unique `x__N__auto__` symbol per
+`cljrs_runtime::interp::syntax_quote` resolves to a unique `x__N__auto__` symbol per
 syntax-quote form.
 
 ---
@@ -273,7 +273,7 @@ The auto-resolved spellings lower to `FormKind::AutoKeyword` / `AutoSymbol`
 rather than being resolved here, so `*ns*` and its aliases stay the evaluator's
 business and namespace resolution lives in one place. Consumers that turn a
 form into data or into IR resolve them first through
-`cljrs_builtins::form::resolve_auto_forms`.
+`cljrs_runtime::builtins::form::resolve_auto_forms`.
 
 ---
 

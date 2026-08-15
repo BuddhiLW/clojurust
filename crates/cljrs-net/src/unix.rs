@@ -22,8 +22,8 @@
 
 use std::sync::Arc;
 
-use cljrs_env::env::GlobalEnv;
 use cljrs_gc::GcPtr;
+use cljrs_runtime::env::env::GlobalEnv;
 use cljrs_value::{Arity, NativeFn, Value, ValueError, ValueResult};
 
 type Builtin = fn(&[Value]) -> ValueResult<Value>;
@@ -53,7 +53,7 @@ use cljrs_async::channel::{chan_deliver, chan_put, chan_ref, chan_take, make_cha
 #[cfg(unix)]
 use cljrs_async::spawn_future;
 #[cfg(unix)]
-use cljrs_env::error::EvalResult;
+use cljrs_runtime::env::error::EvalResult;
 #[cfg(unix)]
 use cljrs_value::{ExceptionInfo, Keyword, MapValue, NativeObjectBox, Resource, ResourceHandle};
 #[cfg(unix)]

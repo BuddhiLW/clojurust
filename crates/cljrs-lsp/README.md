@@ -64,6 +64,6 @@ Point your editor's generic LSP client at one of the above for `*.cljrs` /
   never hold a lock across an `.await`. **No `ropey`** in v1 — FULL sync re-parses
   the whole buffer, so a `String` suffices; `Document` keeps that swappable.
 - **Semantic seam.** `analysis::run` is the only place documents are analyzed.
-  A v2 would give it an optional `&cljrs_eval::GlobalEnv` (from
+  A v2 would give it an optional `&cljrs_runtime::tiered::GlobalEnv` (from
   `cljrs_runtime::Runtime::builder`) to back hover,
   completion, and go-to-definition via each `Var`'s `:file`/`:line` metadata.

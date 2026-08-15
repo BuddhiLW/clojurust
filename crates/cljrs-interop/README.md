@@ -222,7 +222,7 @@ codepath would replace the HEAD fallback.
 | `cljrs-types` (workspace) | `CljxError`, `CljxResult` |
 | `cljrs-gc` (workspace) | `GcPtr`, `Trace`, `MarkVisitor` |
 | `cljrs-value` (workspace) | `Value`, `NativeFn`, `NativeObject`, `NativeObjectBox` |
-| `cljrs-env` (workspace) | `GlobalEnv` — used by `Registry` to intern native functions |
+| `cljrs-runtime` (workspace) | `env::GlobalEnv` — used by `Registry` to intern native functions |
 | `cljrs-export-macro` (workspace) | `#[export]` proc-macro |
 | `inventory` (workspace) | Link-time collection of `ExportEntry` items |
 | `num-bigint` (workspace) | `BigInt` marshalling |

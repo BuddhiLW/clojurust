@@ -9,8 +9,8 @@
 
 use std::path::PathBuf;
 
-use cljrs_eval::{Env, eval};
 use cljrs_interop::Registry;
+use cljrs_runtime::tiered::{Env, eval};
 use cljrs_value::Value;
 
 const TEST_NSES: &[&str] = &["cljrs.blake3-test"];
@@ -70,7 +70,7 @@ fn run_clojure_blake3_tests() {
 
     let mut env = Env::new(globals, "user");
 
-    cljrs_env::callback::push_eval_context(&env);
+    cljrs_runtime::env::callback::push_eval_context(&env);
 
     eval_str(&mut env, "(require 'clojure.test)");
 
@@ -97,7 +97,7 @@ fn run_clojure_blake3_tests() {
         }
     }
 
-    cljrs_env::callback::pop_eval_context();
+    cljrs_runtime::env::callback::pop_eval_context();
 
     eprintln!(
         "[blake3-tests] totals: {total_test} tests, {total_pass} pass, \

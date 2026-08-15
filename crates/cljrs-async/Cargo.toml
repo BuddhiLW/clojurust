@@ -13,9 +13,6 @@ no-gc = [
     "cljrs-gc/no-gc",
     "cljrs-value/no-gc",
     "cljrs-runtime/no-gc",
-    "cljrs-env/no-gc",
-    "cljrs-builtins/no-gc",
-    "cljrs-interp/no-gc",
 ]
 
 [dependencies]
@@ -24,9 +21,6 @@ cljrs-types    = { workspace = true }
 cljrs-gc       = { workspace = true }
 cljrs-reader   = { workspace = true }
 cljrs-value    = { workspace = true }
-cljrs-env      = { workspace = true }
-cljrs-builtins = { workspace = true }
-cljrs-interp   = { workspace = true }
 tokio          = { workspace = true, features = ["rt", "sync", "time", "macros"] }
 futures-util   = { workspace = true }
 

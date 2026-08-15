@@ -20,11 +20,11 @@ This plan does not remove the tree-walking interpreter, JIT, AOT compiler, no-GC
 | 3. Simplify runtime state | Complete | One builder, one dispatch path; per-instance IR cache |
 | 4. Merge JIT and compiler packages | Complete | `cljrs-jit` folded into `cljrs-compiler::jit`; 33 packages → 32 |
 | 5. Consolidate project and CLI tools | Complete | `cljrs-deps`+`cljrs-vcs` → `cljrs-project`; `cljrs-logging` → `tracing`; `cljrs-dom` → `cljrs-wasm::dom`; `cljrs-dylib`/`cljrs-ir-viz` → `cljrs`; 32 packages → 27 |
-| 6. Remove compatibility packages | Not started | |
+| 6. Remove compatibility packages | Complete | `cljrs-env`/`-builtins`/`-interp`/`-eval` shims deleted; 27 packages → 23 |
 
-Package count: 34 at baseline, 27 now, approximately 23 at target. Stage 2 does
-not change the count — it moves four packages' code into `cljrs-runtime` and
-leaves them as re-export shims; Stage 6 deletes those four shims and takes
+Package count: 34 at baseline, **23 now**, which is the plan's target. Stage 2
+did not change the count — it moved four packages' code into `cljrs-runtime` and
+left them as re-export shims; Stage 6 deleted those four shims and took
 27 → 23.
 
 ### Corrections found while measuring the baseline
@@ -949,6 +949,77 @@ Validation gate:
 - `cljrs-compiler` depends mainly on `cljrs-runtime`, `cljrs-ir`, and `cljrs-project`.
 - The CLI does not depend directly on internal execution modules.
 - All required build and test configurations pass.
+
+#### Stage 6 outcome
+
+The four Stage-2 shims are deleted. `cljrs-env`, `cljrs-builtins`,
+`cljrs-interp`, and `cljrs-eval` had been one-line `pub use
+cljrs_runtime::<module>::*;` packages since Stage 2, kept only so downstream
+packages could migrate one at a time. Package count 27 → 23, which is the
+plan's target.
+
+**1, 2. Imports and packages.** 271 `cljrs_{env,builtins,interp,eval}::` paths
+across 67 files became `cljrs_runtime::{env,builtins,interp,tiered}::`, and the
+four `crates/` directories are gone. The rewrite is mechanical and total — no
+path spelled with a former package name remains anywhere in the workspace.
+
+Two things moved rather than being deleted with the packages:
+
+- `crates/cljrs-interp/tests/defonce_metadata_properties.proptest-regressions`,
+  the saved proptest failure seeds. Stage 2 moved the test to
+  `cljrs-runtime/tests` but left its regression file behind, so those four
+  shrunk cases have not been re-run since. It sits next to its test again.
+- The AOT harness crate lists. `HARNESS_RUNTIME_CRATES` and
+  `TEST_HARNESS_RUNTIME_CRATES` in `aot.rs` named `cljrs-env` and `cljrs-eval`
+  as harness dependencies; a generated harness would have failed to resolve
+  them the moment the packages disappeared. Both lists now name `cljrs-runtime`
+  alone, which is what the generated `main.rs` has actually used since Stage 3.
+
+**3. Dependencies and feature propagation.** Every manifest that named a shim
+now names `cljrs-runtime` (or drops the entry, where it already had it):
+`cljrs-async`, `cljrs-base64`, `cljrs-blake3`, `cljrs-charset`,
+`cljrs-compiler`, `cljrs-interop`, `cljrs-io`, `cljrs-net`, `cljrs-nrepl`,
+`cljrs-wasm`, `cljrs`, and `examples/rust-interop`. Three `no-gc` feature lists
+collapsed the same way — `cljrs-async`'s three shim forwards, `cljrs-compiler`'s
+two, and `cljrs`'s one all become a single `cljrs-runtime/no-gc`, which is what
+they resolved to already.
+
+Three redundant dev-dependencies went with them: `cljrs`, `cljrs-base64`, and
+`cljrs-net` each listed in `[dev-dependencies]` a package they already had as a
+normal dependency, which does nothing.
+
+**4. Documentation.** The root README's crate table, dependency graph, and
+repository layout no longer carry the four shim rows. Eleven crate READMEs
+named a deleted package in prose, a dependency table, or a feature list;
+each now names the module that owns the code. `VERSIONING.md`'s
+architecture and phase tables — which still said `cljrs-deps`, `cljrs-vcs`,
+`cljrs-env`, `cljrs-interp`, `cljrs-builtins`, and `cljrs-dylib` — are stated in
+current module paths. `cljrs-runtime`'s README keeps its "Former package" column,
+because that column's job is to say what each module used to be.
+
+The `tiered` module's re-exports of `Env`, `GlobalEnv`, the error types, and
+`eval` are the one facade the plan's Evidence section named that still exists.
+They are now an intra-package convenience rather than a cross-package one — the
+condition the Evidence was about ("increases direct dependencies in downstream
+packages") is gone with the packages — but they still let a reader think
+`tiered` owns the environment types, so the module doc now says plainly that it
+does not and names the owning module for each.
+
+**5. Obsolete plans.** Ten implementation plans whose work has landed moved to
+`docs/archive/`, with a [`README`](archive/README.md) that says why they are
+kept, maps their old crate names to current locations, and points at where each
+one's shipped code lives. Their contents are deliberately unedited: these
+documents record decisions made against the tree as it was, and rewriting their
+paths to match today's would make them a worse record of what happened, not a
+better one. The four plans with open work stay in `docs/` —
+`async-worker-pool-plan.md` and `isolate-boundary-plan.md` (isolate phases
+B2–B3), this plan, and `crates/cljrs-ir/ESCAPE_OPT_PLAN.md` (stage 3
+unimplemented); their crate references *were* rewritten, because those are
+navigation aids for work someone still has to do.
+
+**6. Measurements.** [`consolidation-baseline.md` §7](consolidation-baseline.md)
+carries the re-measurement: package count, lines per package, the regenerated
+dependency graph, and a comparison against the Stage 0 figures.
 
 ## Risks
 

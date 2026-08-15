@@ -15,7 +15,7 @@ use cljrs_async::worker_pool::WorkerPool;
 use cljrs_gc::GcPtr;
 use cljrs_value::{Keyword, MapValue, NativeObjectBox, Value};
 
-fn setup_globals() -> Arc<cljrs_env::env::GlobalEnv> {
+fn setup_globals() -> Arc<cljrs_runtime::env::env::GlobalEnv> {
     let globals = {
         let runtime = cljrs_runtime::Runtime::builder()
             .execution_mode(cljrs_runtime::ExecutionMode::Tiered)

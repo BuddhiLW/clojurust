@@ -114,7 +114,7 @@ pub fn lower_via_rust(
     ns: &str,
     params: &[Arc<str>],
     compilable_forms: &[cljrs_reader::Form],
-    _env: &mut cljrs_eval::Env,
+    _env: &mut cljrs_runtime::tiered::Env,
 ) -> AotResult<IrFunction> {
     let ns_arc: Arc<str> = Arc::from(ns);
     let ir = cljrs_ir::lower::lower_fn_body(name, &ns_arc, params, compilable_forms, false)
@@ -372,17 +372,17 @@ pub fn lower_file_to_ir(
             runtime.into_globals()
         }
     };
-    let mut env = cljrs_eval::Env::new(globals, "user");
+    let mut env = cljrs_runtime::tiered::Env::new(globals, "user");
 
     let mut expanded = Vec::with_capacity(forms.len());
     for form in &forms {
         if needs_interpreter(form) {
-            match cljrs_eval::eval(form, &mut env) {
+            match cljrs_runtime::tiered::eval(form, &mut env) {
                 Ok(_) => {}
                 Err(e) => return Err(AotError::Eval(format!("{e:?}"))),
             }
         }
-        match cljrs_interp::macros::macroexpand_all(form, &mut env) {
+        match cljrs_runtime::interp::macros::macroexpand_all(form, &mut env) {
             Ok(f) => expanded.push(f),
             Err(e) => return Err(AotError::Eval(format!("{e:?}"))),
         }
@@ -472,7 +472,7 @@ fn lower_file_to_ir_bundle(
         }
     };
     session.extensions().register_all(&globals);
-    let mut env = cljrs_eval::Env::new(globals, "user");
+    let mut env = cljrs_runtime::tiered::Env::new(globals, "user");
 
     // Snapshot loaded namespaces before expansion so we can detect which user
     // namespaces `require` pulled in (transitive deps).
@@ -482,9 +482,10 @@ fn lower_file_to_ir_bundle(
     let mut expanded = Vec::with_capacity(forms.len());
     for form in &forms {
         if needs_interpreter(form) {
-            cljrs_eval::eval(form, &mut env).map_err(|e| AotError::Eval(format!("{e:?}")))?;
+            cljrs_runtime::tiered::eval(form, &mut env)
+                .map_err(|e| AotError::Eval(format!("{e:?}")))?;
         }
-        let f = cljrs_interp::macros::macroexpand_all(form, &mut env)
+        let f = cljrs_runtime::interp::macros::macroexpand_all(form, &mut env)
             .map_err(|e| AotError::Eval(format!("{e:?}")))?;
         expanded.push(f);
     }
@@ -599,7 +600,7 @@ fn form_head(form: &cljrs_reader::Form) -> String {
 /// them with the runtime's actual reserved bases via [`crate::wasm::WasmBackend`]
 /// once it knows that layout.  Wiring the IR interpreter in as the dynamic-code
 /// tier (so a namespace skipped above still runs) is the remaining runtime-side
-/// step tracked in `docs/wasm-aot-plan.md`.
+/// step tracked in `docs/archive/wasm-aot-plan.md`.
 #[cfg(feature = "wasm-aot")]
 pub fn compile_file_to_wasm(
     src_path: &Path,
@@ -704,7 +705,7 @@ pub fn compile_file(src_path: &Path, out_path: &Path, session: &CompileSession) 
     // GC service, if it has one, is silently skipped when there is no
     // LocalSet context.
     session.extensions().register_all(&globals);
-    let mut env = cljrs_eval::Env::new(globals, "user");
+    let mut env = cljrs_runtime::tiered::Env::new(globals, "user");
 
     // Snapshot loaded namespaces before expansion so we can detect
     // which user namespaces were pulled in by require.
@@ -717,12 +718,12 @@ pub fn compile_file(src_path: &Path, out_path: &Path, session: &CompileSession) 
         // evaluate them immediately so that required namespaces get loaded
         // and macros from dependencies are available for later forms.
         if needs_interpreter(form) {
-            match cljrs_eval::eval(form, &mut env) {
+            match cljrs_runtime::tiered::eval(form, &mut env) {
                 Ok(_) => {}
                 Err(e) => return Err(AotError::Eval(format!("{e:?}"))),
             }
         }
-        match cljrs_interp::macros::macroexpand_all(form, &mut env) {
+        match cljrs_runtime::interp::macros::macroexpand_all(form, &mut env) {
             Ok(f) => expanded.push(f),
             Err(e) => return Err(AotError::Eval(format!("{e:?}"))),
         }
@@ -906,7 +907,7 @@ pub fn compile_file(src_path: &Path, out_path: &Path, session: &CompileSession) 
     // form) so their bodies can be introspected and compiled to poll functions.
     for (i, form) in forms.iter().enumerate() {
         if is_def_form(form) && expanded_needs_interpreter(&expanded[i]) {
-            let _ = cljrs_eval::eval(form, &mut env);
+            let _ = cljrs_runtime::tiered::eval(form, &mut env);
         }
     }
     // Compile a native state machine for each `^:async` fn the program
@@ -1323,7 +1324,7 @@ fn compile_subfunctions(ir_func: &IrFunction, compiler: &mut Compiler) -> AotRes
 /// load failures abort the compile.
 fn pin_versioned_references(
     forms: &[cljrs_reader::Form],
-    env: &mut cljrs_eval::Env,
+    env: &mut cljrs_runtime::tiered::Env,
 ) -> AotResult<()> {
     let mut pins: Vec<(Option<String>, String)> = Vec::new();
     for form in forms {
@@ -1339,11 +1340,11 @@ fn pin_versioned_references(
                     .globals
                     .resolve_alias(&env.current_ns, p)
                     .unwrap_or_else(|| Arc::from(p.as_str()));
-                Arc::from(cljrs_env::versioned::base_ns_name(&resolved))
+                Arc::from(cljrs_runtime::env::versioned::base_ns_name(&resolved))
             }
-            None => Arc::from(cljrs_env::versioned::base_ns_name(&env.current_ns)),
+            None => Arc::from(cljrs_runtime::env::versioned::base_ns_name(&env.current_ns)),
         };
-        match cljrs_env::versioned::pin_if_available(&env.globals, &base, &commit) {
+        match cljrs_runtime::env::versioned::pin_if_available(&env.globals, &base, &commit) {
             Ok(true) => eprintln!("[aot] pinned {base}@{commit}"),
             Ok(false) => {}
             Err(e) => {
@@ -1408,7 +1409,7 @@ fn collect_versioned_syms(form: &cljrs_reader::Form, out: &mut Vec<(Option<Strin
 /// newly loaded namespace that isn't a builtin source, resolves and reads
 /// its source file from `src_dirs`.
 fn discover_bundled_sources(
-    globals: &Arc<cljrs_env::env::GlobalEnv>,
+    globals: &Arc<cljrs_runtime::env::env::GlobalEnv>,
     pre_loaded: &std::collections::HashSet<Arc<str>>,
     src_dirs: &[PathBuf],
 ) -> Vec<(Arc<str>, String)> {
@@ -1487,22 +1488,22 @@ fn write_compiled_ns_wiring(
 
         compiled_ns_registration.push_str(&format!(
             r#"    globals.register_compiled_ns_loader({ns:?}, std::sync::Arc::new(
-        |globals: &std::sync::Arc<cljrs_env::env::GlobalEnv>| -> cljrs_env::error::EvalResult<()> {{
-        let mut env = cljrs_eval::Env::new(globals.clone(), {ns:?});
-        cljrs_env::callback::push_eval_context(&env);
+        |globals: &std::sync::Arc<cljrs_runtime::env::env::GlobalEnv>| -> cljrs_runtime::env::error::EvalResult<()> {{
+        let mut env = cljrs_runtime::tiered::Env::new(globals.clone(), {ns:?});
+        cljrs_runtime::env::callback::push_eval_context(&env);
         let preamble = include_str!({preamble_file:?});
         if !preamble.is_empty() {{
             let mut parser = cljrs_reader::Parser::new(preamble.to_string(), {ns_label:?}.to_string());
-            let forms = parser.parse_all().map_err(cljrs_env::error::EvalError::Read)?;
+            let forms = parser.parse_all().map_err(cljrs_runtime::env::error::EvalError::Read)?;
             for form in &forms {{
-                cljrs_eval::eval(form, &mut env)?;
+                cljrs_runtime::tiered::eval(form, &mut env)?;
             }}
         }}
         // Re-push the eval context with the (possibly updated) namespace before
         // running the compiled initializer.
-        cljrs_env::callback::pop_eval_context();
-        cljrs_env::callback::push_eval_context(&env);
-{init_call}        cljrs_env::callback::pop_eval_context();
+        cljrs_runtime::env::callback::pop_eval_context();
+        cljrs_runtime::env::callback::push_eval_context(&env);
+{init_call}        cljrs_runtime::env::callback::pop_eval_context();
         Ok(())
     }}));
 "#,
@@ -1524,7 +1525,7 @@ fn write_compiled_ns_wiring(
 fn expand_reader_conds_deep(forms: &[cljrs_reader::Form]) -> Vec<cljrs_reader::Form> {
     // Resolve conditionals at this level first (this is what inlines `#?@`),
     // then recurse into each resulting form's children.
-    cljrs_builtins::form::expand_reader_conds(forms)
+    cljrs_runtime::builtins::form::expand_reader_conds(forms)
         .iter()
         .map(expand_reader_cond_form)
         .collect()
@@ -1556,7 +1557,7 @@ fn expand_reader_cond_form(form: &cljrs_reader::Form) -> cljrs_reader::Form {
         FormKind::ReaderCond {
             splicing: false,
             clauses,
-        } => match cljrs_builtins::form::select_reader_cond(clauses) {
+        } => match cljrs_runtime::builtins::form::select_reader_cond(clauses) {
             Some(sel) => return expand_reader_cond_form(sel),
             None => FormKind::Nil,
         },
@@ -1581,7 +1582,7 @@ fn expand_anon_fns(form: &cljrs_reader::Form) -> cljrs_reader::Form {
     let kind = match &form.kind {
         FormKind::AnonFn(body) => {
             // Expand this `#(...)`, then recurse so nested forms are handled too.
-            let expanded = cljrs_builtins::form::expand_anon_fn(body, form.span.clone());
+            let expanded = cljrs_runtime::builtins::form::expand_anon_fn(body, form.span.clone());
             return expand_anon_fns(&expanded);
         }
         FormKind::List(v) => FormKind::List(map_vec(v)),
@@ -1621,7 +1622,7 @@ fn expand_anon_fns(form: &cljrs_reader::Form) -> cljrs_reader::Form {
 fn qualify_aliases(
     form: &cljrs_reader::Form,
     ns: &str,
-    globals: &Arc<cljrs_env::env::GlobalEnv>,
+    globals: &Arc<cljrs_runtime::env::env::GlobalEnv>,
 ) -> cljrs_reader::Form {
     use cljrs_reader::form::FormKind;
     let recur = |f: &cljrs_reader::Form| qualify_aliases(f, ns, globals);
@@ -1697,7 +1698,7 @@ fn lower_namespace(
     ns_name: &str,
     source: &str,
     init_symbol: &str,
-    globals: &Arc<cljrs_env::env::GlobalEnv>,
+    globals: &Arc<cljrs_runtime::env::env::GlobalEnv>,
 ) -> AotResult<(String, Option<IrFunction>)> {
     let mut parser = Parser::new(source.to_string(), format!("<{ns_name}>"));
     let forms = parser.parse_all()?;
@@ -1707,10 +1708,10 @@ fn lower_namespace(
 
     // Macro-expand each form in an env rooted at this namespace so symbol and
     // alias resolution match how the namespace's own code sees the world.
-    let mut env = cljrs_eval::Env::new(globals.clone(), ns_name);
+    let mut env = cljrs_runtime::tiered::Env::new(globals.clone(), ns_name);
     let mut expanded = Vec::with_capacity(forms.len());
     for form in &forms {
-        match cljrs_interp::macros::macroexpand_all(form, &mut env) {
+        match cljrs_runtime::interp::macros::macroexpand_all(form, &mut env) {
             Ok(f) => expanded.push(f),
             Err(e) => return Err(AotError::Eval(format!("{e:?}"))),
         }
@@ -1763,7 +1764,7 @@ struct AsyncPollEntry {
 /// closures would need separate subfunction-symbol management).
 fn compile_async_poll_fns(
     compiler: &mut Compiler,
-    env: &mut cljrs_eval::Env,
+    env: &mut cljrs_runtime::tiered::Env,
 ) -> AotResult<Vec<AsyncPollEntry>> {
     // Snapshot the async fns first so no namespace lock is held across lowering
     // (which re-enters the env).
@@ -1827,7 +1828,7 @@ fn compile_async_poll_fns(
             if cljrs_ir::lower::async_lower::body_uses_unsupported_async(&arity.body) {
                 continue;
             }
-            let ir = match cljrs_eval::lower::lower_arity(
+            let ir = match cljrs_runtime::tiered::lower::lower_arity(
                 Some(&fnsnap.name),
                 &arity.params,
                 arity.rest.as_ref(),
@@ -1981,7 +1982,7 @@ edition = "2024"
         )
         .parse_all()
         .ok()
-        .and_then(|fs| cljrs_eval::eval(&fs[0], &mut env).ok());
+        .and_then(|fs| cljrs_runtime::tiered::eval(&fs[0], &mut env).ok());
         if let Some(r) = __check {
             if r != cljrs_value::Value::Nil {
                 let escaped: Vec<String> = __argv
@@ -2005,7 +2006,7 @@ edition = "2024"
                     .collect();
                 let call = format!("(-main {})", escaped.join(" "));
                 if let Ok(fs) = cljrs_reader::Parser::new(call, "<main>".to_string()).parse_all() {
-                    match cljrs_eval::eval(&fs[0], &mut env) {
+                    match cljrs_runtime::tiered::eval(&fs[0], &mut env) {
                         Ok(main_result) => {
                             // If -main is ^:async it returns a Future; await it on the
                             // current LocalSet so all spawned go-blocks drain to completion.
@@ -2032,11 +2033,11 @@ edition = "2024"
     let mut parser = cljrs_reader::Parser::new(preamble.to_string(), "<preamble>".to_string());
     let forms = parser.parse_all().expect("preamble parse error");
     for form in &forms {
-        cljrs_eval::eval(form, &mut env).expect("preamble eval error");
+        cljrs_runtime::tiered::eval(form, &mut env).expect("preamble eval error");
     }
     // Re-push eval context with updated namespace (ns form may have changed it).
-    cljrs_env::callback::pop_eval_context();
-    cljrs_env::callback::push_eval_context(&env);
+    cljrs_runtime::env::callback::pop_eval_context();
+    cljrs_runtime::env::callback::push_eval_context(&env);
 "#
     } else {
         ""
@@ -2133,16 +2134,16 @@ async fn run() {{
     // Register AOT-compiled namespace loaders so `require` runs their native
     // initializers instead of interpreting source.
 {compiled_ns}{native_init}
-    let mut env = cljrs_eval::Env::new(globals, "user");
+    let mut env = cljrs_runtime::tiered::Env::new(globals, "user");
 
     // Push an eval context so rt_call can dispatch through the interpreter.
-    cljrs_env::callback::push_eval_context(&env);
+    cljrs_runtime::env::callback::push_eval_context(&env);
 {preamble}
     // Call the compiled code.
     let _result = unsafe {{ __cljrs_main() }};
 {main_call}
     // Pop the eval context.
-    cljrs_env::callback::pop_eval_context();
+    cljrs_runtime::env::callback::pop_eval_context();
 
     // If CLJRS_GC_STATS is set, dump GC stats to its target (stdout/file).
     cljrs_gc::dump_stats_from_env();
@@ -2198,8 +2199,6 @@ const HARNESS_RUNTIME_CRATES: &[&str] = &[
     "cljrs-gc",
     "cljrs-value",
     "cljrs-reader",
-    "cljrs-env",
-    "cljrs-eval",
     "cljrs-runtime",
     "cljrs-stdlib",
     "cljrs-compiler",
@@ -2215,8 +2214,6 @@ const TEST_HARNESS_RUNTIME_CRATES: &[&str] = &[
     "cljrs-gc",
     "cljrs-value",
     "cljrs-reader",
-    "cljrs-env",
-    "cljrs-eval",
     "cljrs-runtime",
     "cljrs-stdlib",
     "cljrs-compiler",
@@ -2589,10 +2586,10 @@ use cljrs_value::Value;
         code.push_str(compiled_ns_registration);
     }
     code.push_str(
-        r#"    let mut env = cljrs_eval::Env::new(globals, "user");
+        r#"    let mut env = cljrs_runtime::tiered::Env::new(globals, "user");
 
     // Push an eval context so rt_call can dispatch through the interpreter.
-    cljrs_env::callback::push_eval_context(&env);
+    cljrs_runtime::env::callback::push_eval_context(&env);
 
     // Load clojure.test once; it stays loaded for the entire run.
     // push_alloc_frame() scopes transient eval allocations: after the frame
@@ -2600,7 +2597,7 @@ use cljrs_value::Value;
     // themselves stay alive via globals.namespaces, so GC can still trace them.
     {
         let _frame = cljrs_gc::push_alloc_frame();
-        let _ = cljrs_eval::eval(
+        let _ = cljrs_runtime::tiered::eval(
             &cljrs_reader::Parser::new(
                 "(require 'clojure.test)".to_string(),
                 "<test-harness>".to_string()
@@ -2640,7 +2637,7 @@ use cljrs_value::Value;
         // allocations from eval become eligible for collection immediately.
         {
             let _frame = cljrs_gc::push_alloc_frame();
-            if let Err(e) = cljrs_eval::eval(
+            if let Err(e) = cljrs_runtime::tiered::eval(
                 &cljrs_reader::Parser::new(
                     format!("(require '{})", ns_str).to_string(),
                     "<test-harness>".to_string()
@@ -2655,7 +2652,7 @@ use cljrs_value::Value;
         // infrastructure objects are freed after each namespace.
         let run_result = {
             let _frame = cljrs_gc::push_alloc_frame();
-            cljrs_eval::eval(
+            cljrs_runtime::tiered::eval(
                 &cljrs_reader::Parser::new(
                     format!("(clojure.test/run-tests '{})", ns_str).to_string(),
                     "<run-tests>".to_string()
@@ -2707,7 +2704,7 @@ use cljrs_value::Value;
     std::io::Write::flush(&mut std::io::stdout()).unwrap();
 
     // Pop the eval context.
-    cljrs_env::callback::pop_eval_context();
+    cljrs_runtime::env::callback::pop_eval_context();
 
     // If CLJRS_GC_STATS is set, dump GC stats to its target (stdout/file).
     cljrs_gc::dump_stats_from_env();
@@ -2815,7 +2812,7 @@ pub fn compile_test_harness(
         cljrs_stdlib::install(&runtime);
         runtime.into_globals()
     };
-    let mut env = cljrs_eval::Env::new(globals, "user");
+    let mut env = cljrs_runtime::tiered::Env::new(globals, "user");
 
     let test_ns_set: std::collections::HashSet<&str> =
         test_namespaces.iter().map(|s| s.as_str()).collect();
@@ -2848,7 +2845,7 @@ pub fn compile_test_harness(
             cljrs_reader::Parser::new(format!("(require '{ns})"), "<aot-test-harness>".to_string())
                 .parse_all()
                 .ok()
-                .map(|forms| cljrs_eval::eval(&forms[0], &mut env));
+                .map(|forms| cljrs_runtime::tiered::eval(&forms[0], &mut env));
         match required {
             Some(Ok(_)) => {}
             Some(Err(e)) => {

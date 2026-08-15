@@ -4,7 +4,7 @@ use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use cljrs_eval::{Env, GlobalEnv};
+use cljrs_runtime::tiered::{Env, GlobalEnv};
 use cljrs_value::Value;
 
 use crate::session::{self, VersioningFlags};

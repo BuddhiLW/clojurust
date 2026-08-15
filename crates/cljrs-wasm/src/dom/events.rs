@@ -7,8 +7,8 @@ use std::ptr::NonNull;
 use std::sync::Arc;
 
 use cljrs_async::channel::CljChannel;
-use cljrs_env::env::Env;
 use cljrs_gc::{GcPtr, MarkVisitor, Trace};
+use cljrs_runtime::env::env::Env;
 use cljrs_value::{
     Arity, Keyword, NativeFn, NativeObject, Value, ValueError, ValueResult, gc_native_object,
 };
@@ -182,7 +182,7 @@ pub fn create_listener(
         DOM_GLOBALS.with(|g| {
             if let Some(globals) = &*g.borrow() {
                 let mut env = Env::new(globals.clone(), "user");
-                let _ = cljrs_env::apply::apply_value(&handler, vec![event_map], &mut env);
+                let _ = cljrs_runtime::env::apply::apply_value(&handler, vec![event_map], &mut env);
             }
         });
 
@@ -251,7 +251,7 @@ pub fn attach_render_listener(target: &web_sys::EventTarget, event_type: String,
         DOM_GLOBALS.with(|g| {
             if let Some(globals) = &*g.borrow() {
                 let mut env = Env::new(globals.clone(), "user");
-                let _ = cljrs_env::apply::apply_value(&handler, vec![event_map], &mut env);
+                let _ = cljrs_runtime::env::apply::apply_value(&handler, vec![event_map], &mut env);
             }
         });
 

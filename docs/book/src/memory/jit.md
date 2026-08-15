@@ -2,7 +2,7 @@
 
 > **Status: planned (Phase 10).** This page describes work that is designed but
 > not yet implemented. The full architecture and roadmap live in
-> [`docs/jit-plan.md`](https://github.com/csm/clojurust/blob/main/docs/jit-plan.md).
+> [`docs/archive/jit-plan.md`](https://github.com/csm/clojurust/blob/main/docs/archive/jit-plan.md).
 
 clojurust runs code through a series of *tiers*, each faster than the last and
 selected automatically based on how hot the code is:
@@ -35,5 +35,5 @@ step. Its design covers:
   caller's region through proven-non-escaping calls — extending the bump
   allocator beyond AOT code into the default GC build.
 
-See [`docs/jit-plan.md`](https://github.com/csm/clojurust/blob/main/docs/jit-plan.md)
+See [`docs/archive/jit-plan.md`](https://github.com/csm/clojurust/blob/main/docs/archive/jit-plan.md)
 for the complete design and the phased Phase 10 roadmap.

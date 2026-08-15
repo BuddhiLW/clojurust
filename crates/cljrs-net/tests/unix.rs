@@ -1,6 +1,6 @@
 //! Phase F integration tests: Unix-domain stream sockets — echo round-trip.
 //!
-//! Done criterion from networking-plan.md Phase F:
+//! Done criterion from docs/archive/networking-plan.md Phase F:
 //!   "a Unix-socket echo server round-trips with a Unix-socket client."
 //!
 //! All tests are `#[cfg(unix)]`; on non-Unix targets this file compiles to an
@@ -14,7 +14,7 @@ mod unix_tests {
     use cljrs_gc::GcPtr;
     use cljrs_value::{Keyword, MapValue, NativeObjectBox, Value};
 
-    fn setup_globals() -> Arc<cljrs_env::env::GlobalEnv> {
+    fn setup_globals() -> Arc<cljrs_runtime::env::env::GlobalEnv> {
         let globals = {
             let runtime = cljrs_runtime::Runtime::builder()
                 .execution_mode(cljrs_runtime::ExecutionMode::Tiered)

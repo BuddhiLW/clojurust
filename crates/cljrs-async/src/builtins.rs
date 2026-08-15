@@ -12,10 +12,10 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
-use cljrs_env::env::{Env, GlobalEnv};
-use cljrs_env::error::EvalResult;
 use cljrs_gc::GcPtr;
-use cljrs_interp::destructure::value_to_seq_vec;
+use cljrs_runtime::env::env::{Env, GlobalEnv};
+use cljrs_runtime::env::error::EvalResult;
+use cljrs_runtime::interp::destructure::value_to_seq_vec;
 use cljrs_value::{
     Arity, NativeFn, NativeObjectBox, PersistentVector, Value, ValueError, ValueResult,
     gc_native_object,
@@ -225,7 +225,7 @@ fn builtin_offer(args: &[Value]) -> ValueResult<Value> {
 /// `nil` if `ch` is closed and drained. Must **not** be called from inside an
 /// `^:async` function — use `(await (take! ch))` there instead.
 fn builtin_take_blocking(args: &[Value]) -> ValueResult<Value> {
-    if cljrs_env::callback::current_is_async() {
+    if cljrs_runtime::env::callback::current_is_async() {
         return Err(ValueError::Other(
             "<!! (blocking take) must not be called inside an ^:async function; \
              use (await (take! ch)) instead"
@@ -243,7 +243,7 @@ fn builtin_take_blocking(args: &[Value]) -> ValueResult<Value> {
 /// closed. Must **not** be called from inside an `^:async` function — use
 /// `(await (put! ch val))` there instead.
 fn builtin_put_blocking(args: &[Value]) -> ValueResult<Value> {
-    if cljrs_env::callback::current_is_async() {
+    if cljrs_runtime::env::callback::current_is_async() {
         return Err(ValueError::Other(
             ">!! (blocking put) must not be called inside an ^:async function; \
              use (await (put! ch val)) instead"
@@ -260,7 +260,7 @@ fn builtin_put_blocking(args: &[Value]) -> ValueResult<Value> {
 /// context, so `await` inside it yields. This is the runtime behind `go`.
 fn builtin_async_spawn(args: &[Value]) -> ValueResult<Value> {
     let thunk = args.first().cloned().unwrap_or(Value::Nil);
-    let (globals, ns) = cljrs_env::callback::capture_eval_context()
+    let (globals, ns) = cljrs_runtime::env::callback::capture_eval_context()
         .ok_or_else(|| ValueError::Other("async-spawn called outside an eval context".into()))?;
     let rt = globals.async_runtime().ok_or_else(|| {
         ValueError::Other(
@@ -302,7 +302,7 @@ fn builtin_join_all(args: &[Value]) -> ValueResult<Value> {
 /// runtime backing the `thread` macro.
 fn builtin_thread_call(args: &[Value]) -> ValueResult<Value> {
     let thunk = args.first().cloned().unwrap_or(Value::Nil);
-    let (globals, ns) = cljrs_env::callback::capture_eval_context()
+    let (globals, ns) = cljrs_runtime::env::callback::capture_eval_context()
         .ok_or_else(|| ValueError::Other("thread-call called outside an eval context".into()))?;
     let rt = globals
         .async_runtime()

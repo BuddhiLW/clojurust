@@ -1,10 +1,10 @@
 //! `AsyncRuntimeImpl` — the Tokio-backed implementation of `AsyncRuntime`.
 
-use cljrs_env::async_hook::AsyncRuntime;
-use cljrs_env::env::Env;
-use cljrs_env::error::{EvalError, EvalResult};
 use cljrs_gc::GcPtr;
-use cljrs_interp::apply::select_arity;
+use cljrs_runtime::env::async_hook::AsyncRuntime;
+use cljrs_runtime::env::env::Env;
+use cljrs_runtime::env::error::{EvalError, EvalResult};
+use cljrs_runtime::interp::apply::select_arity;
 use cljrs_value::{NativeObjectBox, PersistentList, Value};
 
 use crate::channel::CljChannel;
@@ -141,7 +141,7 @@ fn downcast_channel(val: &Value) -> EvalResult<&CljChannel> {
 /// Spawn a long-lived background task on the current `LocalSet` that services
 /// GC requests between poll cycles.
 ///
-/// At each cooperative yield the task calls [`cljrs_env::gc_roots::async_gc_collect`].
+/// At each cooperative yield the task calls [`cljrs_runtime::env::gc_roots::async_gc_collect`].
 /// Because `LocalSet` is single-threaded, no other tasks run while that function
 /// executes, making it safe to scan thread-local root stacks for all suspended tasks.
 ///
@@ -166,7 +166,7 @@ pub(crate) fn spawn_gc_service() {
             tokio::task::spawn_local(async {
                 loop {
                     tokio::task::yield_now().await;
-                    cljrs_env::gc_roots::async_gc_collect();
+                    cljrs_runtime::env::gc_roots::async_gc_collect();
                 }
             });
         });

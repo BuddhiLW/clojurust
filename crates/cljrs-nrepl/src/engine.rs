@@ -8,9 +8,9 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use cljrs_env::dynamics;
-use cljrs_eval::{EvalError, GlobalEnv};
 use cljrs_gc::GcPtr;
+use cljrs_runtime::env::dynamics;
+use cljrs_runtime::tiered::{EvalError, GlobalEnv};
 use cljrs_value::{Keyword, Value, Var};
 use tokio::sync::mpsc::UnboundedSender;
 
@@ -37,7 +37,7 @@ pub(crate) struct Engine {
 }
 
 struct Session {
-    env: cljrs_eval::Env,
+    env: cljrs_runtime::tiered::Env,
     /// Most recent values, indexed as [*1, *2, *3, *e].
     stars: [Value; 4],
 }
@@ -45,7 +45,7 @@ struct Session {
 impl Session {
     fn new(globals: Arc<GlobalEnv>) -> Session {
         Session {
-            env: cljrs_eval::Env::new(globals, "user"),
+            env: cljrs_runtime::tiered::Env::new(globals, "user"),
             stars: [Value::Nil, Value::Nil, Value::Nil, Value::Nil],
         }
     }
@@ -296,9 +296,9 @@ impl Engine {
                 break;
             }
             let _alloc_frame = cljrs_gc::push_alloc_frame();
-            cljrs_builtins::builtins::push_output_capture();
+            cljrs_runtime::builtins::builtins::push_output_capture();
             let result = eval_form(form, &mut session.env);
-            let out = cljrs_builtins::builtins::pop_output_capture().unwrap_or_default();
+            let out = cljrs_runtime::builtins::builtins::pop_output_capture().unwrap_or_default();
             if !out.is_empty() {
                 let _ = replies.send(
                     Response::for_request(req, &sid)

@@ -9,8 +9,8 @@
 use std::sync::Arc;
 
 use cljrs_async::eval_async::eval_async;
-use cljrs_env::env::{Env, GlobalEnv};
 use cljrs_reader::Parser;
+use cljrs_runtime::env::env::{Env, GlobalEnv};
 use cljrs_value::Value;
 
 fn async_env() -> Arc<GlobalEnv> {
@@ -37,7 +37,7 @@ fn eval_sync(src: &str, env: &mut Env) -> Value {
     let mut p = Parser::new(src.to_string(), "<test>".to_string());
     let mut result = Value::Nil;
     for form in p.parse_all().expect("parse error") {
-        result = cljrs_interp::eval::eval(&form, env).expect("eval error");
+        result = cljrs_runtime::interp::eval::eval(&form, env).expect("eval error");
     }
     result
 }
@@ -190,7 +190,7 @@ fn awaited_throw_preserves_ex_data() {
         // error), and that value must be the original Value::Error with its
         // ex-message and ex-data intact.
         let thrown = match err {
-            cljrs_env::error::EvalError::Thrown(v) => v,
+            cljrs_runtime::env::error::EvalError::Thrown(v) => v,
             other => panic!("expected EvalError::Thrown, got {other:?}"),
         };
         let exc = match &thrown {

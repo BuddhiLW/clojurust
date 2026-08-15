@@ -20,8 +20,8 @@ Done (Phases A–H, A2, B1):
 - Phase B: `^:async` fn dispatch via the `AsyncRuntime` hook; `eval_async` tree-walker;
   cooperative `await` of futures/promises.
 - Phase C: `deref`/`@` of a future inside an `^:async` body is a runtime error that steers
-  callers to `await` (enforced in `cljrs-builtins` and `cljrs-interp` via the
-  `cljrs_env::callback::current_is_async` context flag).
+  callers to `await` (enforced in `cljrs_runtime::builtins` and `cljrs_runtime::interp` via the
+  `cljrs_runtime::env::callback::current_is_async` context flag).
 - Phase D: `timeout`, `alts`, and the `alt` macro, in a `clojure.core.async` namespace built
   at `init` time. `timeout` and `alts` are native fns that return a `Value::Future`; `alt` is
   a Clojure macro that `await`s `alts` and dispatches to the matching handler.
@@ -33,7 +33,7 @@ Done (Phases A–H, A2, B1):
   finishes (background task). `mult` broadcasts a source channel to all registered tap channels
   (`tap!`/`untap!`/`untap-all!`). Clojure-level: `async-pmap`, `thread` macro, `merge`,
   `reduce`, `into`. `eval_loop_async` enables proper `await` yielding inside `loop/recur`.
-- Phase G: GC safepoints at async yield points via `cljrs_env::gc_roots::async_gc_collect()`,
+- Phase G: GC safepoints at async yield points via `cljrs_runtime::env::gc_roots::async_gc_collect()`,
   called before each `yield_now().await` in `await_value`. Background GC-service task spawned
   by `init()`. Explicit GC root guards for `task_future` in `spawn_future`, callee/env in
   `run_async_fn`, and awaited futures/promises in `await_value`.
@@ -171,7 +171,7 @@ but is fragile when the awaited value is not yet available. Yielding `try`/`catc
 ### `await` and the single-thread executor
 
 `await` only yields when evaluated by `eval_async` (i.e. inside an `^:async` function body or
-another async driver). The synchronous `await`/`deref` fallback in `cljrs-interp` blocks the OS
+another async driver). The synchronous `await`/`deref` fallback in `cljrs_runtime::interp` blocks the OS
 thread on a condvar; doing that to an *async-spawned* future from the `LocalSet` driver thread
 deadlocks, because the task that would resolve the future cannot run while the only executor
 thread is parked. In Phase B, await async results from within async context. A top-level
@@ -369,8 +369,8 @@ runtime, so these callers see no spurious panic. Re-call `init` from inside a
 `timeout` uses `gloo_timers::future::sleep` on `wasm32` instead of `tokio::time::sleep`.
 
 **Build features:** `no-gc` (default off) forwards the no-GC build to
-`cljrs-gc`, `cljrs-value`, `cljrs-runtime`, `cljrs-env`, `cljrs-builtins`, and
-`cljrs-interp`, so a `no-gc` workspace build can include the async extension.
+`cljrs-gc`, `cljrs-value`, and `cljrs-runtime`, so a `no-gc` workspace build
+can include the async extension.
 The `cljrs` CLI forwards it weakly (`cljrs-async?/no-gc`), i.e. only when its
 own `async` feature pulls this package in.
 

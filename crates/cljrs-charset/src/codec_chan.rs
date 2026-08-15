@@ -21,8 +21,8 @@ use cljrs_async::{
     channel::{chan_put as put, chan_ref, chan_take, make_chan},
     spawn_future,
 };
-use cljrs_env::env::GlobalEnv;
 use cljrs_gc::GcPtr;
+use cljrs_runtime::env::env::GlobalEnv;
 use cljrs_value::{Arity, NativeFn, NativeFnPtr, NativeObjectBox, Value, ValueError, ValueResult};
 
 use crate::{

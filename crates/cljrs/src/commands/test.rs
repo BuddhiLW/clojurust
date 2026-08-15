@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 use std::time::Instant;
 
-use cljrs_eval::Env;
+use cljrs_runtime::tiered::Env;
 use cljrs_value::Value;
 
 use crate::session::{self, VersioningFlags};
@@ -82,8 +82,8 @@ pub fn run(args: Args, versioning: VersioningFlags) -> miette::Result<i32> {
         // freed on the second cycle.
         env.globals.namespaces.write().unwrap().remove(ns.as_str());
         env.globals.loaded.lock().unwrap().remove(ns.as_str());
-        cljrs_eval::force_collect(&env);
-        cljrs_eval::force_collect(&env);
+        cljrs_runtime::tiered::force_collect(&env);
+        cljrs_runtime::tiered::force_collect(&env);
         results.push(result);
     }
 

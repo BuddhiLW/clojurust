@@ -7,7 +7,7 @@
 //! hidden trailing argument once the caller is JIT-compiled.
 //!
 //! In the script/REPL flow each `defn` lowers separately, so this only works
-//! through the cross-defn registry (`cljrs_eval::defn_registry`): `make-pair`
+//! through the cross-defn registry (`cljrs_runtime::tiered::defn_registry`): `make-pair`
 //! is registered when defined, and `use-pair`'s lowering consumes it as an
 //! external.  That cloning makes redefinition correctness the critical
 //! property — the second test redefines the callee mid-run and asserts the

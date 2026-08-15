@@ -50,7 +50,7 @@ const ERROR_SOURCE: &str = include_str!("clojure_rust_error.cljrs");
 ///
 /// Must be called from within a Tokio `LocalSet` context for spawned tasks to
 /// run. Idempotent: the namespace is built only once.
-pub fn init(globals: &Arc<cljrs_env::env::GlobalEnv>) {
+pub fn init(globals: &Arc<cljrs_runtime::env::env::GlobalEnv>) {
     globals.set_async_runtime(Arc::new(AsyncRuntimeImpl::new()));
     runtime::spawn_gc_service();
 
@@ -80,14 +80,14 @@ pub fn init(globals: &Arc<cljrs_env::env::GlobalEnv>) {
 /// Evaluate a Clojure source string form-by-form into an already-created
 /// namespace. Parse/eval failures are reported but do not abort `init`.
 /// Exported for use by crates that register their own namespaces.
-pub fn load_source(globals: &Arc<cljrs_env::env::GlobalEnv>, ns: &str, source: &str) {
-    let mut env = cljrs_env::env::Env::new(globals.clone(), ns);
+pub fn load_source(globals: &Arc<cljrs_runtime::env::env::GlobalEnv>, ns: &str, source: &str) {
+    let mut env = cljrs_runtime::env::env::Env::new(globals.clone(), ns);
     let mut parser = cljrs_reader::Parser::new(source.to_string(), format!("<{ns}>"));
     match parser.parse_all() {
         Ok(forms) => {
             for form in forms {
                 let _alloc_frame = cljrs_gc::push_alloc_frame();
-                if let Err(e) = cljrs_interp::eval::eval(&form, &mut env) {
+                if let Err(e) = cljrs_runtime::interp::eval::eval(&form, &mut env) {
                     eprintln!("[{ns} warning] {e:?}");
                 }
             }

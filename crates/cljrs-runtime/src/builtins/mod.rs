@@ -5,7 +5,7 @@
 mod array_list;
 mod bitops;
 // The `builtins` module keeps its name so the `cljrs_runtime::builtins::builtins`
-// path matches the pre-merge `cljrs_builtins::builtins` path.
+// path matches the pre-merge `cljrs_runtime::builtins::builtins` path.
 #[allow(clippy::module_inception)]
 pub mod builtins;
 pub mod form;

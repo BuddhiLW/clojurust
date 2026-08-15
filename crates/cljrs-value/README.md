@@ -10,8 +10,8 @@ Core runtime values and persistent collections for clojurust.
 
 Defines `Value`, the single enum that represents every Clojure runtime value,
 plus all persistent (immutable, structurally shared) collection types.  The
-`cljrs-interp` and `cljrs-eval` crates operate on `Value`s; `cljrs-builtins` and
-`cljrs-stdlib` build the standard library on top of them.
+`cljrs-runtime` crate's `interp` and `tiered` modules operate on `Value`s; its
+`builtins` module and `cljrs-stdlib` build the standard library on top of them.
 
 ---
 
@@ -299,8 +299,8 @@ pub struct CljxFn {
 ```
 
 `is_async` is set by the interpreter when a `fn`/`defn` carries `^:async` (or an
-`{:async true}` attr-map). `CljxFn::new` defaults it to `false`; `cljrs-env`'s
-`dispatch_if_async` checks it at call time.
+`{:async true}` attr-map). `CljxFn::new` defaults it to `false`;
+`cljrs_runtime::env`'s `dispatch_if_async` checks it at call time.
 
 `self_ptr` is set immediately after `GcPtr::new(cljrs_fn)` in `eval_fn` (for
 named anonymous functions) so that the self-reference returned from the function
@@ -318,7 +318,7 @@ pub fn set_var_rebind_hook(f: impl Fn(&Value, &Value) + Send + Sync + 'static);
 `Var::bind` invokes every registered hook (via `notify_var_rebind`) whenever
 it overwrites an existing binding.  Two consumers exist: the JIT stales and
 reclaims native code compiled for the superseded definition (10.2), and
-`cljrs-eval`'s defn registry invalidates lowerings of *other* functions that
+`cljrs_runtime::tiered`'s defn registry invalidates lowerings of *other* functions that
 specialized against it (10.5).  When no hook is registered the cost is a
 single atomic flag load.
 
@@ -385,7 +385,7 @@ pub struct CljxCons {
 }
 ```
 
-`Thunk` implementations live in `cljrs-eval` (e.g. `ClosureThunk`) so that
+`Thunk` implementations live in `cljrs-runtime` (e.g. `ClosureThunk`) so that
 `cljrs-value` stays free of evaluator dependencies while `LazySeq` can still
 call back through the trait object.
 
@@ -472,7 +472,7 @@ pub fn bump_protocol_generation();
 ```
 
 When `Protocol::extend_via_metadata` is set, `apply_value`'s `ProtocolFn` arm
-(`cljrs-env/src/apply.rs`) checks the dispatch value's metadata for an entry
+(`cljrs-runtime/src/env/apply.rs`) checks the dispatch value's metadata for an entry
 keyed by the exact `ProtocolFn` before falling back to the `impls` type-tag
 lookup — see that crate's README for the dispatch order.
 

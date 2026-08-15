@@ -6,9 +6,7 @@ on:
     paths:
       - "docs/book/**"
       - "crates/cljrs-wasm/**"
-      - "crates/cljrs-interp/**"
-      - "crates/cljrs-env/**"
-      - "crates/cljrs-builtins/**"
+      - "crates/cljrs-runtime/**"
       - "crates/cljrs-gc/**"
       - "crates/cljrs-value/**"
       - "crates/cljrs-reader/**"

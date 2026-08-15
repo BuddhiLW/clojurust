@@ -271,3 +271,137 @@ cljrs-nrepl          cljrs-reader         cljrs-runtime        cljrs-stdlib
 cljrs-tx             cljrs-types          cljrs-value          cljrs-vcs
 cljrs-wasm           rust-interop-example
 ```
+
+---
+
+## 7. Stage 6 re-measurement
+
+Item 6 of Stage 6: regenerate the dependency graph and the baseline measurements.
+Same machine, same profile labels as §1–§3 so the two are comparable.
+
+### 7.1 Workspace size
+
+| Metric | Baseline | Now | Δ |
+|---|---:|---:|---:|
+| Cargo packages (`cargo metadata --no-deps`) | 34 | 23 | −11 |
+| Workspace members in `Cargo.toml` | 34 | 23 (22 crates + `examples/rust-interop`) | −11 |
+| Rust source lines (`crates/`, `examples/`, `tests/`) | 108,049 | 111,491 | +3,442 |
+| Clojure source lines (`.cljrs` / `.cljc` / `.clj`) | 18,628 | 18,628 | 0 |
+
+The plan's target was "approximately 23 packages"; the workspace is at 23.
+
+Rust lines rise slightly. Consolidation removed manifests and re-export shims,
+not code, and the stages added real code as they went: the `Runtime` builder and
+`TierState` (Stage 3), per-runtime `JitState`/`Tiers` with its `Drop`-time code
+reclamation and the `extensions` registry (Stage 4), `cljrs_runtime::logging`
+and the CLI command modules (Stage 5), plus the tests for all of it.
+
+#### Rust lines per package
+
+| Package | Lines | Package | Lines |
+|---|---:|---|---:|
+| `cljrs-runtime` | 31,026 | `cljrs-nrepl` | 1,621 |
+| `cljrs-compiler` | 22,967 | `cljrs-wasm` | 1,477 |
+| `cljrs-ir` | 9,832 | `cljrs-lsp` | 991 |
+| `cljrs-net` | 8,615 | `cljrs-charset` | 790 |
+| `cljrs-value` | 8,011 | `cljrs-io` | 697 |
+| `cljrs` | 6,541 | `cljrs-tx` | 581 |
+| `cljrs-async` | 4,721 | `cljrs-interop` | 556 |
+| `cljrs-gc` | 3,747 | `cljrs-blake3` | 359 |
+| `cljrs-reader` | 3,318 | `rust-interop` (example) | 350 |
+| `cljrs-stdlib` | 2,513 | `cljrs-export-macro` | 311 |
+| `cljrs-project` | 2,140 | `cljrs-base64` | 241 |
+| | | `cljrs-types` | 86 |
+
+`cljrs-runtime` was a nine-line stub at baseline. It is now the merge of
+`cljrs-env` + `cljrs-builtins` + `cljrs-interp` + `cljrs-eval` (29,226 baseline
+lines between them) plus the builder, tier state, and logging filter.
+
+### 7.2 Internal dependency graph
+
+Normal (non-dev) workspace-internal dependencies. Count in parentheses;
+dev-only internal dependencies in brackets.
+
+```
+cljrs (17)               -> async, base64, charset, compiler, gc, interop, io, ir, lsp,
+                            net, nrepl, project, reader, runtime, stdlib, types, value
+cljrs-compiler (9)       -> async, gc, ir, project, reader, runtime, stdlib, types, value
+                            [dev: base64, charset, io, net]
+cljrs-wasm (7)           -> async, gc, reader, runtime, stdlib, types, value
+cljrs-io (6)             -> async, gc, reader, runtime, types, value
+cljrs-net (6)            -> async, gc, reader, runtime, types, value   [dev: stdlib]
+cljrs-runtime (6)        -> gc, ir, project, reader, types, value
+rust-interop-example (6) -> gc, interop, reader, runtime, stdlib, value
+cljrs-async (5)          -> gc, reader, runtime, types, value
+cljrs-interop (5)        -> export-macro, gc, runtime, types, value
+cljrs-stdlib (5)         -> gc, ir, reader, runtime, value
+cljrs-tx (5)             -> gc, reader, runtime, types, value
+cljrs-base64 (4)         -> gc, interop, runtime, value   [dev: reader, stdlib]
+cljrs-charset (4)        -> async, gc, runtime, value
+cljrs-nrepl (4)          -> gc, reader, runtime, value   [dev: stdlib]
+cljrs-blake3 (3)         -> gc, interop, value   [dev: reader, runtime, stdlib]
+cljrs-project (3)        -> gc, reader, types
+cljrs-value (3)          -> gc, reader, types
+cljrs-ir (2)             -> reader, types
+cljrs-lsp (2)            -> reader, types
+cljrs-reader (1)         -> types
+cljrs-export-macro (0)
+cljrs-gc (0)
+cljrs-types (0)
+```
+
+Regenerate with:
+
+```bash
+cargo metadata --no-deps --format-version 1 | python3 -c "
+import json,sys
+d=json.load(sys.stdin); ws={p['name'] for p in d['packages']}
+for p in sorted(d['packages'], key=lambda x: x['name']):
+    normal=sorted({x['name'] for x in p['dependencies'] if x['kind'] is None} & ws)
+    dev=sorted({x['name'] for x in p['dependencies'] if x['kind']=='dev'} & ws)
+    print(p['name'], len(normal), normal, '[dev:', dev, ']' if dev else '')"
+```
+
+Against the baseline graph:
+
+- **`cljrs-compiler`: 16 → 9 direct internal dependencies.** The plan's Stage 6
+  gate asks that it depend "mainly on `cljrs-runtime`, `cljrs-ir`, and
+  `cljrs-project`" — those three plus the `types`/`gc`/`value`/`reader` core it
+  generates code against, `cljrs-stdlib` for the bootstrap environment macro
+  expansion needs, and `cljrs-async` for the state-machine poll ABI its codegen
+  implements. The four product extensions it used to initialize directly
+  (`base64`, `charset`, `io`, `net`) are dev-dependencies: the end-to-end tests
+  supply them the way a host does.
+- **`cljrs`: 24 → 17.** It dropped `deps`, `dylib`, `eval`, `ir-prebuild`,
+  `ir-viz`, `jit`, `logging`, and `vcs`, and gained `project`. Every remaining
+  entry is a product package or a core type layer; none is an internal
+  execution module.
+- **`cljrs-gc (1) -> logging` is now `cljrs-gc (0)`.** The GC's diagnostics are
+  ordinary `tracing` targets, so the bottom of the graph has no internal
+  dependency at all.
+- **`cljrs-runtime (3) -> eval, gc, types` is now `(6) -> gc, ir, project,
+  reader, types, value`.** At baseline it was a stub that depended on the
+  evaluator; it is now the package the evaluator is part of.
+
+### 7.3 Baseline defects
+
+All three `no-gc` defects recorded in §4.2 are fixed — see the Stage 2, 3, and 4
+outcomes in the plan for which stage closed which. `no-gc` builds green across
+every package that carries the feature, and for `cljrs` with and without default
+features.
+
+### 7.4 Package inventory
+
+```
+cljrs                cljrs-async          cljrs-base64         cljrs-blake3
+cljrs-charset        cljrs-compiler       cljrs-export-macro   cljrs-gc
+cljrs-interop        cljrs-io             cljrs-ir             cljrs-lsp
+cljrs-net            cljrs-nrepl          cljrs-project        cljrs-reader
+cljrs-runtime        cljrs-stdlib         cljrs-tx             cljrs-types
+cljrs-value          cljrs-wasm           rust-interop-example
+```
+
+Removed across stages 1–6 (11 packages): `cljrs-builtins`, `cljrs-deps`,
+`cljrs-dom`, `cljrs-dylib`, `cljrs-env`, `cljrs-eval`, `cljrs-interp`,
+`cljrs-ir-prebuild`, `cljrs-ir-viz`, `cljrs-jit`, `cljrs-logging`, `cljrs-vcs`
+— twelve names, eleven net, because `cljrs-project` was created from two of them.

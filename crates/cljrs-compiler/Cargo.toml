@@ -14,7 +14,7 @@ default = ["wasm-aot"]
 # for hosts that only ever produce native binaries.
 wasm-aot = ["dep:wasm-encoder"]
 aot_full_test = []
-no-gc = ["cljrs-gc/no-gc", "cljrs-value/no-gc", "cljrs-eval/no-gc", "cljrs-interp/no-gc", "cljrs-stdlib/no-gc", "cljrs-async/no-gc"]
+no-gc = ["cljrs-gc/no-gc", "cljrs-value/no-gc", "cljrs-runtime/no-gc", "cljrs-stdlib/no-gc", "cljrs-async/no-gc"]
 
 [dependencies]
 cljrs-runtime = { workspace = true }
@@ -24,17 +24,13 @@ tracing        = { workspace = true }
 # networking, charset, and Base64 are extensions the *host* selects and are
 # deliberately absent here — see `src/extensions.rs`.
 cljrs-async    = { workspace = true }
-cljrs-builtins = { workspace = true }
 cljrs-project  = { workspace = true }
 cljrs-types    = { workspace = true }
 cljrs-ir       = { workspace = true }
 cljrs-gc       = { workspace = true }
 cljrs-value    = { workspace = true }
 cljrs-reader   = { workspace = true }
-cljrs-eval     = { workspace = true }
 cljrs-stdlib   = { workspace = true }
-cljrs-env      = { workspace = true }
-cljrs-interp   = { workspace = true }
 
 cranelift-codegen  = { workspace = true }
 cranelift-frontend = { workspace = true }

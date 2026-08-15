@@ -23,9 +23,9 @@ use std::any::Any;
 use std::sync::{Arc, Mutex};
 
 use cljrs_async::channel::{chan_put, chan_ref, make_chan};
-use cljrs_env::callback::invoke;
-use cljrs_env::env::GlobalEnv;
 use cljrs_gc::{GcPtr, MarkVisitor, Trace};
+use cljrs_runtime::env::callback::invoke;
+use cljrs_runtime::env::env::GlobalEnv;
 use cljrs_value::{
     Arity, ExceptionInfo, Keyword, MapValue, NativeFn, NativeObject, NativeObjectBox, Value,
     ValueError, ValueResult, gc_native_object,

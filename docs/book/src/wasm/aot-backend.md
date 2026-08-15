@@ -125,4 +125,4 @@ through `compile_file_to_wasm`, including a cross-namespace `require`.
 
 For the complete design, the increment-by-increment build log, and the open-task
 list, see
-[`docs/wasm-aot-plan.md`](https://github.com/csm/clojurust/blob/main/docs/wasm-aot-plan.md).
+[`docs/archive/wasm-aot-plan.md`](https://github.com/csm/clojurust/blob/main/docs/archive/wasm-aot-plan.md).

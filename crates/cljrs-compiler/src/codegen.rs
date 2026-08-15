@@ -2847,7 +2847,7 @@ mod tests {
                     cljrs_stdlib::install(&runtime);
                     runtime.into_globals()
                 };
-                let mut env = cljrs_eval::Env::new(globals, "user");
+                let mut env = cljrs_runtime::tiered::Env::new(globals, "user");
                 crate::aot::lower_via_rust(Some(&name), "user", &params, &body, &mut env).unwrap()
             })
             .unwrap()

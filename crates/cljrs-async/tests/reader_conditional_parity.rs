@@ -9,8 +9,8 @@
 use std::sync::Arc;
 
 use cljrs_async::eval_async::eval_async;
-use cljrs_env::env::{Env, GlobalEnv};
 use cljrs_reader::Parser;
+use cljrs_runtime::env::env::{Env, GlobalEnv};
 
 fn async_env() -> Arc<GlobalEnv> {
     let globals = cljrs_runtime::Runtime::builder()
@@ -50,7 +50,7 @@ fn eval_both(src: &str) -> (Result<String, String>, Result<String, String>) {
 
     let globals = async_env();
     let mut sync_env = Env::new(globals.clone(), "user");
-    let sync = cljrs_interp::eval::eval(&form, &mut sync_env)
+    let sync = cljrs_runtime::interp::eval::eval(&form, &mut sync_env)
         .map(|v| format!("{v}"))
         .map_err(|e| e.to_string());
 

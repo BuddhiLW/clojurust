@@ -3,8 +3,8 @@
 use std::borrow::Cow;
 use std::sync::{Arc, Mutex};
 
-use cljrs_env::env::GlobalEnv;
 use cljrs_gc::GcPtr;
+use cljrs_runtime::env::env::GlobalEnv;
 use cljrs_value::{Arity, NativeFn, NativeFnPtr, NativeObjectBox, Value, ValueError, ValueResult};
 use encoding_rs::Encoding;
 

@@ -1,6 +1,6 @@
 //! Phase D integration tests: UDP datagram sockets — echo round-trip.
 //!
-//! Done criterion from networking-plan.md Phase D:
+//! Done criterion from docs/archive/networking-plan.md Phase D:
 //!   "a UDP echo responder round-trips datagrams with correct :addr."
 
 use std::sync::{Arc, Mutex};
@@ -9,7 +9,7 @@ use cljrs_async::channel::{chan_put, chan_ref, chan_take};
 use cljrs_gc::GcPtr;
 use cljrs_value::{Keyword, MapValue, NativeObjectBox, Value};
 
-fn setup_globals() -> Arc<cljrs_env::env::GlobalEnv> {
+fn setup_globals() -> Arc<cljrs_runtime::env::env::GlobalEnv> {
     let globals = {
         let runtime = cljrs_runtime::Runtime::builder()
             .execution_mode(cljrs_runtime::ExecutionMode::Tiered)

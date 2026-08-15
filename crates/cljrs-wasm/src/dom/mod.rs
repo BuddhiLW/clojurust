@@ -15,7 +15,7 @@
 use std::cell::RefCell;
 use std::sync::Arc;
 
-use cljrs_env::env::GlobalEnv;
+use cljrs_runtime::env::env::GlobalEnv;
 
 #[cfg(target_arch = "wasm32")]
 pub mod events;

@@ -8,7 +8,7 @@ self-contained: no shared library or `cljrs` installation is needed at runtime.
 
 `cljrs compile` generates a temporary Cargo harness project that:
 
-1. Depends on the clojurust runtime crates (`cljrs-stdlib`, `cljrs-eval`, etc.)
+1. Depends on the clojurust runtime crates (`cljrs-runtime`, `cljrs-stdlib`, etc.)
 2. Also depends on the user's Rust crate (via `path = "<crate_dir>"`)
 3. Also depends on `cljrs-interop` (for `Registry`)
 4. Contains a generated `main.rs` that:
@@ -34,8 +34,8 @@ fn main() {
     let mut registry = cljrs_interop::Registry::new(globals.clone());
     my_project::cljrs_init(&mut registry);
 
-    let mut env = cljrs_eval::Env::new(globals, "user");
-    cljrs_env::callback::push_eval_context(&env);
+    let mut env = cljrs_runtime::tiered::Env::new(globals, "user");
+    cljrs_runtime::env::callback::push_eval_context(&env);
 
     // Interpreted preamble (ns, require, defmacro, …)
     // …

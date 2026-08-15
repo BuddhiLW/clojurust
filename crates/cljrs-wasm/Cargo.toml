@@ -11,12 +11,9 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 cljrs-runtime = { workspace = true }
-cljrs-interp   = { workspace = true }
 cljrs-stdlib   = { workspace = true }
-cljrs-env      = { workspace = true }
 cljrs-value    = { workspace = true }
 cljrs-reader   = { workspace = true }
-cljrs-builtins = { workspace = true }
 cljrs-gc       = { workspace = true }
 cljrs-types    = { workspace = true }
 cljrs-async    = { workspace = true }

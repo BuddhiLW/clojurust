@@ -260,8 +260,8 @@ fn run(cli: Cli) -> miette::Result<i32> {
     match cli.ir_threshold {
         // 0 disables background lowering entirely (functions stay at
         // tree-walk unless eagerly lowered or pre-built).
-        Some(0) => cljrs_eval::set_ir_threshold(u32::MAX),
-        Some(t) => cljrs_eval::set_ir_threshold(t),
+        Some(0) => cljrs_runtime::tiered::set_ir_threshold(u32::MAX),
+        Some(t) => cljrs_runtime::tiered::set_ir_threshold(t),
         None => {}
     }
 

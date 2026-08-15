@@ -1,15 +1,15 @@
 # cljrs-ir
 
 Intermediate representation types shared between the clojurust compiler
-(`cljrs-compiler`) and interpreter (`cljrs-eval`).
+(`cljrs-compiler`) and the tiered interpreter (`cljrs_runtime::tiered`).
 
 The IR is a control-flow graph of basic blocks in A-normal form (ANF) with SSA
 phi nodes at join points.  Every sub-expression is bound to a named temporary
 (`VarId`), and control flow is explicit via `Terminator`s.
 
-**Purpose:** Extracted into its own crate so that both `cljrs-eval` (IR
-interpreter, Tier 1 execution) and `cljrs-compiler` (Cranelift codegen, Tier 2)
-can depend on the same types without a circular dependency.
+**Purpose:** Extracted into its own crate so that both `cljrs-runtime` (the
+`tiered` IR interpreter, Tier 1 execution) and `cljrs-compiler` (Cranelift
+codegen, Tier 2) can depend on the same types without a circular dependency.
 
 ---
 
@@ -232,7 +232,7 @@ pub fn optimize(ir: IrFunction) -> IrFunction;
 
 /// Like `optimize`, but makes previously-lowered defns from other lowering
 /// units visible to escape analysis and stage-4 promotion (the script/REPL
-/// counterpart of AOT's whole-program tree; supplied by cljrs-eval's defn
+/// counterpart of AOT's whole-program tree; supplied by cljrs-runtime's `tiered` defn
 /// registry).  Returns the (ns, name) set of externals actually consulted —
 /// the caller must invalidate this lowering when any of them is redefined.
 pub fn optimize_with_externals(
@@ -317,7 +317,7 @@ pub struct AnalysisResult {
 ```
 
 These are the same types the optimizer uses internally; they are exposed
-publicly so downstream tooling (e.g. `cljrs-ir-viz`) can present
+publicly so downstream tooling (e.g. `cljrs ir viz`) can present
 escape-analysis results without re-implementing the use-chain walk.
 
 ### OSR-entry construction (`osr` module, Phase 10.4)

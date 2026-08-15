@@ -6,7 +6,6 @@ publish = false
 
 [dependencies]
 cljrs-interop = { path = "../../crates/cljrs-interop" }
-cljrs-eval    = { path = "../../crates/cljrs-eval" }
 cljrs-stdlib  = { path = "../../crates/cljrs-stdlib" }
 cljrs-runtime = { path = "../../crates/cljrs-runtime" }
 cljrs-value   = { path = "../../crates/cljrs-value" }

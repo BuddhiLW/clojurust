@@ -22,8 +22,8 @@
 
 use std::sync::Arc;
 
-use cljrs_env::env::GlobalEnv;
 use cljrs_gc::GcPtr;
+use cljrs_runtime::env::env::GlobalEnv;
 use cljrs_value::{NativeFn, Value};
 
 use crate::exports::register_exports;
