@@ -9,7 +9,6 @@ use crate::env::async_hook::AsyncRuntime;
 use crate::env::error::EvalResult;
 use crate::mode::{ExecutionMode, TierState};
 use cljrs_gc::{GcConfig, GcPtr};
-use cljrs_logging::feat_trace;
 use cljrs_reader::Form;
 use cljrs_value::{CljxFn, Namespace, Value, Var};
 // ── RequireSpec / RequireRefer ─────────────────────────────────────────────────
@@ -59,7 +58,7 @@ impl Frame {
 
     pub fn lookup(&self, name: &str) -> Option<&Value> {
         // Search in reverse order so later bindings shadow earlier ones.
-        feat_trace!("env", "lookup {}", name);
+        tracing::trace!(target: "env", "lookup {}", name);
         for (n, v) in self.bindings.iter().rev() {
             if n.as_ref() == name {
                 return Some(v);
@@ -118,7 +117,7 @@ pub struct GlobalEnv {
     /// or `"<ns>@<commit>"` for whole versioned namespaces.
     pub version_cache: Mutex<HashMap<Arc<str>, Value>>,
     /// Parsed `cljrs.edn` config, loaded once at startup.
-    pub deps_config: RwLock<Option<Arc<cljrs_deps::DepsConfig>>>,
+    pub deps_config: RwLock<Option<Arc<cljrs_project::config::DepsConfig>>>,
     /// When true, every versioned-symbol or versioned-namespace resolution must
     /// carry a valid commit signature (verified natively against `trusted_keys`)
     /// before the historical code is executed.  Off by default; enabled via
@@ -128,9 +127,9 @@ pub struct GlobalEnv {
     /// Public keys trusted to sign versioned dependency commits, built from
     /// the `:trusted-signers` config.  Consulted by `check_commit_signature`
     /// when `verify_commit_signatures` is on.  (Not built on wasm, where
-    /// `cljrs-vcs` is unavailable and signature checks are no-ops.)
+    /// `cljrs-project::vcs` is unavailable and signature checks are no-ops.)
     #[cfg(not(target_arch = "wasm32"))]
-    pub trusted_keys: RwLock<Arc<cljrs_vcs::TrustedKeys>>,
+    pub trusted_keys: RwLock<Arc<cljrs_project::vcs::TrustedKeys>>,
     /// Session-scoped cache of commits that have already passed signature
     /// verification this run, keyed by `(repo_root, commit_hash)`.
     pub sig_verify_cache: Mutex<HashSet<(Arc<str>, Arc<str>)>>,
@@ -157,14 +156,14 @@ pub struct GlobalEnv {
     /// (key: `"<ns>@<commit>"`), so each pin warns at most once.
     pub provenance_warned: Mutex<HashSet<Arc<str>>>,
     /// Optional loader for **pinned native packages** (`:rust/load :dylib`),
-    /// installed by `cljrs-dylib`.  Called by the versioned resolver with
+    /// installed by the CLI.  Called by the versioned resolver with
     /// `(globals, base_ns, commit)` before falling back to the HEAD native
     /// binding; returns `Ok(true)` when it registered the package's pinned
     /// implementations into the `"<base_ns>@<commit>"` namespace.
     #[allow(clippy::type_complexity)]
     pub pinned_native_loader: RwLock<Option<PinnedNativeLoader>>,
     /// Optional loader for **native dependencies on the plain `require` path**
-    /// (`:rust/load :dylib`), installed by `cljrs-dylib`.  Called by the
+    /// (`:rust/load :dylib`), installed by the CLI.  Called by the
     /// unversioned namespace loader with `(globals, ns)` when a `require`d
     /// namespace has no Clojure source on the source path; returns `Ok(true)`
     /// when it built the dep's crate at the pinned `:git/sha` and registered
@@ -231,7 +230,7 @@ impl GlobalEnv {
             deps_config: RwLock::new(None),
             verify_commit_signatures: AtomicBool::new(false),
             #[cfg(not(target_arch = "wasm32"))]
-            trusted_keys: RwLock::new(Arc::new(cljrs_vcs::TrustedKeys::new())),
+            trusted_keys: RwLock::new(Arc::new(cljrs_project::vcs::TrustedKeys::new())),
             sig_verify_cache: Mutex::new(HashSet::new()),
             versioned_sources: RwLock::new(HashMap::new()),
             versioned_offline: AtomicBool::new(false),
@@ -658,7 +657,7 @@ impl GlobalEnv {
     }
 
     /// Install the pinned-native package loader (called once by
-    /// `cljrs_dylib::install`; first writer wins).
+    /// `cljrs::native::pinned::install`; first writer wins).
     pub fn set_pinned_native_loader(&self, loader: PinnedNativeLoader) {
         let mut guard = self.pinned_native_loader.write().unwrap();
         if guard.is_none() {
@@ -667,7 +666,7 @@ impl GlobalEnv {
     }
 
     /// Install the native-dependency `require` loader (called once by
-    /// `cljrs_dylib::install`; first writer wins).
+    /// `cljrs::native::pinned::install`; first writer wins).
     pub fn set_native_require_loader(&self, loader: NativeRequireLoader) {
         let mut guard = self.native_require_loader.write().unwrap();
         if guard.is_none() {
@@ -693,9 +692,13 @@ impl GlobalEnv {
                 return Ok(());
             }
             let trusted = self.trusted_keys.read().unwrap().clone();
-            cljrs_vcs::verify_commit_signature(std::path::Path::new(repo_root), commit, &trusted)
-                .map_err(|e| match e {
-                cljrs_vcs::VcsError::SignatureVerificationFailed { commit: c, reason } => {
+            cljrs_project::vcs::verify_commit_signature(
+                std::path::Path::new(repo_root),
+                commit,
+                &trusted,
+            )
+            .map_err(|e| match e {
+                cljrs_project::vcs::VcsError::SignatureVerificationFailed { commit: c, reason } => {
                     crate::env::error::EvalError::CommitSignatureVerificationFailed {
                         commit: c,
                         reason,
@@ -715,22 +718,24 @@ impl GlobalEnv {
     /// Returns the number of keys loaded; warns (to stderr) on any key that
     /// fails to load rather than aborting.  (Not available on wasm.)
     #[cfg(not(target_arch = "wasm32"))]
-    pub fn load_trusted_signers(&self, config: &cljrs_deps::DepsConfig) -> usize {
-        let mut keys = cljrs_vcs::TrustedKeys::new();
+    pub fn load_trusted_signers(&self, config: &cljrs_project::config::DepsConfig) -> usize {
+        let mut keys = cljrs_project::vcs::TrustedKeys::new();
         let mut loaded = 0usize;
         for signer in &config.trusted_signers {
             let result = match signer {
-                cljrs_deps::TrustedSigner::Inline(text) => keys.add_key_text(text),
-                cljrs_deps::TrustedSigner::File(path) => match std::fs::read_to_string(path) {
-                    Ok(text) => keys.add_key_text(&text),
-                    Err(e) => {
-                        eprintln!(
-                            "cljrs: warning: could not read trusted signer key {}: {e}",
-                            path.display()
-                        );
-                        continue;
+                cljrs_project::config::TrustedSigner::Inline(text) => keys.add_key_text(text),
+                cljrs_project::config::TrustedSigner::File(path) => {
+                    match std::fs::read_to_string(path) {
+                        Ok(text) => keys.add_key_text(&text),
+                        Err(e) => {
+                            eprintln!(
+                                "cljrs: warning: could not read trusted signer key {}: {e}",
+                                path.display()
+                            );
+                            continue;
+                        }
                     }
-                },
+                }
             };
             match result {
                 Ok(()) => loaded += 1,
@@ -809,7 +814,7 @@ impl Env {
 
     /// Look up `name`: local frames (innermost first), then the current namespace.
     pub fn lookup(&self, name: &str) -> Option<Value> {
-        feat_trace!("env", "lookup {} in {} frames", name, self.frames.len());
+        tracing::trace!(target: "env", "lookup {} in {} frames", name, self.frames.len());
         for frame in self.frames.iter().rev() {
             if let Some(v) = frame.lookup(name) {
                 return Some(v.clone());

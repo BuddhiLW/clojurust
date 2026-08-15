@@ -11,15 +11,12 @@ members = [
     "crates/cljrs-compiler",
     "crates/cljrs-interop",
     "crates/cljrs-export-macro",
-    "crates/cljrs-logging",
     "crates/cljrs",
     "examples/rust-interop",
     "crates/cljrs-env",
     "crates/cljrs-builtins",
     "crates/cljrs-interp",
-    "crates/cljrs-ir-viz",
-    "crates/cljrs-deps",
-    "crates/cljrs-vcs",
+    "crates/cljrs-project",
     "crates/cljrs-blake3",
     "crates/cljrs-wasm",
     "crates/cljrs-async",
@@ -29,8 +26,6 @@ members = [
     "crates/cljrs-lsp",
     "crates/cljrs-nrepl",
     "crates/cljrs-base64",
-    "crates/cljrs-dylib",
-    "crates/cljrs-dom",
     "crates/cljrs-tx",
 ]
 resolver = "2"
@@ -51,13 +46,10 @@ cljrs-ir           = { path = "crates/cljrs-ir",           version = "0.1.0" }
 cljrs-compiler     = { path = "crates/cljrs-compiler",     version = "0.1.0" }
 cljrs-interop      = { path = "crates/cljrs-interop",      version = "0.1.0" }
 cljrs-export-macro = { path = "crates/cljrs-export-macro", version = "0.1.0" }
-cljrs-logging      = { path = "crates/cljrs-logging",      version = "0.1.0" }
 cljrs-env          = { path = "crates/cljrs-env",          version = "0.1.0" }
 cljrs-builtins     = { path = "crates/cljrs-builtins",     version = "0.1.0" }
 cljrs-interp       = { path = "crates/cljrs-interp",       version = "0.1.0" }
-cljrs-ir-viz       = { path = "crates/cljrs-ir-viz",       version = "0.1.0" }
-cljrs-deps         = { path = "crates/cljrs-deps",         version = "0.1.0" }
-cljrs-vcs          = { path = "crates/cljrs-vcs",          version = "0.1.0" }
+cljrs-project      = { path = "crates/cljrs-project",      version = "0.1.0" }
 cljrs-async        = { path = "crates/cljrs-async",        version = "0.1.0" }
 cljrs-io           = { path = "crates/cljrs-io",           version = "0.1.0" }
 cljrs-net          = { path = "crates/cljrs-net",          version = "0.1.0" }
@@ -65,10 +57,10 @@ cljrs-charset      = { path = "crates/cljrs-charset",      version = "0.1.0" }
 cljrs-lsp          = { path = "crates/cljrs-lsp",          version = "0.1.0" }
 cljrs-nrepl        = { path = "crates/cljrs-nrepl",        version = "0.1.0" }
 cljrs-base64       = { path = "crates/cljrs-base64",       version = "0.1.0" }
-cljrs-dylib        = { path = "crates/cljrs-dylib",        version = "0.1.0" }
-cljrs-dom          = { path = "crates/cljrs-dom",          version = "0.1.0" }
 cljrs-tx           = { path = "crates/cljrs-tx",           version = "0.1.0" }
 
+tracing            = "0.1.44"
+tracing-subscriber = "0.3.23"
 miette       = { version = "7", features = ["fancy"] }
 thiserror    = "2"
 inventory    = "0.3"
@@ -112,7 +104,7 @@ ssh-key  = { version = "0.6", default-features = false, features = [
     "rsa",
 ] }
 # Native (pure-Rust) SSH transport for ssh:// git remotes (opt-in via the
-# `ssh` feature of cljrs-vcs).
+# `ssh` feature of cljrs-project).
 russh      = "0.61"
 tokio-util = { version = "0.7", features = ["io", "io-util"] }
 

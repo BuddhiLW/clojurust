@@ -331,7 +331,7 @@ fn count_alloc_stats(ir_func: &IrFunction) -> AllocStats {
 
 /// Run the AOT pipeline up to (and including) ANF lowering + region
 /// optimization, but stop before code generation.  Returns the source text
-/// and the optimized `IrFunction` so tools like `cljrs-ir-viz` can inspect
+/// and the optimized `IrFunction` so tools like `cljrs ir viz` can inspect
 /// exactly what the AOT compiler would lower.
 ///
 /// The `silent` flag suppresses the usual `[aot] ...` progress output.
@@ -693,7 +693,7 @@ pub fn compile_file(src_path: &Path, out_path: &Path, session: &CompileSession) 
         // verification has keys to check pinned commits against.
         if let Some(config) = std::env::current_dir()
             .ok()
-            .and_then(|cwd| cljrs_deps::load_config(&cwd).ok().flatten())
+            .and_then(|cwd| cljrs_project::config::load_config(&cwd).ok().flatten())
         {
             globals.load_trusted_signers(&config);
         }
@@ -2101,8 +2101,13 @@ unsafe extern "C" {{
 {ns_init_externs}}}
 
 async fn run() {{
-    // Parse environment -X flags.
-    cljrs_logging::set_feature_levels_from_env().unwrap();
+    // Diagnostics: enabled only by CLJRS_X_FLAG / RUST_LOG.  A CLJRS_X_FLAG we
+    // cannot parse is a hard error, matching `cljrs -X`: someone asked for
+    // diagnostics and must not be left silently without them.
+    if let Err(e) = cljrs_runtime::logging::init_from_env() {{
+        eprintln!("error: {{e}}");
+        std::process::exit(2);
+    }}
 
     // Ensure all rt_* symbols are linked into the binary.
     cljrs_compiler::rt_abi::anchor_rt_symbols();
@@ -2189,7 +2194,6 @@ fn main() {{
 /// decided the program should have `clojure.core.async`; registering that
 /// namespace is still the host's call.
 const HARNESS_RUNTIME_CRATES: &[&str] = &[
-    "cljrs-logging",
     "cljrs-types",
     "cljrs-gc",
     "cljrs-value",
@@ -2207,7 +2211,6 @@ const HARNESS_RUNTIME_CRATES: &[&str] = &[
 /// for the `rt_*` ABI bridges) but not the async/IO/net/charset stacks —
 /// those namespaces are not registered by the generated test runner.
 const TEST_HARNESS_RUNTIME_CRATES: &[&str] = &[
-    "cljrs-logging",
     "cljrs-types",
     "cljrs-gc",
     "cljrs-value",
@@ -2526,8 +2529,13 @@ use cljrs_value::Value;
 
     code.push_str(
         r#"fn run() {
-    // Set -X flags from environment.
-    cljrs_logging::set_feature_levels_from_env().unwrap();
+    // Diagnostics: enabled only by CLJRS_X_FLAG / RUST_LOG.  A CLJRS_X_FLAG we
+    // cannot parse is a hard error, matching `cljrs -X`: someone asked for
+    // diagnostics and must not be left silently without them.
+    if let Err(e) = cljrs_runtime::logging::init_from_env() {
+        eprintln!("error: {e}");
+        std::process::exit(2);
+    }
 
     // Ensure all rt_* symbols are linked into the binary (the compiled
     // namespace initializers call them).

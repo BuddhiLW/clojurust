@@ -39,6 +39,8 @@ src/
                           RuntimeBuilder, BuildError, ExecutionMode, TierState
   mode.rs               — ExecutionMode (build-time choice) and TierState (live tiers)
   runtime.rs            — Runtime and RuntimeBuilder: the one construction path
+  logging.rs            — (non-WASM) the gc/env/ir/jit tracing targets, the filters
+                          that select them, and subscriber installation
 
   env/
     mod.rs              — module declarations; re-exports AsyncRuntime
@@ -207,6 +209,43 @@ impl TierState {
 }
 ```
 
+### `logging` (non-WASM)
+
+Diagnostic logging is `tracing`, not an API of this crate: the runtime, GC, and
+compiler emit under four **targets** — `gc`, `env`, `ir`, `jit` — with plain
+`tracing::debug!` / `tracing::trace!`. This module only builds the filter that
+selects them, so the CLI and a generated AOT harness agree by construction. An
+embedding host can ignore all of it and install its own subscriber.
+
+```rust
+pub const FEATURE_TARGETS: &[&str];   // ["gc", "env", "ir", "jit"]
+pub const NOISY_TARGETS:   &[&str];   // cranelift_*, regalloc2 — pinned to warn
+
+/// Everything at `default`, codegen crates at `warn`, FEATURE_TARGETS pinned
+/// OFF — a blanket `--debug` must not turn the firehoses on.
+pub fn base_filter(default: impl Into<LevelFilter>) -> Targets;
+
+/// Fold one `-X` / `CLJRS_X_FLAG` spec (`debug:gc,jit`) into a filter.
+pub fn apply_x_flag(filter: Targets, spec: &str) -> Result<Targets, String>;
+
+/// Let `RUST_LOG` replace `base`. An unparseable value is reported on stderr
+/// and `base` is kept: `RUST_LOG` is the ecosystem's variable, so a value we
+/// reject may not be aimed at us, and degrading to the host's default beats
+/// both silence and a hard failure. Both hosts use this, so a bad `RUST_LOG`
+/// means the same thing to the CLI and to an AOT binary.
+pub fn apply_rust_log(base: Targets) -> Targets;
+
+/// Install `filter` globally, formatting to stderr. Idempotent.
+pub fn init(filter: Targets);
+
+/// What a generated AOT harness calls. Enables nothing unless `CLJRS_X_FLAG`
+/// or `RUST_LOG` asks. `CLJRS_X_FLAG` is ours alone and has one meaning, so an
+/// unparseable value is an `Err` (the harness reports it and exits 2) rather
+/// than being ignored — matching `cljrs -X`, and never leaving someone who
+/// asked for diagnostics silently without them.
+pub fn init_from_env() -> Result<(), String>;
+```
+
 ---
 
 ## Module `env`
@@ -326,12 +365,12 @@ once per pin (`provenance_warned`), or errors when
 cljrs.edn `:enforce-native-versions`).
 
 Opt-in pinned native code: `GlobalEnv::set_pinned_native_loader` installs a
-`PinnedNativeLoader` callback (provided by `cljrs-dylib`); the resolver
+`PinnedNativeLoader` callback (provided by the CLI); the resolver
 consults it before the HEAD fallback, and a successful load redirects the
 lookup into the freshly registered `"<ns>@<commit>"` namespace.
 
 Plain `require` of a native dep: `GlobalEnv::set_native_require_loader`
-installs a `NativeRequireLoader` callback (also provided by `cljrs-dylib`).
+installs a `NativeRequireLoader` callback (also provided by the CLI).
 The unversioned namespace loader (`loader::do_load`) consults it when a
 `require`d namespace has no Clojure source on the source path; a successful
 load registers a `:rust/load :dylib` dep's exports into the **unversioned**
@@ -1032,9 +1071,8 @@ by the lowerer — resolve at Tier 1 exactly as they do tree-walked.
 | `cljrs-value` | `Value`, `CljxFn`, persistent collections, `shared` |
 | `cljrs-reader` | `Form` AST and `Parser` |
 | `cljrs-ir` | IR types (`IrFunction`, `Block`, `Inst`, `IrBundle`) and lowering |
-| `cljrs-logging` | tracing setup used by the lowering worker |
-| `cljrs-deps` | project configuration consulted by the namespace loader |
-| `cljrs-vcs` (non-WASM) | git history access for versioned namespace resolution |
+| `tracing` / `tracing-subscriber` (non-WASM) | the `gc`/`env`/`ir`/`jit` diagnostic targets, and the `logging` module that filters and installs them |
+| `cljrs-project` | `config` — project configuration consulted by the namespace loader; `vcs` (non-WASM) — git history access for versioned namespace resolution |
 | `num-bigint`, `num-rational`, `bigdecimal`, `num-traits` | numeric tower |
 | `rand`, `rpds`, `uuid`, `regex` | builtin implementations |
 | `log`, `thiserror` | diagnostics and error derivation |

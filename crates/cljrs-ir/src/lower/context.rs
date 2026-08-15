@@ -143,7 +143,7 @@ impl LowerCtx {
     /// Emit a `SourceLoc` marker for `span` if the current block has not
     /// already emitted one with the same `(file, line)`.  Source markers
     /// are pure no-op instructions (no `dst`, `Effect::Pure`) consumed by
-    /// debugging / visualization tooling — see `cljrs-ir-viz`.
+    /// debugging / visualization tooling — see `cljrs ir viz`.
     pub fn maybe_emit_source_loc(&mut self, span: &Span) {
         let key = (span.file.clone(), span.line);
         if self.last_source_loc.as_ref() == Some(&key) {

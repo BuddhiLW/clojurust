@@ -418,7 +418,7 @@ impl JitState {
             return;
         }
         if let Some(backend) = self.backend() {
-            cljrs_logging::feat_debug!("jit", "enqueue arity_id={} (count={})", arity_id, count);
+            tracing::debug!(target: "jit", "enqueue arity_id={} (count={})", arity_id, count);
             backend.enqueue_function(self.tiers.clone(), arity_id, ir_func);
         }
     }
@@ -580,8 +580,8 @@ impl JitState {
     pub fn record_deopt(&self, arity_id: u64) {
         let entry = self.entry(arity_id);
         let failures = entry.deopt_count.fetch_add(1, Ordering::Relaxed) + 1;
-        cljrs_logging::feat_debug!(
-            "jit",
+        tracing::debug!(
+            target: "jit",
             "deopt arity_id={} (failure #{} of {})",
             arity_id,
             failures,
@@ -597,8 +597,8 @@ impl JitState {
         if let Some(epoch) = self.take_native_epoch(arity_id)
             && let Some(backend) = self.backend()
         {
-            cljrs_logging::feat_debug!(
-                "jit",
+            tracing::debug!(
+                target: "jit",
                 "specialization discarded arity_id={} epoch={}",
                 arity_id,
                 epoch
@@ -639,8 +639,8 @@ impl JitState {
             }
         }
         if let Some(backend) = self.backend() {
-            cljrs_logging::feat_debug!(
-                "jit",
+            tracing::debug!(
+                target: "jit",
                 "osr enqueue arity_id={} header=bb{}",
                 arity_id,
                 header

@@ -115,7 +115,7 @@ pub fn resolve_versioned_value(
 }
 
 /// Resolve a pinned native symbol: first through the opt-in pinned-native
-/// package loader (`:rust/load :dylib`, installed by `cljrs-dylib`), then
+/// package loader (`:rust/load :dylib`, installed by the CLI), then
 /// through the verified HEAD binding.
 ///
 /// When the loader reports it registered the package at the pinned commit,
@@ -173,7 +173,7 @@ fn versioned_source_available(globals: &GlobalEnv, base_ns: &str, versioned_ns: 
     let rel_path = base_ns.replace('.', "/").replace('-', "_");
     let src_paths = globals.source_paths.read().unwrap().clone();
     match crate::env::loader::find_source_file(&rel_path, &src_paths) {
-        Some((_, file_path)) => cljrs_vcs::find_repo_root(Path::new(&file_path)).is_some(),
+        Some((_, file_path)) => cljrs_project::vcs::find_repo_root(Path::new(&file_path)).is_some(),
         None => false,
     }
 }
@@ -303,7 +303,7 @@ fn fetch_versioned_source(
         })?;
 
     // Locate the git repository.
-    let repo_root = cljrs_vcs::find_repo_root(Path::new(&file_path)).ok_or_else(|| {
+    let repo_root = cljrs_project::vcs::find_repo_root(Path::new(&file_path)).ok_or_else(|| {
         EvalError::Runtime(format!(
             "Namespace {base_ns} (file {file_path}) is not in a git repository; \
              cannot resolve {base_ns}@{commit}"
@@ -324,7 +324,7 @@ fn fetch_versioned_source(
     let rel_file_str = rel_file.to_string_lossy();
 
     // Fetch the source at the requested commit.
-    let src = cljrs_vcs::get_file_at_commit(&repo_root, &rel_file_str, commit)
+    let src = cljrs_project::vcs::get_file_at_commit(&repo_root, &rel_file_str, commit)
         .map_err(|e| EvalError::Runtime(format!("{e}")))?;
 
     // Record for AOT embedding.

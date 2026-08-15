@@ -26,6 +26,9 @@
 pub mod builtins;
 pub mod env;
 pub mod interp;
+/// Diagnostic logging configuration (native only; see the module docs).
+#[cfg(not(target_arch = "wasm32"))]
+pub mod logging;
 pub mod mode;
 pub mod runtime;
 pub mod tiered;

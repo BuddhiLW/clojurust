@@ -433,8 +433,8 @@ pub fn close_region(region: Box<Region>) {
         }
     });
     if poisoned {
-        cljrs_logging::feat_debug!(
-            "gc",
+        tracing::debug!(
+            target: "gc",
             "retiring poisoned region ({} objects, {} bytes)",
             region.object_count(),
             region.bytes_used()

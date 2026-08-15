@@ -102,8 +102,8 @@ fn worker_loop(rx: Receiver<LowerRequest>) {
             process_request(&req);
         }));
         if result.is_err() {
-            cljrs_logging::feat_debug!(
-                "ir",
+            tracing::debug!(
+                target: "ir",
                 "background lower panicked for {:?}; staying at Tier 0",
                 req.name
             );
@@ -116,7 +116,7 @@ fn process_request(req: &LowerRequest) {
     // cache this lowering publishes into.  A runtime dropped while its
     // request sat in the queue has nothing left to publish to.
     let Some(tiers) = req.tiers.upgrade() else {
-        cljrs_logging::feat_debug!("ir", "dropping lower request for dead runtime");
+        tracing::debug!(target: "ir", "dropping lower request for dead runtime");
         return;
     };
     let ir_cache = tiers.ir_cache();
@@ -172,8 +172,8 @@ fn process_request(req: &LowerRequest) {
                     }
                     tiers.jit().on_ir_published(id);
                     registered.push((arity.params.len(), arity.rest_param.is_some(), ir));
-                    cljrs_logging::feat_debug!(
-                        "ir",
+                    tracing::debug!(
+                        target: "ir",
                         "background lower published arity_id={} ({:?})",
                         id,
                         req.name
@@ -183,8 +183,8 @@ fn process_request(req: &LowerRequest) {
                 }
                 Err(e) => {
                     ir_cache.store_unsupported(id);
-                    cljrs_logging::feat_debug!(
-                        "ir",
+                    tracing::debug!(
+                        target: "ir",
                         "background lower unsupported arity_id={} ({:?}): {}",
                         id,
                         req.name,
@@ -202,8 +202,8 @@ fn process_request(req: &LowerRequest) {
             // re-trigger lowering on a later call.
             ir_cache.invalidate(id);
             tiers.jit().clear_lower_queued(id);
-            cljrs_logging::feat_debug!(
-                "ir",
+            tracing::debug!(
+                target: "ir",
                 "background lower abandoned after {} rebind retries arity_id={} ({:?})",
                 MAX_LOWER_ATTEMPTS,
                 id,

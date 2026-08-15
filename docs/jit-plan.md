@@ -97,7 +97,7 @@ bumps on the Tier-1 entry path (`try_ir_path`, `crates/cljrs-eval/src/apply.rs`)
 
 A tunable invocation threshold (default ~1–2k; env var `CLJRS_JIT_THRESHOLD`,
 plus a CLI flag) trips a function from Tier 1 → JIT-queued. The already-reserved
-`-X trace:jit` logging feature (`crates/cljrs-logging`) provides observability.
+`-X trace:jit` (the `jit` `tracing` target) provides observability.
 
 ### Background compilation with atomic swap
 
@@ -294,7 +294,7 @@ Reused / modified: `crates/cljrs-compiler/src/{codegen.rs,rt_abi.rs,aot.rs}`;
 `crates/cljrs-eval/src/{apply.rs,ir_cache.rs,lower.rs,ir_interp.rs}`;
 `crates/cljrs-ir/src/lower/escape.rs`;
 `crates/cljrs-gc/src/{alloc_ctx.rs,region.rs,cancellation.rs}`;
-`crates/cljrs-value/src/types.rs`; `crates/cljrs-logging` (`jit` feature);
+`crates/cljrs-value/src/types.rs`; the `jit` `tracing` target;
 `crates/cljrs/src/main.rs` (CLI flags).
 
 Created: `crates/cljrs-jit/` (with its own `README.md` per the CLAUDE.md

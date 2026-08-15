@@ -103,7 +103,7 @@ impl Tiers {
         for &id in &evicted {
             self.jit.evict_entry_if_cold(id);
             self.jit.stale_osr_code(id);
-            cljrs_logging::feat_debug!("ir", "evicted idle IR arity_id={}", id);
+            tracing::debug!(target: "ir", "evicted idle IR arity_id={}", id);
         }
         evicted
     }

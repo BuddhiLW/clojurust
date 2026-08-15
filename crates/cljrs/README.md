@@ -11,15 +11,43 @@ interactively exploring clojurust programs.
 
 ```
 src/
-  main.rs           — CLI entry point: Clap structs, miette error hook, subcommand
-                      dispatch, REPL loop, test harness, GC-stats reporter
+  main.rs           — the binary: a one-line shim over `cli::main`
+  lib.rs            — module index; the CLI lives in a library so its own
+                      integration tests can reach it (not an embedding API)
+  cli.rs            — global flags, the miette error hook, the tracing
+                      subscriber, the large-stack worker thread, and the
+                      subcommand dispatcher
+  session.rs        — everything more than one subcommand needs: `setup_globals`
+                      (runtime + stdlib + `cljrs.edn` wiring + JIT policy),
+                      source-path helpers, `eval_in` / `eval_form`, the async
+                      driver, and error formatting
+  native/           — loading native (Rust) code into a running environment
+    mod.rs          — the project's own `:rust` cdylib and the cargo/path helpers
+    pinned.rs       — pinned native packages (`:rust/load :dylib`): wrapper
+                      generation, cargo build + cache, dlopen + ABI handshake
   extensions.rs     — `default_set()`: the runtime extensions this build ships,
                       handed to the compiler for `cljrs compile` (the compiler
                       backend does not choose them)
-  commands/
-    mod.rs          — module index for the internal command implementations
-    ir.rs           — the `ir` subcommand: `IrCommands` enum, dispatch, bundle
-                      pre-lowering (`ir build`), bundle dump, HTML IR visualizer
+build.rs            — captures `rustc -V` for the pinned-package ABI fingerprint
+  commands/         — one module per subcommand: its clap `Args` and its `run`
+    mod.rs          — module index
+    run.rs          — `run`: interpret a file, then call `-main`
+    repl.rs         — `repl`: the interactive loop
+    compile.rs      — `compile`: `CompileTarget`, entry-namespace resolution,
+                      opacity policy, native and wasm AOT
+    eval.rs         — `eval`: one expression
+    ir/             — `ir`: `IrCommands` enum, dispatch, bundle pre-lowering
+      mod.rs        —   (`ir build`) and bundle dump
+      viz/          — `ir viz`: the self-contained HTML IR visualizer
+        mod.rs      —   `render_html` / `RenderOptions`
+        render.rs   —   HTML assembly, region colouring, source pane
+        region.rs   —   `RegionStart`/`RegionEnd` pairing and membership
+        blame.rs    —   escape-verdict badges and the blamed use
+    test.rs         — `test`: namespace discovery, the runner, the summary
+    deps.rs         — `deps fetch` / `deps status`
+    build_native.rs — `build-native`: cargo-build the project's `:rust` crate
+    lsp.rs          — `lsp`: run the language server over stdio
+    nrepl.rs        — `nrepl`: serve an nREPL session
 ```
 
 ---
@@ -134,7 +162,7 @@ dependency:
   `:git/sha` (no network — run `cljrs deps fetch` first; a missing cache warns
   and is skipped), and contribute the checkout's `:paths` (or `src/`).
 - **Native deps** (`:rust/load :dylib`) carry no Clojure source; they are built
-  and registered on demand by the native-`require` loader (`cljrs-dylib`) when
+  and registered on demand by the native-`require` loader (`native::pinned`) when
   their namespace is first `require`d.
 
 ### Global flags
@@ -151,7 +179,7 @@ These appear before the subcommand and apply to every command:
   Set `RUST_LOG` (`tracing` target=level syntax) to replace the defaults and
   get them back, e.g. `RUST_LOG=info,cranelift_jit=info cljrs run app.cljrs`.
 
-- `-X <LEVEL:FEATURES>` — feature-level logging, repeatable.  Format: `<level>:<feat1>,<feat2>,…`.  Levels: `debug`, `trace`.  Example: `-X debug:gc,jit`.
+- `-X <LEVEL:FEATURES>` — feature-level logging, repeatable.  Format: `<level>:<feat1>,<feat2>,…`.  Levels: `debug`, `trace`.  Features: `gc`, `env`, `ir`, `jit`.  Example: `-X debug:gc,jit`.  These are `tracing` targets: `RUST_LOG=gc=debug` does the same thing, and `-X` is layered on top of `RUST_LOG` so both can be used together.  A blanket `--debug`/`--trace` deliberately leaves them off — they are firehoses.  A malformed `-X` is a hard error; a malformed `RUST_LOG` is reported on stderr and ignored, leaving the `--debug`/`--trace` default in place.  An AOT binary reads the same two variables (`CLJRS_X_FLAG` in place of `-X`) and treats a bad value in each exactly the same way.
 - `--gc-stats [FILE]` — print a `cljrs_gc::GC_STATS` snapshot at program exit (allocations, region/bump usage, GC pause count + total duration, freed objects/bytes).  No value → stdout; with a path → that file.  Honoured by `run`, `eval`, and `test`.
 - `--jit-stats [FILE]` — print a JIT specialization / inline-cache counter snapshot at program exit (boxed arithmetic bridge calls, entry-guard deopts, keyword IC fills, protocol IC hits/misses; Phase 10.6, `cljrs_compiler::rt_abi::jit_stats`).  No value → stdout; with a path → that file.  Honoured by `run`, `eval`, and `test`.
 
@@ -226,9 +254,9 @@ Build with e.g. `cargo build --release --features enable-rustyline,no-gc`.
 - The miette error hook is installed at startup so `CljxError` propagated to `main` renders with terminal-linked source snippets.
 - A worker thread is spawned with the configured stack size to run the actual command; the main thread only handles signal/exit setup.
 - The REPL prints results, paginates errors via `miette`, and persists multi-line input across blank prompts.
-- **Top-level async (with the `async` feature).** `main` builds a single-threaded Tokio runtime + `LocalSet` and stashes it in a thread-local `AsyncDriver` rather than wrapping the whole session in one `block_on`. Each top-level form is then evaluated through `cljrs_async::eval_async` via `LocalSet::block_on` in `eval_form`, so spawned tasks (core.async producers, `^:async` calls, `clojure.rust.io.async` readers/writers) make progress and a top-level `await` resolves. Tasks that outlive a form — e.g. a channel `def`d at one REPL prompt and consumed at the next — stay queued on the shared `LocalSet` and continue on the next form's drive. Note: blocking ops (`<!!`/`>!!`) still park the single executor thread and so are not usable at the top level; use `(await (take! ch))` / `go` instead.
-- `ir viz` runs the AOT pipeline through region optimization (via `cljrs_compiler::aot::lower_file_to_ir`) and hands the resulting `IrFunction` to `cljrs_ir_viz::render_html`.
-- `ir build` boots a standard environment, walks every var in the requested namespaces, and lowers each function arity with `cljrs_eval::lower::lower_arity` into an `IrBundle`. It lives in `commands/ir.rs`; there is no separate pre-build crate or binary. No `cljrs` runtime path loads a bundle — `cljrs_eval::load_prebuilt_ir` is the public API an embedder would call to replay one.
+- **Top-level async (with the `async` feature).** `session::with_async_driver` builds a single-threaded Tokio runtime + `LocalSet` and stashes it in a thread-local `AsyncDriver` rather than wrapping the whole session in one `block_on`. Each top-level form is then evaluated through `cljrs_async::eval_async` via `LocalSet::block_on` in `eval_form`, so spawned tasks (core.async producers, `^:async` calls, `clojure.rust.io.async` readers/writers) make progress and a top-level `await` resolves. Tasks that outlive a form — e.g. a channel `def`d at one REPL prompt and consumed at the next — stay queued on the shared `LocalSet` and continue on the next form's drive. Note: blocking ops (`<!!`/`>!!`) still park the single executor thread and so are not usable at the top level; use `(await (take! ch))` / `go` instead.
+- `ir viz` runs the AOT pipeline through region optimization (via `cljrs_compiler::aot::lower_file_to_ir`) and hands the resulting `IrFunction` to `commands::ir::viz::render_html`.
+- `ir build` boots a standard environment, walks every var in the requested namespaces, and lowers each function arity with `cljrs_eval::lower::lower_arity` into an `IrBundle`. It lives in `commands/ir/mod.rs`; there is no separate pre-build crate or binary. No `cljrs` runtime path loads a bundle — `cljrs_eval::load_prebuilt_ir` is the public API an embedder would call to replay one.
 
 ---
 
@@ -244,16 +272,234 @@ Build with e.g. `cargo build --release --features enable-rustyline,no-gc`.
 | `cljrs-runtime` (workspace) | Runtime construction (`Runtime::builder`) and evaluation           |
 | `cljrs-stdlib` (workspace)  | Standard library installed into the runtime (`install`)           |
 | `cljrs-compiler` (workspace)| AOT pipeline (`compile_file`, `compile_test_harness`, `lower_file_to_ir`) |
-| `cljrs-ir-viz` (workspace)  | HTML IR visualizer used by `ir viz`                                |
 | `cljrs-ir` (workspace)      | `IrBundle`, `serialize_bundle`, `deserialize_bundle` — used by `ir build` / `ir dump` |
 | `cljrs-interop` (workspace) | Rust ↔ Clojure FFI                                                |
 | `cljrs-async` (workspace, optional) | `clojure.core.async` runtime + `eval_async`; enabled by `async`  |
 | `cljrs-io` (workspace, optional) | `clojure.rust.io.async` async file I/O; enabled by `async`       |
 | `tokio` (workspace, optional) | Single-threaded runtime + `LocalSet` driving async; enabled by `async` |
-| `cljrs-logging` (workspace) | `--debug` / `--trace` / `-X` flag handling                        |
-| `cljrs-deps` (workspace)    | `cljrs.edn` parser; `DepsConfig` / `Dependency` types             |
-| `cljrs-vcs` (workspace)     | Pure-Rust (gitoxide) git helpers: `fetch_remote`, `cache_path_for_url`, native signature verification |
+| `tracing` (workspace)       | `Level` for the `--debug` / `--trace` default; `--debug` / `--trace` / `-X` all build one `Targets` filter and install the stderr subscriber through `cljrs_runtime::logging`, which owns the `tracing-subscriber` dependency |
+| `cljrs-project` (workspace) | `config` — `cljrs.edn` parser, `DepsConfig` / `Dependency` types; `vcs` — pure-Rust (gitoxide) git helpers: `fetch_remote`, `cache_path_for_url`, native signature verification |
 | `clap` (workspace)          | CLI argument parsing                                              |
 | `miette` (workspace)        | Rich terminal error rendering                                     |
-| `tracing` / `tracing-subscriber` | Structured logging output                                    |
 | `rustyline` (workspace, optional) | Line-editing REPL when `enable-rustyline` is on              |
+| `libloading` (workspace)    | `dlopen` for the project `:rust` cdylib and pinned native packages |
+| `serde_json`                | Reading `target_directory` out of `cargo metadata` output          |
+
+---
+
+## Pinned native packages (`:rust/load :dylib`)
+
+### Purpose
+
+Pinned native packages: build a dependency's Rust crate at a pinned git
+commit as a cdylib and load it, so versioned symbols (`my.lib/f@<sha>`) can
+resolve to **truly pinned** native code instead of the default verified HEAD
+binding (`:rust/load :dylib` in `cljrs.edn`).  The same machinery also makes a
+`:rust/load :dylib` dependency loadable by a **plain `require`** of its
+namespace, registering the package's exports into the live (unversioned)
+namespace.
+
+### Status
+
+Versioned-namespaces plan, Phase 5 (see `docs/versioned-namespaces-plan.md`).
+Implemented and tested end-to-end, but **experimental**: the init call
+crosses a Rust-ABI boundary guarded only by the fingerprint handshake
+(feature-flag skew between host and wrapper is not detected), and a Rust
+toolchain is required at runtime.  Statically linking pinned native crates
+into AOT harnesses is deferred (open problem: `#[export]` inventory
+collisions between two versions of one crate).
+
+### File layout
+
+```
+src/native/pinned.rs — install (both loader hooks), wrapper crate generation,
+              cargo build + cache, dlopen + ABI handshake, versioned/unversioned
+              Registry init
+build.rs    — captures `rustc -V` for the host side of the ABI fingerprint
+tests/
+  pinned_dylib_e2e.rs — gated end-to-end test (CLJRS_DYLIB_E2E=1): two-commit
+              native crate fixture; pinned (versioned-symbol) resolution loads
+              the v1 dylib while HEAD stays untouched, and a plain `require`
+              loads the v1 dylib into the unversioned namespace
+```
+
+### Public API
+
+```rust
+/// Install both native loader hooks on the environment (idempotent): the
+/// pinned-native loader (versioned-symbol resolution) and the native-require
+/// loader (plain `require` of a `:rust/load :dylib` dep).  Called by the
+/// cljrs CLI during setup_globals.
+pub fn install(globals: &Arc<GlobalEnv>);   // cljrs::native::pinned
+
+/// The host's ABI fingerprint: "cljrs <version>; <rustc -V>; <debug|release>".
+/// A wrapper dylib is loaded only when its baked fingerprint equals this.
+pub fn abi_fingerprint() -> String;
+
+pub const ABI_SYMBOL: &[u8];   // b"cljrs_dylib_abi\0"
+pub const INIT_SYMBOL: &[u8];  // b"cljrs_dylib_init\0"
+```
+
+### How it works
+
+1. The versioned resolver (`cljrs_runtime::env::versioned`) calls the installed
+   `PinnedNativeLoader` when a pinned lookup is about to fall back to a
+   native function.
+2. The loader finds a `:rust/load :dylib` git dep covering the namespace
+   (exact or dotted-prefix match) with a `:rust/init` function.
+3. `cljrs_project::vcs::fetch_remote` + a gitoxide worktree checkout of the pinned
+   commit's tree (`~/.cljrs/cache/dylibs/checkouts/<crate>@<commit>`, no
+   `.git`; a `.cljrs-checkout-complete` sentinel marks a finished checkout).
+4. A wrapper cdylib crate is generated
+   (`~/.cljrs/cache/dylibs/<crate>@<commit>/fp-<hash>/`), pinning the same
+   `cljrs-interop` as the host (local checkout path when found —
+   `CLJRS_WORKSPACE_ROOT` override honored — else the published `=version`),
+   and built with cargo **in the host's profile** (debug/release —
+   `cljrs-gc` object headers differ between profiles).
+5. dlopen → `cljrs_dylib_abi()` fingerprint must equal
+   `abi_fingerprint()` exactly, else refuse → `cljrs_dylib_init(*mut
+   Registry)` registers the package's exports through
+   `Registry::versioned(commit)`, landing every definition in the immutable
+   `"<ns>@<commit>"` namespace.
+6. The namespace is marked loaded; subsequent pinned lookups are plain
+   namespace hits.
+
+#### Plain `require` of a native dep
+
+When `(require '[my.native.lib :as l])` finds no Clojure source for the
+namespace, `cljrs-runtime`'s unversioned loader consults the installed
+`NativeRequireLoader`.  It runs the same fetch/checkout/wrapper-build pipeline
+(steps 2–4 above), keyed on the dep's pinned `:git/sha`, then runs
+`cljrs_dylib_init` through `Registry::for_require(...)` — an **unversioned**
+view — so the exports land in the live `my.native.lib` namespace.  The loader
+returns and the unversioned loader marks the namespace loaded, so `l/encode`
+resolves like any other namespace.
+
+---
+
+## The IR visualizer (`cljrs ir viz`)
+
+**Purpose:** debug the bump-allocation optimizer.  When a value escapes
+or otherwise misses region promotion, the visualizer flags it with the
+escape-analysis verdict and the use that "blamed" it — making it
+obvious why the optimizer left it on the GC heap.
+
+**Status:** implemented and tested against hand-written snippets; not
+integrated with the AOT compiler's `--emit-ir-html` flag — `cljrs ir viz`
+is the interface.  This was the `cljrs-ir-viz` package until consolidation
+stage 5; the CLI was its only consumer.
+
+---
+
+### File layout
+
+```
+src/commands/ir/viz/
+  mod.rs    — public entry point: `render_html` and `RenderOptions`
+  render.rs — top-level HTML assembly, function/block/inst rendering,
+              source-pane rendering, region color assignment
+  region.rs — collect `RegionStart`/`RegionEnd` pairs, compute the set
+              of `(block, inst_index)` positions covered by each region
+  blame.rs  — pick a representative "blame" use for a non-promoted
+              allocation; format use-kind labels and escape-state badges
+tests/
+  ir_viz.rs — lower a small snippet, render to HTML, and assert the
+              output is well-formed and contains expected markers
+examples/
+  ir_viz_dump.rs — `cargo run -p cljrs --example ir_viz_dump > /tmp/ir.html`
+              renders a hand-written demo to stdout
+```
+
+---
+
+### Usage
+
+#### CLI
+
+```sh
+cljrs ir viz path/to/file.cljrs        # writes path/to/file.cljrs.ir.html
+cljrs ir viz path/to/file.cljrs -o out.html
+cljrs ir viz path/to/file.cljrs --src-path src/    # for require resolution
+```
+
+#### From Rust
+
+```rust
+use cljrs::commands::ir::viz::{render_html, RenderOptions};
+use cljrs_ir::lower::{lower_fn_body, optimize};
+
+let ir = optimize(lower_fn_body(Some("f"), "user", &[], &forms)?);
+let html = render_html(&ir, Some(source_text), &RenderOptions::default());
+std::fs::write("ir.html", html)?;
+```
+
+---
+
+### Public API
+
+```rust
+pub fn render_html(
+    ir: &cljrs_ir::IrFunction,
+    source: Option<&str>,
+    opts: &RenderOptions,
+) -> String;
+
+pub struct RenderOptions {
+    pub title: Option<String>,
+}
+```
+
+`render_html` walks `ir` plus all subfunctions, runs escape analysis with
+an inter-procedural context, and produces a complete HTML document.  The
+return value is a self-contained string suitable for writing to disk and
+opening in any browser.
+
+---
+
+### What the visualizer shows
+
+For each function:
+
+* **Header** — function name (with parent path for subfunctions),
+  parameter list, and source span when known.
+* **Allocation summary** — count of region-allocated, heap, and closure
+  allocations.
+* **Per-block IR** — every instruction with its index, with kinds
+  color-coded:
+  * `alloc` (heap) — orange
+  * `ralloc` (region) — green, with strong tint matching the region's
+    color
+  * `rstart` / `rend` — italic gray
+  * `call`, `store`, `loc`, etc.
+* **Region coloring** — every `RegionStart`/`RegionEnd` pair gets a
+  deterministic hue (golden-angle spacing).  Instructions inside the
+  region get a pale tint of that hue; the actual `RegionAlloc` /
+  `RegionStart` / `RegionEnd` markers get a stronger tint plus an accent
+  border.  Source lines that produced any of the region's
+  `RegionAlloc`s get the same accent border in the gutter.
+* **Escape badges** — every `Alloc*` instruction (i.e. one that did
+  *not* get promoted) shows its escape verdict (`no-escape`,
+  `arg-escape`, `returns`, `escapes`) and the blamed use (e.g. *"return
+  value"*, *"stored into heap object in bb1"*, *"arg 0 of known call
+  Map"*).  Pure `no-escape` allocations are unusual after optimization
+  and indicate a missed promotion opportunity.
+* **Hover linking** — hovering an IR instruction highlights its source
+  line; hovering a source line highlights all IR insts derived from it.
+  Lookup is by line number via `data-line` attributes.
+
+---
+
+### Notes on source mapping
+
+ANF lowering emits `Inst::SourceLoc(span)` markers at the head of each
+form's lowering, deduped per `(file, line)` within a block.  These are
+pure no-op instructions (`Effect::Pure`, no `dst`) so all existing
+analysis and code-generation passes ignore them — they exist only for
+this visualizer and other downstream tooling.
+
+The `IrFunction.span` field is currently populated only for
+hand-constructed IR; the ANF lowering path does not yet set it for
+top-level functions.  Subfunction headers therefore show only their
+first `SourceLoc` marker rather than a span range.
+
+---

@@ -18,14 +18,14 @@ no-gc = ["cljrs-gc/no-gc", "cljrs-value/no-gc", "cljrs-eval/no-gc", "cljrs-inter
 
 [dependencies]
 cljrs-runtime = { workspace = true }
-cljrs-logging  = { workspace = true }
+tracing        = { workspace = true }
 # The async runtime is an ABI dependency, not a product extension: codegen and
 # rt_abi implement `cljrs_async::state_machine`'s poll contract.  I/O,
 # networking, charset, and Base64 are extensions the *host* selects and are
 # deliberately absent here — see `src/extensions.rs`.
 cljrs-async    = { workspace = true }
 cljrs-builtins = { workspace = true }
-cljrs-deps     = { workspace = true }
+cljrs-project  = { workspace = true }
 cljrs-types    = { workspace = true }
 cljrs-ir       = { workspace = true }
 cljrs-gc       = { workspace = true }

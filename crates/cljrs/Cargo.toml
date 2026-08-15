@@ -24,6 +24,10 @@ net     = ["dep:cljrs-net", "async"]
 charset = ["dep:cljrs-charset"]
 base64  = ["dep:cljrs-base64"]
 
+[lib]
+name = "cljrs"
+path = "src/lib.rs"
+
 [[bin]]
 name = "cljrs"
 path = "src/main.rs"
@@ -37,21 +41,17 @@ cljrs-value    = { workspace = true }
 cljrs-eval     = { workspace = true }
 cljrs-stdlib   = { workspace = true }
 cljrs-compiler = { workspace = true }
-cljrs-ir-viz   = { workspace = true }
 cljrs-interop  = { workspace = true }
-cljrs-logging  = { workspace = true }
-cljrs-deps     = { workspace = true }
-cljrs-vcs      = { workspace = true, features = ["ssh"] }
+cljrs-project  = { workspace = true, features = ["ssh"] }
 cljrs-lsp      = { workspace = true }
 cljrs-nrepl    = { workspace = true }
-cljrs-dylib    = { workspace = true }
 cljrs-ir       = { workspace = true }
 clap          = { workspace = true }
 miette        = { workspace = true }
-tracing-subscriber = "0.3.23"
-tracing = "0.1.44"
+tracing            = { workspace = true }
 rustyline   = { workspace = true, optional = true }
 libloading  = { workspace = true }
+serde_json  = "1"
 cljrs-async  = { workspace = true, optional = true }
 cljrs-io     = { workspace = true, optional = true }
 cljrs-net    = { workspace = true, optional = true }
@@ -60,4 +60,7 @@ cljrs-base64  = { workspace = true, optional = true }
 tokio         = { workspace = true, optional = true }
 
 [dev-dependencies]
+# The pinned-native e2e test builds a fixture crate against the workspace's
+# own cljrs-runtime, and the IR visualizer test lowers a snippet first.
+cljrs-runtime = { workspace = true }
 tempfile = "3"

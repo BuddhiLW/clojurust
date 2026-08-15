@@ -94,8 +94,8 @@ pub(crate) fn register(arity_id: u64, compiled: CompiledFn) -> u64 {
 pub fn mark_stale(epoch: u64) {
     let mut state = cache().lock().unwrap();
     if let Some(record) = state.live.remove(&epoch) {
-        cljrs_logging::feat_debug!(
-            "jit",
+        tracing::debug!(
+            target: "jit",
             "mark stale epoch={} arity_id={} ({} bytes)",
             epoch,
             record.arity_id,
@@ -116,7 +116,7 @@ pub fn mark_stale(epoch: u64) {
 pub(crate) fn pin_epoch(epoch: u64) {
     let mut state = cache().lock().unwrap();
     if state.pinned.insert(epoch) {
-        cljrs_logging::feat_debug!("jit", "pin epoch={} (closure escaped)", epoch);
+        tracing::debug!(target: "jit", "pin epoch={} (closure escaped)", epoch);
     }
 }
 
@@ -164,8 +164,8 @@ pub fn reclaim_at_stw() -> usize {
             state.reclaimed_count += 1;
             state.reclaimed_bytes += bytes;
             freed += 1;
-            cljrs_logging::feat_debug!(
-                "jit",
+            tracing::debug!(
+                target: "jit",
                 "reclaimed epoch={} arity_id={} ({} bytes)",
                 epoch,
                 record.arity_id,
@@ -174,8 +174,8 @@ pub fn reclaim_at_stw() -> usize {
         }
     }
     if freed > 0 {
-        cljrs_logging::feat_debug!(
-            "jit",
+        tracing::debug!(
+            target: "jit",
             "reclaim pass freed {} module(s); {} live, {} still-stale",
             freed,
             state.live.len(),

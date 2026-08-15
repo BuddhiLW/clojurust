@@ -755,7 +755,7 @@ pub(crate) fn classify_escape_with_ctx(
 
 /// The output of [`analyze`].  Maps every allocation in the function to its
 /// escape state, and exposes the use-chain map and alloc→block map used by
-/// the optimizer (and downstream tooling such as `cljrs-ir-viz`).
+/// the optimizer (and downstream tooling such as `cljrs ir viz`).
 pub struct AnalysisResult {
     pub states: HashMap<VarId, EscapeState>,
     /// Callee arity-fn-name → set of alloc `VarId`s that are transitively

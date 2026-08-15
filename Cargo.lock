@@ -745,31 +745,27 @@ dependencies = [
  "cljrs-base64",
  "cljrs-charset",
  "cljrs-compiler",
- "cljrs-deps",
- "cljrs-dylib",
  "cljrs-eval",
  "cljrs-gc",
  "cljrs-interop",
  "cljrs-io",
  "cljrs-ir",
- "cljrs-ir-viz",
- "cljrs-logging",
  "cljrs-lsp",
  "cljrs-net",
  "cljrs-nrepl",
+ "cljrs-project",
  "cljrs-reader",
  "cljrs-runtime",
  "cljrs-stdlib",
  "cljrs-types",
  "cljrs-value",
- "cljrs-vcs",
  "libloading",
  "miette",
  "rustyline",
+ "serde_json",
  "tempfile",
  "tokio",
  "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]
@@ -847,15 +843,14 @@ dependencies = [
  "cljrs-base64",
  "cljrs-builtins",
  "cljrs-charset",
- "cljrs-deps",
  "cljrs-env",
  "cljrs-eval",
  "cljrs-gc",
  "cljrs-interp",
  "cljrs-io",
  "cljrs-ir",
- "cljrs-logging",
  "cljrs-net",
+ "cljrs-project",
  "cljrs-reader",
  "cljrs-runtime",
  "cljrs-stdlib",
@@ -872,52 +867,9 @@ dependencies = [
  "target-lexicon",
  "tempfile",
  "tokio",
+ "tracing",
  "wasm-encoder",
  "wasmparser",
-]
-
-[[package]]
-name = "cljrs-deps"
-version = "0.1.0"
-dependencies = [
- "cljrs-gc",
- "cljrs-reader",
- "cljrs-types",
- "thiserror",
-]
-
-[[package]]
-name = "cljrs-dom"
-version = "0.1.0"
-dependencies = [
- "cljrs-async",
- "cljrs-env",
- "cljrs-gc",
- "cljrs-value",
- "getrandom 0.4.3",
- "js-sys",
- "uuid",
- "wasm-bindgen",
- "wasm-bindgen-futures",
- "web-sys",
-]
-
-[[package]]
-name = "cljrs-dylib"
-version = "0.1.0"
-dependencies = [
- "cljrs-deps",
- "cljrs-env",
- "cljrs-gc",
- "cljrs-interop",
- "cljrs-interp",
- "cljrs-logging",
- "cljrs-reader",
- "cljrs-runtime",
- "cljrs-value",
- "cljrs-vcs",
- "libloading",
- "tempfile",
 ]
 
 [[package]]
@@ -948,11 +900,11 @@ name = "cljrs-gc"
 version = "0.1.0"
 dependencies = [
  "bigdecimal",
- "cljrs-logging",
  "num-bigint",
  "num-rational",
  "regex",
  "system-memory",
+ "tracing",
 ]
 
 [[package]]
@@ -1000,20 +952,6 @@ dependencies = [
  "postcard",
  "serde",
 ]
-
-[[package]]
-name = "cljrs-ir-viz"
-version = "0.1.0"
-dependencies = [
- "cljrs-compiler",
- "cljrs-ir",
- "cljrs-reader",
- "cljrs-types",
-]
-
-[[package]]
-name = "cljrs-logging"
-version = "0.1.0"
 
 [[package]]
 name = "cljrs-lsp"
@@ -1075,6 +1013,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "cljrs-project"
+version = "0.1.0"
+dependencies = [
+ "cljrs-gc",
+ "cljrs-reader",
+ "cljrs-types",
+ "gix",
+ "pgp",
+ "russh",
+ "ssh-key 0.6.7",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
 name = "cljrs-reader"
 version = "0.1.0"
 dependencies = [
@@ -1088,15 +1043,12 @@ name = "cljrs-runtime"
 version = "0.1.0"
 dependencies = [
  "bigdecimal",
- "cljrs-deps",
  "cljrs-gc",
  "cljrs-ir",
- "cljrs-logging",
+ "cljrs-project",
  "cljrs-reader",
  "cljrs-types",
  "cljrs-value",
- "cljrs-vcs",
- "log",
  "num-bigint",
  "num-rational",
  "num-traits",
@@ -1106,6 +1058,8 @@ dependencies = [
  "rpds",
  "tempfile",
  "thiserror",
+ "tracing",
+ "tracing-subscriber",
  "uuid",
 ]
 
@@ -1115,7 +1069,6 @@ version = "0.1.0"
 dependencies = [
  "cljrs-gc",
  "cljrs-ir",
- "cljrs-logging",
  "cljrs-reader",
  "cljrs-runtime",
  "cljrs-value",
@@ -1161,26 +1114,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "cljrs-vcs"
-version = "0.1.0"
-dependencies = [
- "gix",
- "pgp",
- "russh",
- "ssh-key 0.6.7",
- "tempfile",
- "thiserror",
- "tokio",
- "tokio-util",
-]
-
-[[package]]
 name = "cljrs-wasm"
 version = "0.1.0"
 dependencies = [
  "cljrs-async",
  "cljrs-builtins",
- "cljrs-dom",
  "cljrs-env",
  "cljrs-gc",
  "cljrs-interp",
@@ -1191,10 +1129,12 @@ dependencies = [
  "cljrs-value",
  "console_error_panic_hook",
  "getrandom 0.4.3",
+ "js-sys",
  "tokio",
  "uuid",
  "wasm-bindgen",
  "wasm-bindgen-futures",
+ "web-sys",
 ]
 
 [[package]]
