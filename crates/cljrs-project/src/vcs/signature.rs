@@ -32,7 +32,7 @@ pub enum TrustedKeyError {
 /// A cljrs-managed set of public keys trusted to sign commits.
 ///
 /// Populate it from `cljrs.edn`'s `:trusted-signers` entries (see
-/// `cljrs-deps`), then pass it to [`crate::verify_commit_signature`].
+/// `cljrs-project`'s config layer), then pass it to [`crate::vcs::verify_commit_signature`].
 #[derive(Default)]
 pub struct TrustedKeys {
     pgp: Vec<SignedPublicKey>,

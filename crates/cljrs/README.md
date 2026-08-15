@@ -251,8 +251,7 @@ Build with e.g. `cargo build --release --features enable-rustyline,no-gc`.
 | `cljrs-io` (workspace, optional) | `clojure.rust.io.async` async file I/O; enabled by `async`       |
 | `tokio` (workspace, optional) | Single-threaded runtime + `LocalSet` driving async; enabled by `async` |
 | `cljrs-logging` (workspace) | `--debug` / `--trace` / `-X` flag handling                        |
-| `cljrs-deps` (workspace)    | `cljrs.edn` parser; `DepsConfig` / `Dependency` types             |
-| `cljrs-vcs` (workspace)     | Pure-Rust (gitoxide) git helpers: `fetch_remote`, `cache_path_for_url`, native signature verification |
+| `cljrs-project` (workspace) | `config` — `cljrs.edn` parser, `DepsConfig` / `Dependency` types; `vcs` — pure-Rust (gitoxide) git helpers: `fetch_remote`, `cache_path_for_url`, native signature verification |
 | `clap` (workspace)          | CLI argument parsing                                              |
 | `miette` (workspace)        | Rich terminal error rendering                                     |
 | `tracing` / `tracing-subscriber` | Structured logging output                                    |

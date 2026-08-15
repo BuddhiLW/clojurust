@@ -22,7 +22,7 @@ use russh::keys::agent::AgentIdentity;
 use russh::keys::agent::client::AgentClient;
 use russh::keys::ssh_key;
 
-use crate::{VcsError, VcsResult};
+use crate::vcs::{VcsError, VcsResult};
 
 /// Fetch `url` into the bare cache repository at `repo_dir`, creating it if it
 /// does not yet exist. After this returns, the remote's reachable objects are

@@ -18,7 +18,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use cljrs_vcs::{
+use cljrs_project::vcs::{
     TrustedKeys, VcsError, find_repo_root, get_file_at_commit, is_valid_commit_hash,
     verify_commit_signature,
 };

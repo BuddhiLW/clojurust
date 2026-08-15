@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use cljrs_reader::{Form, FormKind, Parser};
 
-use crate::{Alias, Dependency, DepsConfig, GitDep, RustConfig, TrustedSigner};
+use crate::config::{Alias, Dependency, DepsConfig, GitDep, RustConfig, TrustedSigner};
 
 // ── Public entry point ────────────────────────────────────────────────────────
 

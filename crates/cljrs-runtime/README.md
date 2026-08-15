@@ -1033,8 +1033,7 @@ by the lowerer — resolve at Tier 1 exactly as they do tree-walked.
 | `cljrs-reader` | `Form` AST and `Parser` |
 | `cljrs-ir` | IR types (`IrFunction`, `Block`, `Inst`, `IrBundle`) and lowering |
 | `cljrs-logging` | tracing setup used by the lowering worker |
-| `cljrs-deps` | project configuration consulted by the namespace loader |
-| `cljrs-vcs` (non-WASM) | git history access for versioned namespace resolution |
+| `cljrs-project` | `config` — project configuration consulted by the namespace loader; `vcs` (non-WASM) — git history access for versioned namespace resolution |
 | `num-bigint`, `num-rational`, `bigdecimal`, `num-traits` | numeric tower |
 | `rand`, `rpds`, `uuid`, `regex` | builtin implementations |
 | `log`, `thiserror` | diagnostics and error derivation |

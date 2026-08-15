@@ -25,7 +25,7 @@ cljrs-logging  = { workspace = true }
 # deliberately absent here — see `src/extensions.rs`.
 cljrs-async    = { workspace = true }
 cljrs-builtins = { workspace = true }
-cljrs-deps     = { workspace = true }
+cljrs-project  = { workspace = true }
 cljrs-types    = { workspace = true }
 cljrs-ir       = { workspace = true }
 cljrs-gc       = { workspace = true }

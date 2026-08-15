@@ -745,7 +745,6 @@ dependencies = [
  "cljrs-base64",
  "cljrs-charset",
  "cljrs-compiler",
- "cljrs-deps",
  "cljrs-dylib",
  "cljrs-eval",
  "cljrs-gc",
@@ -757,12 +756,12 @@ dependencies = [
  "cljrs-lsp",
  "cljrs-net",
  "cljrs-nrepl",
+ "cljrs-project",
  "cljrs-reader",
  "cljrs-runtime",
  "cljrs-stdlib",
  "cljrs-types",
  "cljrs-value",
- "cljrs-vcs",
  "libloading",
  "miette",
  "rustyline",
@@ -847,7 +846,6 @@ dependencies = [
  "cljrs-base64",
  "cljrs-builtins",
  "cljrs-charset",
- "cljrs-deps",
  "cljrs-env",
  "cljrs-eval",
  "cljrs-gc",
@@ -856,6 +854,7 @@ dependencies = [
  "cljrs-ir",
  "cljrs-logging",
  "cljrs-net",
+ "cljrs-project",
  "cljrs-reader",
  "cljrs-runtime",
  "cljrs-stdlib",
@@ -874,16 +873,6 @@ dependencies = [
  "tokio",
  "wasm-encoder",
  "wasmparser",
-]
-
-[[package]]
-name = "cljrs-deps"
-version = "0.1.0"
-dependencies = [
- "cljrs-gc",
- "cljrs-reader",
- "cljrs-types",
- "thiserror",
 ]
 
 [[package]]
@@ -906,16 +895,15 @@ dependencies = [
 name = "cljrs-dylib"
 version = "0.1.0"
 dependencies = [
- "cljrs-deps",
  "cljrs-env",
  "cljrs-gc",
  "cljrs-interop",
  "cljrs-interp",
  "cljrs-logging",
+ "cljrs-project",
  "cljrs-reader",
  "cljrs-runtime",
  "cljrs-value",
- "cljrs-vcs",
  "libloading",
  "tempfile",
 ]
@@ -1075,6 +1063,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "cljrs-project"
+version = "0.1.0"
+dependencies = [
+ "cljrs-gc",
+ "cljrs-reader",
+ "cljrs-types",
+ "gix",
+ "pgp",
+ "russh",
+ "ssh-key 0.6.7",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
 name = "cljrs-reader"
 version = "0.1.0"
 dependencies = [
@@ -1088,14 +1093,13 @@ name = "cljrs-runtime"
 version = "0.1.0"
 dependencies = [
  "bigdecimal",
- "cljrs-deps",
  "cljrs-gc",
  "cljrs-ir",
  "cljrs-logging",
+ "cljrs-project",
  "cljrs-reader",
  "cljrs-types",
  "cljrs-value",
- "cljrs-vcs",
  "log",
  "num-bigint",
  "num-rational",
@@ -1158,20 +1162,6 @@ dependencies = [
  "rpds",
  "thiserror",
  "uuid",
-]
-
-[[package]]
-name = "cljrs-vcs"
-version = "0.1.0"
-dependencies = [
- "gix",
- "pgp",
- "russh",
- "ssh-key 0.6.7",
- "tempfile",
- "thiserror",
- "tokio",
- "tokio-util",
 ]
 
 [[package]]

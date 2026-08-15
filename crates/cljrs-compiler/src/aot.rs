@@ -693,7 +693,7 @@ pub fn compile_file(src_path: &Path, out_path: &Path, session: &CompileSession) 
         // verification has keys to check pinned commits against.
         if let Some(config) = std::env::current_dir()
             .ok()
-            .and_then(|cwd| cljrs_deps::load_config(&cwd).ok().flatten())
+            .and_then(|cwd| cljrs_project::config::load_config(&cwd).ok().flatten())
         {
             globals.load_trusted_signers(&config);
         }

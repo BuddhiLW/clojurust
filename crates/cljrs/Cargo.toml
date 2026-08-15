@@ -40,8 +40,7 @@ cljrs-compiler = { workspace = true }
 cljrs-ir-viz   = { workspace = true }
 cljrs-interop  = { workspace = true }
 cljrs-logging  = { workspace = true }
-cljrs-deps     = { workspace = true }
-cljrs-vcs      = { workspace = true, features = ["ssh"] }
+cljrs-project  = { workspace = true, features = ["ssh"] }
 cljrs-lsp      = { workspace = true }
 cljrs-nrepl    = { workspace = true }
 cljrs-dylib    = { workspace = true }

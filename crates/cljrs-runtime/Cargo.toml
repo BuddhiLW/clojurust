@@ -15,7 +15,7 @@ cljrs-gc      = { workspace = true }
 cljrs-value   = { workspace = true }
 cljrs-reader  = { workspace = true }
 cljrs-logging = { workspace = true }
-cljrs-deps    = { workspace = true }
+cljrs-project = { workspace = true }
 cljrs-ir      = { workspace = true }
 log          = "0.4.29"
 thiserror    = "2.0.18"
@@ -27,9 +27,6 @@ rand         = { workspace = true }
 rpds         = { workspace = true }
 uuid         = { workspace = true, features = ["v4"] }
 regex        = { workspace = true }
-
-[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-cljrs-vcs = { workspace = true }
 
 [dev-dependencies]
 proptest = "1"

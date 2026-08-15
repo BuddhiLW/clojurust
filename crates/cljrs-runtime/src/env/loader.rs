@@ -156,8 +156,8 @@ fn do_load(globals: &Arc<GlobalEnv>, ns_name: &Arc<str>) -> EvalResult<()> {
     // Only meaningful for real files (not builtins) and non-WASM targets.
     #[cfg(not(target_arch = "wasm32"))]
     if !file_path.starts_with("<builtin:") {
-        let repo_root =
-            cljrs_vcs::find_repo_root(Path::new(&file_path)).map(|p| p.display().to_string());
+        let repo_root = cljrs_project::vcs::find_repo_root(Path::new(&file_path))
+            .map(|p| p.display().to_string());
         let ns_ptr = globals.get_or_create_ns(ns_name);
         ns_ptr
             .get()

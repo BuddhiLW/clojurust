@@ -56,7 +56,7 @@ Tooling:
 - **LSP server** — `cljrs lsp`: parse diagnostics + document-symbol outline (`cljrs-lsp`)
 - **nREPL server** — `cljrs nrepl`: bencode-over-TCP for CIDER/Calva/Conjure (`cljrs-nrepl`)
 - **IR visualizer** — `cljrs ir viz`: HTML view of optimized IR + region allocation (`cljrs-ir-viz`)
-- **Dependencies** — `cljrs deps fetch/status`: git-hosted deps from `cljrs.edn` (`cljrs-deps`, `cljrs-vcs`)
+- **Dependencies** — `cljrs deps fetch/status`: git-hosted deps from `cljrs.edn` (`cljrs-project`)
 - **WASM REPL** — browser REPL compiled to `wasm32-unknown-unknown` (`cljrs-wasm`)
 
 ---
@@ -140,8 +140,7 @@ See [`TODO.md`](TODO.md) for the full itemised roadmap.
 
 | Crate | Description | Status |
 |-------|-------------|--------|
-| [`cljrs-deps`](crates/cljrs-deps) | Parses `cljrs.edn` project config (`DepsConfig`); git/local/Rust deps | implemented |
-| [`cljrs-vcs`](crates/cljrs-vcs) | Thin `git` CLI wrapper for versioned symbol resolution + dep cache | implemented |
+| [`cljrs-project`](crates/cljrs-project) | Project layer: `config` parses `cljrs.edn` (`DepsConfig`; git/local/Rust deps), `vcs` is the pure-Rust (gitoxide) git layer for versioned symbol resolution + the dep cache | implemented |
 | [`cljrs-lsp`](crates/cljrs-lsp) | LSP server (`cljrs lsp`): parse diagnostics + document symbols (`tower-lsp`) | implemented (syntactic) |
 | [`cljrs-nrepl`](crates/cljrs-nrepl) | nREPL server (`cljrs nrepl`): bencode over TCP for CIDER/Calva/Conjure | implemented |
 | [`cljrs-wasm`](crates/cljrs-wasm) | Browser REPL compiled to `wasm32-unknown-unknown` (wasm-bindgen) | implemented |
@@ -292,7 +291,7 @@ cljrs-compiler ------> cljrs-runtime (via shims), cljrs-ir, cljrs-stdlib
     |                    dependencies: the host passes an ExtensionSet
     |
 cljrs (binary) ------> cljrs-stdlib, cljrs-compiler, cljrs-lsp,
-                       cljrs-nrepl, cljrs-deps, cljrs-vcs, cljrs-ir-viz,
+                       cljrs-nrepl, cljrs-project, cljrs-ir-viz,
                        cljrs-interop  (+ async/net/charset behind features)
 ```
 
@@ -336,8 +335,7 @@ crates/
   cljrs-net/             # TCP/UDP/Unix/TLS sockets
   cljrs-charset/         # charset encode/decode
   # project & tooling
-  cljrs-deps/            # cljrs.edn project config
-  cljrs-vcs/             # git wrapper for versioned deps
+  cljrs-project/         # cljrs.edn project config + git layer for versioned deps
   cljrs-lsp/             # LSP server
   cljrs-nrepl/           # nREPL server
   cljrs-wasm/            # browser REPL (wasm)

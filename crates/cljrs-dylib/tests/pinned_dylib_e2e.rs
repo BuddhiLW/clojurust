@@ -153,10 +153,10 @@ fn pinned_native_dylib_end_to_end() {
     );
 
     // cljrs.edn equivalent: pinlib is a git dep with :rust/load :dylib.
-    let config = cljrs_deps::DepsConfig {
+    let config = cljrs_project::config::DepsConfig {
         deps: vec![(
             Arc::from("pinlib"),
-            cljrs_deps::Dependency::Git(cljrs_deps::GitDep {
+            cljrs_project::config::Dependency::Git(cljrs_project::config::GitDep {
                 url: Arc::from(repo.path().to_string_lossy().as_ref()),
                 sha: Arc::from(sha_v1.as_str()),
                 rust_init: Some(Arc::from("pinlib::cljrs_init")),
@@ -243,10 +243,10 @@ fn native_dep_loaded_by_plain_require() {
 
     // cljrs.edn equivalent: pinlib is a git dep with :rust/load :dylib, pinned
     // at the v1 commit.  No Clojure source on the path provides this namespace.
-    let config = cljrs_deps::DepsConfig {
+    let config = cljrs_project::config::DepsConfig {
         deps: vec![(
             Arc::from("pinlib"),
-            cljrs_deps::Dependency::Git(cljrs_deps::GitDep {
+            cljrs_project::config::Dependency::Git(cljrs_project::config::GitDep {
                 url: Arc::from(repo.path().to_string_lossy().as_ref()),
                 sha: Arc::from(sha_v1.as_str()),
                 rust_init: Some(Arc::from("pinlib::cljrs_init")),

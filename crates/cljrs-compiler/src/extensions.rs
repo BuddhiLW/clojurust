@@ -153,7 +153,7 @@ impl<'a> IntoIterator for &'a ExtensionSet {
 pub struct CompileSession {
     src_dirs: Vec<PathBuf>,
     extensions: ExtensionSet,
-    rust_config: Option<cljrs_deps::RustConfig>,
+    rust_config: Option<cljrs_project::config::RustConfig>,
     verify_commit_signatures: bool,
     opacity: OpacityPolicy,
 }
@@ -174,7 +174,7 @@ impl CompileSession {
 
     /// Depend on the user's Rust crate and call its `cljrs_init` hook before
     /// loading any Clojure code (`:rust` in `cljrs.edn`).
-    pub fn rust_config(mut self, config: Option<cljrs_deps::RustConfig>) -> Self {
+    pub fn rust_config(mut self, config: Option<cljrs_project::config::RustConfig>) -> Self {
         self.rust_config = config;
         self
     }
@@ -202,7 +202,7 @@ impl CompileSession {
         &self.extensions
     }
 
-    pub fn rust_config_ref(&self) -> Option<&cljrs_deps::RustConfig> {
+    pub fn rust_config_ref(&self) -> Option<&cljrs_project::config::RustConfig> {
         self.rust_config.as_ref()
     }
 

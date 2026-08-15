@@ -14,7 +14,7 @@
 //!    lookup is about to fall back to a native function.
 //! 2. The hook checks `cljrs.edn` for a dep covering the namespace with
 //!    `:rust/load :dylib` and a `:rust/init` function.
-//! 3. The dep's repository is fetched (`cljrs_vcs::fetch_remote`), checked
+//! 3. The dep's repository is fetched (`cljrs_project::vcs::fetch_remote`), checked
 //!    out at the pinned commit, and wrapped in a generated cdylib crate
 //!    that pins the exact same `cljrs-interop` as the host.
 //! 4. `cargo build --release` (cached per `(crate, commit, rustc, cljrs
@@ -44,9 +44,9 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use cljrs_deps::{Dependency, GitDep};
 use cljrs_env::env::GlobalEnv;
 use cljrs_env::error::{EvalError, EvalResult};
+use cljrs_project::config::{Dependency, GitDep};
 
 /// Exported ABI-handshake symbol name.
 pub const ABI_SYMBOL: &[u8] = b"cljrs_dylib_abi\0";
@@ -150,7 +150,7 @@ fn load_require(globals: &Arc<GlobalEnv>, ns: &str) -> EvalResult<bool> {
 
 /// Find a `:rust/load :dylib` git dep whose name covers `base_ns` (exact
 /// match or dotted prefix: dep `my.lib` covers `my.lib.util`).
-fn find_dylib_dep(config: &cljrs_deps::DepsConfig, base_ns: &str) -> Option<GitDep> {
+fn find_dylib_dep(config: &cljrs_project::config::DepsConfig, base_ns: &str) -> Option<GitDep> {
     for (name, dep) in &config.deps {
         if let Dependency::Git(git) = dep
             && git.rust_load_dylib
@@ -186,8 +186,9 @@ fn build_pinned_wrapper(git: &GitDep, commit: &str) -> Result<PathBuf, String> {
     //    bare cache (network only if the commit is missing); `worktree_at_commit`
     //    materializes a files-only checkout from it (shared with the source-path
     //    materialization used for plain `require` of git deps).
-    cljrs_vcs::fetch_remote(&git.url, commit).map_err(|e| e.to_string())?;
-    let checkout = cljrs_vcs::worktree_at_commit(&git.url, commit).map_err(|e| e.to_string())?;
+    cljrs_project::vcs::fetch_remote(&git.url, commit).map_err(|e| e.to_string())?;
+    let checkout =
+        cljrs_project::vcs::worktree_at_commit(&git.url, commit).map_err(|e| e.to_string())?;
     let crate_dir = match git.rust_crate_dir.as_deref() {
         Some(sub) => checkout.join(sub),
         None => checkout.clone(),

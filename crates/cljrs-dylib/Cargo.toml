@@ -8,8 +8,7 @@ repository.workspace = true
 
 [dependencies]
 cljrs-env     = { workspace = true }
-cljrs-vcs     = { workspace = true }
-cljrs-deps    = { workspace = true }
+cljrs-project = { workspace = true }
 cljrs-interop = { workspace = true }
 cljrs-logging = { workspace = true }
 libloading    = "0.8"

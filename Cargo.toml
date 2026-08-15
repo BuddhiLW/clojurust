@@ -18,8 +18,7 @@ members = [
     "crates/cljrs-builtins",
     "crates/cljrs-interp",
     "crates/cljrs-ir-viz",
-    "crates/cljrs-deps",
-    "crates/cljrs-vcs",
+    "crates/cljrs-project",
     "crates/cljrs-blake3",
     "crates/cljrs-wasm",
     "crates/cljrs-async",
@@ -56,8 +55,7 @@ cljrs-env          = { path = "crates/cljrs-env",          version = "0.1.0" }
 cljrs-builtins     = { path = "crates/cljrs-builtins",     version = "0.1.0" }
 cljrs-interp       = { path = "crates/cljrs-interp",       version = "0.1.0" }
 cljrs-ir-viz       = { path = "crates/cljrs-ir-viz",       version = "0.1.0" }
-cljrs-deps         = { path = "crates/cljrs-deps",         version = "0.1.0" }
-cljrs-vcs          = { path = "crates/cljrs-vcs",          version = "0.1.0" }
+cljrs-project      = { path = "crates/cljrs-project",      version = "0.1.0" }
 cljrs-async        = { path = "crates/cljrs-async",        version = "0.1.0" }
 cljrs-io           = { path = "crates/cljrs-io",           version = "0.1.0" }
 cljrs-net          = { path = "crates/cljrs-net",          version = "0.1.0" }
@@ -112,7 +110,7 @@ ssh-key  = { version = "0.6", default-features = false, features = [
     "rsa",
 ] }
 # Native (pure-Rust) SSH transport for ssh:// git remotes (opt-in via the
-# `ssh` feature of cljrs-vcs).
+# `ssh` feature of cljrs-project).
 russh      = "0.61"
 tokio-util = { version = "0.7", features = ["io", "io-util"] }
 

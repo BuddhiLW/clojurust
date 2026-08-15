@@ -556,7 +556,7 @@ fn run_command(command: Commands, versioning: VersioningFlags) -> miette::Result
             // Load cljrs.edn; silently absent is fine.
             let deps_config = std::env::current_dir()
                 .ok()
-                .and_then(|cwd| cljrs_deps::load_config(&cwd).ok().flatten());
+                .and_then(|cwd| cljrs_project::config::load_config(&cwd).ok().flatten());
 
             let rust_config = deps_config.as_ref().and_then(|c| c.rust.clone());
 
@@ -840,7 +840,7 @@ fn setup_globals(
 /// Silently does nothing when no config file is found; prints a warning to
 /// stderr when the file exists but cannot be parsed.
 fn apply_deps_config(globals: &Arc<GlobalEnv>, cwd: &Path) {
-    match cljrs_deps::load_config(cwd) {
+    match cljrs_project::config::load_config(cwd) {
         Ok(Some(config)) => {
             // Append edn :paths to the source-path list (CLI paths come first).
             {
@@ -889,10 +889,10 @@ fn apply_deps_config(globals: &Arc<GlobalEnv>, cwd: &Path) {
 /// the dep root), defaulting to `src/`.  Only directories that actually exist
 /// are added; pure-native deps (no Clojure source) contribute nothing here and
 /// are brought in by the native-`require` loader instead.
-fn add_dep_source_paths(globals: &Arc<GlobalEnv>, config: &cljrs_deps::DepsConfig) {
+fn add_dep_source_paths(globals: &Arc<GlobalEnv>, config: &cljrs_project::config::DepsConfig) {
     for (name, dep) in &config.deps {
         let root = match dep {
-            cljrs_deps::Dependency::Local { root } => {
+            cljrs_project::config::Dependency::Local { root } => {
                 if root.is_dir() {
                     root.clone()
                 } else {
@@ -903,8 +903,8 @@ fn add_dep_source_paths(globals: &Arc<GlobalEnv>, config: &cljrs_deps::DepsConfi
                     continue;
                 }
             }
-            cljrs_deps::Dependency::Git(git) => {
-                match cljrs_vcs::worktree_at_commit(&git.url, &git.sha) {
+            cljrs_project::config::Dependency::Git(git) => {
+                match cljrs_project::vcs::worktree_at_commit(&git.url, &git.sha) {
                     Ok(p) => p,
                     Err(e) => {
                         eprintln!(
@@ -930,11 +930,11 @@ fn add_dep_source_paths(globals: &Arc<GlobalEnv>, config: &cljrs_deps::DepsConfi
 ///
 /// Git deps are resolved from the local cache (run `cljrs deps fetch` first);
 /// missing deps emit a warning and are skipped.
-fn collect_dep_src_paths(config: &cljrs_deps::DepsConfig) -> Vec<PathBuf> {
+fn collect_dep_src_paths(config: &cljrs_project::config::DepsConfig) -> Vec<PathBuf> {
     let mut paths = Vec::new();
     for (name, dep) in &config.deps {
         let root = match dep {
-            cljrs_deps::Dependency::Local { root } => {
+            cljrs_project::config::Dependency::Local { root } => {
                 if root.is_dir() {
                     root.clone()
                 } else {
@@ -945,8 +945,8 @@ fn collect_dep_src_paths(config: &cljrs_deps::DepsConfig) -> Vec<PathBuf> {
                     continue;
                 }
             }
-            cljrs_deps::Dependency::Git(git) => {
-                match cljrs_vcs::worktree_at_commit(&git.url, &git.sha) {
+            cljrs_project::config::Dependency::Git(git) => {
+                match cljrs_project::vcs::worktree_at_commit(&git.url, &git.sha) {
                     Ok(p) => p,
                     Err(e) => {
                         eprintln!(
@@ -1066,7 +1066,7 @@ fn dep_source_paths(root: &Path) -> Vec<PathBuf> {
     let cfg_path = root.join("cljrs.edn");
     if cfg_path.exists()
         && let Ok(src) = std::fs::read_to_string(&cfg_path)
-        && let Ok(parsed) = cljrs_deps::parse_config(&src, &cfg_path)
+        && let Ok(parsed) = cljrs_project::config::parse_config(&src, &cfg_path)
         && !parsed.paths.is_empty()
     {
         return parsed.paths;
@@ -1336,7 +1336,7 @@ fn json_unescape(s: &str) -> String {
 /// A missing library emits a warning and returns — callers of unregistered
 /// functions will get a runtime error rather than a startup crash, which is
 /// friendlier during development.
-fn load_native_lib(rust_config: &cljrs_deps::RustConfig, globals: &Arc<GlobalEnv>) {
+fn load_native_lib(rust_config: &cljrs_project::config::RustConfig, globals: &Arc<GlobalEnv>) {
     let Some(init_fn) = rust_config.init_fn.as_deref() else {
         return;
     };
@@ -1398,7 +1398,7 @@ fn load_native_lib(rust_config: &cljrs_deps::RustConfig, globals: &Arc<GlobalEnv
 /// Build the native Rust crate declared in `cljrs.edn` as a shared library.
 fn run_build_native(release: bool) -> miette::Result<i32> {
     let cwd = std::env::current_dir().into_diagnostic()?;
-    let config = cljrs_deps::load_config(&cwd)
+    let config = cljrs_project::config::load_config(&cwd)
         .into_diagnostic()?
         .ok_or_else(|| miette::miette!("no cljrs.edn found in or above the current directory"))?;
 
@@ -1441,7 +1441,7 @@ fn run_build_native(release: bool) -> miette::Result<i32> {
 /// Fetch one or all git dependencies declared in the nearest `cljrs.edn`.
 fn run_deps_fetch(name: Option<String>) -> miette::Result<i32> {
     let cwd = std::env::current_dir().into_diagnostic()?;
-    let config = cljrs_deps::load_config(&cwd)
+    let config = cljrs_project::config::load_config(&cwd)
         .into_diagnostic()?
         .ok_or_else(|| miette::miette!("no cljrs.edn found in or above the current directory"))?;
 
@@ -1451,7 +1451,7 @@ fn run_deps_fetch(name: Option<String>) -> miette::Result<i32> {
     }
 
     // Collect (dep_name, dependency) pairs to process.
-    let to_fetch: Vec<(&str, &cljrs_deps::Dependency)> = if let Some(ref n) = name {
+    let to_fetch: Vec<(&str, &cljrs_project::config::Dependency)> = if let Some(ref n) = name {
         match config.find_dep(n) {
             Some(dep) => vec![(n.as_str(), dep)],
             None => {
@@ -1465,9 +1465,9 @@ fn run_deps_fetch(name: Option<String>) -> miette::Result<i32> {
     let mut all_ok = true;
     for (dep_name, dep) in to_fetch {
         match dep {
-            cljrs_deps::Dependency::Git(git_dep) => {
+            cljrs_project::config::Dependency::Git(git_dep) => {
                 eprintln!("fetching {dep_name} ({})...", git_dep.url);
-                match cljrs_vcs::fetch_remote(&git_dep.url, &git_dep.sha) {
+                match cljrs_project::vcs::fetch_remote(&git_dep.url, &git_dep.sha) {
                     Ok(path) => eprintln!("  ok → {}", path.display()),
                     Err(e) => {
                         eprintln!("  error: {e}");
@@ -1475,7 +1475,7 @@ fn run_deps_fetch(name: Option<String>) -> miette::Result<i32> {
                     }
                 }
             }
-            cljrs_deps::Dependency::Local { root } => {
+            cljrs_project::config::Dependency::Local { root } => {
                 if root.exists() {
                     eprintln!("{dep_name}: local dep at {} — ok", root.display());
                 } else {
@@ -1495,7 +1495,7 @@ fn run_deps_fetch(name: Option<String>) -> miette::Result<i32> {
 /// Print the cache status of every dependency declared in the nearest `cljrs.edn`.
 fn run_deps_status() -> miette::Result<i32> {
     let cwd = std::env::current_dir().into_diagnostic()?;
-    let config = cljrs_deps::load_config(&cwd)
+    let config = cljrs_project::config::load_config(&cwd)
         .into_diagnostic()?
         .ok_or_else(|| miette::miette!("no cljrs.edn found in or above the current directory"))?;
 
@@ -1507,8 +1507,8 @@ fn run_deps_status() -> miette::Result<i32> {
     let mut all_ok = true;
     for (dep_name, dep) in &config.deps {
         match dep {
-            cljrs_deps::Dependency::Git(git_dep) => {
-                let cache_path = cljrs_vcs::cache_path_for_url(&git_dep.url);
+            cljrs_project::config::Dependency::Git(git_dep) => {
+                let cache_path = cljrs_project::vcs::cache_path_for_url(&git_dep.url);
                 let sha_present = cache_path.exists()
                     && std::process::Command::new("git")
                         .arg("-C")
@@ -1532,7 +1532,7 @@ fn run_deps_status() -> miette::Result<i32> {
                     all_ok = false;
                 }
             }
-            cljrs_deps::Dependency::Local { root } => {
+            cljrs_project::config::Dependency::Local { root } => {
                 if root.exists() {
                     println!("{dep_name}: local dep at {} — ok", root.display());
                 } else {

@@ -66,13 +66,13 @@ fn worktree_materializes_pinned_source_from_cache() {
 
     // Without a populated cache, the worktree cannot be materialized.
     assert!(
-        cljrs_vcs::worktree_at_commit(&url, &sha_v1).is_err(),
+        cljrs_project::vcs::worktree_at_commit(&url, &sha_v1).is_err(),
         "worktree must fail before the bare cache is populated"
     );
 
     // Populate the bare cache, then materialize the pinned (v1) worktree.
-    cljrs_vcs::fetch_remote(&url, &sha_v1).expect("fetch into cache");
-    let wt = cljrs_vcs::worktree_at_commit(&url, &sha_v1).expect("materialize worktree");
+    cljrs_project::vcs::fetch_remote(&url, &sha_v1).expect("fetch into cache");
+    let wt = cljrs_project::vcs::worktree_at_commit(&url, &sha_v1).expect("materialize worktree");
 
     let contents = std::fs::read_to_string(wt.join("hello.txt")).expect("checked-out file");
     assert_eq!(
@@ -84,6 +84,6 @@ fn worktree_materializes_pinned_source_from_cache() {
     assert!(!wt.join(".git").exists(), "worktree should have no .git");
 
     // Idempotent: a second call returns the same cached path.
-    let wt2 = cljrs_vcs::worktree_at_commit(&url, &sha_v1).expect("cached worktree");
+    let wt2 = cljrs_project::vcs::worktree_at_commit(&url, &sha_v1).expect("cached worktree");
     assert_eq!(wt, wt2);
 }
