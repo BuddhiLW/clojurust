@@ -34,7 +34,7 @@ fn build_ir(name: &str, params: &[Arc<str>], body_src: &str) -> IrFunction {
                 cljrs_stdlib::install(&runtime);
                 runtime.into_globals()
             };
-            let mut env = cljrs_eval::Env::new(globals, "user");
+            let mut env = cljrs_runtime::env::env::Env::new(globals, "user");
             crate::aot::lower_via_rust(Some(&name), "user", &params, &forms, &mut env)
                 .expect("lowering should succeed")
         })
@@ -84,13 +84,14 @@ fn osr_entry_compiles_and_resumes_natively_mid_loop() {
 
     // Same transfer protocol as ir_interp::try_osr_enter.
     let result = {
-        let _jit_frame = cljrs_eval::jit_state::push_jit_frame(epoch);
-        let _arg_roots = cljrs_env::gc_roots::root_values(&call_args);
+        let _jit_frame = cljrs_runtime::tiered::jit_state::push_jit_frame(epoch);
+        let _arg_roots = cljrs_runtime::env::gc_roots::root_values(&call_args);
         let _alloc_frame = cljrs_gc::push_alloc_frame();
         let arg_ptrs: Vec<*const Value> = call_args.iter().map(|v| v as *const Value).collect();
         // SAFETY: the OSR entry was compiled with `live_ins.len()` `*const
         // Value` params; all arg pointers are rooted and live for the call.
-        let result_ptr = unsafe { cljrs_eval::jit_state::dispatch_jit_call(fn_ptr, &arg_ptrs) };
+        let result_ptr =
+            unsafe { cljrs_runtime::tiered::jit_state::dispatch_jit_call(fn_ptr, &arg_ptrs) };
         unsafe { (*result_ptr).clone() }
     };
 

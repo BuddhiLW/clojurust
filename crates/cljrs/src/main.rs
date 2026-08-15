@@ -427,8 +427,8 @@ fn run(cli: Cli) -> miette::Result<i32> {
     // how many threads to wait for during stop-the-world collection.
     let _mutator = cljrs_gc::register_mutator();
 
-    // Initialise the JIT tier (unless explicitly disabled).
-    init_jit(cli.jit_threshold.as_ref().copied());
+    // Decide whether runtimes this process builds get a JIT tier.
+    configure_jit(cli.jit_threshold.as_ref().copied());
 
     // Configure background IR lowering (Phase 10.7); independent of the JIT.
     match cli.ir_threshold {
@@ -483,10 +483,14 @@ fn write_jit_stats(target: &str) -> std::io::Result<()> {
     }
 }
 
-/// Initialise the JIT tier based on CLI flags and env vars.
+/// Whether runtimes built by this process get a JIT tier attached.
+static JIT_ENABLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Decide the JIT policy from CLI flags and env vars.
 ///
 /// JIT is enabled by default; disable with `CLJRS_NO_JIT=1` or `--jit-threshold 0`.
-fn init_jit(threshold: Option<u32>) {
+/// The backend itself is attached per runtime, in [`setup_globals`].
+fn configure_jit(threshold: Option<u32>) {
     if std::env::var("CLJRS_NO_JIT").is_ok() {
         return;
     }
@@ -496,7 +500,7 @@ fn init_jit(threshold: Option<u32>) {
     if let Some(t) = threshold {
         cljrs_eval::jit_state::set_jit_threshold(t);
     }
-    cljrs_compiler::jit::init();
+    JIT_ENABLED.store(true, std::sync::atomic::Ordering::Relaxed);
 }
 
 /// CLI-level versioned-symbol policy flags, threaded into `setup_globals`.
@@ -786,6 +790,12 @@ fn setup_globals(
             eprintln!("failed to start the runtime: {e}");
             std::process::exit(1);
         });
+    // Attach the JIT tier to this runtime (unless disabled on the command
+    // line or by `CLJRS_NO_JIT`); nothing has been lowered yet, so no promotion
+    // can be missed.
+    if JIT_ENABLED.load(std::sync::atomic::Ordering::Relaxed) {
+        cljrs_compiler::jit::install(&runtime);
+    }
     cljrs_stdlib::install(&runtime);
     let globals = runtime.into_globals();
     if versioning.verify_commit_signatures {

@@ -33,7 +33,7 @@ src/
   aot.rs        — AOT driver: source → parse → expand → lower → codegen → cargo build → binary
   escape.rs     — (no-gc only) blacklist analysis: 4 checks that reject no-gc–unsafe IR patterns
   jit/          — in-process JIT tier (Cranelift `JITModule`) over the same codegen
-    mod.rs        — `init()`: installs the runtime's JIT seams and spawns the worker; `on_var_rebind` stales superseded code
+    mod.rs        — `Jit` (the runtime's `JitBackend`) + `install`; `on_var_rebind` stales superseded code
     jit_compiler.rs — `compile_jit` / `compile_jit_poll`: build a `JITModule`, register rt_abi symbols, call shared codegen
     jit_worker.rs   — background compile thread; maps Tier-1 type profiles to per-parameter specializations
     code_cache.rs   — epoch-tagged module registry; stale/pin/reclaim at stop-the-world safepoints
@@ -339,7 +339,9 @@ In-process compilation of hot arities to native code, over the same
 tiers: tree-walk → background-lowered IR (Tier 1) → JIT-native (Tier 2).
 
 ```rust
-pub fn init();                                  // install the runtime seams + spawn the worker
+pub struct Jit;                                 // the JitBackend a runtime dispatches through
+pub fn install(runtime: &Runtime);              // attach a JIT to one runtime
+pub fn install_on(globals: &Arc<GlobalEnv>);    // same, for a caller holding the environment
 
 pub mod code_cache {
     pub fn mark_stale(epoch: u64);              // supersede a module (reclaimed at the next STW)
@@ -351,11 +353,17 @@ pub mod code_cache {
 }
 ```
 
-`init()` is idempotent.  It installs the enqueue (whole-function and OSR),
-pending-exception, deopt-sentinel, stale-epoch, var-rebind, stop-the-world
-reclaim, and async-compile seams, then spawns the `cljrs-jit-worker` thread.
-Everything else in the module is crate-private: `jit_compiler::compile_jit`
-(and `compile_jit_poll` for `^:async` state machines), `jit_worker`, and
+`install` registers a `Jit` on the runtime's `JitState`
+(`cljrs_runtime::tiered::backend::JitBackend`) — enqueue, OSR enqueue,
+mark-stale, pending-exception, deopt-sentinel, and async-compile in one
+object, per runtime.  The first call also creates the process-wide pieces:
+the compile queue, the `cljrs-jit-worker` thread, the var-rebind hook, and
+the stop-the-world reclaim hook.  All per-arity state (counters, argument
+profiles, published pointers, OSR entries) belongs to the runtime, not to
+this module; this module owns the compiled machine code.
+
+Everything else here is crate-private: `jit_compiler::compile_jit` (and
+`compile_jit_poll` for `^:async` state machines), `jit_worker`, and
 `async_jit`.
 
 Environment: `CLJRS_JIT_THRESHOLD` (Tier-1 calls before compiling, default
