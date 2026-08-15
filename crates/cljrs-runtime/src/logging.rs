@@ -115,27 +115,56 @@ pub fn init(filter: Targets) {
         .try_init();
 }
 
+/// Replace `base` with `RUST_LOG`'s filter when that variable is set and
+/// non-empty.
+///
+/// A spec that does not parse is reported on stderr and `base` is kept.
+/// `RUST_LOG` belongs to the ecosystem, not to us — plenty of crates read it,
+/// and a value we reject may be aimed at one of them — so an unusable value
+/// degrades the host to its own default rather than killing the process or
+/// silencing it. Both hosts in this workspace use this, so
+/// `RUST_LOG=<garbage>` means the same thing to the CLI and to an AOT binary.
+pub fn apply_rust_log(base: Targets) -> Targets {
+    let Ok(spec) = std::env::var("RUST_LOG") else {
+        return base;
+    };
+    if spec.trim().is_empty() {
+        return base;
+    }
+    match spec.parse::<Targets>() {
+        Ok(filter) => filter,
+        Err(e) => {
+            // No subscriber is installed yet, so this cannot go through `tracing`.
+            eprintln!("cljrs: ignoring RUST_LOG ({e}); using the default log filter");
+            base
+        }
+    }
+}
+
 /// Install a subscriber configured entirely from the environment.
 ///
 /// Nothing is enabled by default — a binary that sets neither variable logs
-/// exactly as much as one with no subscriber at all. `CLJRS_X_FLAG` names
-/// feature targets ([`apply_x_flag`]); `RUST_LOG` is a full [`Targets`] spec
-/// (`gc=debug,cranelift_codegen=info`) applied underneath it, so both can be
+/// exactly as much as one with no subscriber at all. `RUST_LOG` is a full
+/// [`Targets`] spec (`gc=debug,cranelift_codegen=info`); `CLJRS_X_FLAG` names
+/// feature targets ([`apply_x_flag`]) and is layered on top, so both can be
 /// used together.
 ///
 /// This is what a generated AOT harness calls, so `CLJRS_X_FLAG=debug:gc
-/// ./my-binary` behaves the same as `cljrs -X debug:gc run my-app.cljrs`.
-pub fn init_from_env() {
-    let mut filter = match std::env::var("RUST_LOG") {
-        Ok(spec) if !spec.trim().is_empty() => spec.parse::<Targets>().unwrap_or_default(),
-        _ => Targets::new(),
-    };
+/// ./my-binary` behaves the same as `cljrs -X debug:gc run my-app.cljrs` —
+/// including on a value that does not parse. `CLJRS_X_FLAG` is ours alone and
+/// has exactly one meaning, so a bad one is an `Err` here just as a bad `-X` is
+/// a hard error in the CLI: the caller reports it and exits, because leaving
+/// someone who asked for diagnostics with none is the one outcome nobody wants.
+/// (`RUST_LOG` is treated more leniently — see [`apply_rust_log`].)
+pub fn init_from_env() -> Result<(), String> {
+    let mut filter = apply_rust_log(Targets::new());
     if let Ok(spec) = std::env::var("CLJRS_X_FLAG")
-        && let Ok(updated) = apply_x_flag(filter.clone(), &spec)
+        && !spec.trim().is_empty()
     {
-        filter = updated;
+        filter = apply_x_flag(filter, &spec).map_err(|e| format!("invalid CLJRS_X_FLAG: {e}"))?;
     }
     init(filter);
+    Ok(())
 }
 
 #[cfg(test)]
@@ -183,5 +212,50 @@ mod tests {
     fn malformed_x_flags_are_rejected() {
         assert!(apply_x_flag(Targets::new(), "bogus").is_err());
         assert!(apply_x_flag(Targets::new(), "warn:gc").is_err());
+    }
+
+    /// `RUST_LOG` is process-global state, so these cases share one test rather
+    /// than racing each other across the thread pool.
+    #[test]
+    fn rust_log_replaces_the_base_but_never_silences_it() {
+        // SAFETY: single-threaded within this test; no other test reads RUST_LOG.
+        let restore = std::env::var("RUST_LOG").ok();
+
+        unsafe { std::env::remove_var("RUST_LOG") };
+        assert!(
+            apply_rust_log(base_filter(Level::INFO)).would_enable("anything", &Level::INFO),
+            "unset RUST_LOG keeps the base filter"
+        );
+
+        unsafe { std::env::set_var("RUST_LOG", "   ") };
+        assert!(
+            apply_rust_log(base_filter(Level::INFO)).would_enable("anything", &Level::INFO),
+            "blank RUST_LOG keeps the base filter"
+        );
+
+        unsafe { std::env::set_var("RUST_LOG", "gc=debug") };
+        let parsed = apply_rust_log(base_filter(Level::INFO));
+        assert!(
+            parsed.would_enable("gc", &Level::DEBUG),
+            "a valid RUST_LOG replaces the base, unpinning the feature targets"
+        );
+
+        // The point of the fallback: a typo degrades to the host's default
+        // rather than to silence, and it degrades the same way for every host.
+        unsafe { std::env::set_var("RUST_LOG", "=[not a filter]=") };
+        let fallback = apply_rust_log(base_filter(Level::INFO));
+        assert!(
+            fallback.would_enable("anything", &Level::INFO),
+            "an unparseable RUST_LOG must not silence the process"
+        );
+        assert!(
+            !fallback.would_enable("gc", &Level::DEBUG),
+            "...and must leave the base filter's pins intact"
+        );
+
+        match restore {
+            Some(v) => unsafe { std::env::set_var("RUST_LOG", v) },
+            None => unsafe { std::env::remove_var("RUST_LOG") },
+        }
     }
 }

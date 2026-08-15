@@ -2101,8 +2101,13 @@ unsafe extern "C" {{
 {ns_init_externs}}}
 
 async fn run() {{
-    // Diagnostics: enabled only by CLJRS_X_FLAG / RUST_LOG.
-    cljrs_runtime::logging::init_from_env();
+    // Diagnostics: enabled only by CLJRS_X_FLAG / RUST_LOG.  A CLJRS_X_FLAG we
+    // cannot parse is a hard error, matching `cljrs -X`: someone asked for
+    // diagnostics and must not be left silently without them.
+    if let Err(e) = cljrs_runtime::logging::init_from_env() {{
+        eprintln!("error: {{e}}");
+        std::process::exit(2);
+    }}
 
     // Ensure all rt_* symbols are linked into the binary.
     cljrs_compiler::rt_abi::anchor_rt_symbols();
@@ -2524,8 +2529,13 @@ use cljrs_value::Value;
 
     code.push_str(
         r#"fn run() {
-    // Diagnostics: enabled only by CLJRS_X_FLAG / RUST_LOG.
-    cljrs_runtime::logging::init_from_env();
+    // Diagnostics: enabled only by CLJRS_X_FLAG / RUST_LOG.  A CLJRS_X_FLAG we
+    // cannot parse is a hard error, matching `cljrs -X`: someone asked for
+    // diagnostics and must not be left silently without them.
+    if let Err(e) = cljrs_runtime::logging::init_from_env() {
+        eprintln!("error: {e}");
+        std::process::exit(2);
+    }
 
     // Ensure all rt_* symbols are linked into the binary (the compiled
     // namespace initializers call them).

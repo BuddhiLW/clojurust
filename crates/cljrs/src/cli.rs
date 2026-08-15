@@ -9,7 +9,6 @@
 
 use clap::{Parser, Subcommand};
 use miette::IntoDiagnostic as _;
-use tracing_subscriber::filter::Targets;
 
 use crate::commands;
 use crate::session::{self, VersioningFlags};
@@ -176,7 +175,9 @@ pub enum Commands {
 /// (`gc`, `env`, `ir`, `jit`) pinned off — see
 /// [`cljrs_runtime::logging::base_filter`].  `RUST_LOG` (in `tracing`
 /// target=level syntax, e.g. `RUST_LOG=info,cranelift_codegen=debug`) replaces
-/// those defaults entirely, so the IR dumps are still reachable when wanted.
+/// those defaults entirely, so the IR dumps are still reachable when wanted;
+/// one that does not parse is reported and ignored, exactly as it is for an AOT
+/// binary (see [`cljrs_runtime::logging::apply_rust_log`]).
 ///
 /// `-X debug:gc,jit` is layered on last, so it survives a `RUST_LOG` that says
 /// nothing about those targets.
@@ -189,12 +190,8 @@ fn init_tracing(cli: &Cli) -> miette::Result<()> {
         tracing::Level::INFO
     };
 
-    let mut filter = match std::env::var("RUST_LOG") {
-        Ok(spec) if !spec.trim().is_empty() => spec
-            .parse::<Targets>()
-            .unwrap_or_else(|_| cljrs_runtime::logging::base_filter(default_level)),
-        _ => cljrs_runtime::logging::base_filter(default_level),
-    };
+    let mut filter =
+        cljrs_runtime::logging::apply_rust_log(cljrs_runtime::logging::base_filter(default_level));
 
     for flag in &cli.x_flags {
         filter = cljrs_runtime::logging::apply_x_flag(filter, flag)

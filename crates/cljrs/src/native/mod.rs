@@ -59,54 +59,19 @@ fn cargo_target_dir(crate_dir: &Path) -> Option<PathBuf> {
     if !output.status.success() {
         return None;
     }
-    let stdout = std::str::from_utf8(&output.stdout).ok()?;
-    // Cargo's metadata JSON puts `target_directory` at the top level. We do
-    // a small targeted extract rather than pulling in a JSON dependency.
-    let key = r#""target_directory":""#;
-    let start = stdout.find(key)? + key.len();
-    let rest = &stdout[start..];
-    let mut end = None;
-    let bytes = rest.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'\\' if i + 1 < bytes.len() => i += 2,
-            b'"' => {
-                end = Some(i);
-                break;
-            }
-            _ => i += 1,
-        }
-    }
-    let raw = &rest[..end?];
-    Some(PathBuf::from(json_unescape(raw)))
+    target_dir_from_metadata(std::str::from_utf8(&output.stdout).ok()?)
 }
 
-/// Decode the small subset of JSON string escapes that can appear in a
-/// `target_directory` path emitted by `cargo metadata`.
-fn json_unescape(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut chars = s.chars();
-    while let Some(c) = chars.next() {
-        if c != '\\' {
-            out.push(c);
-            continue;
-        }
-        match chars.next() {
-            Some('\\') => out.push('\\'),
-            Some('"') => out.push('"'),
-            Some('/') => out.push('/'),
-            Some('n') => out.push('\n'),
-            Some('t') => out.push('\t'),
-            Some('r') => out.push('\r'),
-            Some(other) => {
-                out.push('\\');
-                out.push(other);
-            }
-            None => out.push('\\'),
-        }
-    }
-    out
+/// Pull `target_directory` out of `cargo metadata --format-version 1` output.
+///
+/// Split from [`cargo_target_dir`] so it can be tested without a subprocess.
+/// This parses the document rather than scanning for the key: a path can carry
+/// JSON escapes (`\\` on Windows, `\"` in a pathological directory name), and
+/// nothing in cargo's contract promises the compact, unordered formatting a
+/// scanner would depend on.
+fn target_dir_from_metadata(json: &str) -> Option<PathBuf> {
+    let meta: serde_json::Value = serde_json::from_str(json).ok()?;
+    Some(PathBuf::from(meta.get("target_directory")?.as_str()?))
 }
 
 /// Load the shared library declared by the project's `:rust` config and call
@@ -173,4 +138,76 @@ pub fn load_project_lib(rust_config: &cljrs_project::config::RustConfig, globals
         lib_path.display(),
         sym_name
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The shape cargo emits today: one compact line.
+    #[test]
+    fn reads_target_directory_from_compact_metadata() {
+        let json =
+            r#"{"packages":[],"workspace_root":"/w","target_directory":"/w/target","version":1}"#;
+        assert_eq!(
+            target_dir_from_metadata(json),
+            Some(PathBuf::from("/w/target"))
+        );
+    }
+
+    /// Nothing promises compact output, and a key-scanner would miss the space
+    /// after the colon. Ordering is not load-bearing either.
+    #[test]
+    fn reads_target_directory_from_pretty_printed_metadata() {
+        let json = r#"{
+  "version": 1,
+  "target_directory": "/w/target",
+  "workspace_root": "/w"
+}"#;
+        assert_eq!(
+            target_dir_from_metadata(json),
+            Some(PathBuf::from("/w/target"))
+        );
+    }
+
+    /// Windows paths arrive with every separator escaped.
+    #[test]
+    fn unescapes_a_windows_path() {
+        let json = r#"{"target_directory":"C:\\Users\\dev\\my crate\\target"}"#;
+        assert_eq!(
+            target_dir_from_metadata(json),
+            Some(PathBuf::from(r"C:\Users\dev\my crate\target"))
+        );
+    }
+
+    /// A directory name may legally contain a quote or a backslash on unix.
+    #[test]
+    fn unescapes_quotes_and_backslashes() {
+        let json = r#"{"target_directory":"/w/a\"b\\c/target"}"#;
+        assert_eq!(
+            target_dir_from_metadata(json),
+            Some(PathBuf::from("/w/a\"b\\c/target"))
+        );
+    }
+
+    /// Every failure is `None`, so `native_lib_path` falls back to
+    /// `<crate_dir>/target` rather than producing a wrong path.
+    #[test]
+    fn absent_or_unusable_metadata_is_none() {
+        assert_eq!(target_dir_from_metadata(r#"{"version":1}"#), None);
+        assert_eq!(target_dir_from_metadata(r#"{"target_directory":7}"#), None);
+        assert_eq!(target_dir_from_metadata("not json at all"), None);
+        assert_eq!(target_dir_from_metadata(""), None);
+    }
+
+    /// The fallback path is joined from the metadata answer, not the crate dir.
+    #[test]
+    fn native_lib_path_falls_back_to_crate_local_target() {
+        // A directory with no manifest makes `cargo metadata` fail, so this
+        // exercises the `unwrap_or_else` fallback.
+        let dir = std::env::temp_dir().join("cljrs-no-manifest-here");
+        let path = native_lib_path(&dir, "mylib", false);
+        assert!(path.starts_with(&dir), "{}", path.display());
+        assert!(path.to_string_lossy().contains("debug"));
+    }
 }

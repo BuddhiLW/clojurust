@@ -179,7 +179,7 @@ These appear before the subcommand and apply to every command:
   Set `RUST_LOG` (`tracing` target=level syntax) to replace the defaults and
   get them back, e.g. `RUST_LOG=info,cranelift_jit=info cljrs run app.cljrs`.
 
-- `-X <LEVEL:FEATURES>` — feature-level logging, repeatable.  Format: `<level>:<feat1>,<feat2>,…`.  Levels: `debug`, `trace`.  Features: `gc`, `env`, `ir`, `jit`.  Example: `-X debug:gc,jit`.  These are `tracing` targets: `RUST_LOG=gc=debug` does the same thing, and `-X` is layered on top of `RUST_LOG` so both can be used together.  A blanket `--debug`/`--trace` deliberately leaves them off — they are firehoses.
+- `-X <LEVEL:FEATURES>` — feature-level logging, repeatable.  Format: `<level>:<feat1>,<feat2>,…`.  Levels: `debug`, `trace`.  Features: `gc`, `env`, `ir`, `jit`.  Example: `-X debug:gc,jit`.  These are `tracing` targets: `RUST_LOG=gc=debug` does the same thing, and `-X` is layered on top of `RUST_LOG` so both can be used together.  A blanket `--debug`/`--trace` deliberately leaves them off — they are firehoses.  A malformed `-X` is a hard error; a malformed `RUST_LOG` is reported on stderr and ignored, leaving the `--debug`/`--trace` default in place.  An AOT binary reads the same two variables (`CLJRS_X_FLAG` in place of `-X`) and treats a bad value in each exactly the same way.
 - `--gc-stats [FILE]` — print a `cljrs_gc::GC_STATS` snapshot at program exit (allocations, region/bump usage, GC pause count + total duration, freed objects/bytes).  No value → stdout; with a path → that file.  Honoured by `run`, `eval`, and `test`.
 - `--jit-stats [FILE]` — print a JIT specialization / inline-cache counter snapshot at program exit (boxed arithmetic bridge calls, entry-guard deopts, keyword IC fills, protocol IC hits/misses; Phase 10.6, `cljrs_compiler::rt_abi::jit_stats`).  No value → stdout; with a path → that file.  Honoured by `run`, `eval`, and `test`.
 
@@ -277,12 +277,13 @@ Build with e.g. `cargo build --release --features enable-rustyline,no-gc`.
 | `cljrs-async` (workspace, optional) | `clojure.core.async` runtime + `eval_async`; enabled by `async`  |
 | `cljrs-io` (workspace, optional) | `clojure.rust.io.async` async file I/O; enabled by `async`       |
 | `tokio` (workspace, optional) | Single-threaded runtime + `LocalSet` driving async; enabled by `async` |
-| `tracing` / `tracing-subscriber` | `--debug` / `--trace` / `-X` all build one `Targets` filter (via `cljrs_runtime::logging`) and install the stderr subscriber |
+| `tracing` (workspace)       | `Level` for the `--debug` / `--trace` default; `--debug` / `--trace` / `-X` all build one `Targets` filter and install the stderr subscriber through `cljrs_runtime::logging`, which owns the `tracing-subscriber` dependency |
 | `cljrs-project` (workspace) | `config` — `cljrs.edn` parser, `DepsConfig` / `Dependency` types; `vcs` — pure-Rust (gitoxide) git helpers: `fetch_remote`, `cache_path_for_url`, native signature verification |
 | `clap` (workspace)          | CLI argument parsing                                              |
 | `miette` (workspace)        | Rich terminal error rendering                                     |
 | `rustyline` (workspace, optional) | Line-editing REPL when `enable-rustyline` is on              |
 | `libloading` (workspace)    | `dlopen` for the project `:rust` cdylib and pinned native packages |
+| `serde_json`                | Reading `target_directory` out of `cargo metadata` output          |
 
 ---
 

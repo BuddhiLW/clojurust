@@ -39,6 +39,8 @@ src/
                           RuntimeBuilder, BuildError, ExecutionMode, TierState
   mode.rs               — ExecutionMode (build-time choice) and TierState (live tiers)
   runtime.rs            — Runtime and RuntimeBuilder: the one construction path
+  logging.rs            — (non-WASM) the gc/env/ir/jit tracing targets, the filters
+                          that select them, and subscriber installation
 
   env/
     mod.rs              — module declarations; re-exports AsyncRuntime
@@ -205,6 +207,43 @@ impl TierState {
     pub fn ir_enabled(self) -> bool;   // >= Ir
     pub fn jit_enabled(self) -> bool;  // == Jit
 }
+```
+
+### `logging` (non-WASM)
+
+Diagnostic logging is `tracing`, not an API of this crate: the runtime, GC, and
+compiler emit under four **targets** — `gc`, `env`, `ir`, `jit` — with plain
+`tracing::debug!` / `tracing::trace!`. This module only builds the filter that
+selects them, so the CLI and a generated AOT harness agree by construction. An
+embedding host can ignore all of it and install its own subscriber.
+
+```rust
+pub const FEATURE_TARGETS: &[&str];   // ["gc", "env", "ir", "jit"]
+pub const NOISY_TARGETS:   &[&str];   // cranelift_*, regalloc2 — pinned to warn
+
+/// Everything at `default`, codegen crates at `warn`, FEATURE_TARGETS pinned
+/// OFF — a blanket `--debug` must not turn the firehoses on.
+pub fn base_filter(default: impl Into<LevelFilter>) -> Targets;
+
+/// Fold one `-X` / `CLJRS_X_FLAG` spec (`debug:gc,jit`) into a filter.
+pub fn apply_x_flag(filter: Targets, spec: &str) -> Result<Targets, String>;
+
+/// Let `RUST_LOG` replace `base`. An unparseable value is reported on stderr
+/// and `base` is kept: `RUST_LOG` is the ecosystem's variable, so a value we
+/// reject may not be aimed at us, and degrading to the host's default beats
+/// both silence and a hard failure. Both hosts use this, so a bad `RUST_LOG`
+/// means the same thing to the CLI and to an AOT binary.
+pub fn apply_rust_log(base: Targets) -> Targets;
+
+/// Install `filter` globally, formatting to stderr. Idempotent.
+pub fn init(filter: Targets);
+
+/// What a generated AOT harness calls. Enables nothing unless `CLJRS_X_FLAG`
+/// or `RUST_LOG` asks. `CLJRS_X_FLAG` is ours alone and has one meaning, so an
+/// unparseable value is an `Err` (the harness reports it and exits 2) rather
+/// than being ignored — matching `cljrs -X`, and never leaving someone who
+/// asked for diagnostics silently without them.
+pub fn init_from_env() -> Result<(), String>;
 ```
 
 ---

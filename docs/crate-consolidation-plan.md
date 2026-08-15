@@ -826,6 +826,22 @@ CLI's whole filter, silently discarding `-X`; `-X` is now layered on top, so
 targets, `RUST_LOG=gc=debug` reaches them without `-X` at all. `cljrs-stdlib`
 listed the dependency without using it and simply drops it.
 
+Malformed values are defined rather than incidental, and defined once for both
+hosts (review follow-up — the first cut had each host guessing separately, and
+a typo'd `RUST_LOG` meant "info-level logging" in the CLI but "silence" in an
+AOT binary):
+
+- **`RUST_LOG`** — reported on stderr and ignored, keeping the host's own
+  default filter. It is the ecosystem's variable, read by crates other than
+  ours, so a value we reject is not necessarily aimed at this program;
+  degrading to the default beats both silence and a hard failure. One
+  function, `apply_rust_log`, implements this for both hosts.
+- **`-X` / `CLJRS_X_FLAG`** — a hard error in both. This one is ours alone and
+  has exactly one meaning, so an unparseable value is unambiguously a mistake
+  by someone trying to turn diagnostics *on*; leaving them silently with none
+  is the one outcome nobody wants. `init_from_env` returns `Result` and the
+  generated harness exits 2, mirroring the CLI's `miette` error.
+
 **5. `cljrs-wasm::dom`.** `cljrs-wasm` was `cljrs-dom`'s only consumer, calling
 `set_globals` and `register` from `Repl::new`. The four files moved with
 `git mv`; its `wasm32`-gated browser bindings (`js-sys`, `web-sys` and its
@@ -862,6 +878,16 @@ already cached under `~/.cljrs/cache/dylibs`, and renaming them would strand
 those caches for nothing. `build.rs` moved with the code, so the ABI fingerprint
 is still the host binary's own `rustc -V`.
 
+`cargo_target_dir` no longer scrapes `cargo metadata`'s JSON by hand (review
+follow-up). The hand-rolled escape decoder was correct, but the key scan
+assumed compact output — `"target_directory": "/w"` with a space after the
+colon would have missed, and nothing in cargo's contract forbids that.
+`serde_json` is already compiled into every `cljrs` build via `cljrs-compiler`
+and `cljrs-lsp`, so taking it directly costs nothing and removes ~60 lines. The
+extraction is split into a pure function with tests covering compact and
+pretty-printed metadata, Windows paths, embedded quotes and backslashes, and
+every failure shape.
+
 Two files moved for accuracy rather than necessity: `file_to_namespace` was
 private to the test runner but `compile`'s entry-namespace fallback needs it, so
 it sits in `session.rs` with the other source-path helpers; and `dump_escape`,
@@ -874,30 +900,39 @@ Gate results:
 |---|---|
 | `cargo fmt --all --check` | pass |
 | `cargo clippy --workspace --all-targets -- -D warnings` | pass |
-| `cargo test --workspace` | 1155 passed, 0 failed, 23 ignored, 140 targets (base: 1154/0/26, 148) |
+| `cargo test --workspace` | 1162 passed, 0 failed, 23 ignored, 140 targets (base: 1154/0/26, 148) |
 | The CLI depends on product-level packages instead of internal runtime layers | pass — `cljrs` now depends on `cljrs-runtime`, `cljrs-stdlib`, `cljrs-compiler`, `cljrs-project`, `cljrs-ir`, `cljrs-interop`, `cljrs-lsp`, `cljrs-nrepl`, the `cljrs-{types,gc,value,reader}` core, and the optional extensions — five fewer packages than before, and none of the five it dropped was a product. Its remaining `cljrs-eval` import is the Stage 2 shim, which Stage 6 rewrites to `cljrs_runtime::tiered` |
 | Project configuration and VCS operations use one package | pass — no `cljrs_deps::` or `cljrs_vcs::` path remains |
 | Each standalone artifact still builds independently | pass — `cljrs` (bin and lib), `cljrs-lsp`, `cljrs-nrepl`, and `cargo check -p cljrs-wasm --target wasm32-unknown-unknown` |
 | CLI help and command behaviour remain compatible | pass — **byte-identical** `--help` for the root and all fifteen subcommands, diffed against the pre-stage binary |
 | Pinned native packages, end to end | pass — `CLJRS_DYLIB_E2E=1 cargo test -p cljrs --test pinned_dylib_e2e`: both cases build real wrapper cdylibs and clear the ABI handshake |
 | `-X` / `RUST_LOG` selection | pass — `-X trace:env` and `RUST_LOG=env=trace` each produce the env traces; `--debug` and `--trace` leave all four targets off; `RUST_LOG=warn -X debug:gc` gives both; `CLJRS_X_FLAG=trace:env` works the same inside an AOT binary |
+| Malformed `-X` / `RUST_LOG` / `CLJRS_X_FLAG` | pass — a bad `RUST_LOG` warns and keeps the default in both hosts (and a valid `-X` still applies over it); a bad `-X` exits 1 from the CLI and a bad `CLJRS_X_FLAG` exits 2 from both the ordinary and the `--test` AOT harness; an empty `CLJRS_X_FLAG` is not an error |
 | `cljrs eval`, `run samples/graph.cljrs`, `run samples/core_async.cljrs`, `compile -o life-sample samples/life.cljrs` + run, `ir viz` | pass |
 | `cljrs ir build --ns clojure.core` | 151 functions lowered, 2 unsupported — identical to stages 1 through 4 |
 | `no-gc` | pass — all eleven packages carrying the feature, plus `cljrs` with and without default features |
 
-The test-target count falls by 8 and the pass count rises by 1; both reconcile
+The test-target count falls by 8 and the pass count rises by 8; both reconcile
 exactly. Targets: −2 (deps/vcs lib+doc targets net of `cljrs-project`'s), −2
 (`cljrs-logging`), −2 (`cljrs-dom`), +2 (`cljrs` gains lib and doctest targets),
 −4 (dylib and ir-viz lib+doc+test targets net of the two that moved into
 `crates/cljrs/tests`). Tests: `cljrs-logging`'s 3 unit tests are replaced by 4
 covering the filter, and every other test moved one for one — the workspace's
-static `#[test]` count goes 1,363 → 1,364. The 3 fewer *ignored* are
-`cljrs-logging`'s three ```` ```ignore ```` doc blocks.
+static `#[test]` count goes 1,363 → 1,364. The other +7 are the review
+follow-ups: 1 for the shared `RUST_LOG` rule and 6 for `cargo metadata`
+parsing. The 3 fewer *ignored* are `cljrs-logging`'s three ```` ```ignore ````
+doc blocks.
 
 Deferred by design: the `cljrs-async` `wasm32` clippy warning (`Isolate::name`
 is never read on that target) is pre-existing and unrelated to this stage's
 boundaries; `wasm32` clippy is not part of the documented gate. The four
 Stage 2 shims are untouched — deleting them is Stage 6, which takes 27 → 23.
+
+Known follow-up, left for its own change: `deps status` shells out to
+`git -C <cache> rev-parse` once per dependency to test whether a SHA is
+present, which predates this stage. Now that config and VCS live in one crate,
+that check can go through the `gix` wrapper in `cljrs_project::vcs` and drop
+the `git` binary from the subcommand's requirements.
 
 ### Stage 6: Remove compatibility packages
 
