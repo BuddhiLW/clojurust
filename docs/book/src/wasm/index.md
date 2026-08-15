@@ -9,7 +9,7 @@ binary.
 > compiler emits validated wasm modules for most of the language; making a module
 > *runnable* in the browser (linking it against the wasm runtime) is the
 > remaining step. See [Status](#status) below and the full design in
-> [`docs/wasm-aot-plan.md`](https://github.com/csm/clojurust/blob/main/docs/wasm-aot-plan.md).
+> [`docs/archive/wasm-aot-plan.md`](https://github.com/csm/clojurust/blob/main/docs/archive/wasm-aot-plan.md).
 
 ## Why a separate backend
 
@@ -75,5 +75,5 @@ in-browser JIT.
   options.
 - [The AOT backend](aot-backend.md) — how the value model, relooper, emitter, and
   typed-parameter ABI work.
-- [`docs/wasm-aot-plan.md`](https://github.com/csm/clojurust/blob/main/docs/wasm-aot-plan.md)
+- [`docs/archive/wasm-aot-plan.md`](https://github.com/csm/clojurust/blob/main/docs/archive/wasm-aot-plan.md)
   — the complete design and the open-task list.

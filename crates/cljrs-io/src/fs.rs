@@ -27,8 +27,8 @@ use tokio::io::AsyncReadExt;
 
 use cljrs_async::channel::{chan_deliver as deliver, chan_put as put, chan_ref, make_chan};
 use cljrs_async::spawn_future;
-use cljrs_env::env::GlobalEnv;
 use cljrs_gc::GcPtr;
+use cljrs_runtime::env::env::GlobalEnv;
 use cljrs_value::{Arity, ExceptionInfo, NativeFn, Value, ValueError, ValueResult};
 
 use crate::charset::{CharDecoder, resolve_charset};

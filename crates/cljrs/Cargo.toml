@@ -12,7 +12,7 @@ default = ["async", "net", "charset", "base64"]
 no-gc = [
     "cljrs-gc/no-gc",
     "cljrs-value/no-gc",
-    "cljrs-eval/no-gc",
+    "cljrs-runtime/no-gc",
     "cljrs-compiler/no-gc",
     "cljrs-stdlib/no-gc",
     # Weak: only forwarded when the optional `async` feature pulls the package in.
@@ -38,7 +38,6 @@ cljrs-types    = { workspace = true }
 cljrs-gc       = { workspace = true }
 cljrs-reader   = { workspace = true }
 cljrs-value    = { workspace = true }
-cljrs-eval     = { workspace = true }
 cljrs-stdlib   = { workspace = true }
 cljrs-compiler = { workspace = true }
 cljrs-interop  = { workspace = true }
@@ -60,7 +59,4 @@ cljrs-base64  = { workspace = true, optional = true }
 tokio         = { workspace = true, optional = true }
 
 [dev-dependencies]
-# The pinned-native e2e test builds a fixture crate against the workspace's
-# own cljrs-runtime, and the IR visualizer test lowers a snippet first.
-cljrs-runtime = { workspace = true }
 tempfile = "3"

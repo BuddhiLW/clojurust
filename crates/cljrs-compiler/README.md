@@ -176,7 +176,7 @@ pub enum WasmError { Reloop(RelooperError), Unsupported(String), Unimplemented(&
 ### IR types (from the `cljrs-ir` crate)
 
 These are **not** defined or re-exported here — `cljrs-compiler` imports them
-from `cljrs_ir` directly, as does `cljrs-eval`. Listed for reference because
+from `cljrs_ir` directly, as does `cljrs_runtime::tiered`. Listed for reference because
 every signature below is stated in terms of them.
 
 ```rust
@@ -247,7 +247,7 @@ walk directly, preserving full semantics.
   its caller with a bogus nil value;
   `rt_deopt()` — counts a guard failure and returns the deopt sentinel
   (a `Box::leak`ed non-GC address; `deopt_sentinel_addr() -> usize` exposes it to the dispatch
-  seam via a `cljrs_eval::jit_state` hook); `rt_kw_ic_fill(ptr, len, slot)` — keyword-constant
+  seam via a `cljrs_runtime::tiered::jit_state` hook); `rt_kw_ic_fill(ptr, len, slot)` — keyword-constant
   inline-cache fill: interns the keyword into a permanently rooted global table and stores the
   stable pointer into the call site's data slot (`rt_const_keyword` itself now interns too);
   `rt_call_ic(callee, args, nargs, slot)` — `rt_call` with a per-call-site protocol-dispatch
@@ -261,7 +261,7 @@ walk directly, preserving full semantics.
   `(ns="Math", name="abs")`, resolve in compiled code instead of yielding nil (which turned
   into "not callable: <nil> is not callable" at the first call).
 - **Versioned symbols:** `rt_load_global` detects a `name@<sha>` suffix and resolves it through
-  the shared `cljrs_env::versioned` resolver (lazily loading the immutable `ns@sha` namespace;
+  the shared `cljrs_runtime::env::versioned` resolver (lazily loading the immutable `ns@sha` namespace;
   resolution failures surface as pending exceptions); lookups into a not-yet-loaded `ns@sha`
   namespace trigger the same lazy load.  `rt_load_global_versioned_ic(ns, ns_len, name,
   name_len, slot)` is the fast path emitted by codegen (`emit_load_global_versioned_ic`):
@@ -537,7 +537,7 @@ closures fall back to the `eval_async` tree-walker.
 execute during expansion (fetching the pinned source from git); a discovery
 pass (`pin_versioned_references`) additionally walks the expanded program for
 bare versioned symbols (`mylib/foo@<sha>`) and force-loads each pin via
-`cljrs_env::versioned::pin_if_available`.  Every pinned source fetched this
+`cljrs_runtime::env::versioned::pin_if_available`.  Every pinned source fetched this
 way is embedded in the binary under its versioned namespace name
 (`register_builtin_source("mylib@<sha>", …)`), so the produced binary is
 self-contained — the generated harness calls
@@ -631,7 +631,7 @@ compilable body, and lowers the body to an `__cljrs_ns_init_<i>` function. The
 harness writes each namespace's preamble to `src/ns_<i>_preamble.cljrs`,
 declares its initializer `extern "C"`, and registers a `CompiledNsLoader`
 (`globals.register_compiled_ns_loader`) so that when `require` resolves the
-namespace at runtime, `cljrs_env::loader::do_load` runs the loader — evaluating
+namespace at runtime, `cljrs_runtime::env::loader::do_load` runs the loader — evaluating
 the preamble, then calling the compiled initializer — instead of tree-walking
 source. Transitive `require`s resolve naturally: a namespace's preamble
 contains its own `ns`/`require` form, which triggers loading of its
@@ -647,7 +647,7 @@ versioned loader rather than the plain `require` path.
 | Feature | Default | Effect |
 |---------|---------|--------|
 | `wasm-aot` | on | The WebAssembly backend (`wasm/`), `aot::compile_file_to_wasm`, and the `wasm-encoder` dependency.  `--no-default-features` produces a native-only compiler. |
-| `no-gc` | off | Propagated to `cljrs-gc`/`cljrs-value`/`cljrs-eval`/`cljrs-interp`/`cljrs-stdlib`; enables the `escape.rs` blacklist analysis. |
+| `no-gc` | off | Propagated to `cljrs-gc`/`cljrs-value`/`cljrs-runtime`/`cljrs-stdlib`/`cljrs-async`; enables the `escape.rs` blacklist analysis. |
 | `aot_full_test` | off | Runs the full (~120 test) AOT end-to-end suite instead of its core subset. |
 
 ---
@@ -661,13 +661,11 @@ versioned loader rather than the plain `require` path.
 | `cljrs-gc` (workspace) | `GcPtr<Value>` — GC interaction |
 | `cljrs-value` (workspace) | `Value`, collections, `NativeFn` — value types referenced by IR and rt_abi |
 | `cljrs-reader` (workspace) | `Form`, `FormKind` — input AST for lowering |
-| `cljrs-eval` (workspace) | `Env`, `GlobalEnv`, macros, callback — macro expansion + rt_call dispatch |
-| `cljrs-runtime` (workspace) | `Runtime::builder` — bootstrap environment for macro expansion + harness |
+| `cljrs-runtime` (workspace) | `Runtime::builder` — bootstrap environment for macro expansion + harness; `env::{Env, GlobalEnv}`, `interp` macro expansion, `env::callback::invoke` and `env::apply::{type_tag_of, type_tag_matches}` for rt_call dispatch and protocol IC tag validation; `tiered` lowering |
 | `cljrs-stdlib` (workspace) | `install` — stdlib namespaces in that environment |
 | `cranelift-*` (workspace) | Cranelift compiler infrastructure (`cranelift-object` for AOT, `cranelift-jit` for the `jit/` tier) |
 | `tracing` (workspace) | `tracing::debug!(target: "jit", …)` — JIT tier diagnostics |
 | `cljrs-async` (workspace) | `state_machine` — the poll ABI `codegen` and `rt_abi` implement.  An ABI dependency, not a product extension |
 | `cljrs-project` (workspace) | `config::RustConfig` — the user's `:rust` crate configuration, carried in `CompileSession` |
 | `cljrs-io`/`-net`/`-charset`/`-base64` | **dev-dependencies only** — extensions the end-to-end tests supply the way a host does |
-| `cljrs-env` (via `cljrs-eval`) | `callback::invoke`, `apply::{type_tag_of, type_tag_matches}` — rt_call dispatch + protocol IC tag validation |
 | `target-lexicon` (workspace) | Target triple detection |

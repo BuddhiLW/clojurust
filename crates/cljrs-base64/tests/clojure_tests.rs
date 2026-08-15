@@ -1,6 +1,6 @@
-use cljrs_env::env::Env;
-use cljrs_eval::eval;
 use cljrs_interop::Registry;
+use cljrs_runtime::env::env::Env;
+use cljrs_runtime::tiered::eval;
 use cljrs_value::Value;
 use std::path::PathBuf;
 
@@ -61,7 +61,7 @@ fn run_clojure_base64_tests() {
 
     let mut env = Env::new(globals, "user");
 
-    cljrs_env::callback::push_eval_context(&env);
+    cljrs_runtime::env::callback::push_eval_context(&env);
 
     eval_str(&mut env, "(require 'clojure.test)");
 
@@ -88,7 +88,7 @@ fn run_clojure_base64_tests() {
         }
     }
 
-    cljrs_env::callback::pop_eval_context();
+    cljrs_runtime::env::callback::pop_eval_context();
 
     eprintln!(
         "[base64-tests] totals: {total_test} tests, {total_pass} pass, \

@@ -9,12 +9,12 @@
 
 use std::sync::atomic::{AtomicI64, Ordering};
 
-use cljrs_eval::{Env, eval};
 use cljrs_gc::{GcPtr, MarkVisitor, Trace};
 use cljrs_interop::export;
 use cljrs_interop::{
     FromValue, IntoValue, NativeObject, Registry, gc_native_object, wrap_fn1, wrap_fn2, wrap_result,
 };
+use cljrs_runtime::tiered::{Env, eval};
 use cljrs_runtime::{ExecutionMode, Runtime};
 use cljrs_value::{Arity, NativeFn, Value, ValueError, ValueResult};
 

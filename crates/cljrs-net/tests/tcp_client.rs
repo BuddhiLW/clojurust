@@ -1,6 +1,6 @@
 //! Phase A integration tests: TCP client connect / read / write / close.
 //!
-//! Done criterion from networking-plan.md Phase A:
+//! Done criterion from docs/archive/networking-plan.md Phase A:
 //!   "a client can connect, (>! out req-bytes), (close! out), and drain :in to EOF."
 
 use std::sync::Arc;
@@ -14,7 +14,7 @@ use cljrs_value::{Keyword, Value};
 
 // ── Test helpers ──────────────────────────────────────────────────────────────
 
-fn setup_globals() -> Arc<cljrs_env::env::GlobalEnv> {
+fn setup_globals() -> Arc<cljrs_runtime::env::env::GlobalEnv> {
     let globals = {
         let runtime = cljrs_runtime::Runtime::builder()
             .execution_mode(cljrs_runtime::ExecutionMode::Tiered)

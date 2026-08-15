@@ -17,7 +17,7 @@ pub mod pinned;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use cljrs_eval::GlobalEnv;
+use cljrs_runtime::tiered::GlobalEnv;
 
 /// Return the expected on-disk path for the shared library produced by
 /// `cargo build` inside `crate_dir`.

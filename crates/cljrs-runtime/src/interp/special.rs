@@ -774,7 +774,7 @@ pub fn eval_loop(args: &[Form], env: &mut Env) -> EvalResult {
         // values) is moved out before the frame drops and is re-rooted at the
         // top of the next iteration (`root_values`) or by the caller during
         // return unwinding; no GC safepoint runs in the interval, exactly as
-        // the IR/JIT dispatch seam relies on (see cljrs-eval `apply.rs`).
+        // the IR/JIT dispatch seam relies on (see `crate::tiered::apply`).
         #[cfg(not(feature = "no-gc"))]
         let _iter_frame = cljrs_gc::push_alloc_frame();
 

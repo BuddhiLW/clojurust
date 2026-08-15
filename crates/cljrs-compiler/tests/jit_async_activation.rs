@@ -5,8 +5,8 @@
 #![cfg(not(feature = "no-gc"))]
 
 use cljrs_async::state_machine::lookup_poll_fn;
-use cljrs_env::env::Env;
 use cljrs_reader::Parser;
+use cljrs_runtime::env::env::Env;
 use cljrs_value::Value;
 
 fn block_on_local<F: std::future::Future>(f: F) -> F::Output {
@@ -24,7 +24,7 @@ fn eval_all(src: &str, env: &mut Env) -> Value {
         .parse_all()
         .expect("parse")
     {
-        last = cljrs_interp::eval::eval(&form, env).expect("eval");
+        last = cljrs_runtime::interp::eval::eval(&form, env).expect("eval");
     }
     last
 }
@@ -60,7 +60,7 @@ fn async_fn_compiles_to_native_state_machine_on_call() {
         assert!(lookup_poll_fn(arity_id).is_none(), "not compiled yet");
 
         // First call triggers JIT compilation of the poll function, then runs it.
-        let fut = cljrs_interp::eval::eval(
+        let fut = cljrs_runtime::interp::eval::eval(
             &Parser::new("(f 41)".to_string(), "<test>".to_string())
                 .parse_all()
                 .unwrap()[0],
@@ -111,7 +111,7 @@ fn async_loop_with_await_is_correct() {
             other => panic!("expected fn, got {other:?}"),
         };
 
-        let fut = cljrs_interp::eval::eval(
+        let fut = cljrs_runtime::interp::eval::eval(
             &Parser::new("(sum-up 5)".to_string(), "<test>".to_string())
                 .parse_all()
                 .unwrap()[0],
@@ -161,14 +161,14 @@ fn async_fn_using_channels_is_not_compiled() {
             other => panic!("expected fn, got {other:?}"),
         };
         // Dispatch once so the compile hook runs (and skips it).
-        let ch = cljrs_interp::eval::eval(
+        let ch = cljrs_runtime::interp::eval::eval(
             &Parser::new("(chan 1)".to_string(), "<test>".to_string())
                 .parse_all()
                 .unwrap()[0],
             &mut env,
         )
         .unwrap();
-        let _ = cljrs_env::apply::dispatch_if_async(
+        let _ = cljrs_runtime::env::apply::dispatch_if_async(
             &eval_all("drain", &mut env),
             std::slice::from_ref(&ch),
             &env,

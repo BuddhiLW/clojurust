@@ -83,8 +83,9 @@ Tooling:
 | 12 | REPL & tooling (REPL, LSP, nREPL) | working |
 | async | core.async, async I/O, networking, charset | implemented |
 
-**1077 Rust tests** across the workspace, plus **11,005 assertions** in the
-AOT-compiled `clojure-test-suite`.
+**1,162 Rust tests** across the workspace, plus **5,486 assertions** in the
+`clojure-test-suite`, which passes identically under the interpreter and
+AOT-compiled.
 
 See [`TODO.md`](TODO.md) for the full itemised roadmap.
 
@@ -101,12 +102,8 @@ See [`TODO.md`](TODO.md) for the full itemised roadmap.
 | [`cljrs-value`](crates/cljrs-value) | `Value` enum; persistent collections (rpds-backed); Clojure-compatible hashing | complete |
 | [`cljrs-gc`](crates/cljrs-gc) | Non-moving mark-and-sweep GC; `GcPtr<T>` smart pointer; `Trace` trait; scratch regions | complete |
 | [`cljrs-runtime`](crates/cljrs-runtime) | The runtime: `env` (`GlobalEnv`, `Env`, dynamic bindings, namespace loader, GC roots), `builtins` (~300 native core functions, transients, regex, bitops), `interp` (tree-walking interpreter: eval, special forms, macros, destructuring), `tiered` (IR interpreter, IR cache, tiering/JIT state, background lower worker, `load_prebuilt_ir` bundle replay) | complete |
-| [`cljrs-env`](crates/cljrs-env) | Re-export shim for `cljrs_runtime::env` | deprecated |
-| [`cljrs-builtins`](crates/cljrs-builtins) | Re-export shim for `cljrs_runtime::builtins` | deprecated |
-| [`cljrs-interp`](crates/cljrs-interp) | Re-export shim for `cljrs_runtime::interp` | deprecated |
 | [`cljrs-tx`](crates/cljrs-tx) | Pure tree-walked transaction functions in a bounded, invocation-lifetime no-GC arena | initial |
 | [`cljrs-ir`](crates/cljrs-ir) | IR types (ANF/SSA) with serialization (postcard); ANF lowering, escape analysis, OSR | complete |
-| [`cljrs-eval`](crates/cljrs-eval) | Re-export shim for `cljrs_runtime::tiered` | deprecated |
 | [`cljrs-stdlib`](crates/cljrs-stdlib) | Embedded stdlib: clojure.string, clojure.set, clojure.test, clojure.walk, clojure.edn, clojure.zip, clojure.data | complete |
 
 ### Compilation
@@ -255,7 +252,7 @@ per `ir_arity_id`.
 
 `cljrs ir build` lowers whole namespaces ahead of time and serializes them to a
 bundle with postcard; `cljrs ir dump` prints one back. Those are diagnostics for
-the lowerer — no runtime path loads a bundle today. `cljrs_eval::load_prebuilt_ir`
+the lowerer — no runtime path loads a bundle today. `cljrs_runtime::tiered::load_prebuilt_ir`
 is the public API an embedder would call to replay one into a live environment,
 which matters for targets with no background lowering worker (a `wasm32` build,
 for instance).
@@ -277,12 +274,9 @@ cljrs-runtime -------> cljrs-value, cljrs-gc, cljrs-reader, cljrs-ir,
     |                  cljrs-project
     |                  modules: env, builtins, interp, tiered, logging
     |
-    |                  cljrs-env / cljrs-builtins / cljrs-interp / cljrs-eval
-    |                  are deprecated re-export shims over those four modules
+cljrs-stdlib --------> cljrs-runtime, cljrs-ir
     |
-cljrs-stdlib --------> cljrs-runtime (via shims), cljrs-ir
-    |
-cljrs-compiler ------> cljrs-runtime (via shims), cljrs-ir, cljrs-stdlib
+cljrs-compiler ------> cljrs-runtime, cljrs-ir, cljrs-stdlib
     |                    (Cranelift JIT + AOT)
     |                  + cljrs-async — the state-machine poll ABI its codegen
     |                    implements.  I/O, net, charset and base64 are *not*
@@ -312,10 +306,6 @@ crates/
   cljrs-value/           # Value enum, collections, hashing
   cljrs-gc/              # tracing GC + scratch regions
   cljrs-runtime/         # env + builtins + interp + tiered (the merged runtime)
-  cljrs-env/             # deprecated shim -> cljrs_runtime::env
-  cljrs-builtins/        # deprecated shim -> cljrs_runtime::builtins
-  cljrs-interp/          # deprecated shim -> cljrs_runtime::interp
-  cljrs-eval/            # deprecated shim -> cljrs_runtime::tiered
   cljrs-ir/              # IR types + lowering + serialization
   cljrs-stdlib/          # embedded standard library namespaces
   # compilation

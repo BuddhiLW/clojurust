@@ -1,7 +1,7 @@
 //! Integration tests for interpreter evaluation under the `no-gc` feature.
 //!
 //! Each test verifies one of the allocation patterns described in
-//! `docs/no-gc-plan.md`:
+//! `docs/archive/no-gc-plan.md`:
 //!
 //! - `def` / `defn` values land in the `StaticArena` (not a scratch region).
 //! - Function calls push a scratch region; the return value lands in the caller's context.
@@ -12,7 +12,7 @@
 //! `GcPtr::is_static_alloc()`.
 //!
 //! Run with:
-//!   cargo test -p cljrs-interp --features no-gc
+//!   cargo test -p cljrs-runtime --features no-gc
 
 #![cfg(feature = "no-gc")]
 

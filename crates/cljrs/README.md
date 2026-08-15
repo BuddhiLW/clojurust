@@ -209,7 +209,7 @@ cljrs eval '(+ 1 2)'
 cljrs ir viz samples/graph.cljrs
 cljrs ir viz samples/graph.cljrs -o /tmp/graph.html --quiet
 
-# Pre-lower namespaces to an IR bundle (replayed by cljrs_eval::load_prebuilt_ir;
+# Pre-lower namespaces to an IR bundle (replayed by cljrs_runtime::tiered::load_prebuilt_ir;
 # no cljrs runtime path loads one today - these are lowerer diagnostics)
 cljrs ir build --ns clojure.core -o core.ir.bin
 cljrs ir build --ns my.app.core --src-path src -o app.ir.bin -v
@@ -241,7 +241,7 @@ cljrs deps status              # show cached vs missing deps
 |---------------------|-------------------------------------------------------------------------------|
 | `async` (default **on**) | Pulls in `cljrs-async` and `cljrs-io` and builds the Tokio runtime that drives top-level async evaluation (see implementation notes). Without it, `^:async`/`core.async`/`clojure.rust.io.async` are unavailable and evaluation is purely synchronous. |
 | `net`, `charset`, `base64` (default **on**) | Network transports and protocols, charset codecs, Base64.  Each feature adds its package to both the interpreted runtime (`setup_globals`) and the compile-time extension set (`extensions::default_set`), so `cljrs run` and `cljrs compile` of the same program see the same namespaces. |
-| `no-gc` (default off) | Propagated to `cljrs-gc`/`cljrs-value`/`cljrs-eval`/`cljrs-compiler`/`cljrs-stdlib`.  Disables the tracing GC; only region-allocated and stack values are permitted.  Compiles fail (`AotError::NoGcBlacklist`) if the program contains allocations the optimizer can't lift onto regions. |
+| `no-gc` (default off) | Propagated to `cljrs-gc`/`cljrs-value`/`cljrs-runtime`/`cljrs-compiler`/`cljrs-stdlib` (and weakly to `cljrs-async`).  Disables the tracing GC; only region-allocated and stack values are permitted.  Compiles fail (`AotError::NoGcBlacklist`) if the program contains allocations the optimizer can't lift onto regions. |
 | `enable-rustyline`  | Pulls in `rustyline` for a line-editing REPL.  Without it, `cljrs repl` falls back to a plain `BufRead` loop.                                                                                |
 
 Build with e.g. `cargo build --release --features enable-rustyline,no-gc`.
@@ -256,7 +256,7 @@ Build with e.g. `cargo build --release --features enable-rustyline,no-gc`.
 - The REPL prints results, paginates errors via `miette`, and persists multi-line input across blank prompts.
 - **Top-level async (with the `async` feature).** `session::with_async_driver` builds a single-threaded Tokio runtime + `LocalSet` and stashes it in a thread-local `AsyncDriver` rather than wrapping the whole session in one `block_on`. Each top-level form is then evaluated through `cljrs_async::eval_async` via `LocalSet::block_on` in `eval_form`, so spawned tasks (core.async producers, `^:async` calls, `clojure.rust.io.async` readers/writers) make progress and a top-level `await` resolves. Tasks that outlive a form — e.g. a channel `def`d at one REPL prompt and consumed at the next — stay queued on the shared `LocalSet` and continue on the next form's drive. Note: blocking ops (`<!!`/`>!!`) still park the single executor thread and so are not usable at the top level; use `(await (take! ch))` / `go` instead.
 - `ir viz` runs the AOT pipeline through region optimization (via `cljrs_compiler::aot::lower_file_to_ir`) and hands the resulting `IrFunction` to `commands::ir::viz::render_html`.
-- `ir build` boots a standard environment, walks every var in the requested namespaces, and lowers each function arity with `cljrs_eval::lower::lower_arity` into an `IrBundle`. It lives in `commands/ir/mod.rs`; there is no separate pre-build crate or binary. No `cljrs` runtime path loads a bundle — `cljrs_eval::load_prebuilt_ir` is the public API an embedder would call to replay one.
+- `ir build` boots a standard environment, walks every var in the requested namespaces, and lowers each function arity with `cljrs_runtime::tiered::lower::lower_arity` into an `IrBundle`. It lives in `commands/ir/mod.rs`; there is no separate pre-build crate or binary. No `cljrs` runtime path loads a bundle — `cljrs_runtime::tiered::load_prebuilt_ir` is the public API an embedder would call to replay one.
 
 ---
 
@@ -268,8 +268,7 @@ Build with e.g. `cargo build --release --features enable-rustyline,no-gc`.
 | `cljrs-gc` (workspace)      | GC root, configuration, `GC_STATS` snapshot                       |
 | `cljrs-reader` (workspace)  | Lexer + parser                                                    |
 | `cljrs-value` (workspace)   | `Value` and persistent collections                                |
-| `cljrs-eval` (workspace)    | Tree-walking interpreter, `Env`                                   |
-| `cljrs-runtime` (workspace) | Runtime construction (`Runtime::builder`) and evaluation           |
+| `cljrs-runtime` (workspace) | Runtime construction (`Runtime::builder`) and evaluation; `env::Env`, the `interp` tree walker, and `tiered` lowering |
 | `cljrs-stdlib` (workspace)  | Standard library installed into the runtime (`install`)           |
 | `cljrs-compiler` (workspace)| AOT pipeline (`compile_file`, `compile_test_harness`, `lower_file_to_ir`) |
 | `cljrs-ir` (workspace)      | `IrBundle`, `serialize_bundle`, `deserialize_bundle` — used by `ir build` / `ir dump` |
@@ -301,7 +300,7 @@ namespace.
 
 ### Status
 
-Versioned-namespaces plan, Phase 5 (see `docs/versioned-namespaces-plan.md`).
+Versioned-namespaces plan, Phase 5 (see `docs/archive/versioned-namespaces-plan.md`).
 Implemented and tested end-to-end, but **experimental**: the init call
 crosses a Rust-ABI boundary guarded only by the fingerprint handshake
 (feature-flag skew between host and wrapper is not detected), and a Rust

@@ -6,11 +6,11 @@
 
 #![cfg(not(feature = "no-gc"))]
 
-use cljrs_eval::{Env, eval};
 use cljrs_reader::Parser;
+use cljrs_runtime::tiered::{Env, eval};
 use cljrs_value::Value;
 
-fn make_env() -> (std::sync::Arc<cljrs_env::env::GlobalEnv>, Env) {
+fn make_env() -> (std::sync::Arc<cljrs_runtime::env::env::GlobalEnv>, Env) {
     let _mutator = cljrs_gc::register_mutator();
     let globals = {
         let runtime = cljrs_runtime::Runtime::builder()

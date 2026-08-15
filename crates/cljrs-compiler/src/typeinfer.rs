@@ -32,7 +32,7 @@
 //!   truthy); of an unboxed bool it is the raw `i8`.
 //!
 //! Parameters are seeded from the caller-supplied specialization `specs`
-//! (derived from Tier-1 type profiles; see `cljrs-eval/src/jit_state.rs`).
+//! (derived from Tier-1 type profiles; see `cljrs-runtime/src/tiered/jit_state.rs`).
 //! The compiled prologue *guards* each specialized parameter's runtime type
 //! and deoptimizes to Tier 1 on mismatch, so inference may trust the seeds.
 

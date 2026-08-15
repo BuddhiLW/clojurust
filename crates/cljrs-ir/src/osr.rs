@@ -56,7 +56,7 @@ use std::sync::Arc;
 use crate::{Block, BlockId, Inst, IrFunction, RegionAllocKind, Terminator, VarId};
 
 /// Hard cap on OSR-function parameters: the dispatch shim
-/// (`cljrs_eval::jit_state::dispatch_jit_call`) supports at most 8 native
+/// (`cljrs_runtime::tiered::jit_state::dispatch_jit_call`) supports at most 8 native
 /// arguments.
 pub const MAX_OSR_PARAMS: usize = 8;
 

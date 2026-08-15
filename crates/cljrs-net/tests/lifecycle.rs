@@ -1,6 +1,6 @@
 //! Phase G integration tests: lifecycle, timeouts, ergonomics.
 //!
-//! Done criterion from networking-plan.md Phase G:
+//! Done criterion from docs/archive/networking-plan.md Phase G:
 //!   - Deterministic teardown: with-open closes connections
 //!   - split-err separates value stream from terminal error/EOF
 //!   - drain-to collects all values from :in into a result map
@@ -9,12 +9,12 @@
 use std::sync::{Arc, Mutex};
 
 use cljrs_async::channel::{chan_put, chan_ref, chan_take, make_chan};
-use cljrs_env::env::Env;
 use cljrs_gc::GcPtr;
 use cljrs_reader::Parser;
+use cljrs_runtime::env::env::Env;
 use cljrs_value::{ExceptionInfo, Keyword, Value, ValueError};
 
-fn setup_globals() -> Arc<cljrs_env::env::GlobalEnv> {
+fn setup_globals() -> Arc<cljrs_runtime::env::env::GlobalEnv> {
     let globals = {
         let runtime = cljrs_runtime::Runtime::builder()
             .execution_mode(cljrs_runtime::ExecutionMode::Tiered)
@@ -58,7 +58,7 @@ fn net_error(msg: &str) -> Value {
 }
 
 fn eval_in(
-    globals: Arc<cljrs_env::env::GlobalEnv>,
+    globals: Arc<cljrs_runtime::env::env::GlobalEnv>,
     ns: &str,
     src: &str,
     bindings: Vec<(&str, Value)>,
@@ -70,7 +70,7 @@ fn eval_in(
     }
     let mut parser = Parser::new(src.to_string(), "<test>".to_string());
     let forms = parser.parse_all().expect("parse error");
-    cljrs_interp::eval::eval(forms.last().unwrap(), &mut env).expect("eval error")
+    cljrs_runtime::interp::eval::eval(forms.last().unwrap(), &mut env).expect("eval error")
 }
 
 // ── Phase G: split-err — clean EOF ───────────────────────────────────────────

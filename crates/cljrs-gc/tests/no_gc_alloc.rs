@@ -1,7 +1,7 @@
 //! Integration tests for the no-gc allocation context stack.
 //!
 //! Verifies `ScratchGuard`, `StaticCtxGuard`, and the "return-expression-in-caller"
-//! protocol described in `docs/no-gc-plan.md`.
+//! protocol described in `docs/archive/no-gc-plan.md`.
 //!
 //! Run with:
 //!   cargo test -p cljrs-gc --features no-gc

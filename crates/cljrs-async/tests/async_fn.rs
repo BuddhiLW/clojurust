@@ -3,8 +3,8 @@
 use std::sync::Arc;
 
 use cljrs_async::eval_async::eval_async;
-use cljrs_env::env::{Env, GlobalEnv};
 use cljrs_reader::Parser;
+use cljrs_runtime::env::env::{Env, GlobalEnv};
 use cljrs_value::Value;
 
 /// Build a standard environment with the async runtime registered.
@@ -43,7 +43,7 @@ fn eval_sync(src: &str, env: &mut Env) -> Value {
     let mut p = Parser::new(src.to_string(), "<test>".to_string());
     let mut result = Value::Nil;
     for form in p.parse_all().expect("parse error") {
-        result = cljrs_interp::eval::eval(&form, env).expect("eval error");
+        result = cljrs_runtime::interp::eval::eval(&form, env).expect("eval error");
     }
     result
 }
@@ -72,7 +72,7 @@ fn async_fn_call_returns_future_immediately() {
         eval_sync("(defn ^:async dbl [x] (* x 2))", &mut env);
         // The call returns a Future, not the computed Long, even though the
         // body produces a Long synchronously.
-        let v = cljrs_interp::eval::eval(&parse_one("(dbl 21)"), &mut env).unwrap();
+        let v = cljrs_runtime::interp::eval::eval(&parse_one("(dbl 21)"), &mut env).unwrap();
         assert!(matches!(v, Value::Future(_)), "expected Future, got {v:?}");
     });
 }
@@ -177,7 +177,7 @@ fn defn_attr_map_marks_async() {
     block_on_local(async move {
         let mut env = Env::new(globals, "user");
         eval_sync("(defn dbl {:async true} [x] (* x 2))", &mut env);
-        let v = cljrs_interp::eval::eval(&parse_one("(dbl 21)"), &mut env).unwrap();
+        let v = cljrs_runtime::interp::eval::eval(&parse_one("(dbl 21)"), &mut env).unwrap();
         assert!(matches!(v, Value::Future(_)), "expected Future, got {v:?}");
     });
 }

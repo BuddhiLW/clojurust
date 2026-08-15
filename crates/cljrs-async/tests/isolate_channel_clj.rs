@@ -4,9 +4,9 @@
 use std::sync::Arc;
 
 use cljrs_async::eval_async::eval_async;
-use cljrs_env::env::{Env, GlobalEnv};
-use cljrs_env::error::EvalError;
 use cljrs_reader::Parser;
+use cljrs_runtime::env::env::{Env, GlobalEnv};
+use cljrs_runtime::env::error::EvalError;
 use cljrs_value::Value;
 
 fn async_env() -> Arc<GlobalEnv> {
@@ -43,15 +43,15 @@ fn eval_sync(src: &str, env: &mut Env) -> Value {
     let mut p = Parser::new(src.to_string(), "<test>".to_string());
     let mut result = Value::Nil;
     for form in p.parse_all().expect("parse error") {
-        result = cljrs_interp::eval::eval(&form, env).expect("eval error");
+        result = cljrs_runtime::interp::eval::eval(&form, env).expect("eval error");
     }
     result
 }
 
 /// Evaluate a single form, returning the `Result` so error paths can be tested.
-#[allow(clippy::result_large_err)] // mirrors cljrs_interp::eval::eval's own signature
+#[allow(clippy::result_large_err)] // mirrors cljrs_runtime::interp::eval::eval's own signature
 fn try_eval(src: &str, env: &mut Env) -> Result<Value, EvalError> {
-    cljrs_interp::eval::eval(&parse_one(src), env)
+    cljrs_runtime::interp::eval::eval(&parse_one(src), env)
 }
 
 fn block_on_local<F: std::future::Future>(f: F) -> F::Output {

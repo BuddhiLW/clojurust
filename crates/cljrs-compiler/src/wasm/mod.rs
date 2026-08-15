@@ -18,7 +18,7 @@
 //!   AOT-wasm                       (baked at build time; browser JITs it to native)
 //! ```
 //!
-//! So the IR interpreter (`cljrs-eval::ir_interp`) remains *on board* in the
+//! So the IR interpreter (`cljrs_runtime::tiered::ir_interp`) remains *on board* in the
 //! wasm bundle as the dynamic-code tier; AOT-wasm is the frozen top tier.  No
 //! in-sandbox JIT/OSR hooks are installed.
 //!
@@ -157,7 +157,7 @@ pub fn compile_function(func: &IrFunction, cfg: &WasmBackend) -> Result<Vec<u8>,
 /// Every function is exported under its name, and an [`cljrs_ir::Inst::CallDirect`] /
 /// [`cljrs_ir::Inst::CallWithRegion`] resolves its callee to the bundled
 /// function's wasm index.  This is the multi-function entry point behind item 1
-/// of `docs/wasm-aot-plan.md`; [`compile_function`] is the single-function
+/// of `docs/archive/wasm-aot-plan.md`; [`compile_function`] is the single-function
 /// special case.
 ///
 /// Pipeline: [`reloop::reloop`] each function, then [`emit::emit_bundle`].

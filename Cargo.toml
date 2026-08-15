@@ -4,7 +4,6 @@ members = [
     "crates/cljrs-gc",
     "crates/cljrs-value",
     "crates/cljrs-reader",
-    "crates/cljrs-eval",
     "crates/cljrs-stdlib",
     "crates/cljrs-runtime",
     "crates/cljrs-ir",
@@ -13,9 +12,6 @@ members = [
     "crates/cljrs-export-macro",
     "crates/cljrs",
     "examples/rust-interop",
-    "crates/cljrs-env",
-    "crates/cljrs-builtins",
-    "crates/cljrs-interp",
     "crates/cljrs-project",
     "crates/cljrs-blake3",
     "crates/cljrs-wasm",
@@ -39,16 +35,12 @@ cljrs-types        = { path = "crates/cljrs-types",        version = "0.1.0" }
 cljrs-gc           = { path = "crates/cljrs-gc",           version = "0.1.0" }
 cljrs-value        = { path = "crates/cljrs-value",        version = "0.1.0" }
 cljrs-reader       = { path = "crates/cljrs-reader",       version = "0.1.0" }
-cljrs-eval         = { path = "crates/cljrs-eval",         version = "0.1.0" }
 cljrs-stdlib       = { path = "crates/cljrs-stdlib",       version = "0.1.0" }
 cljrs-runtime      = { path = "crates/cljrs-runtime",      version = "0.1.0" }
 cljrs-ir           = { path = "crates/cljrs-ir",           version = "0.1.0" }
 cljrs-compiler     = { path = "crates/cljrs-compiler",     version = "0.1.0" }
 cljrs-interop      = { path = "crates/cljrs-interop",      version = "0.1.0" }
 cljrs-export-macro = { path = "crates/cljrs-export-macro", version = "0.1.0" }
-cljrs-env          = { path = "crates/cljrs-env",          version = "0.1.0" }
-cljrs-builtins     = { path = "crates/cljrs-builtins",     version = "0.1.0" }
-cljrs-interp       = { path = "crates/cljrs-interp",       version = "0.1.0" }
 cljrs-project      = { path = "crates/cljrs-project",      version = "0.1.0" }
 cljrs-async        = { path = "crates/cljrs-async",        version = "0.1.0" }
 cljrs-io           = { path = "crates/cljrs-io",           version = "0.1.0" }

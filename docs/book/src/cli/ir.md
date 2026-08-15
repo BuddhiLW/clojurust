@@ -25,7 +25,7 @@ cljrs ir build [OPTIONS]
 ```
 
 A bundle produced by `build` is loaded back at startup with the public
-`cljrs_eval::load_prebuilt_ir` API, which matches bundle entries to the live
+`cljrs_runtime::tiered::load_prebuilt_ir` API, which matches bundle entries to the live
 `ir_arity_id`s assigned when the target functions are defined and populates
 the IR cache directly — the functions execute at Tier 1 (the IR interpreter)
 from their very first call, skipping the warmup that background lowering

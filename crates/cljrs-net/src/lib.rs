@@ -72,7 +72,7 @@ pub const NS_HTTP2: &str = "clojure.rust.net.http2";
 ///
 /// Calls `cljrs_async::init` internally (idempotent) so callers only need to
 /// call this one function. Requires a running `LocalSet` executor. Idempotent.
-pub fn init(globals: &Arc<cljrs_env::env::GlobalEnv>) {
+pub fn init(globals: &Arc<cljrs_runtime::env::env::GlobalEnv>) {
     cljrs_async::init(globals);
 
     if !globals.is_loaded(NS_TCP) {

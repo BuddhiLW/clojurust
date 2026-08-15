@@ -20,8 +20,8 @@ use tokio::net::UdpSocket;
 use tokio::task::AbortHandle;
 
 use cljrs_async::channel::{chan_put, chan_ref, chan_take, make_chan};
-use cljrs_env::env::GlobalEnv;
 use cljrs_gc::GcPtr;
+use cljrs_runtime::env::env::GlobalEnv;
 use cljrs_value::{
     Arity, ExceptionInfo, Keyword, MapValue, NativeFn, NativeObjectBox, Resource, ResourceHandle,
     Value, ValueError, ValueResult,

@@ -7,7 +7,8 @@ evaluator.
 **Status:** implemented. Stage 2 of
 [`docs/crate-consolidation-plan.md`](../../docs/crate-consolidation-plan.md)
 merged four packages into this one, one per module; Stage 3 gave it one
-construction path and one dispatch path:
+construction path and one dispatch path; Stage 6 deleted the four packages'
+re-export shims, so these module paths are the only paths:
 
 | Module | Former package | Responsibility |
 |---|---|---|
@@ -16,9 +17,8 @@ construction path and one dispatch path:
 | [`interp`](#module-interp) | `cljrs-interp` | Tree-walking interpreter: special forms, macros, destructuring |
 | [`tiered`](#module-tiered) | `cljrs-eval` | IR lowering, tier-1 IR interpreter, JIT dispatch state |
 
-The four former packages still exist as re-export shims so downstream packages
-can migrate one at a time; Stage 6 removes them. New code should use
-`cljrs_runtime::{env, builtins, interp, tiered}`.
+Use `cljrs_runtime::{env, builtins, interp, tiered}`. The `cljrs-env`,
+`cljrs-builtins`, `cljrs-interp`, and `cljrs-eval` packages no longer exist.
 
 Stage 3 added [`Runtime` / `RuntimeBuilder` / `ExecutionMode`](#runtime-construction)
 at the crate root and removed the `GlobalEnv` callback seams: the `eval_fn`,
@@ -108,9 +108,9 @@ tests/
   symbolic_nan.rs, threading_macros.rs, auto_gensym.rs, auto_keyword_macro.rs,
   assoc_in_metadata.rs, empty_metadata.rs, into_metadata.rs, vec_metadata.rs,
   defonce_metadata.rs, defonce_metadata_properties.rs,
-  auto_resolution_properties.rs   — tree-walker behavior (moved from cljrs-interp)
+  auto_resolution_properties.rs   — tree-walker behavior
   gas_meter_ir.rs, versioned_ir.rs, partition_ir.rs, destructure_lowering.rs,
-  osr_transfer.rs, region_phi_uaf.rs — tiered behavior (moved from cljrs-eval)
+  osr_transfer.rs, region_phi_uaf.rs — tiered behavior
 ```
 
 ---
@@ -177,8 +177,8 @@ keeping itself alive forever through the heap's tracer list.
 
 `ExecutionMode` is chosen once, at build time, and never changes: it selects the
 function-call path. Before Stage 3 each mode was a different `fn` pointer stored
-in `GlobalEnv`, and those pointers existed only to let `cljrs-interp` reach
-`cljrs-eval` without a dependency cycle. With both in one package the mode is
+in `GlobalEnv`, and those pointers existed only to let the tree walker reach
+the tiered evaluator across a package boundary. With both in one package the mode is
 data and the dispatch is a direct call.
 
 | Mode | `GlobalEnv::call_cljrs_fn` routes to | Target tier |
@@ -560,7 +560,7 @@ the isolate boundary and be mutated concurrently:
 
 Self-contained tree-walking interpreter for Clojure.
 
-**Phase:** Core interpreter — implemented.  `no-gc` region/static-sink support (Phases 4–5), blacklist integration (Phase 6), and integration tests (Phase 8) of `docs/no-gc-plan.md` — implemented.
+**Phase:** Core interpreter — implemented.  `no-gc` region/static-sink support (Phases 4–5), blacklist integration (Phase 6), and integration tests (Phase 8) of `docs/archive/no-gc-plan.md` — implemented.
 
 Evaluates Clojure `Form` ASTs produced by `cljrs-reader`, managing lexical
 environments, special forms, function application, and the recur trampoline.

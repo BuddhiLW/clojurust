@@ -14,7 +14,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use cljrs_eval::{Env, eval};
+use cljrs_runtime::tiered::{Env, eval};
 use cljrs_value::Value;
 
 // ── Git fixture helpers ───────────────────────────────────────────────────────
@@ -143,7 +143,7 @@ fn jit_native_code_resolves_pinned_symbols() {
 
     // Tiny threshold so the worker kicks in after a handful of calls; the
     // threshold is process-wide configuration, read on every dispatch.
-    cljrs_eval::jit_state::set_jit_threshold(3);
+    cljrs_runtime::tiered::jit_state::set_jit_threshold(3);
     let _mutator = cljrs_gc::register_mutator();
     let globals = {
         let runtime = cljrs_runtime::Runtime::builder()
@@ -157,7 +157,7 @@ fn jit_native_code_resolves_pinned_symbols() {
     };
 
     let mut env = Env::new(globals.clone(), "user");
-    cljrs_env::callback::push_eval_context(&env);
+    cljrs_runtime::env::callback::push_eval_context(&env);
 
     eval_str(&mut env, "(require 'mylib)");
     assert_eq!(eval_str(&mut env, "mylib/the-answer"), Value::Long(2));
@@ -189,7 +189,7 @@ fn jit_native_code_resolves_pinned_symbols() {
 
     // The IC-cached values are permanently rooted: a forced collection must
     // not invalidate what native code reads from its cache slots.
-    cljrs_env::gc_roots::force_collect(&env);
+    cljrs_runtime::env::gc_roots::force_collect(&env);
     assert_eq!(eval_str(&mut env, "(hot-val)"), Value::Long(1));
     assert_eq!(eval_str(&mut env, "(hot-call)"), Value::string("v1"));
 
@@ -197,5 +197,5 @@ fn jit_native_code_resolves_pinned_symbols() {
     assert_eq!(eval_str(&mut env, "mylib/the-answer"), Value::Long(2));
     assert_eq!(eval_str(&mut env, "(mylib/describe)"), Value::string("v2"));
 
-    cljrs_env::callback::pop_eval_context();
+    cljrs_runtime::env::callback::pop_eval_context();
 }

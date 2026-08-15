@@ -45,7 +45,7 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::mpsc;
 
-use cljrs_eval::{Env, EvalError, GlobalEnv};
+use cljrs_runtime::tiered::{Env, EvalError, GlobalEnv};
 use cljrs_value::Value;
 
 use crate::bencode::Bencode;
@@ -87,7 +87,7 @@ pub(crate) struct Job {
 ///
 /// The CLI passes its own driver (which runs each form on the process-wide
 /// async `LocalSet` so core.async / `^:async` code makes progress); library
-/// embedders can pass [`cljrs_eval::eval`] or their own wrapper.
+/// embedders can pass [`cljrs_runtime::tiered::eval`] or their own wrapper.
 pub trait EvalForm: FnMut(&cljrs_reader::Form, &mut Env) -> Result<Value, EvalError> {}
 impl<F: FnMut(&cljrs_reader::Form, &mut Env) -> Result<Value, EvalError>> EvalForm for F {}
 
@@ -176,7 +176,7 @@ impl Server {
     /// Process evaluation jobs on the current thread until the server is shut
     /// down. Forms are evaluated with the plain tree-walking/IR evaluator.
     pub fn serve(self) -> miette::Result<()> {
-        self.serve_with(cljrs_eval::eval)
+        self.serve_with(cljrs_runtime::tiered::eval)
     }
 
     /// Like [`Server::serve`], but every top-level form is evaluated through

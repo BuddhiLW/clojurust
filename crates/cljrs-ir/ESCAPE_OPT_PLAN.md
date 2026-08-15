@@ -167,7 +167,7 @@ single clone.
 | `crates/cljrs-ir/src/lower/regionalize.rs` | The pass itself (specialise + rewrite call site) |
 | `crates/cljrs-ir/src/lower/optimize.rs` | Pipeline now runs `promote_cross_fn_allocs` after the local region-promotion pass; several CFG helpers (`collect_use_blocks`, `lca_of`, `lca_of_many`, `blocks_on_path`, `has_back_edge`, `region_contains_throw`) made `pub(crate)` so `regionalize.rs` can reuse them |
 | `crates/cljrs-ir/src/lower/inline.rs` | `clone_inst` extended to copy the new variants |
-| `crates/cljrs-eval/src/ir_interp.rs` | Dispatch for `RegionParam` (binds nil) and `CallWithRegion` (looks up the named subfunction in `ir_func.subfunctions` and re-enters `interpret_ir`) |
+| `crates/cljrs-runtime/src/tiered/ir_interp.rs` | Dispatch for `RegionParam` (binds nil) and `CallWithRegion` (looks up the named subfunction in `ir_func.subfunctions` and re-enters `interpret_ir`) |
 | `crates/cljrs-compiler/src/codegen.rs` | Cranelift translation: `RegionParam` defines the var as `rt_const_nil`; `CallWithRegion` reuses `emit_direct_call` |
 | `crates/cljrs-ir/tests/escape_regression.rs` | Three stage-4 regression tests (`stage4_*`) |
 
@@ -183,6 +183,6 @@ single clone.
 | `crates/cljrs-ir/src/lower/inline.rs` | Stage 1 |
 | `crates/cljrs-ir/src/lib.rs` | IR types including `RegionParam`/`CallWithRegion` |
 | `crates/cljrs-ir/tests/escape_regression.rs` | Regression tests for stages 2–4 |
-| `crates/cljrs-eval/src/ir_interp.rs` | IR interpreter; stage 4 dispatch |
+| `crates/cljrs-runtime/src/tiered/ir_interp.rs` | IR interpreter; stage 4 dispatch |
 | `crates/cljrs-compiler/src/codegen.rs` | Cranelift codegen; stage 4 dispatch |
 | `crates/cljrs-gc/src/region.rs` | Thread-local `REGION_STACK` consulted by stage-4 callee allocations |

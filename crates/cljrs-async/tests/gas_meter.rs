@@ -1,5 +1,5 @@
 use cljrs_async::{await_value, spawn_future};
-use cljrs_env::error::EvalError;
+use cljrs_runtime::env::error::EvalError;
 
 fn block_on_local<F: std::future::Future>(future: F) -> F::Output {
     let runtime = tokio::runtime::Builder::new_current_thread()
@@ -12,14 +12,14 @@ fn block_on_local<F: std::future::Future>(future: F) -> F::Output {
 #[test]
 fn spawned_work_charges_every_captured_meter() {
     block_on_local(async {
-        let outer = cljrs_env::gas::GasMeter::new(3);
-        let inner = cljrs_env::gas::GasMeter::new(2);
+        let outer = cljrs_runtime::env::gas::GasMeter::new(3);
+        let inner = cljrs_runtime::env::gas::GasMeter::new(2);
         let future = {
-            let _outer = cljrs_env::gas::GasGuard::install(outer.clone());
-            let _inner = cljrs_env::gas::GasGuard::install(inner.clone());
+            let _outer = cljrs_runtime::env::gas::GasGuard::install(outer.clone());
+            let _inner = cljrs_runtime::env::gas::GasGuard::install(inner.clone());
             spawn_future(async {
                 tokio::task::yield_now().await;
-                if cljrs_env::gas::charge(2) {
+                if cljrs_runtime::env::gas::charge(2) {
                     Ok(cljrs_value::Value::Nil)
                 } else {
                     Err(EvalError::GasExhausted)
@@ -36,11 +36,11 @@ fn spawned_work_charges_every_captured_meter() {
 #[test]
 fn future_gas_exhaustion_stays_non_catchable_error() {
     block_on_local(async {
-        let meter = cljrs_env::gas::GasMeter::new(0);
+        let meter = cljrs_runtime::env::gas::GasMeter::new(0);
         let future = {
-            let _guard = cljrs_env::gas::GasGuard::install(meter);
+            let _guard = cljrs_runtime::env::gas::GasGuard::install(meter);
             spawn_future(async {
-                if cljrs_env::gas::charge(1) {
+                if cljrs_runtime::env::gas::charge(1) {
                     Ok(cljrs_value::Value::Nil)
                 } else {
                     Err(EvalError::GasExhausted)

@@ -292,7 +292,7 @@ fn eval_method_call(method: &str, arg_forms: &[Form], env: &mut Env) -> EvalResu
 ///
 /// Form-free, so the Tier-1 IR interpreter can route dot-marked
 /// `CallDirect` instructions here (see `dispatch_sentinel_by_name` in
-/// cljrs-eval) and behave exactly like the tree-walker's interop path.
+/// `crate::tiered`) and behave exactly like the tree-walker's interop path.
 pub fn dispatch_method(method: &str, target: &Value, args: &[Value]) -> EvalResult {
     match target {
         Value::Str(s) => dispatch_string_method(method, s.get(), args),

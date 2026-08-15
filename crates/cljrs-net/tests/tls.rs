@@ -1,6 +1,6 @@
 //! Phase E integration tests: TLS client + server — echo round-trip and error path.
 //!
-//! Done criterion from networking-plan.md Phase E:
+//! Done criterion from docs/archive/networking-plan.md Phase E:
 //!   "TLS client and server round-trip bytes over an encrypted channel."
 
 use std::sync::Arc;
@@ -9,7 +9,7 @@ use cljrs_async::channel::{chan_put, chan_ref, chan_take};
 use cljrs_gc::GcPtr;
 use cljrs_value::{Keyword, MapValue, NativeObjectBox, Value};
 
-fn setup_globals() -> Arc<cljrs_env::env::GlobalEnv> {
+fn setup_globals() -> Arc<cljrs_runtime::env::env::GlobalEnv> {
     let globals = {
         let runtime = cljrs_runtime::Runtime::builder()
             .execution_mode(cljrs_runtime::ExecutionMode::Tiered)

@@ -1,6 +1,6 @@
 //! Phase B integration tests: TCP server — listen + accept loop round-trips bytes.
 //!
-//! Done criterion from networking-plan.md Phase B:
+//! Done criterion from docs/archive/networking-plan.md Phase B:
 //!   "an echo server built from listen + go round-trips bytes from a connect client."
 
 use std::sync::Arc;
@@ -9,7 +9,7 @@ use cljrs_async::channel::{chan_put, chan_ref, chan_take};
 use cljrs_gc::GcPtr;
 use cljrs_value::{Keyword, NativeObjectBox, Value};
 
-fn setup_globals() -> Arc<cljrs_env::env::GlobalEnv> {
+fn setup_globals() -> Arc<cljrs_runtime::env::env::GlobalEnv> {
     let globals = {
         let runtime = cljrs_runtime::Runtime::builder()
             .execution_mode(cljrs_runtime::ExecutionMode::Tiered)

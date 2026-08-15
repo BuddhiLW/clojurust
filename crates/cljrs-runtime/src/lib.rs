@@ -10,8 +10,9 @@
 //! | [`interp`] | `cljrs-interp` | Tree-walking interpreter, special forms, macros |
 //! | [`tiered`] | `cljrs-eval` | IR lowering, tier-1 IR interpreter, JIT dispatch state |
 //!
-//! The four former packages remain as thin re-export shims for one migration
-//! stage; new code should depend on `cljrs-runtime` and use these module paths.
+//! The four former packages no longer exist — Stage 6 of the crate
+//! consolidation deleted their re-export shims. These module paths are the
+//! only paths.
 //!
 //! Construction goes through one path — [`Runtime::builder`] — and the
 //! execution mode it selects ([`ExecutionMode`]) is what decides whether a

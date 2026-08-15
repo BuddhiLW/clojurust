@@ -10,8 +10,8 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use cljrs_eval::{Env, EvalError, GlobalEnv, eval};
 use cljrs_gc::GcConfig;
+use cljrs_runtime::tiered::{Env, EvalError, GlobalEnv, eval};
 use cljrs_value::Value;
 
 use crate::native;
@@ -56,7 +56,7 @@ pub fn configure_jit(threshold: Option<u32>) {
         return; // Explicitly disabled via --jit-threshold 0.
     }
     if let Some(t) = threshold {
-        cljrs_eval::jit_state::set_jit_threshold(t);
+        cljrs_runtime::tiered::jit_state::set_jit_threshold(t);
     }
     JIT_ENABLED.store(true, std::sync::atomic::Ordering::Relaxed);
 }

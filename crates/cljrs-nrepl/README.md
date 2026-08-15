@@ -18,7 +18,7 @@ Each session has its own `Env` (namespace) and its own `*1`/`*2`/`*3`/`*e`, boun
 ### Limitations
 
 - **Interrupt is best-effort.** A queued request is dropped, and a multi-form request stops between forms, but a single form that loops forever cannot be cancelled (the interpreter has no preemption hook).
-- **Output is batched per form**, not streamed incrementally: `out` is delivered when the printing form finishes (it reuses the interpreter's thread-local output-capture stack from `cljrs-builtins`).
+- **Output is batched per form**, not streamed incrementally: `out` is delivered when the printing form finishes (it reuses the interpreter's thread-local output-capture stack from `cljrs_runtime::builtins`).
 - Requests without a session share a single `"default"` session rather than receiving a transient one.
 
 ## File layout
@@ -37,7 +37,7 @@ Each session has its own `Env` (namespace) and its own `*1`/`*2`/`*3`/`*e`, boun
 - `struct Config { addr: SocketAddr, port_file: Option<PathBuf> }` — bind address (port 0 = OS-assigned) and optional `.nrepl-port` file; `Default` binds `127.0.0.1:0`.
 - `fn start(config: Config, globals: Arc<GlobalEnv>) -> miette::Result<Server>` — binds the listener, writes the port file, spawns the network thread. Must be called on the thread that owns `globals`.
 - `Server::port(&self) -> u16`
-- `Server::serve(self) -> miette::Result<()>` — blocks the calling (interpreter) thread processing requests until shutdown; evaluates with `cljrs_eval::eval`.
+- `Server::serve(self) -> miette::Result<()>` — blocks the calling (interpreter) thread processing requests until shutdown; evaluates with `cljrs_runtime::tiered::eval`.
 - `Server::serve_with(self, eval_form: impl EvalForm) -> miette::Result<()>` — like `serve`, but each top-level form goes through the supplied evaluator (the CLI passes its async `LocalSet` driver).
 - `Server::shutdown_handle(&self) -> ShutdownHandle` — `Send + Clone`; `shutdown()` stops the network thread and ends `serve`.
 - `trait EvalForm: FnMut(&Form, &mut Env) -> Result<Value, EvalError>` — evaluator signature for `serve_with`.

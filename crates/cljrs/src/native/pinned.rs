@@ -44,9 +44,9 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use cljrs_eval::GlobalEnv;
 use cljrs_project::config::{Dependency, GitDep};
 use cljrs_runtime::env::error::{EvalError, EvalResult};
+use cljrs_runtime::tiered::GlobalEnv;
 
 /// Exported ABI-handshake symbol name.
 pub const ABI_SYMBOL: &[u8] = b"cljrs_dylib_abi\0";

@@ -4,7 +4,7 @@
 //! `build` boots a standard environment, walks every var in the requested
 //! namespaces, lowers every function arity to IR, and writes the resulting
 //! [`IrBundle`] to disk. A bundle can be replayed into a live environment with
-//! [`cljrs_eval::load_prebuilt_ir`], which matches bundle entries to the
+//! [`cljrs_runtime::tiered::load_prebuilt_ir`], which matches bundle entries to the
 //! `ir_arity_id`s assigned when the target functions are defined and populates
 //! the IR cache directly — so those functions execute at Tier 1 (IR
 //! interpreter) from their first call instead of waiting for background
@@ -21,8 +21,8 @@ pub mod viz;
 
 use clap::Subcommand;
 
-use cljrs_eval::{Env, GlobalEnv};
 use cljrs_ir::IrBundle;
+use cljrs_runtime::tiered::{Env, GlobalEnv};
 use cljrs_value::{CljxFn, Value};
 
 #[derive(Subcommand)]
@@ -30,7 +30,7 @@ pub enum IrCommands {
     /// Lower namespaces to IR and write a serialized bundle.
     ///
     /// The bundle is replayed into a live environment with the public
-    /// `cljrs_eval::load_prebuilt_ir` API, which matches bundle entries to the
+    /// `cljrs_runtime::tiered::load_prebuilt_ir` API, which matches bundle entries to the
     /// live `ir_arity_id`s assigned when the target functions are defined and
     /// populates the IR cache directly, so the functions execute at Tier 1
     /// (IR interpreter) from their very first call - skipping the warmup that
@@ -267,7 +267,7 @@ fn load_namespace(
         cljrs_types::span::Span::new(Arc::new("<prebuild>".to_string()), 0, 0, 1, 1),
     );
 
-    cljrs_eval::eval(&require_form, env)
+    cljrs_runtime::tiered::eval(&require_form, env)
         .map_err(|e| format!("failed to load namespace {ns_name}: {e:?}"))?;
 
     if !globals.is_loaded(ns_name) {
@@ -357,7 +357,7 @@ fn lower_function(
         };
 
         let ns_arc: Arc<str> = Arc::from(ns_name);
-        match cljrs_eval::lower::lower_arity(
+        match cljrs_runtime::tiered::lower::lower_arity(
             f.name.as_deref(),
             &arity.params,
             arity.rest_param.as_ref(),

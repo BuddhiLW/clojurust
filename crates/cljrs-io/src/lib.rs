@@ -37,7 +37,7 @@ pub mod charset;
 pub mod fs;
 
 use cljrs_async::load_source;
-use cljrs_env::env::GlobalEnv;
+use cljrs_runtime::env::env::GlobalEnv;
 
 /// Clojure-level helpers (`error?`, `ok?`) loaded on top of the native
 /// primitives at `init` time.

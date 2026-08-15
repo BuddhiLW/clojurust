@@ -1,18 +1,18 @@
 //! Phase C integration tests: framing — line protocol and length-prefixed protocol.
 //!
-//! Done criterion from networking-plan.md Phase C:
+//! Done criterion from docs/archive/networking-plan.md Phase C:
 //!   "a line-protocol and a length-prefixed-frame protocol both work end-to-end
 //!   over a TCP connection, built purely from `frame` + transducers."
 
 use std::sync::{Arc, Mutex};
 
 use cljrs_async::channel::{chan_put, chan_ref, chan_take};
-use cljrs_env::env::Env;
 use cljrs_gc::GcPtr;
 use cljrs_reader::Parser;
+use cljrs_runtime::env::env::Env;
 use cljrs_value::{Keyword, Value};
 
-fn setup_globals() -> Arc<cljrs_env::env::GlobalEnv> {
+fn setup_globals() -> Arc<cljrs_runtime::env::env::GlobalEnv> {
     let globals = {
         let runtime = cljrs_runtime::Runtime::builder()
             .execution_mode(cljrs_runtime::ExecutionMode::Tiered)
@@ -463,7 +463,7 @@ fn test_clojure_pipe_fn_as_framer() {
 
         let mut parser = Parser::new(src.to_string(), "<test>".to_string());
         let forms = parser.parse_all().expect("parse error");
-        let out_chan_val = cljrs_interp::eval::eval(forms.last().unwrap(), &mut env)
+        let out_chan_val = cljrs_runtime::interp::eval::eval(forms.last().unwrap(), &mut env)
             .expect("eval error: frame with Clojure pipe-fn failed");
 
         let out_chan = as_chan(&out_chan_val);

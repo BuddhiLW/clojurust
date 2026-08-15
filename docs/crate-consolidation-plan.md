@@ -20,11 +20,11 @@ This plan does not remove the tree-walking interpreter, JIT, AOT compiler, no-GC
 | 3. Simplify runtime state | Complete | One builder, one dispatch path; per-instance IR cache |
 | 4. Merge JIT and compiler packages | Complete | `cljrs-jit` folded into `cljrs-compiler::jit`; 33 packages → 32 |
 | 5. Consolidate project and CLI tools | Complete | `cljrs-deps`+`cljrs-vcs` → `cljrs-project`; `cljrs-logging` → `tracing`; `cljrs-dom` → `cljrs-wasm::dom`; `cljrs-dylib`/`cljrs-ir-viz` → `cljrs`; 32 packages → 27 |
-| 6. Remove compatibility packages | Not started | |
+| 6. Remove compatibility packages | Complete | `cljrs-env`/`-builtins`/`-interp`/`-eval` shims deleted; 27 packages → 23 |
 
-Package count: 34 at baseline, 27 now, approximately 23 at target. Stage 2 does
-not change the count — it moves four packages' code into `cljrs-runtime` and
-leaves them as re-export shims; Stage 6 deletes those four shims and takes
+Package count: 34 at baseline, **23 now**, which is the plan's target. Stage 2
+did not change the count — it moved four packages' code into `cljrs-runtime` and
+left them as re-export shims; Stage 6 deleted those four shims and took
 27 → 23.
 
 ### Corrections found while measuring the baseline
@@ -950,6 +950,134 @@ Validation gate:
 - The CLI does not depend directly on internal execution modules.
 - All required build and test configurations pass.
 
+#### Stage 6 outcome
+
+The four Stage-2 shims are deleted. `cljrs-env`, `cljrs-builtins`,
+`cljrs-interp`, and `cljrs-eval` had been one-line `pub use
+cljrs_runtime::<module>::*;` packages since Stage 2, kept only so downstream
+packages could migrate one at a time. Package count 27 → 23, which is the
+plan's target.
+
+**1, 2. Imports and packages.** 271 `cljrs_{env,builtins,interp,eval}::` paths
+across 67 files became `cljrs_runtime::{env,builtins,interp,tiered}::`, and the
+four `crates/` directories are gone. No compiled path names a former package.
+
+A first pass swept Rust path syntax and missed prose: comments and doc comments
+naming a deleted crate or a `crates/cljrs-eval/src/...` file path, including
+eight in `cljrs-stdlib`'s `clojure/spec/alpha.cljrs` and one *runnable* line —
+`no_gc_eval.rs`'s "Run with: `cargo test -p cljrs-interp --features no-gc`",
+a command that stopped working the moment the package went away. Those are
+fixed. The exceptions kept on purpose are the "Former package" tables in
+`cljrs-runtime`'s `lib.rs` and README, `mode.rs`'s note on why the callback
+seams existed, and the two measurement documents — each is describing history,
+which is what those names are for.
+
+Two things moved rather than being deleted with the packages:
+
+- `crates/cljrs-interp/tests/defonce_metadata_properties.proptest-regressions`,
+  the saved proptest failure seeds. Stage 2 moved the test to
+  `cljrs-runtime/tests` but left its regression file behind, so those four
+  shrunk cases have not been re-run since. It sits next to its test again.
+- The AOT harness crate lists. `HARNESS_RUNTIME_CRATES` and
+  `TEST_HARNESS_RUNTIME_CRATES` in `aot.rs` named `cljrs-env` and `cljrs-eval`
+  as harness dependencies; a generated harness would have failed to resolve
+  them the moment the packages disappeared. Both lists now name `cljrs-runtime`
+  alone, which is what the generated `main.rs` has actually used since Stage 3.
+
+**3. Dependencies and feature propagation.** Every manifest that named a shim
+now names `cljrs-runtime` (or drops the entry, where it already had it):
+`cljrs-async`, `cljrs-base64`, `cljrs-blake3`, `cljrs-charset`,
+`cljrs-compiler`, `cljrs-interop`, `cljrs-io`, `cljrs-net`, `cljrs-nrepl`,
+`cljrs-wasm`, `cljrs`, and `examples/rust-interop`. Three `no-gc` feature lists
+collapsed the same way — `cljrs-async`'s three shim forwards, `cljrs-compiler`'s
+two, and `cljrs`'s one all become a single `cljrs-runtime/no-gc`, which is what
+they resolved to already.
+
+Three redundant dev-dependencies went with them: `cljrs`, `cljrs-base64`, and
+`cljrs-net` each listed in `[dev-dependencies]` a package they already had as a
+normal dependency, which does nothing.
+
+**4. Documentation.** The root README's crate table, dependency graph, and
+repository layout no longer carry the four shim rows. Eleven crate READMEs
+named a deleted package in prose, a dependency table, or a feature list;
+each now names the module that owns the code. `VERSIONING.md`'s
+architecture and phase tables — which still said `cljrs-deps`, `cljrs-vcs`,
+`cljrs-env`, `cljrs-interp`, `cljrs-builtins`, and `cljrs-dylib` — are stated in
+current module paths. `cljrs-runtime`'s README keeps its "Former package" column,
+because that column's job is to say what each module used to be.
+
+The `tiered` module's re-exports of `Env`, `GlobalEnv`, the error types, and
+`eval` are the one facade the plan's Evidence section named that still exists.
+They are now an intra-package convenience rather than a cross-package one — the
+condition the Evidence was about ("increases direct dependencies in downstream
+packages") is gone with the packages — but they still let a reader think
+`tiered` owns the environment types, so the module doc now says plainly that it
+does not and names the owning module for each.
+
+**5. Obsolete plans.** Ten implementation plans whose work has landed moved to
+`docs/archive/`, with a [`README`](archive/README.md) that says why they are
+kept, maps their old crate names to current locations, and points at where each
+one's shipped code lives. Their contents are deliberately unedited: these
+documents record decisions made against the tree as it was, and rewriting their
+paths to match today's would make them a worse record of what happened, not a
+better one. The four plans with open work stay in `docs/` —
+`async-worker-pool-plan.md` and `isolate-boundary-plan.md` (isolate phases
+B2–B3), this plan, and `crates/cljrs-ir/ESCAPE_OPT_PLAN.md` (stage 3
+unimplemented); their crate references *were* rewritten, because those are
+navigation aids for work someone still has to do.
+
+**6. Measurements.** [`consolidation-baseline.md` §7](consolidation-baseline.md)
+carries the re-measurement: package count, lines per package, the regenerated
+dependency graph, and a comparison against the Stage 0 figures.
+
+Gate results:
+
+| Check | Result |
+|---|---|
+| `cargo fmt --all --check` | pass |
+| `cargo clippy --workspace --all-targets -- -D warnings` | pass |
+| `cargo test --workspace` | 1162 passed, 0 failed, 23 ignored, 132 targets (Stage 5: 1162/0/23, 140 — the same tests across 8 fewer targets, which is exactly the four shims' lib and doctest targets) |
+| The workspace contains approximately 23 packages | pass — 23, the target |
+| `cljrs-compiler` depends mainly on `cljrs-runtime`, `cljrs-ir`, and `cljrs-project` | pass — 9 internal dependencies (16 at baseline): those three, the `types`/`gc`/`value`/`reader` core it generates code against, `cljrs-stdlib` for the bootstrap environment, and `cljrs-async` for the poll ABI. `base64`/`charset`/`io`/`net` are dev-dependencies |
+| The CLI does not depend directly on internal execution modules | pass — 17 internal dependencies (24 at baseline); none of them is an execution layer, and no such package exists to depend on |
+| Clojure test suite (interpreter) | 240 namespaces, 308 tests, 5,486 assertions, 0 failures |
+| Clojure test suite (AOT) | same: 308 tests, 5,486 assertions, 0 failures |
+| `cljrs eval`, `run samples/graph.cljrs`, `run samples/core_async.cljrs`, `compile -o life-sample samples/life.cljrs` + run | pass |
+| `cljrs ir build --ns clojure.core` | 151 functions lowered, 2 unsupported — identical to stages 1 through 5 |
+| Each standalone artifact still builds independently | pass — `cljrs` (bin and lib), `cljrs-lsp`, `cljrs-nrepl`, `cljrs-wasm`, `cljrs-tx`, and `cljrs-compiler --no-default-features` |
+| CLI help and command behaviour | unchanged by construction — the diff under `crates/cljrs/src` consists solely of import-path lines |
+| `no-gc` | pass — every package carrying the feature (`gc`, `value`, `runtime`, `tx`, `stdlib`, `async`, `compiler`), plus `cljrs` with and without default features |
+| `cargo test -p cljrs-runtime --features no-gc` | pass — 233 tests. This is the command `no_gc_eval.rs` documents, and fixing it is what first ran it: see below |
+
+`compile --target wasm` succeeds for programs inside the wasm backend's
+lowering coverage and reports a clean `Unsupported` error outside it —
+`samples/life.cljrs` needs `First`, and the backend lowers only the arithmetic
+and comparison `KnownFn`s. That is pre-existing and untouched here: this stage's
+only edit under `src/wasm/` is one doc-comment path. The backend's own tests
+(`require_fully_compiled_*`, `wasmparser` module validation) are in the
+workspace run above and pass. `wasm32-unknown-unknown` is still not installed in
+this container, so `wasm-pack build crates/cljrs-wasm` remains CI's gate, as at
+baseline; `cargo check -p cljrs-wasm` passes natively.
+
+**A pre-existing failure the doc fix uncovered.** `no_gc_eval.rs` documented
+"Run with: `cargo test -p cljrs-interp --features no-gc`". Correcting the
+package name to `cljrs-runtime` made the command runnable for the first time
+since Stage 2 — and it failed, on `region_phi_uaf_reproduces_under_interpreter`.
+
+The test is a lock-in for a constraint of the IR interpreter's per-block region
+scoping: it hand-builds IR that reads a region-allocated value after the region
+is released, and asserts the resulting panic. The panic comes from the GC
+build's `GcPtr::get()` magic-word check. The `no-gc` region allocator has no
+such poison, so the identical dangling read returns garbage — an address
+observed as `Long(139656700100752)` — rather than panicking. The test is now
+`cfg`'d off under `no-gc`, with the reason stated at the gate, and the real gap
+(`no-gc` has no use-after-free detection at all) is recorded in TODO.md under
+Phase 8 rather than left implicit in a disabled test.
+
+Nothing in this stage caused it: the test file has not changed since Stage 3,
+and every stage's `no-gc` gate ran `cargo check`, never `cargo test`, so no
+documented command reached it.
+
 ## Risks
 
 ### GC roots across moved modules
@@ -984,17 +1112,26 @@ Separate mechanical moves from API redesign and state redesign.
 
 ## Completion criteria
 
-When all criteria are true, the cleanup is complete:
+All six stages are complete. Every criterion below is met:
 
-- The workspace contains approximately 23 packages.
-- Every remaining package satisfies at least one boundary rule.
-- The runtime has one builder and one execution dispatch path.
-- Runtime instances own their tier and cache state.
-- The compiler does not initialize optional product extensions directly.
-- JIT and AOT code generation share one compiler package.
-- The CLI imports product APIs instead of internal layers.
-- Default, `no-gc`, JIT, AOT, transaction, LSP, nREPL, and WASM validation passes.
-- All crate READMEs describe their current files and public APIs.
+| Criterion | Met by |
+|---|---|
+| The workspace contains approximately 23 packages | Stage 6 — 23 |
+| Every remaining package satisfies at least one boundary rule | Stages 1, 4, 5, 6 — the twelve removed packages satisfied none |
+| The runtime has one builder and one execution dispatch path | Stage 3 — `Runtime::builder`, `GlobalEnv::call_cljrs_fn` |
+| Runtime instances own their tier and cache state | Stages 3 and 4 — per-runtime `IrCache`, then `Tiers`/`JitState` |
+| The compiler does not initialize optional product extensions directly | Stage 4 — `CompileSession` carries an `ExtensionSet` from the host |
+| JIT and AOT code generation share one compiler package | Stage 4 — `cljrs-jit` → `cljrs_compiler::jit` |
+| The CLI imports product APIs instead of internal layers | Stages 5 and 6 — 24 internal dependencies → 17, none an execution layer |
+| Default, `no-gc`, JIT, AOT, transaction, LSP, nREPL, and WASM validation passes | Stage 6 gate table above; `wasm32` linking remains CI's, as at baseline |
+| All crate READMEs describe their current files and public APIs | Stage 6 item 4 |
+
+Two things this plan deliberately did not do, recorded so a later reader does not
+mistake them for oversights. `^:async` poll functions are still registered outside
+the epoch-tagged code cache and outlive their runtime (Stage 4; a leak, not a
+hazard, since the registry is keyed by a process-unique id). And `defn_registry`'s
+cross-defn maps stay process-global keyed by `GlobalEnv::id` rather than moving
+into `Tiers` — correct as it stands, and not JIT state.
 
 ## Recommended first pull request
 

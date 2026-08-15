@@ -2,8 +2,8 @@
 //! the tree-walking `eval_async` fallback when an `^:async` function is called.
 
 use cljrs_async::state_machine::{CljxStateMachine, POLL_READY, register_poll_fn};
-use cljrs_env::env::Env;
 use cljrs_reader::Parser;
+use cljrs_runtime::env::env::Env;
 use cljrs_value::Value;
 
 fn block_on_local<F: std::future::Future>(f: F) -> F::Output {
@@ -55,12 +55,12 @@ fn registered_poll_fn_takes_over_dispatch() {
         .parse_all()
         .unwrap()
         {
-            cljrs_interp::eval::eval(&form, &mut env).unwrap();
+            cljrs_runtime::interp::eval::eval(&form, &mut env).unwrap();
         }
 
         // Register a sentinel poll function for foo's arity, keyed by its
         // canonical ir_arity_id.
-        let foo = cljrs_interp::eval::eval(&parse_one("foo"), &mut env).unwrap();
+        let foo = cljrs_runtime::interp::eval::eval(&parse_one("foo"), &mut env).unwrap();
         let arity_id = match &foo {
             Value::Fn(f) => f.get().arities[0].ir_arity_id,
             other => panic!("expected foo to be a fn, got {other:?}"),
@@ -69,7 +69,7 @@ fn registered_poll_fn_takes_over_dispatch() {
 
         // Calling foo now spawns the native state machine, not the interpreter:
         // the result is the sentinel 999, not the awaited 5.
-        let fut = cljrs_interp::eval::eval(&parse_one("(foo 5)"), &mut env).unwrap();
+        let fut = cljrs_runtime::interp::eval::eval(&parse_one("(foo 5)"), &mut env).unwrap();
         assert!(matches!(fut, Value::Future(_)), "expected a Future");
         let result = cljrs_async::await_value(fut).await.expect("resolves");
         assert!(

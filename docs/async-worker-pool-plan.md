@@ -20,8 +20,8 @@ This supersedes the earlier shared-heap, multi-mutator design. That design was t
 (a) kept the `unsafe` `Send` impl, (b) gave *serialized* global STW instead of parallel collection,
 and (c) had a single-heap allocation-mutex ceiling. Isolates remove all three.
 
-Read `async-plan.md` first for the existing executor (`spawn_future`, `await_value`, the
-GC-service task, safepoints). `networking-plan.md` Phase H references this document.
+Read `docs/archive/async-plan.md` first for the existing executor (`spawn_future`, `await_value`, the
+GC-service task, safepoints). `docs/archive/networking-plan.md` Phase H references this document.
 
 ---
 
@@ -251,7 +251,7 @@ mutable state is copied at the boundary.
 - The coordinator drives a `tokio::sync::watch<PressureLevel>` (Green/Yellow/Red) that every isolate
   reads at safepoints. Responses are **local and graduated**: Yellow → collect more eagerly / lower
   the young-gen threshold; Red → **stop taking from `:conns`** (the accept backpressure already in
-  `networking-plan.md`) and shed load. Memory pressure reuses the same channel-backpressure
+  `docs/archive/networking-plan.md`) and shed load. Memory pressure reuses the same channel-backpressure
   mechanism as the rest of the system.
 - Optional real signals into the coordinator on Linux: cgroup v2 **PSI** memory pressure, RSS
   watermarks.
@@ -265,11 +265,11 @@ actionable.
 
 | Phase | Deliverable | Crate(s) |
 |---|---|---|
-| A1 | Delete `unsafe impl Send/Sync for GcPtr`; migrate `future`/`agent`; single registered mutator | `cljrs-gc`, `cljrs-builtins`, `cljrs-async` |
+| A1 | Delete `unsafe impl Send/Sync for GcPtr`; migrate `future`/`agent`; single registered mutator | `cljrs-gc`, `cljrs-runtime` (`builtins`), `cljrs-async` |
 | A2 | `Send`-only worker pool (I/O, TLS crypto, compression, hashing) with `Send`-result handoff | `cljrs-async` |
 | B1 | Per-isolate heaps; independent parallel collection; arena pointers skipped via `is_static_addr` | `cljrs-gc`, `cljrs-async` |
 | B2 | Copy/structured-clone boundary; `Send`-token handoff for resources (the `cljrs-net` seam) | `cljrs-async`, `cljrs-value` |
-| B3 | Shared static arena for code, interned keywords/symbols, refcounted blobs | `cljrs-gc`, `cljrs-value`, `cljrs-env` |
+| B3 | Shared static arena for code, interned keywords/symbols, refcounted blobs | `cljrs-gc`, `cljrs-value`, `cljrs-runtime` (`env`) |
 | — | **ADR (decided):** two-tier atoms — local `atom` (GC-backed) + `shared-atom`/var-root (`Arc<ArcSwap<SharedValue>>`, promote-on-publish) | design |
 
 A1+A2 (Model A) ship a safe, faster, `unsafe`-free runtime on their own. B1–B3 (Model B) add
@@ -300,7 +300,7 @@ parallel collection and multicore Clojure execution.
 - **`cljrs-gc`** — owns `!Send` `GcPtr` (A1), per-isolate heaps + the shared arena (B1/B3).
 - **`cljrs-async`** — owns the `Send` worker pool (A2) and isolate runtimes (B1) and the copy
   boundary (B2).
-- **`cljrs-value`/`cljrs-env`** — structured-clone (B2), arena-resident keywords/code/vars (B3).
+- **`cljrs-value`/`cljrs_runtime::env`** — structured-clone (B2), arena-resident keywords/code/vars (B3).
 - **`cljrs-net`** — consumes the `Send`-token (FD) handoff to pin a connection to an isolate; see
-  `networking-plan.md` Phase H.
+  `docs/archive/networking-plan.md` Phase H.
 - **`cljrs-io`** — file I/O becomes pool/isolate-friendly for free; no change required.

@@ -1,8 +1,8 @@
 //! The one construction path for a clojurust runtime.
 //!
 //! Before this stage every layer had its own "standard environment"
-//! constructor — `cljrs_interp::standard_env{,_minimal,_with_paths}`,
-//! `cljrs_eval::standard_env{,_minimal,_minimal_no_ir,_with_paths}`, and
+//! constructor — `cljrs_runtime::interp::standard_env{,_minimal,_with_paths}`,
+//! `cljrs_runtime::tiered::standard_env{,_minimal,_minimal_no_ir,_with_paths}`, and
 //! `cljrs_stdlib::standard_env{,_no_ir,_with_paths,_with_paths_and_config}`.
 //! They differed in which `fn` pointers they installed, whether they enabled
 //! IR lowering, and which of GC config / root tracer / source paths they

@@ -8481,7 +8481,7 @@ fn builtin_ns_name(args: &[Value]) -> ValueResult<Value> {
 
 /// `(ns-interns ns)` — map of unqualified Symbol → Var for all interned vars.
 ///
-/// Public so `cljrs-interp::apply` can call it after resolving a namespace
+/// Public so `crate::interp::apply` can call it after resolving a namespace
 /// name/symbol to an actual `Namespace` (see `the-ns` semantics there);
 /// intercepted via a sentinel in the builtin dispatch table below.
 pub fn builtin_ns_interns(args: &[Value]) -> ValueResult<Value> {

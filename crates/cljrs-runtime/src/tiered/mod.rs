@@ -1,7 +1,7 @@
 #![allow(clippy::arc_with_non_send_sync)]
 //! IR-accelerated evaluation for clojurust.
 //!
-//! Wraps the tree-walking interpreter (`cljrs-interp`) with IR lowering and
+//! Wraps the tree-walking interpreter ([`crate::interp`]) with IR lowering and
 //! interpretation.  When a function has been lowered to IR (eagerly at
 //! definition time or from a pre-built cache), calls are dispatched to the
 //! tier-1 IR interpreter; otherwise they fall back to tree-walking.
@@ -11,6 +11,12 @@
 //! - `ir_cache` — thread-safe cache of lowered IR keyed by arity ID
 //! - `lower` — orchestrates the pure-Rust `cljrs_ir::lower` pipeline to produce IR
 //! - `apply` — IR-aware function dispatch with tree-walk fallback
+//!
+//! The `pub use`s below re-export names this module does not own — `Env`,
+//! `GlobalEnv`, and the error types belong to [`crate::env`], `eval` to
+//! [`crate::interp`].  They are a convenience for callers that drive tiered
+//! evaluation and need the environment types alongside it; the owning module
+//! is the canonical path for each.
 
 // EvalError::Thrown wraps a full Value; boxing would require pervasive changes.
 #![allow(clippy::result_large_err)]

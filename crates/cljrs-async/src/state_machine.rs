@@ -42,9 +42,9 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
-use cljrs_env::env::GlobalEnv;
-use cljrs_env::error::{EvalError, EvalResult};
-use cljrs_env::gc_roots::{ValueRootGuard, root_value, root_values};
+use cljrs_runtime::env::env::GlobalEnv;
+use cljrs_runtime::env::error::{EvalError, EvalResult};
+use cljrs_runtime::env::gc_roots::{ValueRootGuard, root_value, root_values};
 use cljrs_value::{FutureState, Value};
 
 use crate::eval_async::spawn_future;
@@ -191,7 +191,7 @@ impl Future for CompiledAsyncTask {
         // Install the eval context so the poll function's `rt_*` global-lookup /
         // call bridges work while running detached on the executor thread.
         let _ctx_guard = this.sm.eval_ctx.as_ref().map(|(globals, ns)| {
-            cljrs_env::callback::install_eval_context_guard(globals.clone(), ns.clone())
+            cljrs_runtime::env::callback::install_eval_context_guard(globals.clone(), ns.clone())
         });
         let code = (this.sm.poll_fn)(sm_ptr);
         // The poll function reports its result in-band via `pending` (a plain,

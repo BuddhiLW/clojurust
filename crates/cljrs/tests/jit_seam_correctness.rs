@@ -1,7 +1,7 @@
 //! Phase 10.3 — correctness of rt_abi bridges at the JIT-native dispatch seam.
 //!
 //! Regression tests for two silent-nil bugs in JIT-native dispatch
-//! (`call_jit_native`, cljrs-eval/src/apply.rs):
+//! (`call_jit_native`, cljrs-runtime/src/tiered/apply.rs):
 //!
 //! 1. **Missing eval context.**  Native code resolves globals
 //!    (`rt_load_global`) and calls function values (`rt_call`, the HOF
@@ -249,7 +249,7 @@ fn collection_ops_see_through_metadata_under_jit() {
     // rt_assoc, rt_conj, rt_dissoc, rt_disj, rt_nth, rt_contains, rt_seq,
     // rt_is_empty, rt_is_vector, rt_is_map, rt_transient) matched on the raw
     // `Value` variant, unlike their tree-walker counterparts in
-    // cljrs-builtins, which all call `.unwrap_meta()` first. A
+    // cljrs_runtime::builtins, which all call `.unwrap_meta()` first. A
     // metadata-carrying collection (`with-meta`) — e.g. a protocol
     // implementation map built via `(with-meta {...} impl)`, the idiom
     // Replicant's mutation-log renderer uses — therefore fell through every
@@ -307,7 +307,7 @@ fn collection_ops_see_through_metadata_under_jit() {
 fn assoc_conj_dissoc_disj_preserve_metadata_under_jit() {
     // rt_assoc/rt_conj/rt_dissoc/rt_disj unwrap_meta() the input to dispatch
     // on the underlying collection kind, but the *result* they build is a
-    // brand new collection with no metadata of its own. cljrs-builtins'
+    // brand new collection with no metadata of its own. cljrs_runtime::builtins'
     // builtin_assoc/conj/dissoc/disj all capture the input's metadata before
     // unwrapping and reattach it to the result (`(meta (assoc ^{:a 1} {} :b
     // 2))` => `{:a 1}` in real Clojure) — the rt_abi fast paths must match

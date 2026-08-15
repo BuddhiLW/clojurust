@@ -3,9 +3,9 @@ use std::sync::{Arc, Mutex};
 use base64::Engine;
 use base64::alphabet::{STANDARD, URL_SAFE};
 use base64::engine::general_purpose::{NO_PAD, PAD};
-use cljrs_env::env::GlobalEnv;
 use cljrs_gc::GcPtr;
 use cljrs_interop::{Registry, wrap_fn1};
+use cljrs_runtime::env::env::GlobalEnv;
 use cljrs_value::Value;
 
 pub const NS: &str = "cljrs.base64";

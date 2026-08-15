@@ -88,7 +88,7 @@ then performs a plain lookup in it.  Consequences:
 ## Execution tiers
 
 Versioned symbols work identically on all four execution paths; the shared
-resolver lives in `cljrs_env::versioned`:
+resolver lives in `cljrs_runtime::env::versioned`:
 
 | Tier | Mechanism |
 |------|-----------|
@@ -142,7 +142,7 @@ provenance** (the commit it was built from, registered via
                  :rust/load :dylib}}}
 ```
 
-When a pinned symbol resolves into such a dep's namespace, `cljrs-dylib`
+When a pinned symbol resolves into such a dep's namespace, `cljrs::native::pinned`
 fetches the repository at the pinned commit, generates a wrapper cdylib crate
 (pinning the exact same `cljrs-interop` as the host), builds it with cargo
 (cached under `~/.cljrs/cache/dylibs/<crate>@<commit>/`), `dlopen`s it, and
@@ -163,37 +163,37 @@ inventory entries under the same unversioned names).
 
 ## Architecture
 
-### New crates
+### New code
 
-| Crate        | Responsibility |
-|--------------|----------------|
-| `cljrs-deps` | Parse `cljrs.edn`, `DepsConfig` / `Dependency` types, config discovery |
-| `cljrs-vcs`  | Pure-Rust (gitoxide) git helpers: `find_repo_root`, `get_file_at_commit`, `fetch_remote` (https/local; ssh via the optional `ssh` feature using `russh`), commit-hash validation, cache layout, native PGP/SSH commit-signature verification |
+| Location | Responsibility |
+|----------|----------------|
+| `cljrs_project::config` | Parse `cljrs.edn`, `DepsConfig` / `Dependency` types, config discovery |
+| `cljrs_project::vcs`    | Pure-Rust (gitoxide) git helpers: `find_repo_root`, `get_file_at_commit`, `fetch_remote` (https/local; ssh via the optional `ssh` feature using `russh`), commit-hash validation, cache layout, native PGP/SSH commit-signature verification |
 
-### Modified crates
+### Modified code
 
-| Crate            | Changes |
+| Location         | Changes |
 |------------------|---------|
 | `cljrs-value`    | `Symbol` gains `version: Option<Arc<str>>`; `Symbol::parse` splits on `@`; `Namespace` gains `source_file`, `git_repo_root`, `is_versioned` |
 | `cljrs-reader`   | `lex_symbol` peeks for `@<hex>` suffix and embeds it in the symbol string |
-| `cljrs-env`      | `RequireSpec` gains `version`; `GlobalEnv` gains `version_cache` and `deps_config`; `Env` gains `versioned_eval_commit` and `lookup_local_frames`; `loader.rs` gains `load_versioned_ns` |
-| `cljrs-interp`   | `eval_symbol` dispatches versioned symbols; `resolve_versioned_symbol` function added |
-| `cljrs-builtins` / `cljrs-interp special.rs` | `parse_require_spec_val` / `parse_require_spec_form` extract version from namespace symbol |
+| `cljrs_runtime::env` | `RequireSpec` gains `version`; `GlobalEnv` gains `version_cache` and `deps_config`; `Env` gains `versioned_eval_commit` and `lookup_local_frames`; `loader.rs` gains `load_versioned_ns` |
+| `cljrs_runtime::interp` | `eval_symbol` dispatches versioned symbols; `resolve_versioned_symbol` function added |
+| `cljrs_runtime::builtins` / `cljrs_runtime::interp::special` | `parse_require_spec_val` / `parse_require_spec_form` extract version from namespace symbol |
 | `cljrs` (CLI)    | Load `cljrs.edn` at startup; `cljrs deps fetch/status` subcommands |
 
 ---
 
 ## Implementation phases and status
 
-| # | Phase | Crate(s) touched | Status |
+| # | Phase | Location(s) touched | Status |
 |---|-------|------------------|--------|
-| 1 | `cljrs-deps` crate — config types and `cljrs.edn` parser | `cljrs-deps` (new) | ✅ Done |
-| 2 | `cljrs-vcs` crate — pure-Rust (gitoxide) git helpers | `cljrs-vcs` (new) | ✅ Done |
+| 1 | Config types and `cljrs.edn` parser | `cljrs_project::config` | ✅ Done |
+| 2 | Pure-Rust (gitoxide) git helpers | `cljrs_project::vcs` | ✅ Done |
 | 3 | `Symbol.version`, `Namespace` git fields | `cljrs-value` | ✅ Done |
 | 4 | Lexer `@hash` recognition | `cljrs-reader` | ✅ Done |
-| 5 | `RequireSpec.version`, `GlobalEnv` version cache, `Env.versioned_eval_commit` | `cljrs-env` | ✅ Done |
-| 6 | `eval_symbol` versioned dispatch, `resolve_versioned_symbol`, `load_versioned_ns` | `cljrs-interp` | ✅ Done |
-| 7 | `parse_require_spec_*` version extraction | `cljrs-interp` special forms | ✅ Done |
+| 5 | `RequireSpec.version`, `GlobalEnv` version cache, `Env.versioned_eval_commit` | `cljrs_runtime::env` | ✅ Done |
+| 6 | `eval_symbol` versioned dispatch, `resolve_versioned_symbol`, `load_versioned_ns` | `cljrs_runtime::interp` | ✅ Done |
+| 7 | `parse_require_spec_*` version extraction | `cljrs_runtime::interp::special` | ✅ Done |
 | 8 | CLI: startup config load, `deps fetch/status` | `cljrs` | ✅ Done |
 
 ---
@@ -223,7 +223,7 @@ pub struct Namespace {
 }
 ```
 
-### `RequireSpec` (cljrs-env)
+### `RequireSpec` (`cljrs_runtime::env`)
 ```rust
 pub struct RequireSpec {
     pub ns:      Arc<str>,
@@ -233,7 +233,7 @@ pub struct RequireSpec {
 }
 ```
 
-### `Env` (cljrs-env)
+### `Env` (`cljrs_runtime::env`)
 ```rust
 pub struct Env {
     pub frames:                Vec<Frame>,
@@ -243,14 +243,14 @@ pub struct Env {
 }
 ```
 
-### `GlobalEnv` additions (cljrs-env)
+### `GlobalEnv` additions (`cljrs_runtime::env`)
 ```rust
 pub version_cache: Mutex<HashMap<Arc<str>, Value>>,
 // key: "<ns>/<name>@<commit>"
 pub deps_config: RwLock<Option<Arc<DepsConfig>>>,
 ```
 
-### `DepsConfig` (cljrs-deps)
+### `DepsConfig` (`cljrs_project::config`)
 ```rust
 pub struct DepsConfig {
     pub paths:   Vec<PathBuf>,

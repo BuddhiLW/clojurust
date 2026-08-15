@@ -5,8 +5,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use cljrs_async::eval_async::eval_async;
-use cljrs_env::env::{Env, GlobalEnv};
 use cljrs_reader::Parser;
+use cljrs_runtime::env::env::{Env, GlobalEnv};
 use cljrs_value::Value;
 
 /// Standard env with both the async runtime and async I/O registered.
@@ -35,7 +35,7 @@ fn eval_sync(src: &str, env: &mut Env) -> Value {
     let mut p = Parser::new(src.to_string(), "<test>".to_string());
     let mut result = Value::Nil;
     for form in p.parse_all().expect("parse error") {
-        result = cljrs_interp::eval::eval(&form, env).expect("eval error");
+        result = cljrs_runtime::interp::eval::eval(&form, env).expect("eval error");
     }
     result
 }

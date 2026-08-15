@@ -2,7 +2,7 @@
 //!
 //! This is the single seam every document update flows through. A future
 //! semantic tier (hover, completion, go-to-definition) would extend [`run`] with
-//! an optional `&cljrs_eval::GlobalEnv` without changing the backend.
+//! an optional `&cljrs_runtime::tiered::GlobalEnv` without changing the backend.
 
 use cljrs_reader::Parser;
 use tower_lsp::lsp_types::{Diagnostic, DocumentSymbol};

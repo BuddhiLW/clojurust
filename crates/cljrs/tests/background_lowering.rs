@@ -152,7 +152,7 @@ fn rebind_during_warm_window_takes_effect_immediately() {
     assert!(stdout.contains("rebound: 101"), "stdout:\n{stdout}");
 }
 
-/// Background lowering is owned by cljrs-eval and must work with the JIT
+/// Background lowering is owned by `cljrs_runtime::tiered` and must work with the JIT
 /// disabled: functions still tier up from tree-walk to the IR interpreter.
 #[test]
 fn background_lowering_works_without_jit() {

@@ -1,6 +1,6 @@
 //! Asynchronous tree-walking evaluation for `^:async` function bodies.
 //!
-//! [`eval_async`] mirrors the synchronous [`cljrs_interp::eval::eval`] for the
+//! [`eval_async`] mirrors the synchronous [`cljrs_runtime::interp::eval::eval`] for the
 //! handful of forms where an `await` can legitimately appear — `await` itself,
 //! `do`, `if`, `let`/`let*`, and function-call arguments — and delegates every
 //! other form to the synchronous evaluator. When it reaches an `(await x)` it
@@ -9,21 +9,21 @@
 //! sync `await` fallback does.
 //!
 //! Forms that the sync evaluator macro-expands (`when`, `cond`, `->`, …) are
-//! expanded here first via [`cljrs_interp::macros::macroexpand`] so their
+//! expanded here first via [`cljrs_runtime::interp::macros::macroexpand`] so their
 //! desugared `if`/`do`/`let` shapes are handled with proper yielding.
 
 use std::future::Future;
 
-use cljrs_builtins::form::{expand_pairs, expand_reader_conds_cow};
-use cljrs_env::env::Env;
-use cljrs_env::error::{EvalError, EvalResult};
 use cljrs_gc::GcPtr;
-use cljrs_interp::apply::{bind_fn_params, select_arity};
-use cljrs_interp::destructure::{bind_pattern, value_to_seq_vec};
-use cljrs_interp::eval::{eval, is_special_form};
-use cljrs_interp::macros::macroexpand;
 use cljrs_reader::Form;
 use cljrs_reader::form::FormKind;
+use cljrs_runtime::builtins::form::{expand_pairs, expand_reader_conds_cow};
+use cljrs_runtime::env::env::Env;
+use cljrs_runtime::env::error::{EvalError, EvalResult};
+use cljrs_runtime::interp::apply::{bind_fn_params, select_arity};
+use cljrs_runtime::interp::destructure::{bind_pattern, value_to_seq_vec};
+use cljrs_runtime::interp::eval::{eval, is_special_form};
+use cljrs_runtime::interp::macros::macroexpand;
 use cljrs_value::value::SetValue;
 use cljrs_value::{
     CljxFnArity, CljxFuture, FutureState, MapValue, PersistentHashSet, PersistentList,
@@ -51,17 +51,17 @@ where
     cljrs_gc::region::poison_active_regions();
     let future = GcPtr::new(CljxFuture::new());
     let task_future = future.clone();
-    let gas_meters = cljrs_env::gas::active_meters();
+    let gas_meters = cljrs_runtime::env::gas::active_meters();
     tokio::task::spawn_local(async move {
         // Root the result future across GC cycles: the spawning scope's alloc
         // frame may have dropped before the task gets to run.
         let anchor = Value::Future(task_future.clone());
-        let _root = cljrs_env::gc_roots::root_value(&anchor);
+        let _root = cljrs_runtime::env::gc_roots::root_value(&anchor);
         let mut task = Box::pin(task);
         let result = std::future::poll_fn(|cx| {
             // LocalSet tasks share an OS thread, so TLS state must be scoped
             // to one poll and removed before another task can run.
-            let _gas_guards = cljrs_env::gas::install_meters(&gas_meters);
+            let _gas_guards = cljrs_runtime::env::gas::install_meters(&gas_meters);
             task.as_mut().poll(cx)
         })
         .await;
@@ -105,8 +105,8 @@ pub async fn run_async_fn(callee: Value, args: Vec<Value>, base: &Env) -> EvalRe
     env.is_async = true;
 
     // Keep callee and the local env alive across GC cycles at async yield points.
-    let _callee_root = cljrs_env::gc_roots::root_value(&callee);
-    let _env_root = cljrs_env::gc_roots::push_env_root(&env);
+    let _callee_root = cljrs_runtime::env::gc_roots::root_value(&callee);
+    let _env_root = cljrs_runtime::env::gc_roots::push_env_root(&env);
 
     let mut current_args = args;
     loop {
@@ -238,7 +238,7 @@ pub async fn await_value(val: Value) -> EvalResult {
             // Root the future across GC cycles: the alloc frame of the scope that
             // produced it may have dropped before this task reached a yield point.
             let anchor = Value::Future(f.clone());
-            let _root = cljrs_env::gc_roots::root_value(&anchor);
+            let _root = cljrs_runtime::env::gc_roots::root_value(&anchor);
             loop {
                 {
                     let guard = f.get().state.lock().unwrap();
@@ -261,20 +261,20 @@ pub async fn await_value(val: Value) -> EvalResult {
                         FutureState::Running => {}
                     }
                 }
-                cljrs_env::gc_roots::async_gc_collect();
+                cljrs_runtime::env::gc_roots::async_gc_collect();
                 tokio::task::yield_now().await;
             }
         }
         Value::Promise(p) => {
             let anchor = Value::Promise(p.clone());
-            let _root = cljrs_env::gc_roots::root_value(&anchor);
+            let _root = cljrs_runtime::env::gc_roots::root_value(&anchor);
             loop {
                 {
                     if let Some(v) = p.get().value.lock().unwrap().as_ref() {
                         return Ok(v.clone());
                     }
                 }
-                cljrs_env::gc_roots::async_gc_collect();
+                cljrs_runtime::env::gc_roots::async_gc_collect();
                 tokio::task::yield_now().await;
             }
         }
@@ -292,12 +292,12 @@ async fn eval_body_async(forms: &[Form], env: &mut Env) -> EvalResult {
 }
 
 /// `(try body... (catch Type e handler...)... (finally cleanup...))` with
-/// yielding bodies. Mirrors the synchronous `eval_try` (`cljrs-interp`) exactly,
+/// yielding bodies. Mirrors the synchronous `eval_try` (`cljrs_runtime::interp`) exactly,
 /// but evaluates the body, catch handlers, and finally block with `eval_async`
 /// so an `await`/`<?` inside any of them cooperates with the executor instead of
 /// falling back to the blocking sync path.
 async fn eval_try_async(args: &[Form], env: &mut Env) -> EvalResult {
-    let (body, catches, fin_body) = cljrs_interp::special::parse_try_args(args);
+    let (body, catches, fin_body) = cljrs_runtime::interp::special::parse_try_args(args);
 
     let mut result = eval_body_async(body, env).await;
 
@@ -321,11 +321,11 @@ async fn eval_try_async(args: &[Form], env: &mut Env) -> EvalResult {
     if let Some(err) = err_opt {
         let thrown_val = match err {
             EvalError::Thrown(v) => v,
-            ref other => cljrs_interp::special::eval_error_to_value(other),
+            ref other => cljrs_runtime::interp::special::eval_error_to_value(other),
         };
         let mut handled = false;
         for c in &catches {
-            if cljrs_interp::special::catch_type_matches(c.type_sym, &thrown_val) {
+            if cljrs_runtime::interp::special::catch_type_matches(c.type_sym, &thrown_val) {
                 env.push_frame();
                 env.bind(std::sync::Arc::from(c.binding), thrown_val.clone());
                 result = eval_body_async(c.body, env).await;
@@ -465,16 +465,16 @@ async fn eval_call_async(head: &Form, args: &[Form], whole: &Form, env: &mut Env
         _ => {}
     }
 
-    let _callee_root = cljrs_env::gc_roots::root_value(&callee);
+    let _callee_root = cljrs_runtime::env::gc_roots::root_value(&callee);
     let mut argv: Vec<Value> = Vec::with_capacity(args.len());
     for a in args {
-        let _args_root = cljrs_env::gc_roots::root_values(&argv);
+        let _args_root = cljrs_runtime::env::gc_roots::root_values(&argv);
         argv.push(Box::pin(eval_async(a, env)).await?);
     }
-    cljrs_env::apply::apply_value(&callee, argv, env)
+    cljrs_runtime::env::apply::apply_value(&callee, argv, env)
 }
 
-/// Native functions that `cljrs_interp::eval_call` intercepts at the form level
+/// Native functions that `cljrs_runtime::interp::eval_call` intercepts at the form level
 /// (they require unevaluated forms or env access) and that therefore cannot be
 /// driven through `apply_value` with pre-evaluated arguments.
 fn is_form_intercepted(name: &str) -> bool {

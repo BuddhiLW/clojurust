@@ -116,6 +116,6 @@ Helpers: `(error? x)`, `(ok? x)`.
 
 ## Dependencies
 
-`cljrs-types`, `cljrs-gc`, `cljrs-value`, `cljrs-env`, `cljrs-reader`,
-`cljrs-interp`, `cljrs-async` (channels + `spawn_future`), `tokio` (with the
+`cljrs-types`, `cljrs-gc`, `cljrs-value`, `cljrs-runtime` (`env` + `interp`),
+`cljrs-reader`, `cljrs-async` (channels + `spawn_future`), `tokio` (with the
 `fs` and `io-util` features), and `encoding_rs`.
