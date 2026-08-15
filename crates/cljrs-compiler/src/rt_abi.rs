@@ -3721,12 +3721,13 @@ fn take_pending_exception() -> Option<*const Value> {
 
 /// Take (and clear) the thread's pending exception as an owned `Value`.
 ///
-/// Called by the JIT-native dispatch seam (via the hook installed by
-/// `cljrs_jit::init`) right after native code returns, so an uncaught throw
-/// propagates to the interpreter caller instead of being swallowed as nil.
-/// The caller must invoke this while the JIT frame's alloc roots are still
-/// live (the pending pointer targets a Value boxed inside the native frame).
-pub fn take_pending_exception_value() -> Option<Value> {
+/// Reached from the JIT-native dispatch seam through
+/// [`JitBackend::take_pending_exception`](cljrs_runtime::tiered::backend::JitBackend::take_pending_exception)
+/// right after native code returns, so an uncaught throw propagates to the
+/// interpreter caller instead of being swallowed as nil.  The caller must
+/// invoke this while the JIT frame's alloc roots are still live (the pending
+/// pointer targets a Value boxed inside the native frame).
+pub(crate) fn take_pending_exception_value() -> Option<Value> {
     take_pending_exception().map(|ptr| unsafe { val_ref(ptr) }.clone())
 }
 
@@ -4454,8 +4455,8 @@ pub extern "C" fn rt_gas_charge(cost: u64) -> u8 {
 /// that compiled code can never produce as an ordinary result.
 ///
 /// A specialized function whose entry type guard fails returns this pointer;
-/// the dispatch seam (`call_jit_native`, cljrs-eval/src/apply.rs) compares
-/// the raw result address against it and, on a match, re-executes the call at
+/// the dispatch seam (`call_jit_native`, cljrs-runtime/src/tiered/apply.rs)
+/// compares the raw result address against it and, on a match, re-executes at
 /// Tier 1.  The sentinel is `Box::leak`ed — deliberately **not** a GC heap
 /// object — so it can never be swept, reused, or aliased by a real result.
 fn deopt_sentinel() -> *const Value {
@@ -4464,8 +4465,9 @@ fn deopt_sentinel() -> *const Value {
 }
 
 /// Address of the deopt sentinel, for the dispatch seam's pointer compare
-/// (installed into `cljrs_eval::jit_state` as a hook by `cljrs_jit::init`).
-pub fn deopt_sentinel_addr() -> usize {
+/// (reached through
+/// [`JitBackend::deopt_sentinel`](cljrs_runtime::tiered::backend::JitBackend::deopt_sentinel)).
+pub(crate) fn deopt_sentinel_addr() -> usize {
     deopt_sentinel() as usize
 }
 

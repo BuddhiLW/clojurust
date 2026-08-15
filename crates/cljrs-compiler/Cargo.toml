@@ -14,7 +14,7 @@ default = ["wasm-aot"]
 # for hosts that only ever produce native binaries.
 wasm-aot = ["dep:wasm-encoder"]
 aot_full_test = []
-no-gc = ["cljrs-gc/no-gc", "cljrs-value/no-gc", "cljrs-eval/no-gc", "cljrs-interp/no-gc", "cljrs-stdlib/no-gc"]
+no-gc = ["cljrs-gc/no-gc", "cljrs-value/no-gc", "cljrs-eval/no-gc", "cljrs-interp/no-gc", "cljrs-stdlib/no-gc", "cljrs-async/no-gc"]
 
 [dependencies]
 cljrs-runtime = { workspace = true }
