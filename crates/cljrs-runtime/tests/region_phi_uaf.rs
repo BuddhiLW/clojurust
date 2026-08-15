@@ -158,7 +158,16 @@ fn build_phi_over_regions_ir() -> IrFunction {
 /// out in release builds.  In release the same defective IR may segfault,
 /// return a stale value, or appear to succeed — none of which is a clean
 /// `should_panic` signal.
-#[cfg(debug_assertions)]
+///
+/// Gated off `no-gc` for the same reason one level down: the magic-word
+/// poison lives in the GC build's `GcPtr::get()`, and the `no-gc` region
+/// allocator has no equivalent.  The identical defective IR reads the freed
+/// slot there and returns garbage (an address observed as a `Long`) instead
+/// of panicking, so `should_panic` cannot express the constraint under that
+/// feature.  The constraint itself still holds in both builds; only the
+/// detection differs.  That `no-gc` has no use-after-free poison at all is a
+/// real gap, tracked in TODO.md rather than papered over here.
+#[cfg(all(debug_assertions, not(feature = "no-gc")))]
 #[test]
 #[should_panic(expected = "GcPtr::get() on freed object")]
 fn region_phi_uaf_reproduces_under_interpreter() {

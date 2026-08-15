@@ -477,7 +477,7 @@ pub(crate) enum EscapeMode {
 ///
 /// In the AOT flow the whole program is one IR tree, so cross-function
 /// promotion sees every callee.  In the script/REPL flow each `defn` lowers
-/// separately; the IR tier (`cljrs-eval`) registers each lowered defn and
+/// separately; the IR tier (`cljrs_runtime::tiered`) registers each lowered defn and
 /// supplies the registry to later lowerings through this type.  Consumers of
 /// an external must invalidate themselves when it is redefined — the
 /// `used` set returned by `optimize_with_externals` identifies what to watch.

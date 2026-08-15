@@ -14,7 +14,7 @@
 ;; This is a from-scratch, spec-compatible-in-spirit implementation for the
 ;; clojurust runtime. It does NOT use `reify` for spec objects (every `reify`
 ;; call here would permanently leak a fresh protocol-impl tag into the global
-;; `Protocol.impls` map — see `crates/cljrs-interp/src/special.rs`), so
+;; `Protocol.impls` map — see `crates/cljrs-runtime/src/interp/special.rs`), so
 ;; compound specs are `defrecord` instances extended with the `Spec` protocol
 ;; instead. Bare predicates, sets, keywords, and symbols are made directly
 ;; usable as specs (zero wrapping) by extending `Spec` onto their type tags;
@@ -41,8 +41,8 @@
 ;;
 ;; DISCOVERED RUNTIME BUG (affects any protocol, not spec-specific): every
 ;; extend-type method impl fn is named after its method (`build_impl_fn` in
-;; `crates/cljrs-interp/src/special.rs` sets the fn's `name` from the method
-;; symbol), and `call_cljrs_fn` (`crates/cljrs-interp/src/apply.rs:526-534`)
+;; `crates/cljrs-runtime/src/interp/special.rs` sets the fn's `name` from the method
+;; symbol), and `call_cljrs_fn` (`crates/cljrs-runtime/src/interp/apply.rs:526-534`)
 ;; unconditionally self-binds that name inside the fn body on every call (the
 ;; mechanism that makes named `fn`/`letfn` self-recursion work). That
 ;; self-binding shadows the *global* protocol fn var for the duration of the
@@ -132,7 +132,7 @@
 ;; ── Bare values as specs ────────────────────────────────────────────────────────
 ;;
 ;; `Fn` covers Fn/NativeFunction/ProtocolFn/MultiFn — all callables share the
-;; "Fn" dispatch tag (crates/cljrs-env/src/apply.rs). A predicate call is
+;; "Fn" dispatch tag (crates/cljrs-runtime/src/env/apply.rs). A predicate call is
 ;; wrapped in try/catch so a predicate that throws on an unexpected shape of
 ;; `x` (e.g. `even?` on a non-number) fails conform instead of blowing up the
 ;; caller.
@@ -1020,7 +1020,7 @@
 ;; `(defmacro def [...] ...)` builds the underlying fn via the same
 ;; self-name-as-optional-first-arg logic as `fn*`, which explicitly skips
 ;; treating the name as a self-reference when it's a special form
-;; (`crates/cljrs-interp/src/special.rs` — `!is_special_form(s)` guard) —
+;; (`crates/cljrs-runtime/src/interp/special.rs` — `!is_special_form(s)` guard) —
 ;; but the fn-parsing code never falls back to "there's no self-name after
 ;; all" in that case, so it misreads the name symbol itself as the arity
 ;; clause and throws "fn* expects vector or arity clauses". Worked around by
@@ -1594,7 +1594,7 @@
 ;;
 ;; conform*/explain* call `(mm x)` to get the spec registered for x's
 ;; dispatch branch, then delegate. A dispatch miss throws in this runtime
-;; (`crates/cljrs-env/src/apply.rs`: "No method in multimethod ... for
+;; (`crates/cljrs-runtime/src/env/apply.rs`: "No method in multimethod ... for
 ;; dispatch value ..."), caught here via `(catch Exception ...)` — same
 ;; pattern already used for predicate-spec calls above. We deliberately do
 ;; NOT enumerate `(methods mm)` — its keys are Display strings in this
@@ -1686,7 +1686,7 @@
   :min :max (inclusive bounds), :infinite? (default true — whether ##Inf/
   ##-Inf are accepted), :NaN? (default true — whether ##NaN is accepted).
   Reuses this runtime's existing NaN?/infinite? bootstrap predicates
-  (crates/cljrs-builtins/src/bootstrap.cljrs) rather than reimplementing
+  (crates/cljrs-runtime/src/builtins/bootstrap.cljrs) rather than reimplementing
   IEEE-754 checks."
   [& opts]
   (let [o (apply hash-map opts)
@@ -1707,7 +1707,7 @@
 (defn inst-in
   "NOT IMPLEMENTED: this runtime has no Instant/Date value type and no real
   #inst support — the reader parses the #inst tag but
-  `crates/cljrs-interp/src/eval.rs`'s `eval_tagged_literal` just returns the
+  `crates/cljrs-runtime/src/interp/eval.rs`'s `eval_tagged_literal` just returns the
   inner string unchanged (TODO there), and there is no `inst?` predicate
   anywhere in builtins/bootstrap. Throws immediately with a clear message
   rather than silently misbehaving."

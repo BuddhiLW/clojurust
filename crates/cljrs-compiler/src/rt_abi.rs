@@ -69,7 +69,7 @@ fn box_val(v: Value) -> *const Value {
 /// Reattach `meta` (captured from an input collection via `get_meta()`,
 /// before `unwrap_meta()` peeled it off to dispatch) to a freshly built
 /// result, matching the identity-preserving builtins (`assoc`/`conj`/
-/// `dissoc`/`disj`) in cljrs-builtins, which all do the same.
+/// `dissoc`/`disj`) in `cljrs_runtime::builtins`, which all do the same.
 #[inline]
 fn apply_meta(v: Value, meta: Option<Value>) -> Value {
     match meta {

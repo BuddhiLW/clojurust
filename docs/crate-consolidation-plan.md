@@ -960,8 +960,17 @@ plan's target.
 
 **1, 2. Imports and packages.** 271 `cljrs_{env,builtins,interp,eval}::` paths
 across 67 files became `cljrs_runtime::{env,builtins,interp,tiered}::`, and the
-four `crates/` directories are gone. The rewrite is mechanical and total — no
-path spelled with a former package name remains anywhere in the workspace.
+four `crates/` directories are gone. No compiled path names a former package.
+
+A first pass swept Rust path syntax and missed prose: comments and doc comments
+naming a deleted crate or a `crates/cljrs-eval/src/...` file path, including
+eight in `cljrs-stdlib`'s `clojure/spec/alpha.cljrs` and one *runnable* line —
+`no_gc_eval.rs`'s "Run with: `cargo test -p cljrs-interp --features no-gc`",
+a command that stopped working the moment the package went away. Those are
+fixed. The exceptions kept on purpose are the "Former package" tables in
+`cljrs-runtime`'s `lib.rs` and README, `mode.rs`'s note on why the callback
+seams existed, and the two measurement documents — each is describing history,
+which is what those names are for.
 
 Two things moved rather than being deleted with the packages:
 
@@ -1038,6 +1047,7 @@ Gate results:
 | Each standalone artifact still builds independently | pass — `cljrs` (bin and lib), `cljrs-lsp`, `cljrs-nrepl`, `cljrs-wasm`, `cljrs-tx`, and `cljrs-compiler --no-default-features` |
 | CLI help and command behaviour | unchanged by construction — the diff under `crates/cljrs/src` consists solely of import-path lines |
 | `no-gc` | pass — every package carrying the feature (`gc`, `value`, `runtime`, `tx`, `stdlib`, `async`, `compiler`), plus `cljrs` with and without default features |
+| `cargo test -p cljrs-runtime --features no-gc` | pass — 233 tests. This is the command `no_gc_eval.rs` documents, and fixing it is what first ran it: see below |
 
 `compile --target wasm` succeeds for programs inside the wasm backend's
 lowering coverage and reports a clean `Unsupported` error outside it —
@@ -1048,6 +1058,25 @@ only edit under `src/wasm/` is one doc-comment path. The backend's own tests
 workspace run above and pass. `wasm32-unknown-unknown` is still not installed in
 this container, so `wasm-pack build crates/cljrs-wasm` remains CI's gate, as at
 baseline; `cargo check -p cljrs-wasm` passes natively.
+
+**A pre-existing failure the doc fix uncovered.** `no_gc_eval.rs` documented
+"Run with: `cargo test -p cljrs-interp --features no-gc`". Correcting the
+package name to `cljrs-runtime` made the command runnable for the first time
+since Stage 2 — and it failed, on `region_phi_uaf_reproduces_under_interpreter`.
+
+The test is a lock-in for a constraint of the IR interpreter's per-block region
+scoping: it hand-builds IR that reads a region-allocated value after the region
+is released, and asserts the resulting panic. The panic comes from the GC
+build's `GcPtr::get()` magic-word check. The `no-gc` region allocator has no
+such poison, so the identical dangling read returns garbage — an address
+observed as `Long(139656700100752)` — rather than panicking. The test is now
+`cfg`'d off under `no-gc`, with the reason stated at the gate, and the real gap
+(`no-gc` has no use-after-free detection at all) is recorded in TODO.md under
+Phase 8 rather than left implicit in a disabled test.
+
+Nothing in this stage caused it: the test file has not changed since Stage 3,
+and every stage's `no-gc` gate ran `cargo check`, never `cargo test`, so no
+documented command reached it.
 
 ## Risks
 

@@ -292,7 +292,7 @@ async fn eval_body_async(forms: &[Form], env: &mut Env) -> EvalResult {
 }
 
 /// `(try body... (catch Type e handler...)... (finally cleanup...))` with
-/// yielding bodies. Mirrors the synchronous `eval_try` (`cljrs-interp`) exactly,
+/// yielding bodies. Mirrors the synchronous `eval_try` (`cljrs_runtime::interp`) exactly,
 /// but evaluates the body, catch handlers, and finally block with `eval_async`
 /// so an `await`/`<?` inside any of them cooperates with the executor instead of
 /// falling back to the blocking sync path.

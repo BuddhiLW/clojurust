@@ -144,6 +144,15 @@ Implementation roadmap for a Rust-hosted Clojure dialect. Native file extension 
 - [ ] Weak references (for caches, intern tables) — deferred
 - [ ] Finalization hooks (for resource cleanup) — deferred
 - [ ] Perceus-style in-place mutation: when ref count == 1, mutate in place — deferred (optimization)
+- [ ] Use-after-free poison in the `no-gc` region allocator — the GC build's
+      `GcPtr::get()` checks a magic word and panics with "GcPtr::get() on freed
+      object" when a dangling pointer is read (debug builds only). The `no-gc`
+      region allocator has no equivalent, so the identical dangling read
+      silently returns garbage. Surfaced by `region_phi_uaf.rs`, which builds
+      the defective IR by hand: it asserts the panic in the GC build and is
+      `cfg`'d off under `no-gc` because the feature cannot produce that signal.
+      Poisoning a region's chunk on release would give both builds the same
+      debug-time detection
 
 ---
 

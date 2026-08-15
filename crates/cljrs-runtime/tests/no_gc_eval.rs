@@ -12,7 +12,7 @@
 //! `GcPtr::is_static_alloc()`.
 //!
 //! Run with:
-//!   cargo test -p cljrs-interp --features no-gc
+//!   cargo test -p cljrs-runtime --features no-gc
 
 #![cfg(feature = "no-gc")]
 

@@ -109,7 +109,7 @@ pub fn type_tag_matches(val: &Value, tag: &str) -> bool {
 /// Returns `None` when there is no async runtime or the callee is not an async
 /// function, in which case the caller proceeds with the normal synchronous
 /// call path. This is the single dispatch point shared by `apply_value` here
-/// and `eval_call` in `cljrs-interp`.
+/// and `eval_call` in [`crate::interp`].
 pub fn dispatch_if_async(callee: &Value, args: &[Value], env: &Env) -> Option<Value> {
     let Value::Fn(f) = callee else { return None };
     if !f.get().is_async {

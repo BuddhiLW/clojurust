@@ -18,7 +18,7 @@
 //!   AOT-wasm                       (baked at build time; browser JITs it to native)
 //! ```
 //!
-//! So the IR interpreter (`cljrs-eval::ir_interp`) remains *on board* in the
+//! So the IR interpreter (`cljrs_runtime::tiered::ir_interp`) remains *on board* in the
 //! wasm bundle as the dynamic-code tier; AOT-wasm is the frozen top tier.  No
 //! in-sandbox JIT/OSR hooks are installed.
 //!
