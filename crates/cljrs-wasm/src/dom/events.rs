@@ -16,8 +16,8 @@ use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::spawn_local;
 
-use crate::DOM_GLOBALS;
-use crate::node::dom_node_value;
+use crate::dom::DOM_GLOBALS;
+use crate::dom::node::dom_node_value;
 
 // ── Active-event pointer (for :prevent-default / :stop-propagation) ──────────
 

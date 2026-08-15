@@ -20,7 +20,6 @@ cljrs-builtins = { workspace = true }
 cljrs-gc       = { workspace = true }
 cljrs-types    = { workspace = true }
 cljrs-async    = { workspace = true }
-cljrs-dom      = { workspace = true }
 wasm-bindgen          = "0.2"
 wasm-bindgen-futures  = "0.4"
 console_error_panic_hook = "0.1"
@@ -34,3 +33,35 @@ getrandom = { version = "0.4", features = ["wasm_js"] }
 # uuid 1.22 requires an explicit randomness feature on wasm32-unknown-unknown.
 # Adding the "js" feature here unifies it across the dep graph.
 uuid = { version = "1.22.0", features = ["v4", "js"] }
+
+# Browser bindings used by the `dom` module.  Target-gated because the module's
+# bodies are, so a native build of this crate (which the workspace does) needs
+# none of them.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+js-sys = "0.3"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies.web-sys]
+version  = "0.3"
+features = [
+    "Window",
+    "Document",
+    "Element",
+    "HtmlElement",
+    "Node",
+    "NodeList",
+    "Text",
+    "EventTarget",
+    "Event",
+    "MouseEvent",
+    "KeyboardEvent",
+    "InputEvent",
+    "CssStyleDeclaration",
+    "HtmlInputElement",
+    "HtmlSelectElement",
+    "HtmlTextAreaElement",
+    "HtmlOptionElement",
+    "DomTokenList",
+    "HtmlHeadElement",
+    "AddEventListenerOptions",
+    "console",
+]

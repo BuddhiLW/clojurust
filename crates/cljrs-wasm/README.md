@@ -6,13 +6,19 @@ WebAssembly browser REPL for clojurust.  Compiles the tree-walking interpreter t
 
 ## Status
 
-Phase 12-ext — async browser REPL.  Targets `wasm32-unknown-unknown`; no AOT/IR compilation, no interop, no filesystem I/O.  Full `clojure.core.async` support via a Tokio `LocalSet` driven by `wasm-bindgen-futures`.
+Phase 12-ext — async browser REPL.  The `dom` module was the separate
+`cljrs-dom` package until consolidation stage 5; `cljrs-wasm` was its only
+consumer and it had no independent artifact, so it is a module now.  Targets `wasm32-unknown-unknown`; no AOT/IR compilation, no interop, no filesystem I/O.  Full `clojure.core.async` support via a Tokio `LocalSet` driven by `wasm-bindgen-futures`.
 
 ## File layout
 
 | File | Description |
 |------|-------------|
-| `src/lib.rs` | `Repl` and `EvalResult` wasm-bindgen exports; bootstraps a `Runtime` in `ExecutionMode::TreeWalk`, initialises `cljrs-async`, drives a persistent `LocalSet` pump |
+| `src/lib.rs` | `Repl` and `EvalResult` wasm-bindgen exports; bootstraps a `Runtime` in `ExecutionMode::TreeWalk`, initialises `cljrs-async` and `dom`, drives a persistent `LocalSet` pump |
+| `src/dom/mod.rs` | `dom` module root: the `DOM_GLOBALS` thread-local, `set_globals()`, `register()` |
+| `src/dom/node.rs` | `DomNode` — wraps `web_sys::Node` as a `Value::NativeObject` |
+| `src/dom/events.rs` | Event-to-map conversion, `DomListener`, `DomEventChan` |
+| `src/dom/fns.rs` | All `cljrs.dom` native functions and their registration |
 | `www/index.html` | Self-contained browser REPL UI (pure JS, no bundler required once wasm-pack output is present) |
 
 ## Public API
@@ -91,3 +97,145 @@ cd crates/cljrs-wasm/www && python3 -m http.server 8080
 - Filesystem I/O (`slurp`, `spit`, `load-file`)
 - Rust interop (`cljrs-interop`, `#[export]`)
 - AOT/IR compilation (`cljrs-compiler`, `cljrs-ir`)
+
+## `dom` — the browser DOM API
+
+`Repl::new` calls `dom::set_globals` and `dom::register`, so every session has
+the `cljrs.dom` namespace bound.  The function bodies are
+`#[cfg(target_arch = "wasm32")]`; on a native build `register` is a no-op and
+the namespace is empty, which is how the workspace compiles and tests this
+crate outside a browser target.
+
+```rust
+pub mod dom {
+    /// Install the `GlobalEnv` used by DOM event callbacks that fire outside
+    /// the normal eval context.  Must be called before any eval.
+    pub fn set_globals(globals: Arc<GlobalEnv>);
+    /// Register every `cljrs.dom` native function into `globals`.
+    pub fn register(globals: &Arc<GlobalEnv>);
+}
+```
+
+## The `cljrs.dom` namespace
+
+### Selection
+```clojure
+(dom/document)         ; => DomNode (the document itself)
+(dom/body)             ; => DomNode
+(dom/head)             ; => DomNode
+(dom/by-id "id")       ; => DomNode | nil
+(dom/query "css")      ; => DomNode | nil  (querySelector)
+(dom/query-all "css")  ; => [DomNode ...]  (querySelectorAll)
+```
+
+### Creation
+```clojure
+(dom/create "div")            ; => DomNode
+(dom/create-text "hello")     ; => DomNode (text node)
+(dom/create-ns ns "tag")      ; => DomNode (createElementNS, e.g. SVG)
+```
+
+### Tree manipulation
+```clojure
+(dom/append!        parent child)            ; => parent
+(dom/prepend!       parent child)            ; => parent
+(dom/insert-before! parent child ref-or-nil) ; => parent
+(dom/remove!        el)                      ; => nil
+(dom/replace!       old new)                 ; => nil
+(dom/parent         el)                      ; => DomNode | nil
+(dom/children       el)                      ; => [DomNode ...]
+(dom/child-at       el idx)                  ; => DomNode | nil  (O(1), unlike `children`)
+(dom/child-count    el)                      ; => Long
+(dom/connected?     el)                      ; => boolean  (Node.isConnected)
+```
+
+### Attributes
+```clojure
+(dom/attr            el "name")             ; => String | nil
+(dom/set-attr!       el "name" val)         ; => el
+(dom/remove-attr!    el "name")             ; => el
+(dom/set-attr-ns!    el ns "name" val)      ; => el  (setAttributeNS, e.g. xlink:href)
+(dom/remove-attr-ns! el ns "name")          ; => el
+```
+
+### Classes
+```clojure
+(dom/add-class!    el "name") ; => el
+(dom/remove-class! el "name") ; => el
+(dom/has-class?    el "name") ; => boolean
+(dom/toggle-class! el "name") ; => el
+```
+
+### Content
+```clojure
+(dom/text      el)      ; => String  (textContent)
+(dom/set-text! el str)  ; => el
+(dom/html      el)      ; => String  (innerHTML)
+(dom/set-html! el str)  ; => el
+```
+
+### Style & form values
+```clojure
+(dom/style          el "prop")       ; => String
+(dom/set-style!     el "prop" val)   ; => el
+(dom/remove-style!  el "prop")       ; => el  (style.removeProperty)
+(dom/computed-style el "prop")       ; => String  (getComputedStyle(el).getPropertyValue)
+(dom/value          el)              ; => String  (input/select/textarea)
+(dom/set-value!     el val)          ; => el
+(dom/set-checked!   el bool)         ; => el  (HtmlInputElement.checked property)
+(dom/set-selected!  el bool)         ; => el  (HtmlOptionElement.selected property)
+(dom/set-prop!      el "name" val)   ; => el  (generic DOM property setter, via Reflect.set)
+(dom/get-prop       el "name")       ; => String | Double | boolean | nil
+```
+
+### Events
+```clojure
+; Managed callback — returns a DomListener that keeps the handler alive
+; opts is an optional map: {:capture bool :passive bool :once bool}
+(dom/listen!   el "click" handler-fn)       ; => DomListener
+(dom/listen!   el "click" handler-fn opts)  ; => DomListener
+(dom/unlisten! listener)                    ; => nil  (removes handler immediately)
+
+; Channel-based — returns a core.async channel; listener is leaked
+(dom/event-chan el "input")           ; => channel
+```
+
+### Scheduling
+```clojure
+(dom/request-animation-frame f) ; => Long (request id); calls (f) on the next frame
+```
+
+### Node memory
+```clojure
+(dom/remember! node value) ; => node  (associate an arbitrary value with a node)
+(dom/recall    node)       ; => value | nil
+```
+Identity is tracked via an expando id stamped onto the node; unlike a true
+`WeakMap`, entries are not released when the node itself becomes unreachable.
+
+Event maps delivered to callbacks:
+```clojure
+{:type        "click"
+ :target      <DomNode>
+ :bubbles     true
+ :cancelable  true
+ :prevent-default  #<NativeFn>  ; call ((:prevent-default event)) to cancel
+ :stop-propagation #<NativeFn>
+ ;; MouseEvent extras:
+ :client-x 0  :client-y 0  :button 0
+ ;; KeyboardEvent extras:
+ :key "Enter"  :code "Enter"
+ :ctrl-key false  :alt-key false  :shift-key false  :meta-key false}
+```
+
+### Hiccup renderer
+```clojure
+(dom/render! parent
+  [:div {:id "app" :class "container"}
+    [:h1 {} "Hello"]
+    [:p  {:style {:color "blue"}} "World"]
+    [:button {:on-click (fn [_] (println "clicked!"))} "Click me"]])
+; => parent  (all existing children replaced)
+```
+
+`:style` map values set individual CSS properties. `:on-*` attributes attach event listeners (closure leaked — no handle returned). Children may be strings, nested hiccup vectors, or `DomNode` values.

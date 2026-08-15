@@ -1,7 +1,7 @@
-# cljrs-dom requirements for a Replicant `:rust` backend
+# `cljrs.dom` requirements for a Replicant `:rust` backend
 
 This document specifies the additions needed in **clojurust**'s
-[`cljrs-dom`](https://github.com/csm/clojurust) crate (the `cljrs.dom` namespace)
+[`cljrs-wasm::dom`](https://github.com/csm/clojurust) module (the `cljrs.dom` namespace)
 before Replicant can be ported to compile to WebAssembly via `cljrs`.
 
 It exists because the porting work is *blocked upstream*: Replicant's renderer
@@ -53,7 +53,7 @@ DOM surface area Replicant needs is exactly the protocol above.
 
 ## What `cljrs.dom` already provides (sufficient as-is)
 
-Verified against the crate source (`crates/cljrs-dom/src/fns.rs`,
+Verified against the crate source (`crates/cljrs-wasm/src/dom/fns.rs`,
 `events.rs`, `node.rs`):
 
 | Replicant `IRender` method | `cljrs.dom` function | Notes |

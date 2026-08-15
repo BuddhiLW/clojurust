@@ -12,11 +12,11 @@ use cljrs_value::{
 use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::*;
 
-use crate::DOM_GLOBALS;
-use crate::events::{
+use crate::dom::DOM_GLOBALS;
+use crate::dom::events::{
     ListenerOptions, attach_render_listener, create_event_chan, create_listener, remove_listener,
 };
-use crate::node::{DOM_NODE_TAG, as_web_node, dom_node_value};
+use crate::dom::node::{DOM_NODE_TAG, as_web_node, dom_node_value};
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 

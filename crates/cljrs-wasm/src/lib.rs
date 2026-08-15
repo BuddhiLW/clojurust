@@ -1,3 +1,5 @@
+pub mod dom;
+
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -69,8 +71,8 @@ impl Repl {
             .expect("runtime")
             .into_globals();
         cljrs_stdlib::register(&globals);
-        cljrs_dom::set_globals(globals.clone());
-        cljrs_dom::register(&globals);
+        dom::set_globals(globals.clone());
+        dom::register(&globals);
 
         let local = Rc::new(LocalSet::new());
 
