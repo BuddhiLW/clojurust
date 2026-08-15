@@ -3,8 +3,8 @@
 
 use std::sync::Arc;
 
+use cljrs::commands::ir::viz::{RenderOptions, render_html};
 use cljrs_ir::lower::{lower_fn_body, optimize};
-use cljrs_ir_viz::{RenderOptions, render_html};
 use cljrs_reader::Parser;
 
 fn lower(source: &str) -> cljrs_ir::IrFunction {

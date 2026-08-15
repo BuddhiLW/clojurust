@@ -7,8 +7,8 @@ use cljrs_ir::lower::{AnalysisResult, EscapeContext, EscapeState, analyze, make_
 use cljrs_ir::{Block, BlockId, Const, Inst, IrFunction, Terminator, VarId};
 use cljrs_types::span::Span;
 
-use crate::blame::{blame_use, state_label, use_kind_label};
-use crate::region::{Region, collect_regions, membership_map};
+use crate::commands::ir::viz::blame::{blame_use, state_label, use_kind_label};
+use crate::commands::ir::viz::region::{Region, collect_regions, membership_map};
 
 /// Options for HTML rendering.
 #[derive(Debug, Clone, Default)]

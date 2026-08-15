@@ -115,7 +115,7 @@ pub fn resolve_versioned_value(
 }
 
 /// Resolve a pinned native symbol: first through the opt-in pinned-native
-/// package loader (`:rust/load :dylib`, installed by `cljrs-dylib`), then
+/// package loader (`:rust/load :dylib`, installed by the CLI), then
 /// through the verified HEAD binding.
 ///
 /// When the loader reports it registered the package at the pinned commit,

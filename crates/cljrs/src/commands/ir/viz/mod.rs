@@ -1,4 +1,4 @@
-//! HTML visualizer for clojurust IR.
+//! `cljrs ir viz` — the HTML visualizer for clojurust IR.
 //!
 //! Generates a single self-contained HTML file (inline CSS + JS, no external
 //! deps) that shows a function's IR alongside its source, color-coded by

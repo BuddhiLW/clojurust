@@ -745,13 +745,11 @@ dependencies = [
  "cljrs-base64",
  "cljrs-charset",
  "cljrs-compiler",
- "cljrs-dylib",
  "cljrs-eval",
  "cljrs-gc",
  "cljrs-interop",
  "cljrs-io",
  "cljrs-ir",
- "cljrs-ir-viz",
  "cljrs-lsp",
  "cljrs-net",
  "cljrs-nrepl",
@@ -875,23 +873,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "cljrs-dylib"
-version = "0.1.0"
-dependencies = [
- "cljrs-env",
- "cljrs-gc",
- "cljrs-interop",
- "cljrs-interp",
- "cljrs-project",
- "cljrs-reader",
- "cljrs-runtime",
- "cljrs-value",
- "libloading",
- "tempfile",
- "tracing",
-]
-
-[[package]]
 name = "cljrs-env"
 version = "0.1.0"
 dependencies = [
@@ -970,16 +951,6 @@ dependencies = [
  "cljrs-types",
  "postcard",
  "serde",
-]
-
-[[package]]
-name = "cljrs-ir-viz"
-version = "0.1.0"
-dependencies = [
- "cljrs-compiler",
- "cljrs-ir",
- "cljrs-reader",
- "cljrs-types",
 ]
 
 [[package]]

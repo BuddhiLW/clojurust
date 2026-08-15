@@ -41,12 +41,10 @@ cljrs-value    = { workspace = true }
 cljrs-eval     = { workspace = true }
 cljrs-stdlib   = { workspace = true }
 cljrs-compiler = { workspace = true }
-cljrs-ir-viz   = { workspace = true }
 cljrs-interop  = { workspace = true }
 cljrs-project  = { workspace = true, features = ["ssh"] }
 cljrs-lsp      = { workspace = true }
 cljrs-nrepl    = { workspace = true }
-cljrs-dylib    = { workspace = true }
 cljrs-ir       = { workspace = true }
 clap          = { workspace = true }
 miette        = { workspace = true }
@@ -62,4 +60,7 @@ cljrs-base64  = { workspace = true, optional = true }
 tokio         = { workspace = true, optional = true }
 
 [dev-dependencies]
+# The pinned-native e2e test builds a fixture crate against the workspace's
+# own cljrs-runtime, and the IR visualizer test lowers a snippet first.
+cljrs-runtime = { workspace = true }
 tempfile = "3"

@@ -156,14 +156,14 @@ pub struct GlobalEnv {
     /// (key: `"<ns>@<commit>"`), so each pin warns at most once.
     pub provenance_warned: Mutex<HashSet<Arc<str>>>,
     /// Optional loader for **pinned native packages** (`:rust/load :dylib`),
-    /// installed by `cljrs-dylib`.  Called by the versioned resolver with
+    /// installed by the CLI.  Called by the versioned resolver with
     /// `(globals, base_ns, commit)` before falling back to the HEAD native
     /// binding; returns `Ok(true)` when it registered the package's pinned
     /// implementations into the `"<base_ns>@<commit>"` namespace.
     #[allow(clippy::type_complexity)]
     pub pinned_native_loader: RwLock<Option<PinnedNativeLoader>>,
     /// Optional loader for **native dependencies on the plain `require` path**
-    /// (`:rust/load :dylib`), installed by `cljrs-dylib`.  Called by the
+    /// (`:rust/load :dylib`), installed by the CLI.  Called by the
     /// unversioned namespace loader with `(globals, ns)` when a `require`d
     /// namespace has no Clojure source on the source path; returns `Ok(true)`
     /// when it built the dep's crate at the pinned `:git/sha` and registered
@@ -657,7 +657,7 @@ impl GlobalEnv {
     }
 
     /// Install the pinned-native package loader (called once by
-    /// `cljrs_dylib::install`; first writer wins).
+    /// `cljrs::native::pinned::install`; first writer wins).
     pub fn set_pinned_native_loader(&self, loader: PinnedNativeLoader) {
         let mut guard = self.pinned_native_loader.write().unwrap();
         if guard.is_none() {
@@ -666,7 +666,7 @@ impl GlobalEnv {
     }
 
     /// Install the native-dependency `require` loader (called once by
-    /// `cljrs_dylib::install`; first writer wins).
+    /// `cljrs::native::pinned::install`; first writer wins).
     pub fn set_native_require_loader(&self, loader: NativeRequireLoader) {
         let mut guard = self.native_require_loader.write().unwrap();
         if guard.is_none() {

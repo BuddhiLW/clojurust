@@ -326,12 +326,12 @@ once per pin (`provenance_warned`), or errors when
 cljrs.edn `:enforce-native-versions`).
 
 Opt-in pinned native code: `GlobalEnv::set_pinned_native_loader` installs a
-`PinnedNativeLoader` callback (provided by `cljrs-dylib`); the resolver
+`PinnedNativeLoader` callback (provided by the CLI); the resolver
 consults it before the HEAD fallback, and a successful load redirects the
 lookup into the freshly registered `"<ns>@<commit>"` namespace.
 
 Plain `require` of a native dep: `GlobalEnv::set_native_require_loader`
-installs a `NativeRequireLoader` callback (also provided by `cljrs-dylib`).
+installs a `NativeRequireLoader` callback (also provided by the CLI).
 The unversioned namespace loader (`loader::do_load`) consults it when a
 `require`d namespace has no Clojure source on the source path; a successful
 load registers a `:rust/load :dylib` dep's exports into the **unversioned**

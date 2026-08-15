@@ -17,6 +17,8 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+pub mod viz;
+
 use clap::Subcommand;
 
 use cljrs_eval::{Env, GlobalEnv};
@@ -129,10 +131,10 @@ fn run_viz(
     let (source, ir) = cljrs_compiler::aot::lower_file_to_ir(&file, &src_paths, quiet)
         .map_err(|e| miette::miette!("{e}"))?;
     let title = format!("IR — {}", file.display());
-    let html = cljrs_ir_viz::render_html(
+    let html = viz::render_html(
         &ir,
         Some(&source),
-        &cljrs_ir_viz::RenderOptions { title: Some(title) },
+        &viz::RenderOptions { title: Some(title) },
     );
     let out_path = out.unwrap_or_else(|| {
         let mut p = file.clone();

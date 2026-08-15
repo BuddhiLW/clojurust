@@ -141,7 +141,7 @@ fn do_load(globals: &Arc<GlobalEnv>, ns_name: &Arc<str>) -> EvalResult<()> {
     } else {
         // No Clojure source on the path.  Before giving up, try loading the
         // namespace from a native dependency declared in `cljrs.edn` with
-        // `:rust/load :dylib` (the hook is installed by `cljrs-dylib`).  A
+        // `:rust/load :dylib` (the hook is installed by the CLI).  A
         // pure-native package has no `.cljrs`/`.cljc` file, so this is the
         // only path that brings it in via a plain `require`.
         if try_native_require(globals, ns_name)? {
@@ -198,7 +198,7 @@ fn do_load(globals: &Arc<GlobalEnv>, ns_name: &Arc<str>) -> EvalResult<()> {
     Ok(())
 }
 
-/// Consult the native-dependency `require` loader (installed by `cljrs-dylib`)
+/// Consult the native-dependency `require` loader (installed by the CLI)
 /// for `ns_name`.  Returns `Ok(true)` when a `:rust/load :dylib` dep covering
 /// the namespace was built and its exports registered into the unversioned
 /// namespace; `Ok(false)` when no loader is installed or no dep covers the

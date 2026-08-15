@@ -1,8 +1,18 @@
 //! Loading native (Rust) code into a running environment.
 //!
-//! One entry point today: the project's own `:rust` crate from `cljrs.edn`,
-//! built by `cljrs build-native` and `dlopen`ed by [`load_project_lib`] before
-//! any Clojure code runs.
+//! Two paths, both `dlopen`:
+//!
+//! * The **project's own** `:rust` crate from `cljrs.edn`, built by
+//!   `cljrs build-native` and loaded by [`load_project_lib`] before any Clojure
+//!   code runs.
+//! * A **dependency's** crate at a pinned commit ([`pinned`], `:rust/load
+//!   :dylib`), built on demand into a generated wrapper cdylib and loaded
+//!   through an ABI handshake.
+//!
+//! Both are host policy, not runtime policy: `cljrs_runtime` exposes the loader
+//! hooks and this is the CLI deciding to fill them in.
+
+pub mod pinned;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

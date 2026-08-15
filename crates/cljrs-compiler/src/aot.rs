@@ -331,7 +331,7 @@ fn count_alloc_stats(ir_func: &IrFunction) -> AllocStats {
 
 /// Run the AOT pipeline up to (and including) ANF lowering + region
 /// optimization, but stop before code generation.  Returns the source text
-/// and the optimized `IrFunction` so tools like `cljrs-ir-viz` can inspect
+/// and the optimized `IrFunction` so tools like `cljrs ir viz` can inspect
 /// exactly what the AOT compiler would lower.
 ///
 /// The `silent` flag suppresses the usual `[aot] ...` progress output.

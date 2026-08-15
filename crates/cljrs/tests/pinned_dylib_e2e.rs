@@ -5,7 +5,7 @@
 //! runs when `CLJRS_DYLIB_E2E=1` is set:
 //!
 //! ```sh
-//! CLJRS_DYLIB_E2E=1 cargo test -p cljrs-dylib --test pinned_dylib_e2e
+//! CLJRS_DYLIB_E2E=1 cargo test -p cljrs --test pinned_dylib_e2e
 //! ```
 //!
 //! Fixture: a git repository holding a tiny native crate (`pinlib`) whose
@@ -50,7 +50,7 @@ fn git_sha(dir: &Path, rev: &str) -> String {
     String::from_utf8(out.stdout).unwrap().trim().to_string()
 }
 
-/// Locate the clojurust workspace root (this crate is `<root>/crates/cljrs-dylib`).
+/// Locate the clojurust workspace root (this crate is `<root>/crates/cljrs`).
 fn workspace_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -168,10 +168,10 @@ fn pinned_native_dylib_end_to_end() {
     };
     *globals.deps_config.write().unwrap() = Some(Arc::new(config));
 
-    cljrs_dylib::install(&globals);
+    cljrs::native::pinned::install(&globals);
 
     // Resolve the pinned symbol: must build + load the v1 dylib.
-    let resolved = cljrs_env::versioned::resolve_versioned_value(
+    let resolved = cljrs_runtime::env::versioned::resolve_versioned_value(
         &globals,
         "user",
         Some("pinlib"),
@@ -196,7 +196,7 @@ fn pinned_native_dylib_end_to_end() {
 
     // Second resolution is served from the already-loaded namespace (no
     // rebuild): same value.
-    let again = cljrs_env::versioned::resolve_versioned_value(
+    let again = cljrs_runtime::env::versioned::resolve_versioned_value(
         &globals,
         "user",
         Some("pinlib"),
@@ -258,16 +258,16 @@ fn native_dep_loaded_by_plain_require() {
     };
     *globals.deps_config.write().unwrap() = Some(Arc::new(config));
 
-    cljrs_dylib::install(&globals);
+    cljrs::native::pinned::install(&globals);
 
     // A plain `(require '[pinlib :as pl])` must build + load the native dep.
-    let spec = cljrs_env::env::RequireSpec {
+    let spec = cljrs_runtime::env::env::RequireSpec {
         ns: Arc::from("pinlib"),
         version: None,
         alias: Some(Arc::from("pl")),
-        refer: cljrs_env::env::RequireRefer::None,
+        refer: cljrs_runtime::env::env::RequireRefer::None,
     };
-    cljrs_env::loader::load_ns(globals.clone(), &spec, "user")
+    cljrs_runtime::env::loader::load_ns(globals.clone(), &spec, "user")
         .expect("plain require of a native dep should succeed");
 
     // The unversioned namespace is now loaded and carries the dylib's export.

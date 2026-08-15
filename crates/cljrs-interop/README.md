@@ -140,12 +140,12 @@ impl Registry {
     pub fn new(env: Arc<GlobalEnv>) -> Self;
 
     /// Versioned view: registrations land in "<ns>@<commit>" namespaces.
-    /// Used by cljrs-dylib when loading a pinned native package; does NOT
+    /// Used by the CLI's pinned-package loader; does NOT
     /// auto-register the calling binary's #[export] inventory.
     pub fn versioned(env: Arc<GlobalEnv>, commit: &str) -> Self;
 
     /// Unversioned view that does NOT auto-register the host's #[export]
-    /// inventory.  Used by cljrs-dylib when a `:rust/load :dylib` dep is
+    /// inventory.  Used by the CLI's pinned-package loader when a `:rust/load :dylib` dep is
     /// brought in by a plain `require`: the dep's exports land in their real
     /// (unversioned) namespaces, but the dylib registers its own inventory.
     pub fn for_require(env: Arc<GlobalEnv>) -> Self;

@@ -1,9 +1,9 @@
 //! Tiny example: lower a snippet, optimize, and write the visualizer HTML
 //! to stdout.  Run with:
-//!   cargo run -p cljrs-ir-viz --example dump > /tmp/ir.html
+//!   cargo run -p cljrs --example ir_viz_dump > /tmp/ir.html
 
+use cljrs::commands::ir::viz::{RenderOptions, render_html};
 use cljrs_ir::lower::{lower_fn_body, optimize};
-use cljrs_ir_viz::{RenderOptions, render_html};
 use cljrs_reader::Parser;
 
 fn main() {

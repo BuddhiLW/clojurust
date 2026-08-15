@@ -4,7 +4,7 @@
 //! By default, a pinned symbol (`mylib/f@<sha>`) that resolves to a native
 //! (Rust-backed) function falls back to the **current binary's**
 //! implementation, with provenance verification (see
-//! `cljrs_env::versioned`).  This crate provides the opt-in alternative:
+//! `cljrs_runtime::env::versioned`).  This crate provides the opt-in alternative:
 //! true pinned native code.
 //!
 //! ## Flow
@@ -38,15 +38,15 @@
 //! A full C-ABI vtable is the safer long-term design and is deliberately
 //! deferred.
 
-// EvalError is large by design across the workspace (same allow as cljrs-env).
+// EvalError is large by design across the workspace (same allow as cljrs-runtime).
 #![allow(clippy::result_large_err)]
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use cljrs_env::env::GlobalEnv;
-use cljrs_env::error::{EvalError, EvalResult};
+use cljrs_eval::GlobalEnv;
 use cljrs_project::config::{Dependency, GitDep};
+use cljrs_runtime::env::error::{EvalError, EvalResult};
 
 /// Exported ABI-handshake symbol name.
 pub const ABI_SYMBOL: &[u8] = b"cljrs_dylib_abi\0";
@@ -78,9 +78,8 @@ fn host_profile() -> &'static str {
 
 /// Install the pinned-native package loader on `globals`.
 ///
-/// Idempotent (first writer wins).  Called by the `cljrs` CLI during
-/// environment setup; embedders that want `:rust/load :dylib` support call
-/// it after constructing their `GlobalEnv`.
+/// Idempotent (first writer wins).  Called by [`crate::session::setup_globals`]
+/// during environment setup.
 pub fn install(globals: &Arc<GlobalEnv>) {
     globals.set_pinned_native_loader(Arc::new(load_pinned));
     globals.set_native_require_loader(Arc::new(load_require));
@@ -109,7 +108,7 @@ fn load_pinned(globals: &Arc<GlobalEnv>, base_ns: &str, commit: &str) -> EvalRes
         .map_err(|e| EvalError::Runtime(format!("pinned native {versioned_ns}: {e}")))?;
 
     globals.mark_loaded(&versioned_ns);
-    eprintln!("[cljrs-dylib] loaded pinned native package {versioned_ns}");
+    eprintln!("[cljrs] loaded pinned native package {versioned_ns}");
     Ok(true)
 }
 
@@ -121,7 +120,7 @@ fn load_pinned(globals: &Arc<GlobalEnv>, base_ns: &str, commit: &str) -> EvalRes
 /// Unlike [`load_pinned`] (which serves versioned-symbol resolution and lands
 /// the package in the immutable `"<ns>@<commit>"` namespace), this registers
 /// into the live namespace so unversioned references resolve normally.  The
-/// caller (`cljrs-env`'s unversioned loader) marks `ns` loaded on success.
+/// caller (`cljrs-runtime`'s unversioned loader) marks `ns` loaded on success.
 fn load_require(globals: &Arc<GlobalEnv>, ns: &str) -> EvalResult<bool> {
     let config = globals.deps_config.read().unwrap().clone();
     let Some(config) = config else {
@@ -144,7 +143,7 @@ fn load_require(globals: &Arc<GlobalEnv>, ns: &str) -> EvalResult<bool> {
     load_library(globals, &lib_path, None)
         .map_err(|e| EvalError::Runtime(format!("native dep {ns}: {e}")))?;
 
-    eprintln!("[cljrs-dylib] loaded native dep {ns} (pinned {commit})");
+    eprintln!("[cljrs] loaded native dep {ns} (pinned {commit})");
     Ok(true)
 }
 
@@ -224,7 +223,7 @@ fn build_pinned_wrapper(git: &GitDep, commit: &str) -> Result<PathBuf, String> {
     if offline {
         cmd.arg("--offline");
     }
-    eprintln!("[cljrs-dylib] building pinned native package {pkg_ident}@{commit}…");
+    eprintln!("[cljrs] building pinned native package {pkg_ident}@{commit}…");
     let status = cmd.status().map_err(|e| format!("cargo: {e}"))?;
     if !status.success() {
         return Err(format!(
@@ -296,10 +295,10 @@ panic = "unwind"
     std::fs::write(wrapper_dir.join("build.rs"), build_rs).map_err(|e| e.to_string())?;
 
     let lib_rs = format!(
-        r#"//! Auto-generated pinned-package wrapper (cljrs-dylib).
+        r#"//! Auto-generated pinned-package wrapper (cljrs).
 
 /// ABI fingerprint baked at build time; must equal the host's
-/// `cljrs_dylib::abi_fingerprint()` exactly (including the build profile —
+/// `cljrs::native::pinned::abi_fingerprint()` exactly (including the build profile —
 /// cljrs-gc object headers differ between debug and release).
 #[cfg(debug_assertions)]
 static ABI: &str = concat!(
@@ -397,8 +396,7 @@ fn load_library(
         init(&mut registry as *mut _);
 
         // The dylib's code must stay mapped as long as any registered
-        // NativeFn closure exists (same contract as the CLI's
-        // load_native_lib).
+        // NativeFn closure exists (same contract as `super::load_project_lib`).
         std::mem::forget(lib);
     }
     Ok(())
@@ -416,7 +414,7 @@ fn dylib_cache_root() -> PathBuf {
 
 /// Locate a local clojurust checkout for path-pinned wrapper deps:
 /// `CLJRS_WORKSPACE_ROOT` override first, then this crate's compile-time
-/// manifest location (`<workspace>/crates/cljrs-dylib`).
+/// manifest location (`<workspace>/crates/cljrs`).
 fn find_workspace_root() -> Option<PathBuf> {
     let validate = |p: PathBuf| -> Option<PathBuf> {
         (p.join("Cargo.toml").exists() && p.join("crates/cljrs-interop/Cargo.toml").exists())
