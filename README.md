@@ -83,8 +83,9 @@ Tooling:
 | 12 | REPL & tooling (REPL, LSP, nREPL) | working |
 | async | core.async, async I/O, networking, charset | implemented |
 
-**1077 Rust tests** across the workspace, plus **11,005 assertions** in the
-AOT-compiled `clojure-test-suite`.
+**1,162 Rust tests** across the workspace, plus **5,486 assertions** in the
+`clojure-test-suite`, which passes identically under the interpreter and
+AOT-compiled.
 
 See [`TODO.md`](TODO.md) for the full itemised roadmap.
 
