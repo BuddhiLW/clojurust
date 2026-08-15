@@ -287,8 +287,9 @@ cljrs-stdlib --------> cljrs-runtime (via shims), cljrs-ir
     |
 cljrs-compiler ------> cljrs-runtime (via shims), cljrs-ir, cljrs-stdlib
     |                    (Cranelift JIT + AOT)
-    |                  + cljrs-async, cljrs-io, cljrs-net, cljrs-charset,
-    |                    cljrs-base64 — extensions its AOT harness initializes
+    |                  + cljrs-async — the state-machine poll ABI its codegen
+    |                    implements.  I/O, net, charset and base64 are *not*
+    |                    dependencies: the host passes an ExtensionSet
     |
 cljrs (binary) ------> cljrs-stdlib, cljrs-compiler, cljrs-lsp,
                        cljrs-nrepl, cljrs-deps, cljrs-vcs, cljrs-ir-viz,

@@ -13,7 +13,8 @@
 //!   `JITModule`, with an epoch-tagged code cache and reclamation
 //! - **Native AOT** (`aot`) — whole-program compilation to an object file plus
 //!   a generated Rust harness
-//! - **WASM AOT** (`wasm`) — the browser backend
+//! - **WASM AOT** (`wasm`) — the browser backend, behind the default-on
+//!   `wasm-aot` feature
 //!
 //! The JIT and AOT paths are not separate products: they share `typeinfer`,
 //! `codegen`, and the `rt_abi` runtime ABI directly, so a change to the
@@ -27,7 +28,9 @@
 pub mod aot;
 pub mod codegen;
 pub mod escape;
+pub mod extensions;
 pub mod jit;
 pub mod rt_abi;
 pub mod typeinfer;
+#[cfg(feature = "wasm-aot")]
 pub mod wasm;

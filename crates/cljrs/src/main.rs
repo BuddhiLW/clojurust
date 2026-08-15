@@ -15,6 +15,7 @@ use cljrs_stdlib::{self as cljrs_stdlib};
 use cljrs_value::Value;
 
 mod commands;
+mod extensions;
 use commands::ir::IrCommands;
 
 /// Default thread stack size: 64 MiB.
@@ -643,24 +644,22 @@ fn run_command(command: Commands, versioning: VersioningFlags) -> miette::Result
                     }
                 };
 
+                // The compiler does not pick extensions; this build's feature
+                // set does, exactly as it does for an interpreted run.
+                let session = cljrs_compiler::extensions::CompileSession::new(
+                    all_src_paths.clone(),
+                    extensions::default_set(),
+                )
+                .rust_config(rust_config.clone())
+                .verify_commit_signatures(versioning.verify_commit_signatures)
+                .opacity(opacity);
+
                 if target == CompileTarget::Wasm {
-                    cljrs_compiler::aot::compile_file_to_wasm(
-                        &entry_file,
-                        &out,
-                        &all_src_paths,
-                        opacity,
-                    )
-                    .map_err(|e| miette::miette!("{e}"))?;
+                    cljrs_compiler::aot::compile_file_to_wasm(&entry_file, &out, &session)
+                        .map_err(|e| miette::miette!("{e}"))?;
                 } else {
-                    cljrs_compiler::aot::compile_file(
-                        &entry_file,
-                        &out,
-                        &all_src_paths,
-                        rust_config.as_ref(),
-                        versioning.verify_commit_signatures,
-                        opacity,
-                    )
-                    .map_err(|e| miette::miette!("{e}"))?;
+                    cljrs_compiler::aot::compile_file(&entry_file, &out, &session)
+                        .map_err(|e| miette::miette!("{e}"))?;
                 }
             }
             Ok(0)

@@ -32,6 +32,7 @@ src/
   typeinfer.rs  — Phase 10.6 scalar representation inference (Repr lattice, fixpoint dataflow)
   aot.rs        — AOT driver: source → parse → expand → lower → codegen → cargo build → binary
   escape.rs     — (no-gc only) blacklist analysis: 4 checks that reject no-gc–unsafe IR patterns
+  extensions.rs — Extension / ExtensionSet descriptors + CompileSession: what the *host* supplies
   jit/          — in-process JIT tier (Cranelift `JITModule`) over the same codegen
     mod.rs        — `Jit` (the runtime's `JitBackend`) + `install`; `on_var_rebind` stales superseded code
     jit_compiler.rs — `compile_jit` / `compile_jit_poll`: build a `JITModule`, register rt_abi symbols, call shared codegen
@@ -39,14 +40,19 @@ src/
     code_cache.rs   — epoch-tagged module registry; stale/pin/reclaim at stop-the-world safepoints
     async_jit.rs    — `^:async` arity activation: lower → state machine → native poll fn
     osr_integration.rs — (test-only) end-to-end OSR entry compile + call
-  wasm/         — AOT Clojure → WebAssembly backend (scaffold; second backend over the same IR)
+  wasm/         — (feature `wasm-aot`) AOT Clojure → WebAssembly backend (second backend over the same IR)
     mod.rs      — public API (`compile_function`, `compile_bundle`, `WasmBackend`, `WasmError`); browser tier model
     abi.rs      — ABI/region contract: Value→i32, rt_abi import table, region-handle threading
     reloop.rs   — relooper: IR CFG → structured control flow (`Structured`); wasm-private
     emit.rs     — wasm-encoder emitter: IrFunction(s) → validated wasm module (subset; multi-function)
 ```
 
-### WebAssembly backend (`wasm/`)
+### WebAssembly backend (`wasm/`, feature `wasm-aot`)
+
+Behind the default-on `wasm-aot` feature, together with
+`aot::compile_file_to_wasm` and the `AotError::Wasm` variant.  Building with
+`--no-default-features` drops the backend and the `wasm-encoder` dependency,
+for hosts that only ever produce native binaries.
 
 **Phase 12-wasm (scaffold).** A second code-generation backend over the same
 regionalized `cljrs-ir` IR, targeting the browser, where no in-sandbox native
@@ -371,6 +377,54 @@ Environment: `CLJRS_JIT_THRESHOLD` (Tier-1 calls before compiling, default
 `CLJRS_JIT_NO_SPEC=1` (compile generically), `CLJRS_JIT_DEOPT_LIMIT` (entry-guard
 failures tolerated before a specialization is discarded).
 
+### Extensions and the compile session (`extensions.rs`)
+
+The compiler does not decide what a compiled program contains.  A host — the
+`cljrs` CLI from its enabled features and project configuration, or an
+embedding application — describes each optional extension generically and
+hands the set over:
+
+```rust
+pub struct Extension {
+    pub crate_name: &'static str,        // harness [dependencies] entry, e.g. "cljrs-io"
+    pub register: fn(&Arc<GlobalEnv>),   // compile-time registration (macro expansion)
+    pub init_path: &'static str,         // same fn, by name, for generated harness source
+}
+
+pub struct ExtensionSet { /* ordered */ }
+impl ExtensionSet {
+    pub fn new() -> Self;
+    pub fn with(self, e: Extension) -> Self;      pub fn push(&mut self, e: Extension);
+    pub fn register_all(&self, globals: &Arc<GlobalEnv>);
+    pub fn crate_names(&self) -> Vec<&'static str>;
+    pub fn harness_init_code(&self) -> String;
+    pub fn iter(&self) -> Iter<'_, Extension>;    pub fn len(&self) -> usize;
+    pub fn is_empty(&self) -> bool;
+}
+
+pub struct CompileSession { /* src_dirs, extensions, rust_config, signatures, opacity */ }
+impl CompileSession {
+    pub fn new(src_dirs: Vec<PathBuf>, extensions: ExtensionSet) -> Self;
+    pub fn rust_config(self, Option<RustConfig>) -> Self;
+    pub fn verify_commit_signatures(self, bool) -> Self;
+    pub fn opacity(self, OpacityPolicy) -> Self;
+    // accessors: src_dirs, extensions, rust_config_ref,
+    //            verifies_commit_signatures, opacity_policy, add_src_dir
+}
+```
+
+`compile_file` and `compile_file_to_wasm` take a `&CompileSession` and call
+`register_all` on the bootstrap environment (so `require` resolves during
+macro expansion) and `harness_init_code` when generating the harness (so the
+produced binary registers the same namespaces).  `crate_names` are merged into
+the harness `[dependencies]`, deduplicated against the base set.
+
+Consequently this package does **not** depend on `cljrs-io`, `cljrs-net`,
+`cljrs-charset`, or `cljrs-base64` — a compiler build never compiles the
+network stack.  `cljrs-async` remains a dependency because `codegen` and
+`rt_abi` implement its state-machine poll ABI; registering
+`clojure.core.async` is still the host's decision.
+
 ### AOT driver (`aot.rs`)
 
 ```rust
@@ -588,6 +642,16 @@ versioned loader rather than the plain `require` path.
 
 ---
 
+## Features
+
+| Feature | Default | Effect |
+|---------|---------|--------|
+| `wasm-aot` | on | The WebAssembly backend (`wasm/`), `aot::compile_file_to_wasm`, and the `wasm-encoder` dependency.  `--no-default-features` produces a native-only compiler. |
+| `no-gc` | off | Propagated to `cljrs-gc`/`cljrs-value`/`cljrs-eval`/`cljrs-interp`/`cljrs-stdlib`; enables the `escape.rs` blacklist analysis. |
+| `aot_full_test` | off | Runs the full (~120 test) AOT end-to-end suite instead of its core subset. |
+
+---
+
 ## Dependencies
 
 | Crate | Role |
@@ -602,5 +666,8 @@ versioned loader rather than the plain `require` path.
 | `cljrs-stdlib` (workspace) | `install` — stdlib namespaces in that environment |
 | `cranelift-*` (workspace) | Cranelift compiler infrastructure (`cranelift-object` for AOT, `cranelift-jit` for the `jit/` tier) |
 | `cljrs-logging` (workspace) | `feat_debug!("jit", …)` — JIT tier diagnostics |
+| `cljrs-async` (workspace) | `state_machine` — the poll ABI `codegen` and `rt_abi` implement.  An ABI dependency, not a product extension |
+| `cljrs-deps` (workspace) | `RustConfig` — the user's `:rust` crate configuration, carried in `CompileSession` |
+| `cljrs-io`/`-net`/`-charset`/`-base64` | **dev-dependencies only** — extensions the end-to-end tests supply the way a host does |
 | `cljrs-env` (via `cljrs-eval`) | `callback::invoke`, `apply::{type_tag_of, type_tag_matches}` — rt_call dispatch + protocol IC tag validation |
 | `target-lexicon` (workspace) | Target triple detection |
