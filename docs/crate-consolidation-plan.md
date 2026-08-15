@@ -19,12 +19,13 @@ This plan does not remove the tree-walking interpreter, JIT, AOT compiler, no-GC
 | 2. Create the merged runtime | Complete | `cljrs-env`/`-builtins`/`-interp`/`-eval` merged into `cljrs-runtime`; the four remain as re-export shims until Stage 6 |
 | 3. Simplify runtime state | Complete | One builder, one dispatch path; per-instance IR cache |
 | 4. Merge JIT and compiler packages | Complete | `cljrs-jit` folded into `cljrs-compiler::jit`; 33 packages → 32 |
-| 5. Consolidate project and CLI tools | Not started | |
+| 5. Consolidate project and CLI tools | Complete | `cljrs-deps`+`cljrs-vcs` → `cljrs-project`; `cljrs-logging` → `tracing`; `cljrs-dom` → `cljrs-wasm::dom`; `cljrs-dylib`/`cljrs-ir-viz` → `cljrs`; 32 packages → 27 |
 | 6. Remove compatibility packages | Not started | |
 
-Package count: 34 at baseline, 32 now, approximately 23 at target. Stage 2 does
+Package count: 34 at baseline, 27 now, approximately 23 at target. Stage 2 does
 not change the count — it moves four packages' code into `cljrs-runtime` and
-leaves them as re-export shims; Stage 6 deletes the shims and takes 32 → 28.
+leaves them as re-export shims; Stage 6 deletes those four shims and takes
+27 → 23.
 
 ### Corrections found while measuring the baseline
 
@@ -174,13 +175,13 @@ When none of these rules apply, use a Rust module.
 | `cljrs-interp` | `cljrs-runtime::interp` *(done, stage 2)* |
 | `cljrs-eval` | `cljrs-runtime::tiered` *(done, stage 2)* |
 | `cljrs-jit` | `cljrs-compiler::jit` *(done, stage 4)* |
-| `cljrs-ir-viz` | Internal `cljrs::commands::ir` module |
-| `cljrs-ir-prebuild` | Internal CLI module or removal |
-| `cljrs-deps` | `cljrs-project::config` |
-| `cljrs-vcs` | `cljrs-project::vcs` |
-| `cljrs-dylib` | Internal CLI native-package module |
-| `cljrs-dom` | `cljrs-wasm::dom` |
-| `cljrs-logging` | Standard `tracing` targets and filters |
+| `cljrs-ir-viz` | `cljrs::commands::ir::viz` *(done, stage 5)* |
+| `cljrs-ir-prebuild` | `cljrs::commands::ir` *(done, stage 1)* |
+| `cljrs-deps` | `cljrs-project::config` *(done, stage 5)* |
+| `cljrs-vcs` | `cljrs-project::vcs` *(done, stage 5)* |
+| `cljrs-dylib` | `cljrs::native::pinned` *(done, stage 5)* |
+| `cljrs-dom` | `cljrs-wasm::dom` *(done, stage 5)* |
+| `cljrs-logging` | Standard `tracing` targets and filters *(done, stage 5)* |
 
 Keep `cljrs-base64` and `cljrs-blake3` as native-package examples.
 If no core package requires them, exclude them from default workspace builds.
@@ -763,6 +764,140 @@ Validation gate:
 - Project configuration and VCS operations use one package.
 - Each standalone artifact still builds independently.
 - CLI help and command behavior remain compatible.
+
+#### Stage 5 outcome
+
+Five packages become modules of the thing that used them. Every one of them had
+exactly one consumer, produced no artifact of its own, and satisfied no boundary
+rule.
+
+| Former package | Now |
+|---|---|
+| `cljrs-deps` | `cljrs_project::config` |
+| `cljrs-vcs` | `cljrs_project::vcs` |
+| `cljrs-logging` | `tracing` targets + `cljrs_runtime::logging` filters |
+| `cljrs-dom` | `cljrs_wasm::dom` |
+| `cljrs-dylib` | `cljrs::native::pinned` |
+| `cljrs-ir-viz` | `cljrs::commands::ir::viz` |
+
+Package count: 32 → 27. Items 3 and 4 (IR visualization and the retained IR
+bundle code into `cljrs::commands::ir`) were partly done by Stage 1, which moved
+the `ir` *commands* there; this stage moves the visualizer's implementation in
+behind them and deletes the package.
+
+**1. `cljrs-project`.** `cljrs-deps` parses `cljrs.edn` into a `DepsConfig`;
+`cljrs-vcs` turns the git dependencies that config declares into files on disk.
+Every consumer that had one had the other. Both moved whole with `git mv`; the
+only edits to moved code were `crate::` → `crate::config::` / `crate::vcs::`
+and two doc references, and downstream call sites were the mechanical
+`cljrs_deps::` → `cljrs_project::config::` / `cljrs_vcs::` →
+`cljrs_project::vcs::`.
+
+`vcs` stays native-only. `cljrs-runtime` previously target-gated the whole
+`cljrs-vcs` dependency for `wasm32`; that gate now lives in `cljrs-project`
+itself — the module is `#[cfg(not(target_arch = "wasm32"))]` and gix/pgp/ssh-key
+are declared under the same predicate — so a `wasm32` build compiles neither,
+exactly as before. The `ssh` feature survives and the CLI still enables it.
+
+**6. `tracing` instead of `cljrs-logging`.** The package was a 158-line
+reimplementation of what `tracing` already does: a global feature→level map, two
+`eprintln!` macros, and a `-X debug:gc,jit` parser. The 42 emit sites are now
+`tracing::debug!(target: "jit", …)` / `tracing::trace!(target: "env", …)` — four
+targets in use, `gc`, `env`, `ir`, and `jit`, unchanged from the four feature
+names.
+
+Selection is a filter, built by the new `cljrs_runtime::logging`, which is where
+the CLI and the generated AOT harness meet so the two agree by construction
+rather than by duplicated generated source:
+
+- `base_filter(level)` — the host's `--debug`/`--trace` level, the cranelift
+  crates pinned to `warn` (moved here from the CLI, since an AOT binary links
+  them too), and the four feature targets pinned **off**. Pinning them off is
+  what preserves behaviour: a blanket `--debug` never turned the GC and JIT
+  firehoses on, and it still does not.
+- `apply_x_flag(filter, spec)` — one `-X` / `CLJRS_X_FLAG` spec.
+- `init_from_env()` — what the harness calls. It enables nothing unless
+  `CLJRS_X_FLAG` or `RUST_LOG` asks, so an AOT binary with neither set logs
+  exactly as much as it did with no subscriber at all.
+
+Two things improve rather than staying equal. `RUST_LOG` used to replace the
+CLI's whole filter, silently discarding `-X`; `-X` is now layered on top, so
+`RUST_LOG=warn -X debug:gc` gives both. And because these are ordinary `tracing`
+targets, `RUST_LOG=gc=debug` reaches them without `-X` at all. `cljrs-stdlib`
+listed the dependency without using it and simply drops it.
+
+**5. `cljrs-wasm::dom`.** `cljrs-wasm` was `cljrs-dom`'s only consumer, calling
+`set_globals` and `register` from `Repl::new`. The four files moved with
+`git mv`; its `wasm32`-gated browser bindings (`js-sys`, `web-sys` and its
+feature list) moved into `cljrs-wasm` under the same target predicate, so a
+native build still compiles none of them and `register` is still a no-op there.
+
+**2, 3, 4, 7. The CLI.** `crates/cljrs/src/main.rs` was 1,920 lines holding ten
+subcommands, the environment bootstrap, the REPL, the test runner, the async
+driver, and the native-library loader, with a `run_command` whose `Compile` arm
+alone ran to 120 lines. It is now:
+
+| Path | Holds |
+|---|---|
+| `main.rs` | a one-line shim over `cli::main` |
+| `cli.rs` | global flags, the miette hook, the tracing subscriber, the large-stack thread, the JIT/stats policy, and a ten-line dispatcher |
+| `commands/{run,repl,compile,eval,ir,test,deps,build_native,lsp,nrepl}.rs` | one module per subcommand: its clap `Args` and its `run` |
+| `session.rs` | what more than one subcommand needs: `setup_globals`, source-path helpers, `eval_in`/`eval_form`, error formatting |
+| `native.rs` → `native/{mod,pinned}.rs` | loading native code: the project's `:rust` cdylib, and pinned packages |
+
+Each subcommand's arguments moved from an inline `Commands` variant into a
+`#[derive(clap::Args)]` struct in its own module, which is what lets the
+argument definitions sit next to the code that reads them. **Every `--help`
+page is byte-identical to the pre-stage binary** — root and all fifteen
+subcommands, diffed.
+
+`cljrs` gains a library target. The binary is a shim over `cli::main`, and the
+library is what makes the CLI's internals reachable from `crates/cljrs/tests`,
+which `cljrs-dylib`'s end-to-end tests need now that they live there. It is a
+tool, not an embedding API, and the crate docs say so.
+
+The pinned-package wrapper symbols (`cljrs_dylib_abi`, `cljrs_dylib_init`) keep
+their names: they are the wire ABI between a host and every wrapper cdylib
+already cached under `~/.cljrs/cache/dylibs`, and renaming them would strand
+those caches for nothing. `build.rs` moved with the code, so the ABI fingerprint
+is still the host binary's own `rustc -V`.
+
+Two files moved for accuracy rather than necessity: `file_to_namespace` was
+private to the test runner but `compile`'s entry-namespace fallback needs it, so
+it sits in `session.rs` with the other source-path helpers; and `dump_escape`,
+an escape-analysis debug helper in `cljrs-ir-viz/examples` that never used the
+visualizer, moved to `cljrs-compiler`, whose `aot::lower_file_to_ir` it calls.
+
+Gate results:
+
+| Check | Result |
+|---|---|
+| `cargo fmt --all --check` | pass |
+| `cargo clippy --workspace --all-targets -- -D warnings` | pass |
+| `cargo test --workspace` | 1155 passed, 0 failed, 23 ignored, 140 targets (base: 1154/0/26, 148) |
+| The CLI depends on product-level packages instead of internal runtime layers | pass — `cljrs` now depends on `cljrs-runtime`, `cljrs-stdlib`, `cljrs-compiler`, `cljrs-project`, `cljrs-ir`, `cljrs-interop`, `cljrs-lsp`, `cljrs-nrepl`, the `cljrs-{types,gc,value,reader}` core, and the optional extensions — five fewer packages than before, and none of the five it dropped was a product. Its remaining `cljrs-eval` import is the Stage 2 shim, which Stage 6 rewrites to `cljrs_runtime::tiered` |
+| Project configuration and VCS operations use one package | pass — no `cljrs_deps::` or `cljrs_vcs::` path remains |
+| Each standalone artifact still builds independently | pass — `cljrs` (bin and lib), `cljrs-lsp`, `cljrs-nrepl`, and `cargo check -p cljrs-wasm --target wasm32-unknown-unknown` |
+| CLI help and command behaviour remain compatible | pass — **byte-identical** `--help` for the root and all fifteen subcommands, diffed against the pre-stage binary |
+| Pinned native packages, end to end | pass — `CLJRS_DYLIB_E2E=1 cargo test -p cljrs --test pinned_dylib_e2e`: both cases build real wrapper cdylibs and clear the ABI handshake |
+| `-X` / `RUST_LOG` selection | pass — `-X trace:env` and `RUST_LOG=env=trace` each produce the env traces; `--debug` and `--trace` leave all four targets off; `RUST_LOG=warn -X debug:gc` gives both; `CLJRS_X_FLAG=trace:env` works the same inside an AOT binary |
+| `cljrs eval`, `run samples/graph.cljrs`, `run samples/core_async.cljrs`, `compile -o life-sample samples/life.cljrs` + run, `ir viz` | pass |
+| `cljrs ir build --ns clojure.core` | 151 functions lowered, 2 unsupported — identical to stages 1 through 4 |
+| `no-gc` | pass — all eleven packages carrying the feature, plus `cljrs` with and without default features |
+
+The test-target count falls by 8 and the pass count rises by 1; both reconcile
+exactly. Targets: −2 (deps/vcs lib+doc targets net of `cljrs-project`'s), −2
+(`cljrs-logging`), −2 (`cljrs-dom`), +2 (`cljrs` gains lib and doctest targets),
+−4 (dylib and ir-viz lib+doc+test targets net of the two that moved into
+`crates/cljrs/tests`). Tests: `cljrs-logging`'s 3 unit tests are replaced by 4
+covering the filter, and every other test moved one for one — the workspace's
+static `#[test]` count goes 1,363 → 1,364. The 3 fewer *ignored* are
+`cljrs-logging`'s three ```` ```ignore ```` doc blocks.
+
+Deferred by design: the `cljrs-async` `wasm32` clippy warning (`Isolate::name`
+is never read on that target) is pre-existing and unrelated to this stage's
+boundaries; `wasm32` clippy is not part of the documented gate. The four
+Stage 2 shims are untouched — deleting them is Stage 6, which takes 27 → 23.
 
 ### Stage 6: Remove compatibility packages
 

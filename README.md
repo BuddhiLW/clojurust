@@ -55,7 +55,7 @@ Tooling:
 
 - **LSP server** — `cljrs lsp`: parse diagnostics + document-symbol outline (`cljrs-lsp`)
 - **nREPL server** — `cljrs nrepl`: bencode-over-TCP for CIDER/Calva/Conjure (`cljrs-nrepl`)
-- **IR visualizer** — `cljrs ir viz`: HTML view of optimized IR + region allocation (`cljrs-ir-viz`)
+- **IR visualizer** — `cljrs ir viz`: HTML view of optimized IR + region allocation
 - **Dependencies** — `cljrs deps fetch/status`: git-hosted deps from `cljrs.edn` (`cljrs-project`)
 - **WASM REPL** — browser REPL compiled to `wasm32-unknown-unknown` (`cljrs-wasm`)
 
@@ -114,7 +114,6 @@ See [`TODO.md`](TODO.md) for the full itemised roadmap.
 | Crate | Description | Status |
 |-------|-------------|--------|
 | [`cljrs-compiler`](crates/cljrs-compiler) | Cranelift codegen (generic over `Module`), type inference, C-ABI runtime bridge, AOT object/binary emission, and the in-process JIT (`jit/`): hot-arity native compilation, type specialization + inline caches, OSR, code unloading, region threading | working |
-| [`cljrs-ir-viz`](crates/cljrs-ir-viz) | HTML visualizer for optimized IR + region allocation (`cljrs ir viz`) | implemented |
 
 ### Interop
 
@@ -122,7 +121,6 @@ See [`TODO.md`](TODO.md) for the full itemised roadmap.
 |-------|-------------|--------|
 | [`cljrs-interop`](crates/cljrs-interop) | Rust ↔ Clojure FFI: NativeObject, FromValue/IntoValue, error bridging, Registry | mostly complete |
 | [`cljrs-export-macro`](crates/cljrs-export-macro) | Proc-macro backing `#[cljrs_interop::export]` (re-exported by `cljrs-interop`) | complete |
-| [`cljrs-dylib`](crates/cljrs-dylib) | Pinned native packages: build a dep's crate at a git commit as a cdylib and load it | experimental |
 | [`cljrs-base64`](crates/cljrs-base64) | Base64 encode/decode exposed as Clojure native functions (interop example) | implemented |
 | [`cljrs-blake3`](crates/cljrs-blake3) | BLAKE3 hashing exposed as Clojure native functions (interop example) | implemented |
 
@@ -275,8 +273,9 @@ cljrs-value ---------> cljrs-gc, cljrs-reader, cljrs-types
     |
 cljrs-ir ------------> cljrs-reader, cljrs-types
     |
-cljrs-runtime -------> cljrs-value, cljrs-gc, cljrs-reader, cljrs-ir
-    |                  modules: env, builtins, interp, tiered
+cljrs-runtime -------> cljrs-value, cljrs-gc, cljrs-reader, cljrs-ir,
+    |                  cljrs-project
+    |                  modules: env, builtins, interp, tiered, logging
     |
     |                  cljrs-env / cljrs-builtins / cljrs-interp / cljrs-eval
     |                  are deprecated re-export shims over those four modules
@@ -289,15 +288,16 @@ cljrs-compiler ------> cljrs-runtime (via shims), cljrs-ir, cljrs-stdlib
     |                    implements.  I/O, net, charset and base64 are *not*
     |                    dependencies: the host passes an ExtensionSet
     |
-cljrs (binary) ------> cljrs-stdlib, cljrs-compiler, cljrs-lsp,
-                       cljrs-nrepl, cljrs-project, cljrs-ir-viz,
-                       cljrs-interop  (+ async/net/charset behind features)
+cljrs (binary+lib) --> cljrs-stdlib, cljrs-compiler, cljrs-lsp,
+                       cljrs-nrepl, cljrs-project, cljrs-interop
+                       (+ async/net/charset/base64 behind features)
+                       modules: cli, commands (incl. ir::viz), session, native
 ```
 
-`cljrs-compiler`'s dependency on the extension crates is unconditional, so every
-consumer compiles the async and networking stacks. Stage 4 of
-[`docs/crate-consolidation-plan.md`](docs/crate-consolidation-plan.md) replaces
-it with an extension registry the CLI populates.
+The CLI is the only place that chooses optional extensions: `cljrs-compiler`
+does not depend on `cljrs-io`, `cljrs-net`, `cljrs-charset`, or `cljrs-base64`,
+and takes an `ExtensionSet` from its host instead (stage 4 of
+[`docs/crate-consolidation-plan.md`](docs/crate-consolidation-plan.md)).
 
 ---
 
@@ -320,11 +320,9 @@ crates/
   cljrs-stdlib/          # embedded standard library namespaces
   # compilation
   cljrs-compiler/        # Cranelift codegen + JIT + AOT
-  cljrs-ir-viz/          # IR HTML visualizer
   # interop
   cljrs-interop/         # Rust <-> Clojure FFI
   cljrs-export-macro/    # #[export] proc-macro
-  cljrs-dylib/           # pinned native packages
   cljrs-base64/          # base64 interop library
   cljrs-blake3/          # BLAKE3 interop library
   # async, I/O & networking
@@ -338,7 +336,7 @@ crates/
   cljrs-nrepl/           # nREPL server
   cljrs-wasm/            # browser REPL (wasm)
   # binary
-  cljrs/                 # CLI binary
+  cljrs/                 # CLI: subcommands, IR visualizer, native package loading
 examples/
   rust-interop/         # Rust interop example
 tests/
