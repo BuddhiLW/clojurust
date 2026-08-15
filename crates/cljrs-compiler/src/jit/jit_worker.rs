@@ -117,7 +117,7 @@ fn specs_from_profile(jit: &JitState, arity_id: u64, ir_func: &IrFunction) -> Op
 
 fn compile_function_request(tiers: &Arc<Tiers>, arity_id: u64, ir_func: &Arc<IrFunction>) {
     let specs = specs_from_profile(tiers.jit(), arity_id, ir_func).unwrap_or_default();
-    cljrs_logging::feat_debug!("jit", "compiling arity_id={} specs={:?}", arity_id, specs);
+    tracing::debug!(target: "jit", "compiling arity_id={} specs={:?}", arity_id, specs);
 
     // Isolate each compilation: a panic in codegen (e.g. an unsupported IR
     // shape that trips a Cranelift assertion) must not kill the worker
@@ -129,8 +129,8 @@ fn compile_function_request(tiers: &Arc<Tiers>, arity_id: u64, ir_func: &Arc<IrF
     })) {
         Ok(result) => result,
         Err(_) => {
-            cljrs_logging::feat_debug!(
-                "jit",
+            tracing::debug!(
+                target: "jit",
                 "compile panicked arity_id={}; staying at Tier 1",
                 arity_id
             );
@@ -151,8 +151,8 @@ fn compile_function_request(tiers: &Arc<Tiers>, arity_id: u64, ir_func: &Arc<IrF
             // stale instead; it is reclaimed at the next STW safepoint.
             let current = tiers.ir_cache().get(arity_id);
             if !current.is_some_and(|cur| Arc::ptr_eq(&cur, ir_func)) {
-                cljrs_logging::feat_debug!(
-                    "jit",
+                tracing::debug!(
+                    target: "jit",
                     "discarding stale compile arity_id={} epoch={}",
                     arity_id,
                     epoch,
@@ -160,8 +160,8 @@ fn compile_function_request(tiers: &Arc<Tiers>, arity_id: u64, ir_func: &Arc<IrF
                 code_cache::mark_stale(epoch);
                 return;
             }
-            cljrs_logging::feat_debug!(
-                "jit",
+            tracing::debug!(
+                target: "jit",
                 "compiled  arity_id={} epoch={} fn_ptr={:p}",
                 arity_id,
                 epoch,
@@ -172,15 +172,15 @@ fn compile_function_request(tiers: &Arc<Tiers>, arity_id: u64, ir_func: &Arc<IrF
             tiers.jit().store_native_fn(arity_id, fn_ptr, epoch);
         }
         Err(e) => {
-            cljrs_logging::feat_debug!("jit", "compile error arity_id={}: {}", arity_id, e,);
+            tracing::debug!(target: "jit", "compile error arity_id={}: {}", arity_id, e,);
             // Don't retry; the function stays at Tier 1.
         }
     }
 }
 
 fn compile_osr_request(jit: &JitState, arity_id: u64, header: u32, ir_func: &IrFunction) {
-    cljrs_logging::feat_debug!(
-        "jit",
+    tracing::debug!(
+        target: "jit",
         "osr compiling arity_id={} header=bb{}",
         arity_id,
         header
@@ -202,8 +202,8 @@ fn compile_osr_request(jit: &JitState, arity_id: u64, header: u32, ir_func: &IrF
         Ok(Ok((compiled, live_ins))) => {
             let fn_ptr = compiled.fn_ptr;
             let epoch = code_cache::register(arity_id, compiled);
-            cljrs_logging::feat_debug!(
-                "jit",
+            tracing::debug!(
+                target: "jit",
                 "osr compiled arity_id={} header=bb{} epoch={} fn_ptr={:p} live_ins={}",
                 arity_id,
                 header,
@@ -214,8 +214,8 @@ fn compile_osr_request(jit: &JitState, arity_id: u64, header: u32, ir_func: &IrF
             jit.store_osr_fn(arity_id, header, fn_ptr, epoch, live_ins);
         }
         Ok(Err(e)) => {
-            cljrs_logging::feat_debug!(
-                "jit",
+            tracing::debug!(
+                target: "jit",
                 "osr declined arity_id={} header=bb{}: {}",
                 arity_id,
                 header,
@@ -224,8 +224,8 @@ fn compile_osr_request(jit: &JitState, arity_id: u64, header: u32, ir_func: &IrF
             jit.mark_osr_failed(arity_id, header);
         }
         Err(_) => {
-            cljrs_logging::feat_debug!(
-                "jit",
+            tracing::debug!(
+                target: "jit",
                 "osr compile panicked arity_id={} header=bb{}; staying at Tier 1",
                 arity_id,
                 header

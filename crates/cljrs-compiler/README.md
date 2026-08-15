@@ -665,7 +665,7 @@ versioned loader rather than the plain `require` path.
 | `cljrs-runtime` (workspace) | `Runtime::builder` — bootstrap environment for macro expansion + harness |
 | `cljrs-stdlib` (workspace) | `install` — stdlib namespaces in that environment |
 | `cranelift-*` (workspace) | Cranelift compiler infrastructure (`cranelift-object` for AOT, `cranelift-jit` for the `jit/` tier) |
-| `cljrs-logging` (workspace) | `feat_debug!("jit", …)` — JIT tier diagnostics |
+| `tracing` (workspace) | `tracing::debug!(target: "jit", …)` — JIT tier diagnostics |
 | `cljrs-async` (workspace) | `state_machine` — the poll ABI `codegen` and `rt_abi` implement.  An ABI dependency, not a product extension |
 | `cljrs-project` (workspace) | `config::RustConfig` — the user's `:rust` crate configuration, carried in `CompileSession` |
 | `cljrs-io`/`-net`/`-charset`/`-base64` | **dev-dependencies only** — extensions the end-to-end tests supply the way a host does |

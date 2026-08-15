@@ -218,8 +218,8 @@ fn try_osr_enter(slot: &OsrSlot, regs: &Registers, env: &mut Env) -> Option<Eval
         let v = regs.values.get(var.0 as usize).and_then(|v| v.as_ref())?;
         call_args.push(v.clone());
     }
-    cljrs_logging::feat_debug!(
-        "jit",
+    tracing::debug!(
+        target: "jit",
         "osr entering native code ({} live-ins, epoch={})",
         call_args.len(),
         slot.epoch
@@ -1694,11 +1694,11 @@ pub(crate) fn eager_lower_fn(f: &CljxFn, env: &mut Env) {
         return;
     }
 
-    cljrs_logging::feat_trace!("ir", "eager_lower_fn {:?}", f.name);
+    tracing::trace!(target: "ir", "eager_lower_fn {:?}", f.name);
 
     // Don't lower macros (they operate on forms, not values).
     if f.is_macro {
-        cljrs_logging::feat_debug!("ir", "not lowering macro: {:?}", f.name);
+        tracing::debug!(target: "ir", "not lowering macro: {:?}", f.name);
         return;
     }
 
@@ -1714,7 +1714,7 @@ pub(crate) fn eager_lower_fn(f: &CljxFn, env: &mut Env) {
 
     // Don't nest lowering calls.
     if IR_LOWERING_ACTIVE.get() {
-        cljrs_logging::feat_trace!("ir", "lowering active, not continuing");
+        tracing::trace!(target: "ir", "lowering active, not continuing");
         return;
     }
 
@@ -1792,8 +1792,8 @@ pub(crate) fn eager_lower_fn(f: &CljxFn, env: &mut Env) {
         );
     }
 
-    cljrs_logging::feat_debug!(
-        "ir",
+    tracing::debug!(
+        target: "ir",
         "ir complete {:?} lowered:{} cached:{} failed:{}",
         f.name,
         lowered,

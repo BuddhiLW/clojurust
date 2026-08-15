@@ -250,8 +250,8 @@ pub fn lower_expanded_arity(
     do_optimize: bool,
     is_async: bool,
 ) -> Result<(IrFunction, Vec<(Arc<str>, Arc<str>)>), LowerError> {
-    cljrs_logging::feat_debug!(
-        "lower",
+    tracing::debug!(
+        target: "lower",
         "lowering {:?}/{:?} optimize? {}",
         ns,
         name,

@@ -47,7 +47,7 @@ Feature-scoped logging. Enables logging at `LEVEL` for the named comma-separated
 `FEATURES` only.
 
 ```
-cljrs -X debug:gc,reader run my-program.cljrs
+cljrs -X debug:gc,jit run my-program.cljrs
 cljrs -X trace:jit run my-program.cljrs
 ```
 

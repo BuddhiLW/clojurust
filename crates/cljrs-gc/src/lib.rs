@@ -266,7 +266,7 @@ impl MarkVisitor {
             let h = unsafe { &*header };
             unsafe { (h.trace_fn)(header as *const GcBoxHeader, self) };
         }
-        cljrs_logging::feat_debug!("gc", "drain visited {} objects", visited);
+        tracing::debug!(target: "gc", "drain visited {} objects", visited);
     }
 }
 
@@ -682,8 +682,8 @@ mod gc_full {
         pub fn collect<F: FnOnce(&mut MarkVisitor)>(&self, trace_roots: F) {
             let pre_count = self.inner.lock().unwrap().count;
             let pre_memory = self.memory_in_use.load(Ordering::Relaxed);
-            cljrs_logging::feat_debug!(
-                "gc",
+            tracing::debug!(
+                target: "gc",
                 "starting collection: {} objects, ~{} bytes in use",
                 pre_count,
                 pre_memory
@@ -700,8 +700,8 @@ mod gc_full {
             // Retired (poisoned) regions are immortal roots: their objects may
             // still be referenced and may hold `GcPtr`s into the heap.
             crate::region::trace_retired_regions(&mut visitor);
-            cljrs_logging::feat_debug!(
-                "gc",
+            tracing::debug!(
+                target: "gc",
                 "starting drain with {} grey objects",
                 visitor.grey.len()
             );
@@ -760,8 +760,8 @@ mod gc_full {
                 freed_bytes as u64,
             );
             let post_memory = self.memory_in_use.load(Ordering::Relaxed);
-            cljrs_logging::feat_debug!(
-                "gc",
+            tracing::debug!(
+                target: "gc",
                 "collection complete: freed {} (~{} bytes), {} remaining (~{} bytes), mark={:.2?} sweep={:.2?}",
                 freed_count,
                 freed_bytes,
@@ -818,9 +818,9 @@ mod gc_full {
         }
 
         pub fn collect_auto(&self) -> bool {
-            cljrs_logging::feat_debug!("gc", "automatic collection requested");
+            tracing::debug!(target: "gc", "automatic collection requested");
             let Some(_stw_guard) = crate::cancellation::begin_stw() else {
-                cljrs_logging::feat_debug!("gc", "automatic collection skipped");
+                tracing::debug!(target: "gc", "automatic collection skipped");
                 return false;
             };
             self.collect(|visitor| self.trace_registered_roots(visitor));

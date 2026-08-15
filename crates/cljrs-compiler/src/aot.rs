@@ -2101,8 +2101,8 @@ unsafe extern "C" {{
 {ns_init_externs}}}
 
 async fn run() {{
-    // Parse environment -X flags.
-    cljrs_logging::set_feature_levels_from_env().unwrap();
+    // Diagnostics: enabled only by CLJRS_X_FLAG / RUST_LOG.
+    cljrs_runtime::logging::init_from_env();
 
     // Ensure all rt_* symbols are linked into the binary.
     cljrs_compiler::rt_abi::anchor_rt_symbols();
@@ -2189,7 +2189,6 @@ fn main() {{
 /// decided the program should have `clojure.core.async`; registering that
 /// namespace is still the host's call.
 const HARNESS_RUNTIME_CRATES: &[&str] = &[
-    "cljrs-logging",
     "cljrs-types",
     "cljrs-gc",
     "cljrs-value",
@@ -2207,7 +2206,6 @@ const HARNESS_RUNTIME_CRATES: &[&str] = &[
 /// for the `rt_*` ABI bridges) but not the async/IO/net/charset stacks —
 /// those namespaces are not registered by the generated test runner.
 const TEST_HARNESS_RUNTIME_CRATES: &[&str] = &[
-    "cljrs-logging",
     "cljrs-types",
     "cljrs-gc",
     "cljrs-value",
@@ -2526,8 +2524,8 @@ use cljrs_value::Value;
 
     code.push_str(
         r#"fn run() {
-    // Set -X flags from environment.
-    cljrs_logging::set_feature_levels_from_env().unwrap();
+    // Diagnostics: enabled only by CLJRS_X_FLAG / RUST_LOG.
+    cljrs_runtime::logging::init_from_env();
 
     // Ensure all rt_* symbols are linked into the binary (the compiled
     // namespace initializers call them).

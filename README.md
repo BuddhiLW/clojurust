@@ -108,7 +108,6 @@ See [`TODO.md`](TODO.md) for the full itemised roadmap.
 | [`cljrs-ir`](crates/cljrs-ir) | IR types (ANF/SSA) with serialization (postcard); ANF lowering, escape analysis, OSR | complete |
 | [`cljrs-eval`](crates/cljrs-eval) | Re-export shim for `cljrs_runtime::tiered` | deprecated |
 | [`cljrs-stdlib`](crates/cljrs-stdlib) | Embedded stdlib: clojure.string, clojure.set, clojure.test, clojure.walk, clojure.edn, clojure.zip, clojure.data | complete |
-| [`cljrs-logging`](crates/cljrs-logging) | Feature-gated logging (`-X debug:ir`, `-X trace:gc`, etc.) | complete |
 
 ### Compilation
 
@@ -319,7 +318,6 @@ crates/
   cljrs-eval/            # deprecated shim -> cljrs_runtime::tiered
   cljrs-ir/              # IR types + lowering + serialization
   cljrs-stdlib/          # embedded standard library namespaces
-  cljrs-logging/         # feature-gated debug/trace logging
   # compilation
   cljrs-compiler/        # Cranelift codegen + JIT + AOT
   cljrs-ir-viz/          # IR HTML visualizer

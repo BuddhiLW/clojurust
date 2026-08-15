@@ -752,7 +752,6 @@ dependencies = [
  "cljrs-io",
  "cljrs-ir",
  "cljrs-ir-viz",
- "cljrs-logging",
  "cljrs-lsp",
  "cljrs-net",
  "cljrs-nrepl",
@@ -852,7 +851,6 @@ dependencies = [
  "cljrs-interp",
  "cljrs-io",
  "cljrs-ir",
- "cljrs-logging",
  "cljrs-net",
  "cljrs-project",
  "cljrs-reader",
@@ -871,6 +869,7 @@ dependencies = [
  "target-lexicon",
  "tempfile",
  "tokio",
+ "tracing",
  "wasm-encoder",
  "wasmparser",
 ]
@@ -899,13 +898,13 @@ dependencies = [
  "cljrs-gc",
  "cljrs-interop",
  "cljrs-interp",
- "cljrs-logging",
  "cljrs-project",
  "cljrs-reader",
  "cljrs-runtime",
  "cljrs-value",
  "libloading",
  "tempfile",
+ "tracing",
 ]
 
 [[package]]
@@ -936,11 +935,11 @@ name = "cljrs-gc"
 version = "0.1.0"
 dependencies = [
  "bigdecimal",
- "cljrs-logging",
  "num-bigint",
  "num-rational",
  "regex",
  "system-memory",
+ "tracing",
 ]
 
 [[package]]
@@ -998,10 +997,6 @@ dependencies = [
  "cljrs-reader",
  "cljrs-types",
 ]
-
-[[package]]
-name = "cljrs-logging"
-version = "0.1.0"
 
 [[package]]
 name = "cljrs-lsp"
@@ -1095,12 +1090,10 @@ dependencies = [
  "bigdecimal",
  "cljrs-gc",
  "cljrs-ir",
- "cljrs-logging",
  "cljrs-project",
  "cljrs-reader",
  "cljrs-types",
  "cljrs-value",
- "log",
  "num-bigint",
  "num-rational",
  "num-traits",
@@ -1110,6 +1103,8 @@ dependencies = [
  "rpds",
  "tempfile",
  "thiserror",
+ "tracing",
+ "tracing-subscriber",
  "uuid",
 ]
 
@@ -1119,7 +1114,6 @@ version = "0.1.0"
 dependencies = [
  "cljrs-gc",
  "cljrs-ir",
- "cljrs-logging",
  "cljrs-reader",
  "cljrs-runtime",
  "cljrs-value",

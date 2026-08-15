@@ -6,8 +6,6 @@ use std::time::Instant;
 use clap::{Parser, Subcommand, ValueEnum};
 use miette::IntoDiagnostic as _;
 use tracing_subscriber::filter::Targets;
-use tracing_subscriber::layer::SubscriberExt as _;
-use tracing_subscriber::util::SubscriberInitExt as _;
 
 use cljrs_eval::{Env, EvalError, GlobalEnv, eval};
 use cljrs_gc::GcConfig;
@@ -76,10 +74,10 @@ struct Cli {
     )]
     ir_threshold: Option<u32>,
 
-    /// Feature-level logging flags: -X debug:gc,jit or -X trace:reader
+    /// Feature-level logging flags: -X debug:gc,jit or -X trace:env
     ///
     /// Format: <level>:<feature1>,<feature2>,...
-    /// Levels: debug, trace
+    /// Levels: debug, trace.  Features: gc, env, ir, jit.
     #[arg(short = 'X', global = true, value_name = "LEVEL:FEATURES")]
     x_flags: Vec<String>,
 
@@ -308,30 +306,18 @@ fn build_gc_config(soft_limit_mb: Option<usize>, hard_limit_mb: Option<usize>) -
     }
 }
 
-/// Crates whose logging is noisy enough to drown out everything else.
-///
-/// Cranelift (and its register allocator) log whole function bodies of IR at
-/// `info`/`debug` through the `log` crate, which `tracing-subscriber`'s
-/// `tracing-log` bridge forwards into our subscriber.  A single JIT compile
-/// therefore buries any real message.  These stay at `warn` regardless of
-/// `--debug`/`--trace`; set `RUST_LOG` to see them.
-const NOISY_TARGETS: &[&str] = &[
-    "cranelift_codegen",
-    "cranelift_frontend",
-    "cranelift_jit",
-    "cranelift_module",
-    "cranelift_native",
-    "cranelift_object",
-    "regalloc2",
-];
-
 /// Install the global tracing subscriber.
 ///
 /// The default verbosity comes from `--debug`/`--trace`, with the noisy
-/// codegen crates pinned to `warn`.  `RUST_LOG` (in `tracing` target=level
-/// syntax, e.g. `RUST_LOG=info,cranelift_codegen=debug`) replaces those
-/// defaults entirely, so the IR dumps are still reachable when wanted.
-fn init_tracing(cli: &Cli) {
+/// codegen crates pinned to `warn` and the runtime's own feature targets
+/// (`gc`, `env`, `ir`, `jit`) pinned off — see
+/// [`cljrs_runtime::logging::base_filter`].  `RUST_LOG` (in `tracing`
+/// target=level syntax, e.g. `RUST_LOG=info,cranelift_codegen=debug`) replaces
+/// those defaults entirely, so the IR dumps are still reachable when wanted.
+///
+/// `-X debug:gc,jit` is layered on last, so it survives a `RUST_LOG` that says
+/// nothing about those targets.
+fn init_tracing(cli: &Cli) -> miette::Result<()> {
     let default_level = if cli.trace {
         tracing::Level::TRACE
     } else if cli.debug {
@@ -340,22 +326,20 @@ fn init_tracing(cli: &Cli) {
         tracing::Level::INFO
     };
 
-    let mut filter = Targets::new().with_default(default_level);
-    for target in NOISY_TARGETS {
-        filter = filter.with_target(*target, tracing::Level::WARN);
+    let mut filter = match std::env::var("RUST_LOG") {
+        Ok(spec) if !spec.trim().is_empty() => spec
+            .parse::<Targets>()
+            .unwrap_or_else(|_| cljrs_runtime::logging::base_filter(default_level)),
+        _ => cljrs_runtime::logging::base_filter(default_level),
+    };
+
+    for flag in &cli.x_flags {
+        filter = cljrs_runtime::logging::apply_x_flag(filter, flag)
+            .map_err(|e| miette::miette!("invalid -X flag: {e}"))?;
     }
 
-    if let Ok(spec) = std::env::var("RUST_LOG")
-        && !spec.trim().is_empty()
-        && let Ok(from_env) = spec.parse::<Targets>()
-    {
-        filter = from_env;
-    }
-
-    let _ = tracing_subscriber::registry()
-        .with(filter)
-        .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
-        .try_init();
+    cljrs_runtime::logging::init(filter);
+    Ok(())
 }
 
 fn main() -> miette::Result<()> {
@@ -369,12 +353,7 @@ fn main() -> miette::Result<()> {
     .into_diagnostic()?;
 
     let cli = Cli::parse();
-    init_tracing(&cli);
-
-    // Parse -X feature logging flags
-    for flag in &cli.x_flags {
-        cljrs_logging::parse_x_flag(flag).map_err(|e| miette::miette!("invalid -X flag: {e}"))?;
-    }
+    init_tracing(&cli)?;
 
     let stack_size = cli
         .stack_size_mb
