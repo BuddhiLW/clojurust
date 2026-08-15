@@ -40,6 +40,15 @@
 - [Interpreter mode](rust-interop/interpreter.md)
 - [AOT mode](rust-interop/aot.md)
 
+# Embedding
+
+- [Embedding clojurust](embedding/index.md)
+- [The runtime builder](embedding/runtime-builder.md)
+- [Execution modes](embedding/execution-modes.md)
+- [Extensions & native code](embedding/extensions.md)
+- [Evaluating code](embedding/evaluating.md)
+- [Limits & sandboxing](embedding/sandboxing.md)
+
 # Memory Management
 
 - [Overview](memory/index.md)

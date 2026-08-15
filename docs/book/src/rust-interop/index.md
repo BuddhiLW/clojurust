@@ -13,6 +13,11 @@ integration. The interop layer has two modes that work together:
 Both modes use the same API: a `Registry` object that maps Clojure-visible
 names to Rust functions.
 
+A third arrangement inverts the relationship: instead of `cljrs` loading your
+Rust, *your* program builds a runtime and registers its own functions into it.
+That is the [Embedding](../embedding/index.md) chapter, and it uses the same
+`Registry` described here.
+
 ## When to use Rust interop
 
 - Wrapping an existing Rust library (e.g. a database driver, image codec, or

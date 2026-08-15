@@ -12,6 +12,7 @@ can AOT-compile programs to standalone native binaries.
 - **Garbage collector** — a tracing GC manages all Clojure values; an optional region-based allocator is available for allocation-heavy code paths.
 - **AOT compilation** — `cljrs compile` produces a standalone native binary via Cranelift, or a WebAssembly module with `--target wasm`. See the [WebAssembly](wasm/index.md) chapter.
 - **Async & I/O** — `clojure.core.async` channels and non-blocking file I/O ship as optional crates layered over the interpreter. See the [Async & I/O](async-io/index.md) chapter.
+- **Embeddable** — the same runtime the CLI drives can be built inside your own Rust program as a scripting, rules, or plugin layer. See the [Embedding](embedding/index.md) chapter.
 
 ## Source file extensions
 

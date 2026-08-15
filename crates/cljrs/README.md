@@ -48,6 +48,12 @@ build.rs            — captures `rustc -V` for the pinned-package ABI fingerpri
     build_native.rs — `build-native`: cargo-build the project's `:rust` crate
     lsp.rs          — `lsp`: run the language server over stdio
     nrepl.rs        — `nrepl`: serve an nREPL session
+tests/
+  embedding_book_examples.rs — the snippets from the book's Embedding chapter
+                      (`docs/book/src/embedding/`), compiled and run so the
+                      documented host API cannot drift
+  pinned_dylib_e2e.rs — gated (`CLJRS_DYLIB_E2E=1`) pinned-native end-to-end
+                      test; described under Pinned native packages below
 ```
 
 ---
