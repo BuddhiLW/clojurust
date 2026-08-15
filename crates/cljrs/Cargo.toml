@@ -24,6 +24,10 @@ net     = ["dep:cljrs-net", "async"]
 charset = ["dep:cljrs-charset"]
 base64  = ["dep:cljrs-base64"]
 
+[lib]
+name = "cljrs"
+path = "src/lib.rs"
+
 [[bin]]
 name = "cljrs"
 path = "src/main.rs"

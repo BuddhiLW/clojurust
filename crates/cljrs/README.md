@@ -11,15 +11,35 @@ interactively exploring clojurust programs.
 
 ```
 src/
-  main.rs           — CLI entry point: Clap structs, miette error hook, subcommand
-                      dispatch, REPL loop, test harness, GC-stats reporter
+  main.rs           — the binary: a one-line shim over `cli::main`
+  lib.rs            — module index; the CLI lives in a library so its own
+                      integration tests can reach it (not an embedding API)
+  cli.rs            — global flags, the miette error hook, the tracing
+                      subscriber, the large-stack worker thread, and the
+                      subcommand dispatcher
+  session.rs        — everything more than one subcommand needs: `setup_globals`
+                      (runtime + stdlib + `cljrs.edn` wiring + JIT policy),
+                      source-path helpers, `eval_in` / `eval_form`, the async
+                      driver, and error formatting
+  native.rs         — loading native (Rust) code into a running environment:
+                      the project's `:rust` cdylib and the cargo/path helpers
   extensions.rs     — `default_set()`: the runtime extensions this build ships,
                       handed to the compiler for `cljrs compile` (the compiler
                       backend does not choose them)
-  commands/
-    mod.rs          — module index for the internal command implementations
-    ir.rs           — the `ir` subcommand: `IrCommands` enum, dispatch, bundle
-                      pre-lowering (`ir build`), bundle dump, HTML IR visualizer
+  commands/         — one module per subcommand: its clap `Args` and its `run`
+    mod.rs          — module index
+    run.rs          — `run`: interpret a file, then call `-main`
+    repl.rs         — `repl`: the interactive loop
+    compile.rs      — `compile`: `CompileTarget`, entry-namespace resolution,
+                      opacity policy, native and wasm AOT
+    eval.rs         — `eval`: one expression
+    ir.rs           — `ir`: `IrCommands` enum, dispatch, bundle pre-lowering
+                      (`ir build`), bundle dump, HTML IR visualizer
+    test.rs         — `test`: namespace discovery, the runner, the summary
+    deps.rs         — `deps fetch` / `deps status`
+    build_native.rs — `build-native`: cargo-build the project's `:rust` crate
+    lsp.rs          — `lsp`: run the language server over stdio
+    nrepl.rs        — `nrepl`: serve an nREPL session
 ```
 
 ---
