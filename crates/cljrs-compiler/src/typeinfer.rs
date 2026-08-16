@@ -14,20 +14,19 @@
 //! A var is given an unboxed repr only when the *exact* runtime semantics of
 //! the boxed bridge are expressible on the raw representation:
 //!
-//! - `rt_add`/`rt_sub`/`rt_mul` on `(Long, Long)` are *checked* and throw on
-//!   overflow (Clojure primitive-long semantics); the unboxed codegen path
-//!   emits `iadd`/`isub`/`imul` followed by a signed-overflow branch that
-//!   raises the same exception, so the two agree.  The `unchecked-*` family
-//!   (`rt_unchecked_*` / plain `iadd`) wraps, also consistently across tiers.
-//!   Mixed `Long`/`Double` operands promote to `f64`, identical to
-//!   `fcvt_from_sint` + `fadd`/….
+//! - `rt_add`/`rt_sub`/`rt_mul` promote overflowing `(Long, Long)` results to
+//!   BigInt. Because an unboxed `i64` destination cannot represent that
+//!   result-type change, checked Long arithmetic stays boxed. Mixed
+//!   `Long`/`Double` operands can remain unboxed as `f64`. The `unchecked-*`
+//!   family is unboxed for longs and wraps consistently across tiers.
 //! - `rt_lt`/`rt_gt`/`rt_lte`/`rt_gte` compare `(Long, Long)` as `i64` and
 //!   promote mixed operands to `f64` — identical to `icmp`/`fcmp`.
 //! - `rt_eq` on `(Long, Long)` is `i64` equality.  Other operand types keep
 //!   the boxed call (`Value` equality has cross-variant rules).
 //! - `rt_div` truncates `(Long, Long)` and yields nil for division by zero —
-//!   not expressible unboxed, so `Div`/`Rem` results stay boxed except the
-//!   all-`Double` case which is exactly `fdiv`.
+//!   not expressible unboxed, so only all-`Double` `Div` becomes `fdiv`.
+//!   `Rem` and `Mod` stay boxed for every operand representation; in
+//!   particular, `Mod` must retain divisor-sign semantics for negative longs.
 //! - Truthiness of an unboxed long/double is constant `true` (every number is
 //!   truthy); of an unboxed bool it is the raw `i8`.
 //!
@@ -58,11 +57,20 @@ fn meet(a: Lat, b: Lat) -> Lat {
     }
 }
 
-/// Result repr of an arithmetic [`KnownFn`] (`Add`/`Sub`/`Mul`) given operand
-/// reprs.  `None` (⊥) propagates; any boxed/non-numeric operand forces Boxed.
-fn arith_result(a: Lat, b: Lat) -> Lat {
+/// Result repr of wrapping `unchecked-*` arithmetic.
+fn unchecked_arith_result(a: Lat, b: Lat) -> Lat {
     match (a?, b?) {
         (Repr::Long, Repr::Long) => Some(Repr::Long),
+        (Repr::Long | Repr::Double, Repr::Long | Repr::Double) => Some(Repr::Double),
+        _ => Some(Repr::Boxed),
+    }
+}
+
+/// Result repr of promoting `+`/`-`/`*` arithmetic. Long overflow can produce
+/// a BigInt, so two Long operands require a boxed destination.
+fn promoting_arith_result(a: Lat, b: Lat) -> Lat {
+    match (a?, b?) {
+        (Repr::Long, Repr::Long) => Some(Repr::Boxed),
         (Repr::Long | Repr::Double, Repr::Long | Repr::Double) => Some(Repr::Double),
         _ => Some(Repr::Boxed),
     }
@@ -137,12 +145,12 @@ pub fn infer(func: &IrFunction, specs: &[Repr]) -> HashMap<VarId, Repr> {
                         let a = get(&lat, args[0]);
                         let b = get(&lat, args[1]);
                         let r = match kf {
-                            KnownFn::Add
-                            | KnownFn::Sub
-                            | KnownFn::Mul
-                            | KnownFn::UncheckedAdd
+                            KnownFn::Add | KnownFn::Sub | KnownFn::Mul => {
+                                promoting_arith_result(a, b)
+                            }
+                            KnownFn::UncheckedAdd
                             | KnownFn::UncheckedSub
-                            | KnownFn::UncheckedMul => arith_result(a, b),
+                            | KnownFn::UncheckedMul => unchecked_arith_result(a, b),
                             // Long/Long division truncates and nil-guards; only
                             // the all-double case is expressible unboxed.
                             KnownFn::Div => match (a, b) {
@@ -213,10 +221,10 @@ mod tests {
     use cljrs_ir::Block;
     use std::sync::Arc;
 
-    /// (fn [n] (loop [i 0 acc 0] (if (< i n) (recur (+ i 1) (+ acc i)) acc)))
-    /// with `n` specialized to Long: everything must come out unboxed.
+    /// An unchecked-add loop with `n` specialized to Long stays fully
+    /// unboxed because wrapping arithmetic cannot change its result type.
     #[test]
-    fn loop_counter_infers_long_when_param_specialized() {
+    fn unchecked_loop_counter_infers_long_when_param_specialized() {
         let mut f = IrFunction::new(Some(Arc::from("sum")), None);
         let n = f.fresh_var();
         f.params = vec![(Arc::from("n"), n)];
@@ -265,8 +273,8 @@ mod tests {
             phis: vec![],
             insts: vec![
                 Inst::Const(one, Const::Long(1)),
-                Inst::CallKnown(i2, KnownFn::Add, vec![i, one]),
-                Inst::CallKnown(acc2, KnownFn::Add, vec![acc, i]),
+                Inst::CallKnown(i2, KnownFn::UncheckedAdd, vec![i, one]),
+                Inst::CallKnown(acc2, KnownFn::UncheckedAdd, vec![acc, i]),
             ],
             terminator: Terminator::RecurJump {
                 target: header,
@@ -311,7 +319,7 @@ mod tests {
             insts: vec![
                 Inst::Const(x, Const::Long(5)),
                 Inst::Const(one, Const::Long(1)),
-                Inst::CallKnown(y, KnownFn::Add, vec![x, one]),
+                Inst::CallKnown(y, KnownFn::UncheckedAdd, vec![x, one]),
             ],
             terminator: Terminator::Return(y),
         });
@@ -320,6 +328,56 @@ mod tests {
         let reprs = infer(&f, &[]);
         assert_eq!(reprs.get(&x), Some(&Repr::Long));
         assert_eq!(reprs.get(&y), Some(&Repr::Long));
+    }
+
+    #[test]
+    fn mod_of_long_constants_stays_boxed() {
+        let mut f = IrFunction::new(None, None);
+        let minus_ten = f.fresh_var();
+        let three = f.fresh_var();
+        let result = f.fresh_var();
+        let entry = f.fresh_block();
+        f.blocks.push(Block {
+            id: entry,
+            phis: vec![],
+            insts: vec![
+                Inst::Const(minus_ten, Const::Long(-10)),
+                Inst::Const(three, Const::Long(3)),
+                Inst::CallKnown(result, KnownFn::Mod, vec![minus_ten, three]),
+            ],
+            terminator: Terminator::Return(result),
+        });
+
+        let reprs = infer(&f, &[]);
+        assert_eq!(reprs.get(&minus_ten), Some(&Repr::Long));
+        assert_eq!(reprs.get(&three), Some(&Repr::Long));
+        assert_eq!(
+            reprs.get(&result),
+            None,
+            "Mod must use the boxed rt_mod path, never unboxed remainder"
+        );
+    }
+
+    #[test]
+    fn promoting_long_arithmetic_stays_boxed() {
+        let mut f = IrFunction::new(None, None);
+        let max = f.fresh_var();
+        let one = f.fresh_var();
+        let result = f.fresh_var();
+        let entry = f.fresh_block();
+        f.blocks.push(Block {
+            id: entry,
+            phis: vec![],
+            insts: vec![
+                Inst::Const(max, Const::Long(i64::MAX)),
+                Inst::Const(one, Const::Long(1)),
+                Inst::CallKnown(result, KnownFn::Add, vec![max, one]),
+            ],
+            terminator: Terminator::Return(result),
+        });
+
+        let reprs = infer(&f, &[]);
+        assert_eq!(reprs.get(&result), None, "promoting + must stay boxed");
     }
 
     /// A phi joining a Long with a Boxed value must come out Boxed.

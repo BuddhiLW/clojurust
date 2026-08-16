@@ -7,6 +7,7 @@
 //! **Eligibility criteria** (all must hold):
 //! - The callee resolves to a named `IrFunction` in the same compilation unit.
 //! - The callee has no `LoadLocal` instructions (no environment captures).
+//! - The callee has no hidden capture parameters.
 //! - The callee has no subfunctions (no closures in its body).
 //! - The callee body fits within `INLINE_THRESHOLD` instructions.
 //! - The callee is not the caller itself (no direct recursion).
@@ -38,13 +39,22 @@ fn has_load_local(ir: &IrFunction) -> bool {
     })
 }
 
-fn is_eligible(callee: &IrFunction, forbidden: &HashSet<Arc<str>>) -> bool {
+fn is_eligible(callee: &IrFunction, arg_count: usize, forbidden: &HashSet<Arc<str>>) -> bool {
     let name_ok = callee
         .name
         .as_ref()
         .map(|n| !forbidden.contains(n))
         .unwrap_or(false); // unnamed callee → skip
     name_ok
+        // A LoadGlobal call only provides user arguments. A capturing arity's
+        // leading parameters are closure captures (including the mutable Var
+        // used by a recursive defn), not the closure value itself. Mapping a
+        // LoadGlobal result into those parameters makes `deref` see a function
+        // instead of a Var and silently turns recursive branches into nil.
+        // Exact equality is intentionally conservative for variadic callees:
+        // calls with extra rest arguments stay dynamic until the inliner
+        // models the variadic rest-parameter ABI explicitly.
+        && callee.params.len() == arg_count
         && callee.subfunctions.is_empty()
         && !has_load_local(callee)
         && !callee.blocks.is_empty()
@@ -455,7 +465,7 @@ fn inline_one_round(
                 };
                 let (fn_name, callee) =
                     resolve(*callee_var, args.len(), &var_defs, defn_map, registry)?;
-                if !is_eligible(callee, forbidden) {
+                if !is_eligible(callee, args.len(), forbidden) {
                     return None;
                 }
                 Some((inst_idx, fn_name, *callee_var, args.clone(), *dst))

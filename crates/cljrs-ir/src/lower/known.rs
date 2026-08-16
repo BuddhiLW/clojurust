@@ -55,7 +55,7 @@ pub fn resolve_known_fn(sym_name: &str) -> Option<KnownFn> {
         "*" => Some(KnownFn::Mul),
         "/" => Some(KnownFn::Div),
         "rem" => Some(KnownFn::Rem),
-        "mod" => Some(KnownFn::Rem),
+        "mod" => Some(KnownFn::Mod),
         "unchecked-add" | "unchecked-add-int" => Some(KnownFn::UncheckedAdd),
         "unchecked-subtract" | "unchecked-subtract-int" => Some(KnownFn::UncheckedSub),
         "unchecked-multiply" | "unchecked-multiply-int" => Some(KnownFn::UncheckedMul),

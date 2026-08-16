@@ -135,12 +135,10 @@ semantics survive on the raw representation, so a value's wasm local takes that
 machine type and intermediate scalar arithmetic compiles to native `i64`/`f64`
 ops instead of the heap-allocating `rt_*` bridges. Values are **boxed only where
 they flow into a boxed context** (call arg, collection element, `return`, boxed
-φ, var bridge); checked long `+`/`-` emit the same signed-overflow branch the
-native backend does (`rt_overflow_error` + `rt_throw` + early boxed-`nil`
-return). A `refine_reprs` pass **demotes back to boxed**, transitively, any
-unboxed producer the emitter can't lower (e.g. checked long `*`, which needs a
-128-bit overflow check wasm can't express), so the repr map only ever marks a
-value unboxed when the emitter can produce it unboxed.
+φ, var bridge). Promoting long `+`/`-`/`*` stay boxed because overflow can
+change the result type to BigInt. A `refine_reprs` pass **demotes back to
+boxed**, transitively, any unboxed producer the emitter cannot lower, so the
+repr map only ever marks a value unboxed when the emitter can produce it.
 
 **Typed parameter ABI.** A function with `^long`/`^double` parameter hints
 (`seed_reprs`, `is_typed`) compiles to **two** wasm functions: a *typed body*
@@ -195,7 +193,7 @@ All functions are `#[unsafe(no_mangle)] pub extern "C"` — called by symbol nam
 
 - **Constants:** `rt_const_nil`, `rt_const_true`, `rt_const_false`, `rt_const_long(i64)`, `rt_const_double(f64)`, `rt_const_char(u32)`, `rt_const_string(ptr, len)`, `rt_const_keyword(ptr, len)`, `rt_const_symbol(ptr, len)`.  nil, true/false, and longs in `0..1024` are interned once per process via `cljrs_gc::static_alloc` (program-lifetime, **not** GC-heap allocations — nothing traces the intern caches, so GC-managed entries would be swept after two collections and every compiled use would read freed memory; see `tests/interned_scalars.rs`)
 - **Truthiness:** `rt_truthiness(v) -> u8`
-- **Arithmetic:** `rt_add`, `rt_sub`, `rt_mul` (checked — throw on long overflow), `rt_div`, `rt_rem`, `rt_unchecked_add`, `rt_unchecked_sub`, `rt_unchecked_mul` (wrapping), `rt_overflow_error` (builds the integer-overflow exception for the unboxed checked-arithmetic codegen path)
+- **Arithmetic:** `rt_add`, `rt_sub`, `rt_mul` (promote overflowing longs to BigInt), `rt_div`, `rt_rem`, `rt_unchecked_add`, `rt_unchecked_sub`, `rt_unchecked_mul` (wrapping). `rt_overflow_error` remains available for explicit primitive-long codegen paths; promoting core arithmetic stays boxed.
 - **Comparison:** `rt_eq`, `rt_case_eq` (type-strict equality for `case` dispatch — `Long`/`BigInt` interchangeable, mixed numerics never equal), `rt_lt`, `rt_gt`, `rt_lte`, `rt_gte`
 - **Primitive arrays:** `rt_alength(arr) -> i64`, `rt_aget_long(arr, i) -> i64`, `rt_aget_double(arr, i) -> f64` (unboxed element loads), `rt_aset_long`/`rt_aset_double` (unboxed stores), `rt_aget`/`rt_aset` (boxed fallback for unknown element types) — all bounds-checked, throwing on out-of-range / type mismatch
 - **Collections:** `rt_alloc_vector`, `rt_alloc_map`, `rt_alloc_set`, `rt_alloc_list`, `rt_alloc_cons`, `rt_get`, `rt_count`, `rt_first`, `rt_rest` (both seq any value — vector/list/cons fast paths, plus string/map/set/lazy-seq via `seq`; `rt_first`/`rt_nth`/`rt_peek` return an *interior pointer* into vector storage, so escape analysis treats them as aliasing arg 0), `rt_next` (`seq`-of-`rest`: returns `nil` when exhausted, unlike `rt_rest`), `rt_assoc`, `rt_conj`
@@ -333,9 +331,9 @@ Forward fixpoint dataflow over the CFG (including `RecurJump` back-edges into
 loop-header phis).  Parameters are seeded from `specs`; constants and the
 arithmetic/comparison `KnownFn`s propagate; phis meet (mixed reprs fall back to
 `Boxed`).  A var gets an unboxed repr only where codegen can emit semantics
-matching the boxed rt_abi bridge: checked long `+`/`-`/`*` (overflow throws,
-via an inline signed-overflow branch matching `rt_add`/etc.), wrapping
-`unchecked-*`, f64 promotion for mixed operands, ordered float compares;
+matching the boxed rt_abi bridge: wrapping `unchecked-*`, f64 arithmetic for
+mixed numeric operands, and ordered float compares. Promoting long `+`/`-`/`*`
+stay boxed because overflow can produce BigInt.
 `Div`/`Rem` and cross-type `Eq` always stay boxed.
 
 ### JIT tier (`jit/`)

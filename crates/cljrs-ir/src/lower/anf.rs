@@ -242,25 +242,11 @@ fn lower_form(ctx: &mut LowerCtx, form: &Form) -> R {
             }
         }
         FormKind::Float(f) => Ok(ctx.emit_const(Const::Double(*f))),
-        FormKind::BigDecimal(s) => {
-            // Lossy: no BigDecimal Const exists yet, so approximate as f64.
-            let f: f64 = s.parse().unwrap_or(0.0);
-            Ok(ctx.emit_const(Const::Double(f)))
-        }
-        FormKind::Ratio(s) => {
-            // Lossy: no Ratio Const exists yet, so evaluate a/b as f64.
-            if let Some(pos) = s.find('/') {
-                let num: f64 = s[..pos].parse().unwrap_or(0.0);
-                let den: f64 = s[pos + 1..].parse().unwrap_or(1.0);
-                Ok(ctx.emit_const(Const::Double(if den != 0.0 { num / den } else { 0.0 })))
-            } else {
-                let f: f64 = s.parse().unwrap_or(0.0);
-                Ok(ctx.emit_const(Const::Double(f)))
-            }
-        }
+        FormKind::BigDecimal(s) => Ok(ctx.emit_const(Const::BigDecimal(Arc::from(s.as_str())))),
+        FormKind::Ratio(s) => Ok(ctx.emit_const(Const::Ratio(Arc::from(s.as_str())))),
         FormKind::Char(c) => Ok(ctx.emit_const(Const::Char(*c))),
         FormKind::Str(s) => Ok(ctx.emit_const(Const::Str(Arc::from(s.as_str())))),
-        FormKind::Regex(s) => Ok(ctx.emit_const(Const::Str(Arc::from(s.as_str())))),
+        FormKind::Regex(s) => Ok(ctx.emit_const(Const::Regex(Arc::from(s.as_str())))),
         FormKind::Symbolic(f) => Ok(ctx.emit_const(Const::Double(*f))),
         FormKind::Keyword(s) => Ok(ctx.emit_const(Const::Keyword(Arc::from(s.as_str())))),
         FormKind::AutoKeyword(s) => {
@@ -2255,6 +2241,7 @@ fn is_binary_foldable(kf: &KnownFn) -> bool {
             | KnownFn::Mul
             | KnownFn::Div
             | KnownFn::Rem
+            | KnownFn::Mod
             | KnownFn::Eq
             | KnownFn::Lt
             | KnownFn::Gt

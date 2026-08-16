@@ -1931,6 +1931,7 @@ edition = "2024"
 {native_deps}"#,
     );
     std::fs::write(harness_dir.join("Cargo.toml"), cargo_toml)?;
+    deps.seed_lockfile(&harness_dir)?;
 
     // Write build.rs — tells Cargo to link our object file.
     let obj_abs = std::fs::canonicalize(&obj_path)?;
@@ -2361,6 +2362,21 @@ impl HarnessDeps {
             // harness can never silently link a mismatched runtime.
             HarnessDeps::Published(version) => format!("{name} = \"={version}\"\n"),
         }
+    }
+
+    /// A path-dependency harness is built with `--offline`, but path
+    /// dependencies still have registry transitive dependencies. Seed the
+    /// generated standalone workspace with the checkout's lockfile so Cargo
+    /// selects the already-vetted, cached graph instead of resolving newly
+    /// published versions that cannot be downloaded offline.
+    fn seed_lockfile(&self, harness_dir: &Path) -> AotResult<()> {
+        if let HarnessDeps::Workspace(root) = self {
+            let source = root.join("Cargo.lock");
+            if source.is_file() {
+                std::fs::copy(source, harness_dir.join("Cargo.lock"))?;
+            }
+        }
+        Ok(())
     }
 }
 
@@ -2973,6 +2989,7 @@ edition = "2024"
 {runtime_deps}"#,
     );
     std::fs::write(harness_dir.join("Cargo.toml"), cargo_toml)?;
+    deps.seed_lockfile(&harness_dir)?;
 
     // Write build.rs — tells Cargo to link the compiled namespace initializers.
     let obj_abs = std::fs::canonicalize(&obj_path)?;

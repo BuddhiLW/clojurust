@@ -210,6 +210,21 @@ pub const RT_IMPORTS: &[RtImport] = &[
         results: &[I32],
     },
     RtImport {
+        name: "rt_const_regex",
+        params: &[I32, I64],
+        results: &[I32],
+    },
+    RtImport {
+        name: "rt_const_ratio",
+        params: &[I32, I64],
+        results: &[I32],
+    },
+    RtImport {
+        name: "rt_const_bigdecimal",
+        params: &[I32, I64],
+        results: &[I32],
+    },
+    RtImport {
         name: "rt_const_keyword",
         params: &[I32, I64],
         results: &[I32],
@@ -248,6 +263,11 @@ pub const RT_IMPORTS: &[RtImport] = &[
     },
     RtImport {
         name: "rt_rem",
+        params: &[I32, I32],
+        results: &[I32],
+    },
+    RtImport {
+        name: "rt_mod",
         params: &[I32, I32],
         results: &[I32],
     },
@@ -484,9 +504,8 @@ pub const RT_IMPORTS: &[RtImport] = &[
         params: &[],
         results: &[I32],
     },
-    // Boxed integer-overflow exception, raised by unboxed checked `+`/`-`/`*`
-    // when the `i64` result overflows (Clojure primitive-long semantics) — the
-    // wasm analogue of `codegen.rs::emit_long_overflow_check`.
+    // Boxed integer-overflow exception reserved for explicit primitive-long
+    // codegen paths. Promoting core arithmetic stays boxed.
     RtImport {
         name: "rt_overflow_error",
         params: &[],

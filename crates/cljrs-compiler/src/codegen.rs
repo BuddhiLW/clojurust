@@ -47,6 +47,9 @@ struct RuntimeFuncs {
     rt_const_double: FuncId,
     rt_const_char: FuncId,
     rt_const_string: FuncId,
+    rt_const_regex: FuncId,
+    rt_const_ratio: FuncId,
+    rt_const_bigdecimal: FuncId,
     /// Still declared for completeness (the rt_abi symbol exists), but
     /// keyword constants now go through the per-site inline cache
     /// (`rt_kw_ic_fill`); see `emit_keyword_ic`.
@@ -70,6 +73,7 @@ struct RuntimeFuncs {
     rt_aset: FuncId,
     rt_div: FuncId,
     rt_rem: FuncId,
+    rt_mod: FuncId,
     rt_eq: FuncId,
     rt_case_eq: FuncId,
     rt_lt: FuncId,
@@ -1532,6 +1536,9 @@ impl<'a, 'b, M: Module> FunctionTranslator<'a, 'b, M> {
                 Ok(self.builder.inst_results(call)[0])
             }
             Const::Str(s) => self.emit_string_const(self.rt.rt_const_string, s),
+            Const::Regex(s) => self.emit_string_const(self.rt.rt_const_regex, s),
+            Const::Ratio(s) => self.emit_string_const(self.rt.rt_const_ratio, s),
+            Const::BigDecimal(s) => self.emit_string_const(self.rt.rt_const_bigdecimal, s),
             Const::Keyword(s) => self.emit_keyword_ic(s),
             Const::Symbol(s) => self.emit_string_const(self.rt.rt_const_symbol, s),
         }
@@ -1921,7 +1928,8 @@ impl<'a, 'b, M: Module> FunctionTranslator<'a, 'b, M> {
         use cranelift_codegen::ir::condcodes::{FloatCC, IntCC};
         let (a, b) = (args[0], args[1]);
         match (known_fn, dst_repr) {
-            // Checked unboxed integer arithmetic — throws on overflow.
+            // Primitive-long support retained for explicitly unboxed IR.
+            // Ordinary promoting Add/Sub/Mul results are boxed by typeinfer.
             (KnownFn::Add | KnownFn::Sub | KnownFn::Mul, Repr::Long) => {
                 let av = self.use_var(a);
                 let bv = self.use_var(b);
@@ -2172,6 +2180,7 @@ impl<'a, 'b, M: Module> FunctionTranslator<'a, 'b, M> {
             KnownFn::UncheckedMul => self.rt.rt_unchecked_mul,
             KnownFn::Div => self.rt.rt_div,
             KnownFn::Rem => self.rt.rt_rem,
+            KnownFn::Mod => self.rt.rt_mod,
             KnownFn::Eq => self.rt.rt_eq,
             KnownFn::CaseEq => self.rt.rt_case_eq,
             KnownFn::Lt => self.rt.rt_lt,
@@ -2592,6 +2601,9 @@ fn declare_runtime_funcs<M: Module>(
         rt_const_double: declare_rt(module, "rt_const_double", &[types::F64], ptr)?,
         rt_const_char: declare_rt(module, "rt_const_char", &[types::I32], ptr)?,
         rt_const_string: declare_rt(module, "rt_const_string", &[ptr, types::I64], ptr)?,
+        rt_const_regex: declare_rt(module, "rt_const_regex", &[ptr, types::I64], ptr)?,
+        rt_const_ratio: declare_rt(module, "rt_const_ratio", &[ptr, types::I64], ptr)?,
+        rt_const_bigdecimal: declare_rt(module, "rt_const_bigdecimal", &[ptr, types::I64], ptr)?,
         rt_const_keyword: declare_rt(module, "rt_const_keyword", &[ptr, types::I64], ptr)?,
         rt_const_symbol: declare_rt(module, "rt_const_symbol", &[ptr, types::I64], ptr)?,
         rt_truthiness: declare_rt(module, "rt_truthiness", &[ptr], types::I8)?,
@@ -2616,6 +2628,7 @@ fn declare_runtime_funcs<M: Module>(
         rt_aset: declare_rt(module, "rt_aset", &[ptr, ptr, ptr], ptr)?,
         rt_div: declare_rt(module, "rt_div", &[ptr, ptr], ptr)?,
         rt_rem: declare_rt(module, "rt_rem", &[ptr, ptr], ptr)?,
+        rt_mod: declare_rt(module, "rt_mod", &[ptr, ptr], ptr)?,
         rt_eq: declare_rt(module, "rt_eq", &[ptr, ptr], ptr)?,
         rt_case_eq: declare_rt(module, "rt_case_eq", &[ptr, ptr], ptr)?,
         rt_lt: declare_rt(module, "rt_lt", &[ptr, ptr], ptr)?,
@@ -2924,9 +2937,8 @@ mod tests {
         assert!(!obj.is_empty());
     }
 
-    /// Phase 10.6: the same loop compiled with the parameter specialized to
-    /// Long must pass the Cranelift verifier — entry guard, unboxed loop
-    /// phis, raw iadd/icmp arithmetic, and boxing on the return edge.
+    /// Phase 10.6: the same loop compiled with a Long-specialized parameter
+    /// must pass the verifier when promoting arithmetic forces boxed loop phis.
     #[test]
     fn test_compile_loop_recur_specialized_long() {
         let body = parse_body("(loop [i 0 acc 0] (if (< i n) (recur (+ i 1) (+ acc i)) acc))");

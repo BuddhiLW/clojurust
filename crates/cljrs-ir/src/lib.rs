@@ -147,15 +147,15 @@ pub enum KnownFn {
     Pop,
     Vec,
 
-    // Arithmetic (pure, no alloc for i64/f64)
+    // Arithmetic (pure; overflowing Long operations may allocate a BigInt)
     Add,
     Sub,
     Mul,
     Div,
     Rem,
+    Mod,
 
-    // Unchecked integer arithmetic — wraps on overflow (never promotes/throws).
-    // The checked `Add`/`Sub`/`Mul` throw on unboxed-Long overflow; these do not.
+    // Unchecked integer arithmetic — wraps on overflow instead of promoting.
     UncheckedAdd,
     UncheckedSub,
     UncheckedMul,
@@ -329,6 +329,12 @@ pub enum Const {
     Long(i64),
     Double(f64),
     Str(Arc<str>),
+    /// Regex source, compiled when the constant is materialized.
+    Regex(Arc<str>),
+    /// Exact ratio spelling (`numerator/denominator`).
+    Ratio(Arc<str>),
+    /// Exact reader-normalized BigDecimal spelling.
+    BigDecimal(Arc<str>),
     Keyword(Arc<str>),
     Symbol(Arc<str>),
     Char(char),
@@ -1017,6 +1023,7 @@ impl KnownFn {
             | KnownFn::Mul
             | KnownFn::Div
             | KnownFn::Rem
+            | KnownFn::Mod
             | KnownFn::UncheckedAdd
             | KnownFn::UncheckedSub
             | KnownFn::UncheckedMul

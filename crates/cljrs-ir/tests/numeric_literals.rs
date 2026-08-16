@@ -6,6 +6,7 @@
 //! results — see `lower_form`'s `FormKind::BigInt` arm).
 
 use cljrs_ir::lower::{LowerError, lower_fn_body};
+use cljrs_ir::{Const, Inst};
 use cljrs_reader::Parser;
 
 fn try_lower(source: &str) -> Result<cljrs_ir::IrFunction, LowerError> {
@@ -36,4 +37,34 @@ fn bigint_literal_overflowing_i64_is_an_error() {
         }
         other => panic!("expected UnsupportedForm, got {other:?}"),
     }
+}
+
+#[test]
+fn exact_literal_kinds_survive_lowering() {
+    let ir = try_lower(r#"1/3 1.25M #"[a-z]+""#).expect("exact literals should lower");
+    let constants: Vec<&Const> = ir
+        .blocks
+        .iter()
+        .flat_map(|block| &block.insts)
+        .filter_map(|inst| match inst {
+            Inst::Const(_, constant) => Some(constant),
+            _ => None,
+        })
+        .collect();
+
+    assert!(
+        constants
+            .iter()
+            .any(|c| matches!(c, Const::Ratio(s) if s.as_ref() == "1/3"))
+    );
+    assert!(
+        constants
+            .iter()
+            .any(|c| matches!(c, Const::BigDecimal(s) if s.as_ref() == "1.25"))
+    );
+    assert!(
+        constants
+            .iter()
+            .any(|c| matches!(c, Const::Regex(s) if s.as_ref() == "[a-z]+"))
+    );
 }

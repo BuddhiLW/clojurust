@@ -132,17 +132,26 @@ fn capture_or_print(s: &str) -> bool {
 /// `doc-data` read it back off the var's metadata like any other docstring.
 const BUILTIN_DOCS: &[(&str, &str)] = &[
     // Arithmetic
-    ("+", "Returns the sum of nums. (+) returns 0."),
+    (
+        "+",
+        "Returns the sum of nums, promoting to BigInt on integer overflow. (+) returns 0.",
+    ),
     (
         "+'",
         "Returns the sum of nums, promoting to BigInt on overflow. (+') returns 0.",
     ),
-    ("-", "Negates x, or subtracts the rest of ys from x."),
+    (
+        "-",
+        "Negates x, or subtracts the rest of ys from x, promoting to BigInt on integer overflow.",
+    ),
     (
         "-'",
         "Negates x, or subtracts the rest of ys from x, promoting to BigInt on overflow.",
     ),
-    ("*", "Returns the product of nums. (*) returns 1."),
+    (
+        "*",
+        "Returns the product of nums, promoting to BigInt on integer overflow. (*) returns 1.",
+    ),
     (
         "*'",
         "Returns the product of nums, promoting to BigInt on overflow. (*') returns 1.",
@@ -160,8 +169,14 @@ const BUILTIN_DOCS: &[(&str, &str)] = &[
         "Remainder of dividing num by div; result has the same sign as num.",
     ),
     ("quot", "Quotient of dividing num by div."),
-    ("inc", "Returns a number one greater than x."),
-    ("dec", "Returns a number one less than x."),
+    (
+        "inc",
+        "Returns a number one greater than x, promoting to BigInt on integer overflow.",
+    ),
+    (
+        "dec",
+        "Returns a number one less than x, promoting to BigInt on integer overflow.",
+    ),
     ("abs", "Returns the absolute value of x."),
     (
         "unchecked-add",
@@ -2036,7 +2051,7 @@ fn simplify_bigint(n: BigInt) -> Value {
     }
 }
 
-fn builtin_add(args: &[Value]) -> ValueResult<Value> {
+pub fn builtin_add(args: &[Value]) -> ValueResult<Value> {
     let cat = widest_category(args)?;
     match cat {
         NumCat::Double => {
@@ -2069,18 +2084,16 @@ fn builtin_add(args: &[Value]) -> ValueResult<Value> {
         }
         NumCat::Long => {
             let mut sum: i64 = 0;
-            for v in args {
+            for (index, v) in args.iter().enumerate() {
                 let n = numeric_as_i64(v)?;
                 match sum.checked_add(n) {
-                    Some(s) => sum = s,
+                    Some(next) => sum = next,
                     None => {
-                        // Overflow: promote to BigInt for remaining args
-                        let mut big = BigInt::from(sum) + BigInt::from(n);
-                        for v2 in &args[args.iter().position(|x| std::ptr::eq(x, v)).unwrap() + 1..]
-                        {
-                            big += numeric_as_bigint(v2)?;
+                        let mut promoted = BigInt::from(sum) + BigInt::from(n);
+                        for remaining in &args[index + 1..] {
+                            promoted += numeric_as_bigint(remaining)?;
                         }
-                        return Ok(simplify_bigint(big));
+                        return Ok(simplify_bigint(promoted));
                     }
                 }
             }
@@ -2121,7 +2134,7 @@ fn builtin_add_quote(args: &[Value]) -> ValueResult<Value> {
     }
 }
 
-fn builtin_sub(args: &[Value]) -> ValueResult<Value> {
+pub fn builtin_sub(args: &[Value]) -> ValueResult<Value> {
     if args.is_empty() {
         return Err(ValueError::ArityError {
             name: "-".into(),
@@ -2133,7 +2146,7 @@ fn builtin_sub(args: &[Value]) -> ValueResult<Value> {
         return match &args[0] {
             Value::Long(n) => match n.checked_neg() {
                 Some(r) => Ok(Value::Long(r)),
-                None => Ok(Value::BigInt(GcPtr::new(-BigInt::from(*n)))),
+                None => Ok(simplify_bigint(-BigInt::from(*n))),
             },
             Value::Double(f) => Ok(Value::Double(-f)),
             Value::BigInt(n) => Ok(simplify_bigint(-n.get().clone())),
@@ -2177,17 +2190,16 @@ fn builtin_sub(args: &[Value]) -> ValueResult<Value> {
         }
         NumCat::Long => {
             let mut result = numeric_as_i64(&args[0])?;
-            for v in &args[1..] {
+            for (offset, v) in args[1..].iter().enumerate() {
                 let n = numeric_as_i64(v)?;
                 match result.checked_sub(n) {
-                    Some(r) => result = r,
+                    Some(next) => result = next,
                     None => {
-                        let mut big = BigInt::from(result) - BigInt::from(n);
-                        for v2 in &args[args.iter().position(|x| std::ptr::eq(x, v)).unwrap() + 1..]
-                        {
-                            big -= numeric_as_bigint(v2)?;
+                        let mut promoted = BigInt::from(result) - BigInt::from(n);
+                        for remaining in &args[offset + 2..] {
+                            promoted -= numeric_as_bigint(remaining)?;
                         }
-                        return Ok(simplify_bigint(big));
+                        return Ok(simplify_bigint(promoted));
                     }
                 }
             }
@@ -2264,7 +2276,7 @@ fn builtin_mul_quote(args: &[Value]) -> ValueResult<Value> {
     }
 }
 
-fn builtin_mul(args: &[Value]) -> ValueResult<Value> {
+pub fn builtin_mul(args: &[Value]) -> ValueResult<Value> {
     let cat = widest_category(args)?;
     match cat {
         NumCat::Double => {
@@ -2297,17 +2309,16 @@ fn builtin_mul(args: &[Value]) -> ValueResult<Value> {
         }
         NumCat::Long => {
             let mut result: i64 = 1;
-            for v in args {
+            for (index, v) in args.iter().enumerate() {
                 let n = numeric_as_i64(v)?;
                 match result.checked_mul(n) {
-                    Some(r) => result = r,
+                    Some(next) => result = next,
                     None => {
-                        let mut big = BigInt::from(result) * BigInt::from(n);
-                        for v2 in &args[args.iter().position(|x| std::ptr::eq(x, v)).unwrap() + 1..]
-                        {
-                            big *= numeric_as_bigint(v2)?;
+                        let mut promoted = BigInt::from(result) * BigInt::from(n);
+                        for remaining in &args[index + 1..] {
+                            promoted *= numeric_as_bigint(remaining)?;
                         }
-                        return Ok(simplify_bigint(big));
+                        return Ok(simplify_bigint(promoted));
                     }
                 }
             }
@@ -2366,7 +2377,7 @@ fn builtin_div(args: &[Value]) -> ValueResult<Value> {
     }
 }
 
-fn builtin_mod(args: &[Value]) -> ValueResult<Value> {
+pub fn builtin_mod(args: &[Value]) -> ValueResult<Value> {
     // Clojure mod: result has same sign as divisor.
     use num_bigint::BigInt;
     match (&args[0], &args[1]) {
@@ -2573,7 +2584,10 @@ fn builtin_quot(args: &[Value]) -> ValueResult<Value> {
 
 fn builtin_inc(args: &[Value]) -> ValueResult<Value> {
     match &args[0] {
-        Value::Long(n) => Ok(Value::Long(n.wrapping_add(1))),
+        Value::Long(n) => Ok(n
+            .checked_add(1)
+            .map(Value::Long)
+            .unwrap_or_else(|| simplify_bigint(BigInt::from(*n) + BigInt::from(1)))),
         Value::Double(f) => Ok(Value::Double(f + 1.0)),
         Value::Ratio(r) => Ok(Value::Ratio(GcPtr::new(
             r.get().add(Ratio::new(BigInt::from(1), BigInt::from(1))),
@@ -2589,7 +2603,10 @@ fn builtin_inc(args: &[Value]) -> ValueResult<Value> {
 
 fn builtin_dec(args: &[Value]) -> ValueResult<Value> {
     match &args[0] {
-        Value::Long(n) => Ok(Value::Long(n.wrapping_sub(1))),
+        Value::Long(n) => Ok(n
+            .checked_sub(1)
+            .map(Value::Long)
+            .unwrap_or_else(|| simplify_bigint(BigInt::from(*n) - BigInt::from(1)))),
         Value::Double(f) => Ok(Value::Double(f - 1.0)),
         Value::Ratio(r) => Ok(Value::Ratio(GcPtr::new(
             r.get().sub(Ratio::new(BigInt::from(1), BigInt::from(1))),
@@ -8716,6 +8733,37 @@ mod doc_tests {
         for (name, _) in BUILTIN_DOCS {
             assert!(seen.insert(*name), "duplicate BUILTIN_DOCS entry: {name:?}");
         }
+    }
+
+    #[test]
+    fn long_arithmetic_promotes_on_overflow() {
+        let assert_bigint = |result: ValueResult<Value>, expected: &str| match result {
+            Ok(Value::BigInt(value)) => assert_eq!(value.get().to_string(), expected),
+            other => panic!("expected BigInt {expected}, got {other:?}"),
+        };
+
+        assert_bigint(
+            builtin_add(&[Value::Long(i64::MAX), Value::Long(1)]),
+            "9223372036854775808",
+        );
+        assert_bigint(builtin_sub(&[Value::Long(i64::MIN)]), "9223372036854775808");
+        assert_bigint(
+            builtin_sub(&[Value::Long(i64::MIN), Value::Long(1)]),
+            "-9223372036854775809",
+        );
+        assert_bigint(
+            builtin_sub(&[Value::Long(i64::MAX), Value::Long(-1)]),
+            "9223372036854775808",
+        );
+        assert_bigint(
+            builtin_mul(&[Value::Long(i64::MAX), Value::Long(2)]),
+            "18446744073709551614",
+        );
+        assert_bigint(builtin_inc(&[Value::Long(i64::MAX)]), "9223372036854775808");
+        assert_bigint(
+            builtin_dec(&[Value::Long(i64::MIN)]),
+            "-9223372036854775809",
+        );
     }
 
     /// Docs attach as `:doc` var metadata, readable via `meta`/`doc-data`.
