@@ -2036,6 +2036,10 @@ fn simplify_bigint(n: BigInt) -> Value {
     }
 }
 
+fn integer_overflow() -> ValueError {
+    ValueError::Other("integer overflow".to_string())
+}
+
 fn builtin_add(args: &[Value]) -> ValueResult<Value> {
     let cat = widest_category(args)?;
     match cat {
@@ -2071,18 +2075,7 @@ fn builtin_add(args: &[Value]) -> ValueResult<Value> {
             let mut sum: i64 = 0;
             for v in args {
                 let n = numeric_as_i64(v)?;
-                match sum.checked_add(n) {
-                    Some(s) => sum = s,
-                    None => {
-                        // Overflow: promote to BigInt for remaining args
-                        let mut big = BigInt::from(sum) + BigInt::from(n);
-                        for v2 in &args[args.iter().position(|x| std::ptr::eq(x, v)).unwrap() + 1..]
-                        {
-                            big += numeric_as_bigint(v2)?;
-                        }
-                        return Ok(simplify_bigint(big));
-                    }
-                }
+                sum = sum.checked_add(n).ok_or_else(integer_overflow)?;
             }
             Ok(Value::Long(sum))
         }
@@ -2133,7 +2126,7 @@ fn builtin_sub(args: &[Value]) -> ValueResult<Value> {
         return match &args[0] {
             Value::Long(n) => match n.checked_neg() {
                 Some(r) => Ok(Value::Long(r)),
-                None => Ok(Value::BigInt(GcPtr::new(-BigInt::from(*n)))),
+                None => Err(integer_overflow()),
             },
             Value::Double(f) => Ok(Value::Double(-f)),
             Value::BigInt(n) => Ok(simplify_bigint(-n.get().clone())),
@@ -2179,17 +2172,7 @@ fn builtin_sub(args: &[Value]) -> ValueResult<Value> {
             let mut result = numeric_as_i64(&args[0])?;
             for v in &args[1..] {
                 let n = numeric_as_i64(v)?;
-                match result.checked_sub(n) {
-                    Some(r) => result = r,
-                    None => {
-                        let mut big = BigInt::from(result) - BigInt::from(n);
-                        for v2 in &args[args.iter().position(|x| std::ptr::eq(x, v)).unwrap() + 1..]
-                        {
-                            big -= numeric_as_bigint(v2)?;
-                        }
-                        return Ok(simplify_bigint(big));
-                    }
-                }
+                result = result.checked_sub(n).ok_or_else(integer_overflow)?;
             }
             Ok(Value::Long(result))
         }
@@ -2299,17 +2282,7 @@ fn builtin_mul(args: &[Value]) -> ValueResult<Value> {
             let mut result: i64 = 1;
             for v in args {
                 let n = numeric_as_i64(v)?;
-                match result.checked_mul(n) {
-                    Some(r) => result = r,
-                    None => {
-                        let mut big = BigInt::from(result) * BigInt::from(n);
-                        for v2 in &args[args.iter().position(|x| std::ptr::eq(x, v)).unwrap() + 1..]
-                        {
-                            big *= numeric_as_bigint(v2)?;
-                        }
-                        return Ok(simplify_bigint(big));
-                    }
-                }
+                result = result.checked_mul(n).ok_or_else(integer_overflow)?;
             }
             Ok(Value::Long(result))
         }
@@ -2366,7 +2339,7 @@ fn builtin_div(args: &[Value]) -> ValueResult<Value> {
     }
 }
 
-fn builtin_mod(args: &[Value]) -> ValueResult<Value> {
+pub fn builtin_mod(args: &[Value]) -> ValueResult<Value> {
     // Clojure mod: result has same sign as divisor.
     use num_bigint::BigInt;
     match (&args[0], &args[1]) {
@@ -2573,7 +2546,10 @@ fn builtin_quot(args: &[Value]) -> ValueResult<Value> {
 
 fn builtin_inc(args: &[Value]) -> ValueResult<Value> {
     match &args[0] {
-        Value::Long(n) => Ok(Value::Long(n.wrapping_add(1))),
+        Value::Long(n) => n
+            .checked_add(1)
+            .map(Value::Long)
+            .ok_or_else(integer_overflow),
         Value::Double(f) => Ok(Value::Double(f + 1.0)),
         Value::Ratio(r) => Ok(Value::Ratio(GcPtr::new(
             r.get().add(Ratio::new(BigInt::from(1), BigInt::from(1))),
@@ -2589,7 +2565,10 @@ fn builtin_inc(args: &[Value]) -> ValueResult<Value> {
 
 fn builtin_dec(args: &[Value]) -> ValueResult<Value> {
     match &args[0] {
-        Value::Long(n) => Ok(Value::Long(n.wrapping_sub(1))),
+        Value::Long(n) => n
+            .checked_sub(1)
+            .map(Value::Long)
+            .ok_or_else(integer_overflow),
         Value::Double(f) => Ok(Value::Double(f - 1.0)),
         Value::Ratio(r) => Ok(Value::Ratio(GcPtr::new(
             r.get().sub(Ratio::new(BigInt::from(1), BigInt::from(1))),
@@ -8716,6 +8695,26 @@ mod doc_tests {
         for (name, _) in BUILTIN_DOCS {
             assert!(seen.insert(*name), "duplicate BUILTIN_DOCS entry: {name:?}");
         }
+    }
+
+    #[test]
+    fn checked_long_arithmetic_throws_and_quoted_add_promotes() {
+        let overflow = |result: ValueResult<Value>| {
+            assert!(
+                matches!(result, Err(ValueError::Other(message)) if message == "integer overflow")
+            );
+        };
+
+        overflow(builtin_add(&[Value::Long(i64::MAX), Value::Long(1)]));
+        overflow(builtin_sub(&[Value::Long(i64::MIN)]));
+        overflow(builtin_mul(&[Value::Long(i64::MAX), Value::Long(2)]));
+        overflow(builtin_inc(&[Value::Long(i64::MAX)]));
+        overflow(builtin_dec(&[Value::Long(i64::MIN)]));
+
+        assert!(matches!(
+            builtin_add_quote(&[Value::Long(i64::MAX), Value::Long(1)]),
+            Ok(Value::BigInt(_))
+        ));
     }
 
     /// Docs attach as `:doc` var metadata, readable via `meta`/`doc-data`.

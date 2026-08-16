@@ -512,6 +512,7 @@ fn is_scalar_knownfn(kfn: &KnownFn) -> bool {
             | KnownFn::Mul
             | KnownFn::Div
             | KnownFn::Rem
+            | KnownFn::Mod
             | KnownFn::UncheckedAdd
             | KnownFn::UncheckedSub
             | KnownFn::UncheckedMul

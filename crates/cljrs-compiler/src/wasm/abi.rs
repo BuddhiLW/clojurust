@@ -210,6 +210,21 @@ pub const RT_IMPORTS: &[RtImport] = &[
         results: &[I32],
     },
     RtImport {
+        name: "rt_const_regex",
+        params: &[I32, I64],
+        results: &[I32],
+    },
+    RtImport {
+        name: "rt_const_ratio",
+        params: &[I32, I64],
+        results: &[I32],
+    },
+    RtImport {
+        name: "rt_const_bigdecimal",
+        params: &[I32, I64],
+        results: &[I32],
+    },
+    RtImport {
         name: "rt_const_keyword",
         params: &[I32, I64],
         results: &[I32],
@@ -248,6 +263,11 @@ pub const RT_IMPORTS: &[RtImport] = &[
     },
     RtImport {
         name: "rt_rem",
+        params: &[I32, I32],
+        results: &[I32],
+    },
+    RtImport {
+        name: "rt_mod",
         params: &[I32, I32],
         results: &[I32],
     },

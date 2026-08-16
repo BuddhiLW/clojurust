@@ -1360,6 +1360,9 @@ impl Emitter<'_> {
             // through `rt_const_keyword` rather than the per-call-site inline
             // cache, which is deferred with the rest of the IC work.
             Const::Str(s) => self.emit_string_like(s, "rt_const_string"),
+            Const::Regex(s) => self.emit_string_like(s, "rt_const_regex"),
+            Const::Ratio(s) => self.emit_string_like(s, "rt_const_ratio"),
+            Const::BigDecimal(s) => self.emit_string_like(s, "rt_const_bigdecimal"),
             Const::Keyword(s) => self.emit_string_like(s, "rt_const_keyword"),
             Const::Symbol(s) => self.emit_string_like(s, "rt_const_symbol"),
         }
@@ -1424,6 +1427,7 @@ impl Emitter<'_> {
             KnownFn::Mul => ("rt_mul", false),
             KnownFn::Div => ("rt_div", false),
             KnownFn::Rem => ("rt_rem", false),
+            KnownFn::Mod => ("rt_mod", false),
             KnownFn::Eq => ("rt_eq", true),
             KnownFn::Lt => ("rt_lt", true),
             KnownFn::Gt => ("rt_gt", true),

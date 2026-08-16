@@ -278,6 +278,45 @@ pub unsafe extern "C" fn rt_const_symbol(ptr: *const u8, len: u64) -> *const Val
     box_val(Value::symbol(Symbol::simple(name)))
 }
 
+/// Materialize an exact regex, ratio, or BigDecimal constant from its source
+/// spelling. Invalid literals use the same pending-exception path as other
+/// compiled runtime failures.
+unsafe fn parse_string_const(
+    ptr: *const u8,
+    len: u64,
+    parse: fn(&str) -> cljrs_runtime::tiered::EvalResult,
+) -> *const Value {
+    let bytes = unsafe { std::slice::from_raw_parts(ptr, len as usize) };
+    let Ok(source) = std::str::from_utf8(bytes) else {
+        return throw_str("invalid UTF-8 in compiled constant".to_string());
+    };
+    match parse(source) {
+        Ok(value) => box_val(value),
+        Err(error) => throw_str(error.to_string()),
+    }
+}
+
+/// # Safety
+/// `ptr` must point to valid UTF-8 data of `len` bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rt_const_regex(ptr: *const u8, len: u64) -> *const Value {
+    unsafe { parse_string_const(ptr, len, cljrs_runtime::builtins::parse_regex) }
+}
+
+/// # Safety
+/// `ptr` must point to valid UTF-8 data of `len` bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rt_const_ratio(ptr: *const u8, len: u64) -> *const Value {
+    unsafe { parse_string_const(ptr, len, cljrs_runtime::builtins::parse_ratio) }
+}
+
+/// # Safety
+/// `ptr` must point to valid UTF-8 data of `len` bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rt_const_bigdecimal(ptr: *const u8, len: u64) -> *const Value {
+    unsafe { parse_string_const(ptr, len, cljrs_runtime::builtins::parse_bigdecimal) }
+}
+
 // ── Truthiness ──────────────────────────────────────────────────────────────
 
 /// Return 1 if the value is truthy (not nil and not false), 0 otherwise.
@@ -715,6 +754,18 @@ pub unsafe extern "C" fn rt_rem(a: *const Value, b: *const Value) -> *const Valu
         (Value::Long(x), Value::Long(y)) if *y != 0 => intern_long(x % y),
         (Value::Double(x), Value::Double(y)) => box_val(Value::Double(x % y)),
         _ => rt_const_nil(),
+    }
+}
+
+/// # Safety
+/// Both pointers must be valid `*const Value`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rt_mod(a: *const Value, b: *const Value) -> *const Value {
+    bump_boxed_arith();
+    let args = [unsafe { val_ref(a) }.clone(), unsafe { val_ref(b) }.clone()];
+    match cljrs_runtime::builtins::builtins::builtin_mod(&args) {
+        Ok(value) => box_val(value),
+        Err(error) => throw_str(error.to_string()),
     }
 }
 
@@ -4198,6 +4249,9 @@ pub fn anchor_rt_symbols() {
     std::hint::black_box(rt_const_double as *const () as usize);
     std::hint::black_box(rt_const_char as *const () as usize);
     std::hint::black_box(rt_const_string as *const () as usize);
+    std::hint::black_box(rt_const_regex as *const () as usize);
+    std::hint::black_box(rt_const_ratio as *const () as usize);
+    std::hint::black_box(rt_const_bigdecimal as *const () as usize);
     std::hint::black_box(rt_const_keyword as *const () as usize);
     std::hint::black_box(rt_const_symbol as *const () as usize);
     std::hint::black_box(rt_truthiness as *const () as usize);
@@ -4217,6 +4271,7 @@ pub fn anchor_rt_symbols() {
     std::hint::black_box(rt_aset as *const () as usize);
     std::hint::black_box(rt_div as *const () as usize);
     std::hint::black_box(rt_rem as *const () as usize);
+    std::hint::black_box(rt_mod as *const () as usize);
     std::hint::black_box(rt_eq as *const () as usize);
     std::hint::black_box(rt_case_eq as *const () as usize);
     std::hint::black_box(rt_lt as *const () as usize);

@@ -471,7 +471,7 @@ fn execute_inst(
 ) -> EvalResult<()> {
     match inst {
         Inst::Const(dst, c) => {
-            regs.set(*dst, const_to_value(c));
+            regs.set(*dst, const_to_value(c)?);
         }
 
         Inst::LoadLocal(dst, name) => {
@@ -748,17 +748,20 @@ fn execute_inst(
 
 // ── Constant conversion ─────────────────────────────────────────────────────
 
-fn const_to_value(c: &Const) -> Value {
-    match c {
+fn const_to_value(c: &Const) -> EvalResult {
+    Ok(match c {
         Const::Nil => Value::Nil,
         Const::Bool(b) => Value::Bool(*b),
         Const::Long(n) => Value::Long(*n),
         Const::Double(d) => Value::Double(*d),
         Const::Str(s) => Value::Str(GcPtr::new(s.to_string())),
+        Const::Regex(s) => return crate::builtins::parse_regex(s),
+        Const::Ratio(s) => return crate::builtins::parse_ratio(s),
+        Const::BigDecimal(s) => return crate::builtins::parse_bigdecimal(s),
         Const::Keyword(k) => Value::Keyword(GcPtr::new(cljrs_value::keyword::Keyword::parse(k))),
         Const::Symbol(s) => Value::symbol(cljrs_value::Symbol::simple(s.clone())),
         Const::Char(c) => Value::Char(*c),
-    }
+    })
 }
 
 // ── Global value lookup ─────────────────────────────────────────────────────
@@ -1131,6 +1134,7 @@ fn dispatch_known_fn(known_fn: &KnownFn, args: Vec<Value>, env: &mut Env) -> Eva
         KnownFn::Mul => builtin_arith(&args, "*"),
         KnownFn::Div => builtin_arith(&args, "/"),
         KnownFn::Rem => builtin_arith(&args, "rem"),
+        KnownFn::Mod => builtin_call_native("mod", &args),
         KnownFn::UncheckedAdd => builtin_arith(&args, "unchecked-add"),
         KnownFn::UncheckedSub => builtin_arith(&args, "unchecked-subtract"),
         KnownFn::UncheckedMul => builtin_arith(&args, "unchecked-multiply"),
@@ -1491,7 +1495,7 @@ fn builtin_call_native(name: &str, args: &[Value]) -> EvalResult {
     crate::env::callback::with_eval_context(|env| {
         let callee = load_builtin(env, name)?;
         if let Value::NativeFunction(nf) = &callee {
-            (nf.get().func)(args).map_err(|e| EvalError::Runtime(e.to_string()))
+            (nf.get().func)(args).map_err(crate::env::error::value_error_to_eval_error)
         } else {
             apply_value(&callee, args.to_vec(), env)
         }
@@ -1556,15 +1560,15 @@ fn builtin_arith(args: &[Value], op: &str) -> EvalResult {
             "+" => x
                 .checked_add(*y)
                 .map(Value::Long)
-                .ok_or_else(|| EvalError::Runtime("integer overflow".to_string())),
+                .ok_or_else(integer_overflow_error),
             "-" => x
                 .checked_sub(*y)
                 .map(Value::Long)
-                .ok_or_else(|| EvalError::Runtime("integer overflow".to_string())),
+                .ok_or_else(integer_overflow_error),
             "*" => x
                 .checked_mul(*y)
                 .map(Value::Long)
-                .ok_or_else(|| EvalError::Runtime("integer overflow".to_string())),
+                .ok_or_else(integer_overflow_error),
             "unchecked-add" => Ok(Value::Long(x.wrapping_add(*y))),
             "unchecked-subtract" => Ok(Value::Long(x.wrapping_sub(*y))),
             "unchecked-multiply" => Ok(Value::Long(x.wrapping_mul(*y))),
@@ -1616,6 +1620,12 @@ fn builtin_arith(args: &[Value], op: &str) -> EvalResult {
         }
         _ => builtin_call_native(op, args),
     }
+}
+
+fn integer_overflow_error() -> EvalError {
+    crate::env::error::value_error_to_eval_error(cljrs_value::ValueError::Other(
+        "integer overflow".to_string(),
+    ))
 }
 
 /// Comparison dispatch for <, >, <=, >=.

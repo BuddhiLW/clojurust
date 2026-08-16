@@ -395,7 +395,6 @@ fn test_reader_conditional() {
 }
 
 #[test]
-#[cfg(feature = "aot_full_test")]
 fn test_recursive_defn() {
     assert_output(
         "recursive_defn",

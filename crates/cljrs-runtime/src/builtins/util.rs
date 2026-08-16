@@ -106,3 +106,9 @@ pub fn parse_ratio(s: &str) -> EvalResult {
         Ok(Value::Ratio(GcPtr::new(r)))
     }
 }
+
+pub fn parse_regex(s: &str) -> EvalResult {
+    regex::Regex::new(s)
+        .map(|r| Value::Pattern(GcPtr::new(r)))
+        .map_err(|e| EvalError::Runtime(e.to_string()))
+}
