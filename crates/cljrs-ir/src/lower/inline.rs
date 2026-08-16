@@ -51,6 +51,9 @@ fn is_eligible(callee: &IrFunction, arg_count: usize, forbidden: &HashSet<Arc<st
         // used by a recursive defn), not the closure value itself. Mapping a
         // LoadGlobal result into those parameters makes `deref` see a function
         // instead of a Var and silently turns recursive branches into nil.
+        // Exact equality is intentionally conservative for variadic callees:
+        // calls with extra rest arguments stay dynamic until the inliner
+        // models the variadic rest-parameter ABI explicitly.
         && callee.params.len() == arg_count
         && callee.subfunctions.is_empty()
         && !has_load_local(callee)

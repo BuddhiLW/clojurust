@@ -108,6 +108,10 @@ pub fn parse_ratio(s: &str) -> EvalResult {
 }
 
 pub fn parse_regex(s: &str) -> EvalResult {
+    // TODO: Intern parsed exact constants (or add per-site caches) across all
+    // execution tiers. Tree-walk and compiled tiers currently both compile a
+    // regex literal on each evaluation; preserving that behavior keeps this
+    // correctness change tier-neutral, but a hot literal still pays Regex::new.
     regex::Regex::new(s)
         .map(|r| Value::Pattern(GcPtr::new(r)))
         .map_err(|e| EvalError::Runtime(e.to_string()))

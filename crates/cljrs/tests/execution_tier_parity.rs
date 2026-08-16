@@ -39,6 +39,9 @@ const PROGRAM: &str = r#"
   (def parity-seq-sink (parity-seq-loop parity-input)))
 
 (println (str "mod|value|" (pr-str (parity-mod -10 3))))
+;; Keep a direct literal call alongside the hot function call. This locks down
+;; ANF binary-fold normalization and the compiler's boxed Mod path separately.
+(println (str "mod-literal|value|" (pr-str (mod -10 3))))
 (println (str "literals|value|" (pr-str (parity-literals))))
 (println (str "recursive-aot|value|" (pr-str (parity-fib 10))))
 (println (str "seq-loop|value|" (pr-str (parity-seq-loop parity-input))))
@@ -212,7 +215,7 @@ fn parse_records(tier: Tier, output: &Output) -> BTreeMap<String, Outcome> {
             tier.name()
         );
     }
-    assert_eq!(records.len(), 5, "{} stdout:\n{stdout}", tier.name());
+    assert_eq!(records.len(), 6, "{} stdout:\n{stdout}", tier.name());
     records
 }
 
@@ -233,6 +236,7 @@ fn values_and_errors_match_across_all_execution_tiers() {
     assert_eq!(aot, tree, "AOT diverged from tree-walk");
 
     assert_eq!(tree["mod"], Outcome::Value("2".to_string()));
+    assert_eq!(tree["mod-literal"], Outcome::Value("2".to_string()));
     assert_eq!(
         tree["literals"],
         Outcome::Value("[#\"[a-z]+\" 1/3 1.25M]".to_string())

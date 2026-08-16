@@ -26,8 +26,9 @@
 //! - `rt_eq` on `(Long, Long)` is `i64` equality.  Other operand types keep
 //!   the boxed call (`Value` equality has cross-variant rules).
 //! - `rt_div` truncates `(Long, Long)` and yields nil for division by zero —
-//!   not expressible unboxed, so `Div`/`Rem` results stay boxed except the
-//!   all-`Double` case which is exactly `fdiv`.
+//!   not expressible unboxed, so only all-`Double` `Div` becomes `fdiv`.
+//!   `Rem` and `Mod` stay boxed for every operand representation; in
+//!   particular, `Mod` must retain divisor-sign semantics for negative longs.
 //! - Truthiness of an unboxed long/double is constant `true` (every number is
 //!   truthy); of an unboxed bool it is the raw `i8`.
 //!
@@ -320,6 +321,34 @@ mod tests {
         let reprs = infer(&f, &[]);
         assert_eq!(reprs.get(&x), Some(&Repr::Long));
         assert_eq!(reprs.get(&y), Some(&Repr::Long));
+    }
+
+    #[test]
+    fn mod_of_long_constants_stays_boxed() {
+        let mut f = IrFunction::new(None, None);
+        let minus_ten = f.fresh_var();
+        let three = f.fresh_var();
+        let result = f.fresh_var();
+        let entry = f.fresh_block();
+        f.blocks.push(Block {
+            id: entry,
+            phis: vec![],
+            insts: vec![
+                Inst::Const(minus_ten, Const::Long(-10)),
+                Inst::Const(three, Const::Long(3)),
+                Inst::CallKnown(result, KnownFn::Mod, vec![minus_ten, three]),
+            ],
+            terminator: Terminator::Return(result),
+        });
+
+        let reprs = infer(&f, &[]);
+        assert_eq!(reprs.get(&minus_ten), Some(&Repr::Long));
+        assert_eq!(reprs.get(&three), Some(&Repr::Long));
+        assert_eq!(
+            reprs.get(&result),
+            None,
+            "Mod must use the boxed rt_mod path, never unboxed remainder"
+        );
     }
 
     /// A phi joining a Long with a Boxed value must come out Boxed.

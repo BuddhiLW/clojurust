@@ -504,6 +504,8 @@ fn optimize_tree(ir_func: IrFunction, ctx: &EscapeContext) -> IrFunction {
 
 /// Returns true when `kfn` always produces a non-collection scalar value
 /// (Long, Bool, or Nil) that will never be allocated in the active region.
+/// This is only a region-escape classification; compiler representation
+/// inference independently decides whether an operation may be unboxed.
 fn is_scalar_knownfn(kfn: &KnownFn) -> bool {
     matches!(
         kfn,
