@@ -2,11 +2,11 @@
 //!
 //! Four properties, one test each:
 //!
-//! 1. **Primitive unboxing on stable type profiles** — a hot numeric loop
-//!    whose parameter profiled monomorphically `Long` compiles to native
+//! 1. **Primitive unboxing on stable type profiles** — a hot wrapping-numeric
+//!    loop whose parameter profiled monomorphically `Long` compiles to native
 //!    code that keeps `i64`s in registers: the boxed arithmetic bridge
-//!    counters (`rt_add`/`rt_lt`/…) stay nearly flat compared to the same
-//!    workload with specialization disabled (`CLJRS_JIT_NO_SPEC=1`).
+//!    counters (`rt_unchecked_add`/`rt_lt`/…) stay nearly flat compared to the
+//!    same workload with specialization disabled (`CLJRS_JIT_NO_SPEC=1`).
 //!
 //! 2. **Deoptimization** — calling the specialized function with a `Double`
 //!    fails the entry type guard, returns the deopt sentinel, and re-runs at
@@ -88,15 +88,16 @@ fn stat(stats: &str, label: &str) -> u64 {
 
 #[test]
 fn monomorphic_long_profile_unboxes_hot_loop_arithmetic() {
-    // hot-sum(200) does ~600 arithmetic/comparison ops per call.  Without
+    // hot-sum(200) does ~600 arithmetic/comparison ops per call. Without
     // specialization the JIT'd code calls the boxed bridges for every one of
     // them (~12M over the run); with the parameter specialized to Long the
-    // loop runs entirely in registers.
+    // wrapping arithmetic runs entirely in registers. Plain `+` is
+    // intentionally boxed because overflow can promote its result to BigInt.
     let src = r#"
         (defn hot-sum [n]
           (loop [i 0 acc 0]
             (if (< i n)
-              (recur (+ i 1) (+ acc i))
+              (recur (unchecked-add i 1) (unchecked-add acc i))
               acc)))
         (dotimes [i 20000]
           (when (not= (hot-sum 200) 19900)
