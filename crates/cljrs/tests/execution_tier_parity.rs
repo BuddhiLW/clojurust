@@ -22,7 +22,9 @@ const PROGRAM: &str = r#"
     (if s
       (recur (next s) (conj acc (first s)))
       acc)))
-(defn parity-checked-add [a b] (+ a b))
+(defn parity-add [a b] (+ a b))
+(defn parity-sub [a b] (- a b))
+(defn parity-mul [a b] (* a b))
 (def parity-input [1 2 3 4])
 (def parity-literal-sink nil)
 (def parity-seq-sink nil)
@@ -32,7 +34,9 @@ const PROGRAM: &str = r#"
 (dotimes [_ 50]
   (parity-mod 10 3)
   (parity-fib 8)
-  (parity-checked-add 1 2)
+  (parity-add 1 2)
+  (parity-sub 2 1)
+  (parity-mul 2 3)
   ;; Keeping allocation-heavy results reachable also prevents AOT's region
   ;; optimizer from turning the JIT warm-up into an allocation stress test.
   (def parity-literal-sink (parity-literals))
@@ -45,11 +49,20 @@ const PROGRAM: &str = r#"
 (println (str "literals|value|" (pr-str (parity-literals))))
 (println (str "recursive-aot|value|" (pr-str (parity-fib 10))))
 (println (str "seq-loop|value|" (pr-str (parity-seq-loop parity-input))))
-(try
-  (println (str "overflow|value|"
-                (pr-str (parity-checked-add 9223372036854775807 1))))
-  (catch Exception e
-    (println (str "overflow|error|" (ex-message e)))))
+(println (str "overflow-add|value|"
+              (pr-str (parity-add 9223372036854775807 1))))
+(println (str "overflow-sub-low|value|"
+              (pr-str (parity-sub -9223372036854775808 1))))
+(println (str "overflow-sub-high|value|"
+              (pr-str (parity-sub 9223372036854775807 -1))))
+(println (str "overflow-mul|value|"
+              (pr-str (parity-mul 9223372036854775807 2))))
+(println
+  (str "arithmetic-error|"
+       (try
+         (str "value|" (pr-str (mod 1 0)))
+         (catch Exception e
+           (str "error|" (ex-message e))))))
 "#;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -215,7 +228,7 @@ fn parse_records(tier: Tier, output: &Output) -> BTreeMap<String, Outcome> {
             tier.name()
         );
     }
-    assert_eq!(records.len(), 6, "{} stdout:\n{stdout}", tier.name());
+    assert_eq!(records.len(), 10, "{} stdout:\n{stdout}", tier.name());
     records
 }
 
@@ -244,7 +257,23 @@ fn values_and_errors_match_across_all_execution_tiers() {
     assert_eq!(tree["recursive-aot"], Outcome::Value("55".to_string()));
     assert_eq!(tree["seq-loop"], Outcome::Value("[1 2 3 4]".to_string()));
     assert_eq!(
-        tree["overflow"],
-        Outcome::Error("integer overflow".to_string())
+        tree["overflow-add"],
+        Outcome::Value("9223372036854775808N".to_string())
+    );
+    assert_eq!(
+        tree["overflow-sub-low"],
+        Outcome::Value("-9223372036854775809N".to_string())
+    );
+    assert_eq!(
+        tree["overflow-sub-high"],
+        Outcome::Value("9223372036854775808N".to_string())
+    );
+    assert_eq!(
+        tree["overflow-mul"],
+        Outcome::Value("18446744073709551614N".to_string())
+    );
+    assert_eq!(
+        tree["arithmetic-error"],
+        Outcome::Error("mod by zero".to_string())
     );
 }

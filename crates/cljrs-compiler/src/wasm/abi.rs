@@ -504,9 +504,8 @@ pub const RT_IMPORTS: &[RtImport] = &[
         params: &[],
         results: &[I32],
     },
-    // Boxed integer-overflow exception, raised by unboxed checked `+`/`-`/`*`
-    // when the `i64` result overflows (Clojure primitive-long semantics) — the
-    // wasm analogue of `codegen.rs::emit_long_overflow_check`.
+    // Boxed integer-overflow exception reserved for explicit primitive-long
+    // codegen paths. Promoting core arithmetic stays boxed.
     RtImport {
         name: "rt_overflow_error",
         params: &[],

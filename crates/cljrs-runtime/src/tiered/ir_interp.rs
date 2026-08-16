@@ -1555,20 +1555,21 @@ fn builtin_arith(args: &[Value], op: &str) -> EvalResult {
     let (a, b) = (&args[0], &args[1]);
     match (a, b) {
         (Value::Long(x), Value::Long(y)) => match op {
-            // Checked: primitive long arithmetic throws on overflow (matches
-            // the compiled tier).  The wrapping variants are `unchecked-*`.
-            "+" => x
-                .checked_add(*y)
-                .map(Value::Long)
-                .ok_or_else(integer_overflow_error),
-            "-" => x
-                .checked_sub(*y)
-                .map(Value::Long)
-                .ok_or_else(integer_overflow_error),
-            "*" => x
-                .checked_mul(*y)
-                .map(Value::Long)
-                .ok_or_else(integer_overflow_error),
+            // Plain arithmetic promotes to BigInt on overflow. Keep the fast
+            // Long path for the common case and use the canonical builtin for
+            // the result-type-changing slow path.
+            "+" => match x.checked_add(*y) {
+                Some(value) => Ok(Value::Long(value)),
+                None => promoting_arith_slow_path(op, args),
+            },
+            "-" => match x.checked_sub(*y) {
+                Some(value) => Ok(Value::Long(value)),
+                None => promoting_arith_slow_path(op, args),
+            },
+            "*" => match x.checked_mul(*y) {
+                Some(value) => Ok(Value::Long(value)),
+                None => promoting_arith_slow_path(op, args),
+            },
             "unchecked-add" => Ok(Value::Long(x.wrapping_add(*y))),
             "unchecked-subtract" => Ok(Value::Long(x.wrapping_sub(*y))),
             "unchecked-multiply" => Ok(Value::Long(x.wrapping_mul(*y))),
@@ -1622,10 +1623,14 @@ fn builtin_arith(args: &[Value], op: &str) -> EvalResult {
     }
 }
 
-fn integer_overflow_error() -> EvalError {
-    crate::env::error::value_error_to_eval_error(cljrs_value::ValueError::Other(
-        "integer overflow".to_string(),
-    ))
+fn promoting_arith_slow_path(op: &str, args: &[Value]) -> EvalResult {
+    let result = match op {
+        "+" => crate::builtins::builtins::builtin_add(args),
+        "-" => crate::builtins::builtins::builtin_sub(args),
+        "*" => crate::builtins::builtins::builtin_mul(args),
+        _ => unreachable!("non-promoting arithmetic slow path: {op}"),
+    };
+    result.map_err(crate::env::error::value_error_to_eval_error)
 }
 
 /// Comparison dispatch for <, >, <=, >=.
@@ -1820,15 +1825,15 @@ mod arith_tests {
     use cljrs_value::Value;
 
     #[test]
-    fn checked_add_overflow_throws() {
+    fn checked_add_overflow_promotes() {
         let r = builtin_arith(&[Value::Long(i64::MAX), Value::Long(1)], "+");
-        assert!(r.is_err(), "checked + overflow must throw");
+        assert!(matches!(r, Ok(Value::BigInt(_))), "+ overflow must promote");
     }
 
     #[test]
-    fn checked_mul_overflow_throws() {
+    fn checked_mul_overflow_promotes() {
         let r = builtin_arith(&[Value::Long(i64::MAX), Value::Long(2)], "*");
-        assert!(r.is_err(), "checked * overflow must throw");
+        assert!(matches!(r, Ok(Value::BigInt(_))), "* overflow must promote");
     }
 
     #[test]

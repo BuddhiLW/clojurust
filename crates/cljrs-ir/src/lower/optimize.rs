@@ -502,8 +502,9 @@ fn optimize_tree(ir_func: IrFunction, ctx: &EscapeContext) -> IrFunction {
 
 // ── Function-scope region wrapping ──────────────────────────────────────────
 
-/// Returns true when `kfn` always produces a non-collection scalar value
-/// (Long, Bool, or Nil) that will never be allocated in the active region.
+/// Returns true when `kfn` always produces a non-collection value that will
+/// never capture an allocation from the active region. Promoting arithmetic
+/// can return a heap-backed BigInt and still satisfies that property.
 /// This is only a region-escape classification; compiler representation
 /// inference independently decides whether an operation may be unboxed.
 fn is_scalar_knownfn(kfn: &KnownFn) -> bool {

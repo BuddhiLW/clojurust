@@ -147,7 +147,7 @@ pub enum KnownFn {
     Pop,
     Vec,
 
-    // Arithmetic (pure, no alloc for i64/f64)
+    // Arithmetic (pure; overflowing Long operations may allocate a BigInt)
     Add,
     Sub,
     Mul,
@@ -155,8 +155,7 @@ pub enum KnownFn {
     Rem,
     Mod,
 
-    // Unchecked integer arithmetic — wraps on overflow (never promotes/throws).
-    // The checked `Add`/`Sub`/`Mul` throw on unboxed-Long overflow; these do not.
+    // Unchecked integer arithmetic — wraps on overflow instead of promoting.
     UncheckedAdd,
     UncheckedSub,
     UncheckedMul,

@@ -359,29 +359,15 @@ pub extern "C" fn rt_overflow_error() -> *const Value {
     make_overflow_exc()
 }
 
-/// Raise the integer-overflow exception via the pending-exception slot and
-/// return nil, exactly as `(throw …)` does in compiled code.
-fn throw_overflow() -> *const Value {
-    unsafe { rt_throw(make_overflow_exc()) }
-}
-
 /// # Safety
 /// Both pointers must be valid `*const Value`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rt_add(a: *const Value, b: *const Value) -> *const Value {
     bump_boxed_arith();
-    let a = unsafe { val_ref(a) };
-    let b = unsafe { val_ref(b) };
-    match (a, b) {
-        // Checked: primitive long `+` throws on overflow (Clojure semantics).
-        (Value::Long(x), Value::Long(y)) => match x.checked_add(*y) {
-            Some(s) => intern_long(s),
-            None => throw_overflow(),
-        },
-        (Value::Double(x), Value::Double(y)) => box_val(Value::Double(x + y)),
-        (Value::Long(x), Value::Double(y)) => box_val(Value::Double(*x as f64 + y)),
-        (Value::Double(x), Value::Long(y)) => box_val(Value::Double(x + *y as f64)),
-        _ => rt_const_nil(), // fallback for non-numeric
+    let args = [unsafe { val_ref(a) }.clone(), unsafe { val_ref(b) }.clone()];
+    match cljrs_runtime::builtins::builtins::builtin_add(&args) {
+        Ok(value) => box_or_intern_val(value),
+        Err(error) => throw_str(error.to_string()),
     }
 }
 
@@ -390,17 +376,10 @@ pub unsafe extern "C" fn rt_add(a: *const Value, b: *const Value) -> *const Valu
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rt_sub(a: *const Value, b: *const Value) -> *const Value {
     bump_boxed_arith();
-    let a = unsafe { val_ref(a) };
-    let b = unsafe { val_ref(b) };
-    match (a, b) {
-        (Value::Long(x), Value::Long(y)) => match x.checked_sub(*y) {
-            Some(s) => intern_long(s),
-            None => throw_overflow(),
-        },
-        (Value::Double(x), Value::Double(y)) => box_val(Value::Double(x - y)),
-        (Value::Long(x), Value::Double(y)) => box_val(Value::Double(*x as f64 - y)),
-        (Value::Double(x), Value::Long(y)) => box_val(Value::Double(x - *y as f64)),
-        _ => rt_const_nil(),
+    let args = [unsafe { val_ref(a) }.clone(), unsafe { val_ref(b) }.clone()];
+    match cljrs_runtime::builtins::builtins::builtin_sub(&args) {
+        Ok(value) => box_or_intern_val(value),
+        Err(error) => throw_str(error.to_string()),
     }
 }
 
@@ -409,17 +388,10 @@ pub unsafe extern "C" fn rt_sub(a: *const Value, b: *const Value) -> *const Valu
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rt_mul(a: *const Value, b: *const Value) -> *const Value {
     bump_boxed_arith();
-    let a = unsafe { val_ref(a) };
-    let b = unsafe { val_ref(b) };
-    match (a, b) {
-        (Value::Long(x), Value::Long(y)) => match x.checked_mul(*y) {
-            Some(s) => intern_long(s),
-            None => throw_overflow(),
-        },
-        (Value::Double(x), Value::Double(y)) => box_val(Value::Double(x * y)),
-        (Value::Long(x), Value::Double(y)) => box_val(Value::Double(*x as f64 * y)),
-        (Value::Double(x), Value::Long(y)) => box_val(Value::Double(x * *y as f64)),
-        _ => rt_const_nil(),
+    let args = [unsafe { val_ref(a) }.clone(), unsafe { val_ref(b) }.clone()];
+    match cljrs_runtime::builtins::builtins::builtin_mul(&args) {
+        Ok(value) => box_or_intern_val(value),
+        Err(error) => throw_str(error.to_string()),
     }
 }
 

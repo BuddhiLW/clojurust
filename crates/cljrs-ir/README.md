@@ -163,11 +163,10 @@ return nil and silently corrupt the promoted function.
 160+ built-in function identifiers with effect classification (`Effect`):
 `Pure`, `Alloc`, `HeapRead`, `HeapWrite`, `IO`, `UnknownCall`.
 
-The checked integer arithmetic `Add`/`Sub`/`Mul` throw on overflow at the IR
-and compiled tiers (Clojure primitive-long semantics); `UncheckedAdd`/
-`UncheckedSub`/`UncheckedMul` are the wrapping counterparts (the `unchecked-*`
-family, plus `unchecked-inc`/`-dec`/`-negate` which lower to them).  `inc`/`dec`
-lower to checked `Add`/`Sub`.
+The promoting integer arithmetic `Add`/`Sub`/`Mul` returns BigInt on Long
+overflow at every tier. `UncheckedAdd`/`UncheckedSub`/`UncheckedMul` are the
+wrapping counterparts (the `unchecked-*` family, plus `unchecked-inc`/`-dec`/
+`-negate` which lower to them). `inc`/`dec` lower to promoting `Add`/`Sub`.
 
 `CaseEq` is type-strict equality used by the `case` macro (`case=` builtin).
 Like Clojure's JVM semantics, `Long` and `BigInt` are interchangeable but mixed

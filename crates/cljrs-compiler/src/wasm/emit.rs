@@ -123,13 +123,11 @@
 //! into a boxed context** — a call argument, collection element, `return`, a
 //! boxed φ, a global/var bridge — via [`Emitter::get`] (which boxes an unboxed
 //! local on demand); unboxed operands are read with [`Emitter::get_i64`] /
-//! [`Emitter::get_f64`].  Checked `+`/`-` on `Long` emit the same signed-overflow
-//! branch the native backend does (`rt_overflow_error` + `rt_throw`, then an
-//! early boxed-`nil` `return`); `Long` `*` (which needs a 128-bit overflow check
-//! wasm cannot express without `i64.mul_hi`) and every other non-trivial unboxed
-//! producer are **demoted back to boxed** by [`refine_reprs`], so the repr map
-//! the emitter consumes only ever marks a value unboxed when the emitter can
-//! produce it unboxed.
+//! [`Emitter::get_f64`]. Promoting `+`/`-`/`*` on `Long` stay boxed because an
+//! overflow can change the result type to BigInt. Wrapping `unchecked-*` and
+//! exactly representable floating-point arithmetic remain unboxed. Every
+//! producer this backend cannot express is **demoted back to boxed** by
+//! [`refine_reprs`].
 //!
 //! # Typed parameter ABI
 //!
@@ -693,15 +691,11 @@ fn refine_reprs(
                     let a = repr_of(&reprs, args[0]);
                     let b = repr_of(&reprs, args[1]);
                     match (r, kf) {
-                        // Checked `+`/`-` (overflow branch) and unchecked
-                        // `+`/`-`/`*` (wrapping) on two longs.
+                        // Wrapping `unchecked-*` on two longs. Promoting
+                        // `+`/`-`/`*` stay boxed because overflow yields BigInt.
                         (
                             Repr::Long,
-                            KnownFn::Add
-                            | KnownFn::Sub
-                            | KnownFn::UncheckedAdd
-                            | KnownFn::UncheckedSub
-                            | KnownFn::UncheckedMul,
+                            KnownFn::UncheckedAdd | KnownFn::UncheckedSub | KnownFn::UncheckedMul,
                         ) => a == Repr::Long && b == Repr::Long,
                         // `f64` arithmetic (mixed operands promote).
                         (
@@ -1477,8 +1471,8 @@ impl Emitter<'_> {
         b: VarId,
     ) -> Result<(), WasmError> {
         match (self.repr_of(dst), kf) {
-            // ── Checked long `+`/`-`: store the wrapped result, then branch to a
-            // throw on signed overflow (Clojure primitive-long semantics). ──────
+            // ── Primitive-long `+`/`-` support for explicitly unboxed IR.
+            // Promoting core arithmetic is boxed by type inference. ─────────────
             (Repr::Long, KnownFn::Add | KnownFn::Sub) => {
                 self.get_i64(a)?;
                 self.get_i64(b)?;
@@ -2795,12 +2789,10 @@ mod tests {
         );
     }
 
-    /// A loop accumulator: `(loop [i 0 acc 0] (if (< i n) (recur (inc i) (+ acc i)) acc))`
-    /// shape.  With no param spec, `i`/`acc` still infer unboxed `Long` from the
-    /// `0` seeds, so the `+`s lower to checked `i64.add` (overflow → throw) while
-    /// the `(< i n)` against the boxed param `n` stays on the `rt_lt` bridge —
-    /// exercising checked unboxed add *and* a boxed-compare with one unboxed
-    /// operand (boxed on demand).  Mirrors `typeinfer`'s loop-counter test.
+    /// An unchecked-add loop accumulator. With no param spec, `i`/`acc` infer
+    /// unboxed `Long` from the `0` seeds, while the comparison against boxed
+    /// `n` stays on `rt_lt`. Promoting `+` cannot use this representation
+    /// because overflow can return BigInt.
     #[test]
     fn unboxed_loop_accumulator() {
         let mut f = IrFunction::new(Some(Arc::from("sum")), None);
@@ -2850,8 +2842,8 @@ mod tests {
             phis: vec![],
             insts: vec![
                 Inst::Const(one, Const::Long(1)),
-                Inst::CallKnown(i2, KnownFn::Add, vec![i, one]),
-                Inst::CallKnown(acc2, KnownFn::Add, vec![acc, i]),
+                Inst::CallKnown(i2, KnownFn::UncheckedAdd, vec![i, one]),
+                Inst::CallKnown(acc2, KnownFn::UncheckedAdd, vec![acc, i]),
             ],
             terminator: Terminator::RecurJump {
                 target: header,
@@ -2867,16 +2859,14 @@ mod tests {
 
         let bytes = compile(&f).expect("emit");
         validate(&bytes);
-        // Checked unboxed long addition (i64.add) and its overflow guard (i64.lt_s).
         assert!(
             body_has(&bytes, |op| matches!(op, wasmparser::Operator::I64Add)),
             "unboxed accumulator should use i64.add"
         );
     }
 
-    /// `(* a b)` on two longs is **demoted** to the boxed `rt_mul` bridge (wasm
-    /// lacks an `i64.mul_hi` for the 128-bit overflow check), so it still
-    /// validates with no `i64.mul` in the body.
+    /// Promoting `(* a b)` on two longs uses boxed `rt_mul`, so an overflow can
+    /// return BigInt. No `i64.mul` may appear in the body.
     #[test]
     fn long_mul_demotes_to_boxed() {
         let mut f = IrFunction::new(Some(Arc::from("prod")), None);
@@ -2898,7 +2888,7 @@ mod tests {
         validate(&bytes);
         assert!(
             !body_has(&bytes, |op| matches!(op, wasmparser::Operator::I64Mul)),
-            "checked long multiply should stay on the boxed bridge"
+            "promoting long multiply should stay on the boxed bridge"
         );
     }
 
@@ -3192,10 +3182,9 @@ mod tests {
 
     // ── Typed parameter ABI (item 1) ─────────────────────────────────────────
 
-    /// `(fn [^long n] (+ n 1))`: the `^long` hint makes the function compile to a
-    /// typed body (its param is an unboxed `i64`, so the `+ 1` is a checked
-    /// `i64.add`) plus a boxed-entry trampoline that coerces the boxed argument
-    /// (`rt_coerce_long`) and `return_call`s the body.
+    /// `(fn [^long n] (+ n 1))`: the hint gives the typed body an unboxed
+    /// parameter, while promoting `+` boxes that parameter on demand and calls
+    /// `rt_add`. The boxed-entry trampoline still coerces the incoming value.
     #[test]
     fn typed_long_param_emits_trampoline_and_typed_body() {
         let mut f = IrFunction::new(Some(Arc::from("addone")), None);

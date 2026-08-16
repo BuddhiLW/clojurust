@@ -1928,7 +1928,8 @@ impl<'a, 'b, M: Module> FunctionTranslator<'a, 'b, M> {
         use cranelift_codegen::ir::condcodes::{FloatCC, IntCC};
         let (a, b) = (args[0], args[1]);
         match (known_fn, dst_repr) {
-            // Checked unboxed integer arithmetic — throws on overflow.
+            // Primitive-long support retained for explicitly unboxed IR.
+            // Ordinary promoting Add/Sub/Mul results are boxed by typeinfer.
             (KnownFn::Add | KnownFn::Sub | KnownFn::Mul, Repr::Long) => {
                 let av = self.use_var(a);
                 let bv = self.use_var(b);
@@ -2936,9 +2937,8 @@ mod tests {
         assert!(!obj.is_empty());
     }
 
-    /// Phase 10.6: the same loop compiled with the parameter specialized to
-    /// Long must pass the Cranelift verifier — entry guard, unboxed loop
-    /// phis, raw iadd/icmp arithmetic, and boxing on the return edge.
+    /// Phase 10.6: the same loop compiled with a Long-specialized parameter
+    /// must pass the verifier when promoting arithmetic forces boxed loop phis.
     #[test]
     fn test_compile_loop_recur_specialized_long() {
         let body = parse_body("(loop [i 0 acc 0] (if (< i n) (recur (+ i 1) (+ acc i)) acc))");
