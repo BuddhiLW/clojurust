@@ -11,7 +11,9 @@ use crate::builtins::new::{builtin_exception_dot, builtin_new};
 use crate::builtins::regex::{
     builtin_re_find, builtin_re_groups, builtin_re_matcher, builtin_re_matches, builtin_re_pattern,
 };
-use crate::builtins::time::builtin_nanotime;
+use crate::builtins::time::{
+    builtin_current_time_millis, builtin_nanotime, builtin_system_nano_time, init_clock,
+};
 use crate::builtins::transients::{
     builtin_assoc_bang, builtin_conj_bang, builtin_disj_bang, builtin_dissoc_bang,
     builtin_persistent_bang, builtin_pop_bang, builtin_transient,
@@ -538,6 +540,22 @@ const BUILTIN_DOCS: &[(&str, &str)] = &[
         "Removes the method of a multimethod associated with dispatch-val.",
     ),
     (
+        "System/currentTimeMillis",
+        "Returns the current time in milliseconds since the Unix epoch.",
+    ),
+    (
+        "System/nanoTime",
+        "Returns a monotonic time in nanoseconds from an arbitrary origin; only differences are meaningful.",
+    ),
+    (
+        "Thread/sleep",
+        "Blocks the current thread for n milliseconds.",
+    ),
+    (
+        "eval",
+        "Evaluates a form data structure and returns the result. Sees namespace bindings, not the enclosing lexical scope.",
+    ),
+    (
         "make-hierarchy",
         "Creates a new, independent global hierarchy for use with derive/isa?.",
     ),
@@ -1053,6 +1071,8 @@ const BUILTIN_DOCS: &[(&str, &str)] = &[
 // ── Registration ──────────────────────────────────────────────────────────────
 
 pub fn register_all(globals: &Arc<GlobalEnv>, ns: &str) {
+    // Fix `System/nanoTime`'s origin at startup rather than at the first read.
+    init_clock();
     let fns: Vec<(&str, Arity, fn(&[Value]) -> ValueResult<Value>)> = vec![
         // Arithmetic
         ("+", Arity::Variadic { min: 0 }, builtin_add),
@@ -1634,6 +1654,15 @@ pub fn register_all(globals: &Arc<GlobalEnv>, ns: &str) {
         ),
         // time utils
         ("nanotime", Arity::Fixed(0), builtin_nanotime),
+        (
+            "System/currentTimeMillis",
+            Arity::Fixed(0),
+            builtin_current_time_millis,
+        ),
+        ("System/nanoTime", Arity::Fixed(0), builtin_system_nano_time),
+        ("Thread/sleep", Arity::Fixed(1), builtin_sleep),
+        // eval — intercepted where the environment is available
+        ("eval", Arity::Fixed(1), builtin_eval_sentinel),
     ];
 
     let docs: HashMap<&str, &str> = BUILTIN_DOCS.iter().copied().collect();
@@ -8411,6 +8440,14 @@ fn builtin_with_meta(args: &[Value]) -> ValueResult<Value> {
         _ if matches!(args[1], Value::Nil) => Ok(args[0].unwrap_meta().clone()),
         _ => Ok(args[0].clone().with_meta(args[1].clone())),
     }
+}
+
+/// Sentinel — `eval` is intercepted in `eval_call` because it needs env.
+fn builtin_eval_sentinel(_args: &[Value]) -> ValueResult<Value> {
+    Err(ValueError::WrongType {
+        expected: "intercepted",
+        got: "eval sentinel should not be called directly".to_string(),
+    })
 }
 
 /// Sentinel — `vary-meta` is intercepted in `eval_call` because it needs env.

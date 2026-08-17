@@ -686,6 +686,28 @@ value; the 2-arity forms read and `alter-var-root`
 (`builtin_make_hierarchy`). Multimethod dispatch consults the same var — see
 `env::apply::isa_in_global_hierarchy`.
 
+### Host clock (`time.rs`)
+
+- `(nanotime)` — nanoseconds since the Unix epoch (wall clock).
+- `(System/currentTimeMillis)` — milliseconds since the Unix epoch.
+- `(System/nanoTime)` — nanoseconds from a fixed origin taken at startup
+  (`init_clock`, called from `register_all`). Monotonic and unaffected by
+  wall-clock adjustments, so only differences are meaningful.
+- `(Thread/sleep ms)` — blocks the current thread, same as `(sleep ms)`.
+
+The `System/…` and `Thread/…` names follow the existing `Math/…` convention: a
+JVM static's name registered as an ordinary builtin, so portable code that
+reaches for a clock resolves without a reader conditional.
+
+### `eval`
+
+`eval` is registered as a sentinel and intercepted where the environment is
+available (`interp::apply::eval_call`, and by name in the IR interpreter and
+the async tree-walker). It converts the form *value* back into a `Form`
+(`interp::macros::value_to_form`) and evaluates it in a fresh top-level
+environment of the current namespace, so it sees vars but not the caller's
+locals.
+
 ## Module `interp`
 
 Self-contained tree-walking interpreter for Clojure.
@@ -770,6 +792,14 @@ the keyword shorthand `^:async` or an explicit `{:async true}` map.  `fn`/`defn`
 use it to set `CljxFn::is_async`, which `env::apply::dispatch_if_async`
 checks at call time to route through the async runtime.
 
+### Which natives need form-level interception
+
+`is_form_intercepted(name) -> bool` is the canonical list of natives that
+`eval_call` intercepts because they need unevaluated forms or the environment.
+The async tree-walker (`cljrs-async`) and the IR interpreter consult it instead
+of keeping their own copies; the `match` in `eval_call` must have an arm for
+every name it reports.
+
 ### Special handlers in `apply.rs`
 
 Each handler evaluates its key expressions under the correct allocation context:
@@ -803,6 +833,7 @@ implement sentinel operations without hitting the stub errors registered in
 | `make_delay_from_fn(f, globals, ns)` | `make-delay` — wrap zero-arg fn in a `Delay` |
 | `eval_alter_var_root(args, env)` | `alter-var-root` — apply f to var root, store result |
 | `eval_vary_meta(args, env)` | `vary-meta` — apply f to obj metadata |
+| `eval_eval(args, env)` | `eval` — convert a form value back to a `Form` and evaluate it at top level of the current namespace (vars visible, caller's locals not) |
 | `eval_with_bindings_star(args, env)` | `with-bindings*` — push binding frame, call f |
 | `eval_send_to_agent(args, env)` | `send` / `send-off` — dispatch action to agent |
 | `dispatch_method(method, target, args)` | `(.method target args…)` — interop method dispatch on an evaluated target (strings, vectors, seqs) |
