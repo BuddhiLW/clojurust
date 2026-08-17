@@ -684,8 +684,27 @@ impl GlobalEnv {
     /// `deps` feature supply its own git implementation, or a sandboxed host
     /// remove the default one (`None`) so no versioned resolution can reach
     /// the filesystem's git history.
+    ///
+    /// Drops every cached signature verdict: those were reached by the
+    /// outgoing provider, against its trust set and its view of the
+    /// repository, and say nothing about what the incoming one would decide
+    /// for the same `(repo, commit)`.  Keeping them would let a permissive
+    /// provider launder an approval for source a later provider serves.
     pub fn set_vcs_provider(&self, provider: Option<Arc<dyn crate::env::vcs::VcsProvider>>) {
+        // Neither this nor `check_commit_signature` ever holds the `vcs` and
+        // `sig_verify_cache` locks at the same time, and the two reach for
+        // them in opposite orders — keep it that way, or the pair becomes a
+        // lock-order inversion.
         *self.vcs.write().unwrap() = provider;
+        self.invalidate_signature_cache();
+    }
+
+    /// Forget every cached signature verdict, so the next
+    /// [`check_commit_signature`](Self::check_commit_signature) re-asks the
+    /// current provider.  Called whenever the thing that produced those
+    /// verdicts changes: the provider itself, or its trusted-key set.
+    pub fn invalidate_signature_cache(&self) {
+        self.sig_verify_cache.lock().unwrap().clear();
     }
 
     /// If `:verify-commit-signatures` is enabled, verify that `commit` inside
@@ -736,11 +755,18 @@ impl GlobalEnv {
     /// Returns the number of keys loaded; warns (to stderr) on any key that
     /// fails to load rather than aborting.  Returns 0 when this build has no
     /// VCS provider, since there is nothing that could consume the keys.
+    ///
+    /// Replacing the trust set invalidates the signature cache for the same
+    /// reason replacing the provider does: a verdict reached under the old
+    /// keys is not a verdict under the new ones.  (In the normal flow this
+    /// runs at session start, before anything has been verified.)
     pub fn load_trusted_signers(&self, config: &cljrs_project::config::DepsConfig) -> usize {
-        match self.vcs() {
-            Some(vcs) => vcs.load_trusted_signers(&config.trusted_signers),
-            None => 0,
-        }
+        let Some(vcs) = self.vcs() else {
+            return 0;
+        };
+        let loaded = vcs.load_trusted_signers(&config.trusted_signers);
+        self.invalidate_signature_cache();
+        loaded
     }
 }
 

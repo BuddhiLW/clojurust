@@ -63,6 +63,47 @@ impl VcsProvider for StubVcs {
     }
 }
 
+/// An always-approving provider that counts how often it is actually asked,
+/// so caching and cache invalidation are observable.
+#[derive(Default)]
+struct CountingVcs {
+    verify_calls: std::sync::atomic::AtomicUsize,
+}
+
+impl CountingVcs {
+    fn calls(&self) -> usize {
+        self.verify_calls.load(Ordering::Relaxed)
+    }
+}
+
+impl VcsProvider for CountingVcs {
+    fn find_repo_root(&self, _start: &Path) -> Option<PathBuf> {
+        Some(PathBuf::from("/stub/repo"))
+    }
+
+    fn file_at_commit(
+        &self,
+        _repo_root: &Path,
+        _rel_path: &str,
+        _commit: &str,
+    ) -> Result<String, String> {
+        Ok(String::new())
+    }
+
+    fn verify_commit_signature(
+        &self,
+        _repo_root: &Path,
+        _commit: &str,
+    ) -> Result<(), SignatureFailure> {
+        self.verify_calls.fetch_add(1, Ordering::Relaxed);
+        Ok(())
+    }
+
+    fn load_trusted_signers(&self, signers: &[TrustedSigner]) -> usize {
+        signers.len()
+    }
+}
+
 /// With the default `deps` feature a provider is installed; without it, none is.
 #[test]
 fn default_provider_matches_feature() {
@@ -102,8 +143,7 @@ fn signature_check_fails_without_provider() {
     );
 }
 
-/// An installed provider is what decides the verdict, and a pass is cached so
-/// the provider is consulted once per (repo, commit).
+/// The installed provider is what decides the verdict.
 #[test]
 fn installed_provider_decides_signature_verdict() {
     let globals = make_globals();
@@ -126,11 +166,21 @@ fn installed_provider_decides_signature_verdict() {
             .check_commit_signature("/stub/repo", "abc1234")
             .is_ok()
     );
+}
 
-    // Cached: the rejecting provider is never asked about this commit again.
-    globals.set_vcs_provider(Some(Arc::new(StubVcs {
-        signature_ok: false,
-    })));
+/// A pass is cached, so a given `(repo, commit)` costs one verification per
+/// session — but the cache belongs to the provider that filled it.  Swapping
+/// the provider must drop those verdicts, or a permissive provider could
+/// launder an approval for source a stricter one would reject.
+#[test]
+fn provider_swap_invalidates_cached_verdicts() {
+    let globals = make_globals();
+    globals
+        .verify_commit_signatures
+        .store(true, Ordering::Relaxed);
+
+    let counting = Arc::new(CountingVcs::default());
+    globals.set_vcs_provider(Some(counting.clone()));
     assert!(
         globals
             .check_commit_signature("/stub/repo", "abc1234")
@@ -138,8 +188,55 @@ fn installed_provider_decides_signature_verdict() {
     );
     assert!(
         globals
-            .check_commit_signature("/stub/repo", "def5678")
-            .is_err()
+            .check_commit_signature("/stub/repo", "abc1234")
+            .is_ok()
+    );
+    assert_eq!(counting.calls(), 1, "a pass should be cached");
+
+    // Swap in a provider that rejects: the earlier approval must not carry
+    // over to it.
+    globals.set_vcs_provider(Some(Arc::new(StubVcs {
+        signature_ok: false,
+    })));
+    assert!(
+        globals
+            .check_commit_signature("/stub/repo", "abc1234")
+            .is_err(),
+        "cached verdict from the previous provider leaked"
+    );
+}
+
+/// Reloading the trusted-key set is the same hazard: the verdicts in the
+/// cache were reached under the old keys.
+#[test]
+fn reloading_trusted_signers_invalidates_cached_verdicts() {
+    let globals = make_globals();
+    globals
+        .verify_commit_signatures
+        .store(true, Ordering::Relaxed);
+
+    let counting = Arc::new(CountingVcs::default());
+    globals.set_vcs_provider(Some(counting.clone()));
+    assert!(
+        globals
+            .check_commit_signature("/stub/repo", "abc1234")
+            .is_ok()
+    );
+    assert_eq!(counting.calls(), 1);
+
+    globals.load_trusted_signers(&cljrs_project::config::DepsConfig {
+        trusted_signers: vec![TrustedSigner::Inline("key-a".to_string())],
+        ..Default::default()
+    });
+    assert!(
+        globals
+            .check_commit_signature("/stub/repo", "abc1234")
+            .is_ok()
+    );
+    assert_eq!(
+        counting.calls(),
+        2,
+        "new trust set must force re-verification"
     );
 }
 

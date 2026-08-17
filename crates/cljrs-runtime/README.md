@@ -105,7 +105,8 @@ tests/
   no_gc_eval.rs                    — (no-gc) arithmetic, def provenance, region stack
   versioned_resolution.rs          — versioned resolution against a real git fixture
   vcs_provider.rs                  — the VcsProvider seam: default provider, degradation
-                                     with none installed, signature-check routing
+                                     with none installed, signature-check routing and
+                                     cache invalidation on provider/trust-set change
                                      (passes with and without the `deps` feature)
   require_spec_reader_conditional.rs — reader conditionals in ns require specs
   declare_macro.rs, doc.rs, gas_meter.rs, into_seq_target.rs, map_entry.rs,
@@ -381,6 +382,12 @@ On `GlobalEnv`:
   repository".
 - `set_vcs_provider(&self, Option<Arc<dyn VcsProvider>>)` — supply your own
   implementation, or pass `None` to strip git access from a sandboxed host.
+  Drops every cached signature verdict: those were reached by the outgoing
+  provider under its trust set, so carrying them over would let a permissive
+  provider launder an approval for source a stricter one would reject.
+- `invalidate_signature_cache(&self)` — forget those verdicts explicitly.
+  `load_trusted_signers` calls it too, since a new key set invalidates
+  conclusions drawn under the old one.
 
 Callers: `loader::do_load` (records a namespace's repo root),
 `versioned::versioned_source_available` and `versioned::fetch_versioned_source`,
