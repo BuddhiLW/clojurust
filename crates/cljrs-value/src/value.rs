@@ -11,7 +11,7 @@ use crate::hash::{
     ClojureHash, hash_combine_ordered, hash_combine_unordered, hash_i64, hash_string, hash_u128,
 };
 use crate::keyword::Keyword;
-use crate::regex::Matcher;
+use crate::regex::{Matcher, Pattern};
 use crate::resource::ResourceHandle;
 use crate::shared::SharedAtom;
 use crate::symbol::Symbol;
@@ -22,7 +22,6 @@ use crate::types::{
 use cljrs_gc::{GcPtr, MarkVisitor, Trace};
 use num_bigint::BigInt;
 use num_traits::ToPrimitive;
-use regex::Regex;
 
 /// A GC-traced mutable array of Values (backs `object-array`).
 #[derive(Debug)]
@@ -67,7 +66,7 @@ pub enum Value {
     Char(char),
     Str(GcPtr<String>),
     Uuid(u128),
-    Pattern(GcPtr<Regex>),
+    Pattern(GcPtr<Pattern>),
     Matcher(GcPtr<Matcher>),
 
     // ── Identifiers ───────────────────────────────────────────────────────────

@@ -1,5 +1,5 @@
 use cljrs_gc::GcPtr;
-use cljrs_value::regex::{MatchPhase, Matcher};
+use cljrs_value::regex::{MatchPhase, Matcher, Pattern};
 use cljrs_value::{Value, ValueError, ValueResult};
 
 pub fn builtin_re_pattern(args: &[Value]) -> ValueResult<Value> {
@@ -7,7 +7,7 @@ pub fn builtin_re_pattern(args: &[Value]) -> ValueResult<Value> {
         Value::Pattern(pattern) => Ok(Value::Pattern(pattern.clone())),
         Value::Matcher(matcher) => Ok(Value::Pattern(matcher.get().pattern.clone())),
         Value::Str(s) => {
-            let pattern = regex::Regex::new(s.get().as_str());
+            let pattern = Pattern::new(s.get().as_str());
             match pattern {
                 Ok(pattern) => Ok(Value::Pattern(GcPtr::new(pattern))),
                 Err(e) => Err(ValueError::Other(e.to_string())),
@@ -77,7 +77,7 @@ pub fn builtin_re_groups(args: &[Value]) -> ValueResult<Value> {
 fn new_matcher(args: &[Value], match_all: bool) -> ValueResult<Matcher> {
     let pattern = match &args[0] {
         Value::Pattern(p) => Ok(p.get().clone()),
-        Value::Str(s) => regex::Regex::new(s.get()),
+        Value::Str(s) => Pattern::new(s.get()),
         v => {
             return Err(ValueError::WrongType {
                 expected: "str or pattern",

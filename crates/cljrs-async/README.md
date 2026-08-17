@@ -377,3 +377,19 @@ own `async` feature pulls this package in.
 **Timer portability:** On `wasm32` the `time` feature of tokio is present but
 `platform_sleep` (used internally by `timeout`) delegates to `gloo-timers` so that
 the browser's `setTimeout` is used instead of a non-functional OS-level clock.
+
+---
+
+## Features
+
+| Feature | Default | Effect |
+|---|---|---|
+| `regex-full` | on | Forwards `cljrs-value/regex-full` — `Value::Pattern` uses the `regex` crate. |
+| `small-regex` | off | Forwards `cljrs-value/small-regex` — `regex-lite` instead, trading Unicode character classes for ~277 KB of text. See [cljrs-value's README](../cljrs-value/README.md#features). |
+
+`regex-full` wins when both are enabled, so `small-regex` only takes effect with
+`--no-default-features`. This crate depends on `cljrs-runtime` with *its* default
+features on, which re-enables `regex-full` — so selecting the small engine here
+also means depending on `cljrs-runtime` (and `cljrs-stdlib`, if present) directly
+with default features off. `cljrs-runtime`'s `deps` feature pulls `regex` in
+through `pgp` regardless, so the size win only lands once `deps` is off too.

@@ -12,12 +12,12 @@ use crate::interp::syntax_quote::syntax_quote;
 use cljrs_gc::GcPtr;
 use cljrs_reader::Form;
 use cljrs_reader::form::FormKind;
+use cljrs_value::regex::Pattern;
 use cljrs_value::value::SetValue;
 use cljrs_value::{
     FutureState, Keyword, MapValue, PersistentHashSet, PersistentList, PersistentVector, Symbol,
     Value,
 };
-use regex::Regex;
 
 /// Evaluate a `Form` in the given `Env`.
 pub fn eval(form: &Form, env: &mut Env) -> EvalResult {
@@ -37,7 +37,7 @@ pub fn eval(form: &Form, env: &mut Env) -> EvalResult {
         FormKind::BigDecimal(s) => crate::builtins::parse_bigdecimal(s),
         FormKind::Ratio(s) => crate::builtins::parse_ratio(s),
         FormKind::Regex(s) => {
-            let r = Regex::new(s);
+            let r = Pattern::new(s);
             match r {
                 Ok(r) => Ok(Value::Pattern(GcPtr::new(r))),
                 Err(e) => Err(EvalError::Runtime(e.to_string())),

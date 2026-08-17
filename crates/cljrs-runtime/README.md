@@ -1124,6 +1124,8 @@ by the lowerer — resolve at Tier 1 exactly as they do tree-walked.
 |---|---|---|
 | `no-gc` | off | Forwards to `cljrs-gc/no-gc` and `cljrs-value/no-gc`; switches `env::gc_roots`, `interp::special`, and `interp::apply` to the region/`StaticArena` allocation protocol |
 | `deps` | **on** | Enables `cljrs-project/vcs` and installs the `cljrs-project`-backed [`VcsProvider`](#vcs-submodule) in `GlobalEnv::new`, so versioned vars (`ns/name@commit`) resolve out of git history and `:verify-commit-signatures` can check signatures |
+| `regex-full` | **on** | Forwards `cljrs-value/regex-full`: `Value::Pattern` uses the `regex` crate |
+| `small-regex` | off | Forwards `cljrs-value/small-regex`: `Value::Pattern` uses `regex-lite` instead, dropping ~277 KB of text at the cost of Unicode character classes. `regex-full` wins if both are on, so this needs `--no-default-features` — and `deps` off as well, since `cljrs-project/vcs` pulls `regex` in through `pgp`. See [cljrs-value's README](../cljrs-value/README.md#features) |
 
 ### Turning `deps` off
 
@@ -1160,11 +1162,11 @@ the default provider at runtime.
 |-------|------|
 | `cljrs-types` | `Span` |
 | `cljrs-gc` | `GcPtr<T>`, alloc frames, safepoints |
-| `cljrs-value` | `Value`, `CljxFn`, persistent collections, `shared` |
+| `cljrs-value` | `Value`, `CljxFn`, persistent collections, `shared`, `regex::Pattern` (the regex engine is selected there, not here) |
 | `cljrs-reader` | `Form` AST and `Parser` |
 | `cljrs-ir` | IR types (`IrFunction`, `Block`, `Inst`, `IrBundle`) and lowering |
 | `tracing` / `tracing-subscriber` (non-WASM) | the `gc`/`env`/`ir`/`jit` diagnostic targets, and the `logging` module that filters and installs them |
 | `cljrs-project` | `config` — project configuration consulted by the namespace loader (always; no external dependencies of its own). `vcs` (non-WASM, `deps` feature) — git history access for versioned namespace resolution. Never `vcs-net`: the interpreter reads local repositories and never fetches, so no HTTP/TLS stack is linked. |
 | `num-bigint`, `num-rational`, `bigdecimal`, `num-traits` | numeric tower |
-| `rand`, `rpds`, `uuid`, `regex` | builtin implementations |
+| `rand`, `rpds`, `uuid` | builtin implementations |
 | `log`, `thiserror` | diagnostics and error derivation |

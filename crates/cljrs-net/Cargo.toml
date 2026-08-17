@@ -6,6 +6,14 @@ description = "TCP/Unix/TLS networking for clojurust — channel-oriented socket
 license.workspace = true
 repository.workspace = true
 
+[features]
+default = ["regex-full"]
+
+# Regex engine, forwarded to cljrs-value (which owns the choice); `regex-full`
+# is the default engine, `small-regex` swaps in regex-lite.
+regex-full  = ["cljrs-value/regex-full"]
+small-regex = ["cljrs-value/small-regex"]
+
 [dependencies]
 cljrs-runtime = { workspace = true }
 cljrs-types    = { workspace = true }

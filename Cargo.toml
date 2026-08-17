@@ -33,7 +33,13 @@ repository = "https://github.com/csm/clojurust"
 [workspace.dependencies]
 cljrs-types        = { path = "crates/cljrs-types",        version = "0.1.0" }
 cljrs-gc           = { path = "crates/cljrs-gc",           version = "0.1.0" }
-cljrs-value        = { path = "crates/cljrs-value",        version = "0.1.0" }
+# Default-off so each member picks a regex engine explicitly: `regex-full`
+# (the `regex` crate) or `small-regex` (`regex-lite`). Every member that
+# depends on cljrs-value re-exports both features and has `regex-full` in its
+# own `default`, so a plain build is unchanged; a size-constrained embedding
+# turns default features off along the whole chain and selects `small-regex`.
+# See crates/cljrs-value/src/regex.rs.
+cljrs-value        = { path = "crates/cljrs-value",        version = "0.1.0", default-features = false }
 cljrs-reader       = { path = "crates/cljrs-reader",       version = "0.1.0" }
 cljrs-stdlib       = { path = "crates/cljrs-stdlib",       version = "0.1.0" }
 cljrs-runtime      = { path = "crates/cljrs-runtime",      version = "0.1.0" }
@@ -71,6 +77,9 @@ tokio        = { version = "1.50.0", features = ["rt", "sync", "time", "macros"]
 futures-util = "0.3"
 encoding_rs  = "0.8"
 regex        = "1.12.3"
+# Alternate engine behind cljrs-value's `small-regex` feature: ~1/10th the code
+# size, no DFA/SIMD, no Unicode character classes.
+regex-lite   = "0.1.9"
 serde        = "1.0.228"
 postcard     = "1.1.3"
 rustyline    = "18.0.0"

@@ -7,7 +7,13 @@ license.workspace = true
 repository.workspace = true
 
 [features]
-default = ["wasm-aot"]
+default = ["wasm-aot", "regex-full"]
+
+# Regex engine, forwarded to cljrs-value (which owns the choice); `regex-full`
+# is the default engine, `small-regex` swaps in regex-lite.
+regex-full  = ["cljrs-value/regex-full"]
+small-regex = ["cljrs-value/small-regex"]
+
 # The WebAssembly AOT backend (`src/wasm/`) and its `compile_file_to_wasm`
 # driver.  On by default so `cljrs compile --target wasm` works out of the box;
 # `--no-default-features` drops the backend and the `wasm-encoder` dependency

@@ -3,6 +3,7 @@
 use crate::env::error::{EvalError, EvalResult};
 use bigdecimal::BigDecimal;
 use cljrs_gc::GcPtr;
+use cljrs_value::regex::Pattern;
 use cljrs_value::{Value, ValueError, ValueResult};
 use num_bigint::BigInt;
 use num_traits::{Signed, ToPrimitive};
@@ -112,7 +113,7 @@ pub fn parse_regex(s: &str) -> EvalResult {
     // execution tiers. Tree-walk and compiled tiers currently both compile a
     // regex literal on each evaluation; preserving that behavior keeps this
     // correctness change tier-neutral, but a hot literal still pays Regex::new.
-    regex::Regex::new(s)
+    Pattern::new(s)
         .map(|r| Value::Pattern(GcPtr::new(r)))
         .map_err(|e| EvalError::Runtime(e.to_string()))
 }

@@ -28,6 +28,7 @@ src/
   keyword.rs                     — Keyword { namespace, name }
   publish.rs                     — (Phase 10.5, GC builds; identity stub under no-gc) heap-promotion publish barrier: publish_value(Value) -> Value scans for region-allocated boxes, deep-copies them to the GC heap (via clone.rs), or poisons the active regions when the value is opaque to the scan. Called by Var::bind, Atom::new/reset, Volatile::new/reset, CljxPromise::deliver, and cljrs-async channel puts
   shared.rs                      — (Phase B3) SharedValue enum, SharedAtom (Arc<ArcSwap<SharedValue>>), promote/demote; PromoteError. Var roots reuse SharedValue via Var::shared_root (issue #171)
+  regex.rs                       — Pattern (engine-agnostic compiled regex behind Value::Pattern, selected by the regex-full / small-regex features), PatternError, Captures, Matcher (stateful re-find/re-matches driver), MatchPhase, MatchResult
   symbol.rs                      — Symbol { namespace, name }
   type_hint.rs                   — TypeHint enum (^long/^double/^longs/… primitive type tags) + from_tag/is_array/element
   native_object.rs               — NativeObject trait, NativeObjectBox wrapper, gc_native_object helper (Phase 9 interop)
@@ -65,6 +66,9 @@ pub enum Value {
     Ratio(GcPtr<num_rational::Ratio<num_bigint::BigInt>>),
     Char(char),
     Str(GcPtr<String>),
+    // Regexes (engine selected by the regex-full / small-regex features)
+    Pattern(GcPtr<Pattern>),
+    Matcher(GcPtr<Matcher>),
     // Identifiers
     Symbol(GcPtr<Symbol>),
     Keyword(GcPtr<Keyword>),
@@ -124,6 +128,76 @@ Both support `simple(name)`, `qualified(ns, name)`, `parse(str)`, and
 helpers used by all execution tiers to detect versioned names:
 `symbol::is_commit_hash(s) -> bool` and
 `symbol::split_version(name) -> (&str, Option<&str>)`.
+
+### `regex` — `Pattern` / `Captures` / `Matcher`
+
+`Value::Pattern` holds a `GcPtr<Pattern>`, never an engine type directly.
+`Pattern` is the only place in the workspace that names a regex engine, so the
+engine is a build-time choice (see [Features](#features)):
+
+```rust
+pub struct Pattern(/* regex::Regex or regex_lite::Regex */);
+
+impl Pattern {
+    pub fn new(pattern: &str) -> Result<Pattern, PatternError>;
+    pub fn as_str(&self) -> &str;
+    pub fn captures<'h>(&self, haystack: &'h str) -> Option<Captures<'h>>;
+    pub fn captures_at<'h>(&self, haystack: &'h str, start: usize) -> Option<Captures<'h>>;
+    pub fn replace<'h>(&self, haystack: &'h str, replacement: &str) -> Cow<'h, str>;
+    pub fn replace_all<'h>(&self, haystack: &'h str, replacement: &str) -> Cow<'h, str>;
+    pub fn split<'h>(&self, haystack: &'h str) -> impl Iterator<Item = &'h str>;
+    pub fn splitn<'h>(&self, haystack: &'h str, limit: usize) -> impl Iterator<Item = &'h str>;
+}
+
+impl Clone for Pattern {}
+impl fmt::Display for Pattern {}   // the pattern source
+impl Trace for Pattern {}          // leaf: no GcPtr fields
+
+/// Engine-independent compile failure; carries the engine's message.
+pub struct PatternError(/* private */);
+impl fmt::Display for PatternError {}
+impl std::error::Error for PatternError {}
+
+/// A successful match, borrowing the haystack.
+pub struct Captures<'h>(/* private */);
+
+impl<'h> Captures<'h> {
+    pub fn full(&self) -> &'h str;        // group 0
+    pub fn end(&self) -> usize;           // byte offset past group 0
+    pub fn group_count(&self) -> usize;   // groups incl. group 0; ≥ 1
+    pub fn groups(&self) -> impl Iterator<Item = Option<&'h str>> + '_;
+}
+```
+
+`Matcher` is the stateful driver behind `re-find`/`re-matches`/`re-seq`: it
+holds `pattern: GcPtr<Pattern>` plus a haystack and walks matches left to
+right, one per `next()` call.
+
+```rust
+pub enum MatchPhase { New, Matching(usize), Complete }
+
+pub struct Matcher { pub pattern: GcPtr<Pattern>, /* haystack, state, match_all */ }
+
+impl Matcher {
+    pub fn new(pattern: Pattern, source: String, match_all: bool) -> Matcher;
+    pub fn next(&self) -> MatchPhase;            // advance; Complete once exhausted
+    pub fn capture(&self) -> Option<MatchResult>; // last match, owned
+    pub fn phase(&self) -> MatchPhase;
+}
+
+impl Clone for Matcher {}
+impl Trace for Matcher {}
+
+/// Owned form of a match — outlives the haystack borrow.
+pub struct MatchResult { pub full: String, pub groups: Vec<Option<String>> }
+
+impl MatchResult {
+    pub fn new(cap: &Captures<'_>) -> MatchResult;
+    /// Str for a group-less match, Vector of groups otherwise (Clojure's
+    /// re-find return shape).
+    pub fn to_value(&self) -> Value;
+}
+```
 
 ### Phase B3 — Shared static arena
 
@@ -526,3 +600,48 @@ Matcher; Var whose root holds a non-promotable value.
 `cljrs-value` depends on `cljrs-reader` so that `CljxFnArity::body` can store
 `Vec<Form>` (unevaluated source bodies for interpreter evaluation and closure
 capture).
+
+---
+
+## Features
+
+| Feature | Default | Effect |
+|---|---|---|
+| `regex-full` | yes | `Value::Pattern` uses the `regex` crate: linear-time matching, full Unicode character classes. |
+| `small-regex` | no | `Value::Pattern` uses `regex-lite` instead — roughly a tenth of the code size; `regex-automata`, `regex-syntax` and `aho-corasick` drop out of the build. |
+| `no-gc` | no | Forwards `cljrs-gc/no-gc` (region allocation, no tracing GC). |
+
+Exactly one regex engine is compiled in, and `regex-full` wins when both
+features are enabled. Cargo features are additive, so that ordering is
+deliberate: a build where one dependent asks for `small-regex` and another takes
+the default gets the more capable engine rather than a silent semantic
+downgrade.
+
+Measured on a stripped release build of the interpreter plus
+`clojure.core`/`clojure.string` with `deps` off (`cljrs-stdlib` with
+`default-features = false`), swapping the engine takes `.text` from 3.68 MB to
+2.89 MB and the binary from 5.77 MB to 4.10 MB.
+
+`small-regex` is a **behaviour** change as well as a size one — `regex-lite` has
+no Unicode character classes (`\w`, `\d`, `[[:alpha:]]` and friends are ASCII
+only) and is materially slower on pathological patterns. `re-find`/`re-matches`/
+`re-seq` over short strings, which is what most Clojure code does with regexes,
+are unaffected in behaviour.
+
+Because `regex-full` wins ties, selecting the small engine means turning default
+features off on every workspace crate you depend on directly; each of them
+re-exports both features:
+
+```toml
+[dependencies]
+# interpreter + clojure.core/clojure.string, no git dependency support
+cljrs-stdlib = { version = "0.1", default-features = false, features = ["small-regex"] }
+```
+
+One crate left at its defaults anywhere in the graph puts `regex` back — the same
+unification caveat that applies to `cljrs-runtime`'s `deps` feature. And `deps`
+itself has to be off for the swap to pay: `cljrs-project/vcs` pulls `regex` in
+through `pgp`, so an embedding that resolves git-hosted dependencies links the
+full engine no matter what this feature says. `cljrs-stdlib` therefore depends on
+`cljrs-runtime` with default features off and re-exports `deps` alongside the two
+regex features.

@@ -647,6 +647,8 @@ versioned loader rather than the plain `require` path.
 | `wasm-aot` | on | The WebAssembly backend (`wasm/`), `aot::compile_file_to_wasm`, and the `wasm-encoder` dependency.  `--no-default-features` produces a native-only compiler. |
 | `no-gc` | off | Propagated to `cljrs-gc`/`cljrs-value`/`cljrs-runtime`/`cljrs-stdlib`/`cljrs-async`; enables the `escape.rs` blacklist analysis. |
 | `aot_full_test` | off | Runs the full (~120 test) AOT end-to-end suite instead of its core subset. |
+| `regex-full` | on | Forwards `cljrs-value/regex-full` — `Value::Pattern` uses the `regex` crate. |
+| `small-regex` | off | Forwards `cljrs-value/small-regex` — `regex-lite` instead; see [cljrs-value's README](../cljrs-value/README.md#features). |
 
 ---
 

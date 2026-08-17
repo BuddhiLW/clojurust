@@ -7,13 +7,28 @@ license.workspace = true
 repository.workspace = true
 
 [features]
-default = []
+default = ["regex-full", "deps"]
+
+# Regex engine, forwarded to cljrs-value (which owns the choice) and to
+# cljrs-runtime. `regex-full` is the default engine, `small-regex` swaps in
+# regex-lite. Both are forwarded because cljrs-runtime is depended on with
+# default features off — see the note on `deps` below.
+regex-full  = ["cljrs-value/regex-full", "cljrs-runtime/regex-full"]
+small-regex = ["cljrs-value/small-regex", "cljrs-runtime/small-regex"]
+
+# Pass-through for cljrs-runtime's git-backed dependency support, on by default
+# so a plain `cljrs-stdlib` build behaves as it always has.
+deps = ["cljrs-runtime/deps"]
+
 no-gc = ["cljrs-gc/no-gc", "cljrs-value/no-gc", "cljrs-runtime/no-gc"]
 
 [dependencies]
 cljrs-gc      = { workspace = true }
 cljrs-ir      = { workspace = true }
 cljrs-value   = { workspace = true }
-cljrs-runtime = { workspace = true }
+# Not `workspace = true`: an interpreter-plus-clojure.core embedding needs to be
+# able to turn cljrs-runtime's default features off (`deps`, `regex-full`), and
+# Cargo ignores `default-features = false` on an inherited dependency whose
+# workspace entry leaves it on. The features above put both knobs back.
+cljrs-runtime = { path = "../cljrs-runtime", version = "0.1.0", default-features = false }
 cljrs-reader  = { workspace = true }
-

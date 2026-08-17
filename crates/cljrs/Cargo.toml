@@ -7,7 +7,13 @@ license.workspace = true
 repository.workspace = true
 
 [features]
-default = ["async", "net", "charset", "base64"]
+default = ["async", "net", "charset", "base64", "regex-full"]
+
+# Regex engine, forwarded to cljrs-value (which owns the choice); `regex-full`
+# is the default engine, `small-regex` swaps in regex-lite.
+regex-full  = ["cljrs-value/regex-full"]
+small-regex = ["cljrs-value/small-regex"]
+
 # Propagate no-gc to all direct dependencies; transitive deps pick it up through their own feature chains.
 no-gc = [
     "cljrs-gc/no-gc",

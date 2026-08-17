@@ -43,3 +43,19 @@ Each session has its own `Env` (namespace) and its own `*1`/`*2`/`*3`/`*e`, boun
 - `trait EvalForm: FnMut(&Form, &mut Env) -> Result<Value, EvalError>` — evaluator signature for `serve_with`.
 - `mod bencode` — `Bencode`, `encode`, `encode_to_vec`, `decode` (public for tests/clients).
 - `mod protocol` — `Request`, `Response`.
+
+---
+
+## Features
+
+| Feature | Default | Effect |
+|---|---|---|
+| `regex-full` | on | Forwards `cljrs-value/regex-full` — `Value::Pattern` uses the `regex` crate. |
+| `small-regex` | off | Forwards `cljrs-value/small-regex` — `regex-lite` instead, trading Unicode character classes for ~277 KB of text. See [cljrs-value's README](../cljrs-value/README.md#features). |
+
+`regex-full` wins when both are enabled, so `small-regex` only takes effect with
+`--no-default-features`. This crate depends on `cljrs-runtime` with *its* default
+features on, which re-enables `regex-full` — so selecting the small engine here
+also means depending on `cljrs-runtime` (and `cljrs-stdlib`, if present) directly
+with default features off. `cljrs-runtime`'s `deps` feature pulls `regex` in
+through `pgp` regardless, so the size win only lands once `deps` is off too.
