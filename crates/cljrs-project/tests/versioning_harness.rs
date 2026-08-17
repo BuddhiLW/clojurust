@@ -1,5 +1,8 @@
 //! Versioning test harness.
 //!
+//! Exercises the `vcs` feature (local git reads + signature verification);
+//! compiled away when the crate is built without it.
+//!
 //! Two git repositories are created in temporary directories:
 //!
 //! - **library repo** — a minimal Clojure library (`src/mylib.cljc`) with two
@@ -14,6 +17,8 @@
 //! | Tagged version → pinned commit | sha of tag `v1.0.0` returns v1 content |
 //! | Signature positive | `verify_commit_signature` on a GPG-signed commit → Ok |
 //! | Signature negative | `verify_commit_signature` on an unsigned commit → Err |
+
+#![cfg(feature = "vcs")]
 
 use std::path::{Path, PathBuf};
 use std::process::Command;

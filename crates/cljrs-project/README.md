@@ -18,6 +18,27 @@ API under the new module paths.
 This is the same gating `cljrs-runtime` previously applied to the `cljrs-vcs`
 dependency itself.
 
+`vcs` is also **feature-gated**, in two tiers, so a consumer links only the
+weight it actually uses:
+
+- **`vcs`** — reading a local repository plus signature verification
+  (`find_repo_root`, `get_file_at_commit`, `worktree_at_commit`,
+  `checkout_tree`, `verify_commit_signature`). Pulls gitoxide, rPGP and
+  `ssh-key`, but **no** network stack.
+- **`vcs-net`** — `fetch_remote`, i.e. cloning/fetching a remote into the local
+  cache. This is what selects gix's blocking http transport and with it
+  reqwest/hyper/rustls/aws-lc-rs/tokio. Gitoxide routes *every* clone through
+  that transport layer, so `vcs-net` gates local-path and `file://` fetches
+  too, not only `https://`.
+
+Without either, the crate is just the `cljrs.edn` config model and has no
+dependencies outside the workspace. That is what lets `cljrs-runtime` embed
+the config model — and, under its own default `deps` feature, local git reads —
+without dragging a TLS stack into every embedding of the interpreter.
+
+The workspace dependency entry sets `default-features = false`, so each member
+opts in explicitly; only the `cljrs` binary takes `vcs-net`.
+
 All git operations run in-process via [`gix`] (gitoxide) — no `git` binary is
 required. Commit-signature verification is native: PGP signatures are checked
 with rPGP (`pgp`) and SSH signatures with `ssh-key`, against a caller-supplied
@@ -33,9 +54,15 @@ cache presence without network access.
 
 ## Features
 
-| Feature | Default | Description |
-|---------|---------|-------------|
-| `ssh`   | off     | Native pure-Rust SSH transport (`russh`) for `ssh://`/scp-like remotes. Host keys are verified against `~/.ssh/known_hosts`; authentication is via a running ssh-agent (`$SSH_AUTH_SOCK`). The `cljrs` binary enables this. |
+The crate's own `default` is `["vcs", "vcs-net"]`, but the workspace dependency
+entry sets `default-features = false`, so within this repo every member states
+what it needs.
+
+| Feature | Default | Enabled by | Description |
+|---------|---------|-----------|-------------|
+| `vcs`     | on (crate default) | `cljrs-runtime/deps`, `cljrs` | The `vcs` module: local git reads (gitoxide) and commit-signature verification (rPGP, `ssh-key`). No network stack. |
+| `vcs-net` | on (crate default) | `cljrs` | `fetch_remote`: clone/fetch a remote into the local cache. Selects gix's blocking http transport, and with it reqwest/hyper/rustls/aws-lc-rs/tokio. Implies `vcs`. |
+| `ssh`     | off     | `cljrs` | Native pure-Rust SSH transport (`russh`) for `ssh://`/scp-like remotes. Host keys are verified against `~/.ssh/known_hosts`; authentication is via a running ssh-agent (`$SSH_AUTH_SOCK`). Implies `vcs-net`. |
 
 [`gix`]: https://docs.rs/gix
 
@@ -43,7 +70,7 @@ cache presence without network access.
 
 | File | Description |
 |------|-------------|
-| `src/lib.rs` | Crate root; declares `config` and the native-only `vcs` |
+| `src/lib.rs` | Crate root; declares `config` and the native-only, `vcs`-feature-gated `vcs` |
 | `src/config.rs` | `cljrs.edn` types (`DepsConfig`, `RustConfig`, `Dependency`, `Alias`, `GitDep`, `TrustedSigner`), `find_config_file`, `load_config` |
 | `src/config/parse.rs` | Walk the `cljrs-reader` Form tree from `cljrs.edn` source into `DepsConfig` |
 | `src/vcs.rs` | `VcsError` and the `gix`-backed git operations |
@@ -118,7 +145,7 @@ pub enum DepsError { Io(std::io::Error), Parse(String) }
 pub type DepsResult<T> = Result<T, DepsError>;
 ```
 
-### `cljrs_project::vcs` (native targets only)
+### `cljrs_project::vcs` (native targets, `vcs` feature)
 
 ```rust
 /// True if `s` is 7–40 lowercase or uppercase hex characters.
@@ -139,6 +166,9 @@ pub fn cache_path_for_url(url: &str) -> PathBuf
 
 /// Clone or fetch `url` (https/local/file), ensuring `sha` is present locally.
 /// Returns the path to the bare repo in the cache.
+/// Requires the `vcs-net` feature (gitoxide routes all clones, local ones
+/// included, through its transport layer).
+#[cfg(feature = "vcs-net")]
 pub fn fetch_remote(url: &str, sha: &str) -> VcsResult<PathBuf>
 
 /// Materialize a files-only working checkout of `sha` for `url` from the local

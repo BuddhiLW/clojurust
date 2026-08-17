@@ -16,6 +16,7 @@ pub mod gc_roots;
 pub mod loader;
 pub mod policy;
 pub mod taps;
+pub mod vcs;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod versioned;
 

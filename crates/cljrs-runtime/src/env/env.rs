@@ -124,12 +124,12 @@ pub struct GlobalEnv {
     /// `--verify-commit-signatures` CLI flag or `:verify-commit-signatures true`
     /// in `cljrs.edn`.
     pub verify_commit_signatures: AtomicBool,
-    /// Public keys trusted to sign versioned dependency commits, built from
-    /// the `:trusted-signers` config.  Consulted by `check_commit_signature`
-    /// when `verify_commit_signatures` is on.  (Not built on wasm, where
-    /// `cljrs-project::vcs` is unavailable and signature checks are no-ops.)
-    #[cfg(not(target_arch = "wasm32"))]
-    pub trusted_keys: RwLock<Arc<cljrs_project::vcs::TrustedKeys>>,
+    /// The git backend used by versioned resolution and signature checking, or
+    /// `None` in builds that carry no VCS implementation (wasm, or
+    /// `cljrs-runtime` without its default `deps` feature).  With no provider,
+    /// source files are treated as living outside any repository and versioned
+    /// resolution can only use embedded (AOT) sources.  See [`crate::env::vcs`].
+    vcs: RwLock<Option<Arc<dyn crate::env::vcs::VcsProvider>>>,
     /// Session-scoped cache of commits that have already passed signature
     /// verification this run, keyed by `(repo_root, commit_hash)`.
     pub sig_verify_cache: Mutex<HashSet<(Arc<str>, Arc<str>)>>,
@@ -229,8 +229,7 @@ impl GlobalEnv {
             version_cache: Mutex::new(HashMap::new()),
             deps_config: RwLock::new(None),
             verify_commit_signatures: AtomicBool::new(false),
-            #[cfg(not(target_arch = "wasm32"))]
-            trusted_keys: RwLock::new(Arc::new(cljrs_project::vcs::TrustedKeys::new())),
+            vcs: RwLock::new(crate::env::vcs::default_provider()),
             sig_verify_cache: Mutex::new(HashSet::new()),
             versioned_sources: RwLock::new(HashMap::new()),
             versioned_offline: AtomicBool::new(false),
@@ -674,6 +673,40 @@ impl GlobalEnv {
         }
     }
 
+    /// The installed VCS backend, or `None` when this build has none (see
+    /// [`crate::env::vcs`]).  Callers must degrade gracefully: "no provider"
+    /// means "this source file is not in a git repository".
+    pub fn vcs(&self) -> Option<Arc<dyn crate::env::vcs::VcsProvider>> {
+        self.vcs.read().unwrap().clone()
+    }
+
+    /// Replace the VCS backend.  Lets an embedder that built without the
+    /// `deps` feature supply its own git implementation, or a sandboxed host
+    /// remove the default one (`None`) so no versioned resolution can reach
+    /// the filesystem's git history.
+    ///
+    /// Drops every cached signature verdict: those were reached by the
+    /// outgoing provider, against its trust set and its view of the
+    /// repository, and say nothing about what the incoming one would decide
+    /// for the same `(repo, commit)`.  Keeping them would let a permissive
+    /// provider launder an approval for source a later provider serves.
+    pub fn set_vcs_provider(&self, provider: Option<Arc<dyn crate::env::vcs::VcsProvider>>) {
+        // Neither this nor `check_commit_signature` ever holds the `vcs` and
+        // `sig_verify_cache` locks at the same time, and the two reach for
+        // them in opposite orders — keep it that way, or the pair becomes a
+        // lock-order inversion.
+        *self.vcs.write().unwrap() = provider;
+        self.invalidate_signature_cache();
+    }
+
+    /// Forget every cached signature verdict, so the next
+    /// [`check_commit_signature`](Self::check_commit_signature) re-asks the
+    /// current provider.  Called whenever the thing that produced those
+    /// verdicts changes: the provider itself, or its trusted-key set.
+    pub fn invalidate_signature_cache(&self) {
+        self.sig_verify_cache.lock().unwrap().clear();
+    }
+
     /// If `:verify-commit-signatures` is enabled, verify that `commit` inside
     /// `repo_root` carries a valid GPG or SSH signature.
     ///
@@ -681,34 +714,38 @@ impl GlobalEnv {
     /// path the result is cached per `(repo_root, commit)` so each commit is
     /// only verified once per session.  On failure returns
     /// `EvalError::CommitSignatureVerificationFailed`.
+    ///
+    /// If verification is demanded but this build has no VCS provider, the
+    /// check fails: silently accepting an unverifiable commit would defeat the
+    /// flag the user explicitly turned on.
     pub fn check_commit_signature(&self, repo_root: &str, commit: &str) -> EvalResult<()> {
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            if !self.verify_commit_signatures.load(Ordering::Relaxed) {
-                return Ok(());
-            }
-            let key = (Arc::<str>::from(repo_root), Arc::<str>::from(commit));
-            if self.sig_verify_cache.lock().unwrap().contains(&key) {
-                return Ok(());
-            }
-            let trusted = self.trusted_keys.read().unwrap().clone();
-            cljrs_project::vcs::verify_commit_signature(
-                std::path::Path::new(repo_root),
-                commit,
-                &trusted,
-            )
+        if !self.verify_commit_signatures.load(Ordering::Relaxed) {
+            return Ok(());
+        }
+        let key = (Arc::<str>::from(repo_root), Arc::<str>::from(commit));
+        if self.sig_verify_cache.lock().unwrap().contains(&key) {
+            return Ok(());
+        }
+        let Some(vcs) = self.vcs() else {
+            return Err(crate::env::error::EvalError::Runtime(format!(
+                "commit-signature verification is enabled, but this build has no VCS \
+                 provider to verify commit {commit} with (cljrs-runtime built without \
+                 the `deps` feature)"
+            )));
+        };
+        vcs.verify_commit_signature(std::path::Path::new(repo_root), commit)
             .map_err(|e| match e {
-                cljrs_project::vcs::VcsError::SignatureVerificationFailed { commit: c, reason } => {
+                crate::env::vcs::SignatureFailure::Untrusted { commit, reason } => {
                     crate::env::error::EvalError::CommitSignatureVerificationFailed {
-                        commit: c,
+                        commit,
                         reason,
                     }
                 }
-                other => crate::env::error::EvalError::Runtime(format!("{other}")),
+                crate::env::vcs::SignatureFailure::Error(msg) => {
+                    crate::env::error::EvalError::Runtime(msg)
+                }
             })?;
-            self.sig_verify_cache.lock().unwrap().insert(key);
-        }
-        let _ = (repo_root, commit);
+        self.sig_verify_cache.lock().unwrap().insert(key);
         Ok(())
     }
 
@@ -716,33 +753,19 @@ impl GlobalEnv {
     /// install it, so subsequent `check_commit_signature` calls verify against
     /// it.  Inline keys are parsed directly; `File` entries are read from disk.
     /// Returns the number of keys loaded; warns (to stderr) on any key that
-    /// fails to load rather than aborting.  (Not available on wasm.)
-    #[cfg(not(target_arch = "wasm32"))]
+    /// fails to load rather than aborting.  Returns 0 when this build has no
+    /// VCS provider, since there is nothing that could consume the keys.
+    ///
+    /// Replacing the trust set invalidates the signature cache for the same
+    /// reason replacing the provider does: a verdict reached under the old
+    /// keys is not a verdict under the new ones.  (In the normal flow this
+    /// runs at session start, before anything has been verified.)
     pub fn load_trusted_signers(&self, config: &cljrs_project::config::DepsConfig) -> usize {
-        let mut keys = cljrs_project::vcs::TrustedKeys::new();
-        let mut loaded = 0usize;
-        for signer in &config.trusted_signers {
-            let result = match signer {
-                cljrs_project::config::TrustedSigner::Inline(text) => keys.add_key_text(text),
-                cljrs_project::config::TrustedSigner::File(path) => {
-                    match std::fs::read_to_string(path) {
-                        Ok(text) => keys.add_key_text(&text),
-                        Err(e) => {
-                            eprintln!(
-                                "cljrs: warning: could not read trusted signer key {}: {e}",
-                                path.display()
-                            );
-                            continue;
-                        }
-                    }
-                }
-            };
-            match result {
-                Ok(()) => loaded += 1,
-                Err(e) => eprintln!("cljrs: warning: invalid trusted signer key: {e}"),
-            }
-        }
-        *self.trusted_keys.write().unwrap() = Arc::new(keys);
+        let Some(vcs) = self.vcs() else {
+            return 0;
+        };
+        let loaded = vcs.load_trusted_signers(&config.trusted_signers);
+        self.invalidate_signature_cache();
         loaded
     }
 }
