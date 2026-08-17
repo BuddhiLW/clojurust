@@ -673,7 +673,7 @@
 (defn iterate
   "Returns a lazy sequence of x, (f x), (f (f x)), etc."
   [f x]
-  (cons x (lazy-seq (iterate f (f x)))))
+  (lazy-seq (cons x (lazy-seq (iterate f (f x))))))
 
 (defn repeat
   "Returns a lazy (infinite, or length n if supplied) sequence of xs."
