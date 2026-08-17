@@ -2119,7 +2119,18 @@ fn eval_defmethod(args: &[Form], env: &mut Env) -> EvalResult {
     );
     let fn_val = Value::Fn(GcPtr::new(cljrs_fn));
 
-    mf_ptr.get().methods.lock().unwrap().insert(key, fn_val);
+    mf_ptr
+        .get()
+        .methods
+        .lock()
+        .unwrap()
+        .insert(key.clone(), fn_val);
+    mf_ptr
+        .get()
+        .dispatch_vals
+        .lock()
+        .unwrap()
+        .insert(key, dispatch_val);
 
     Ok(Value::MultiFn(mf_ptr))
 }
