@@ -24,6 +24,8 @@ tracing        = { workspace = true }
 # networking, charset, and Base64 are extensions the *host* selects and are
 # deliberately absent here — see `src/extensions.rs`.
 cljrs-async    = { workspace = true }
+# Only the `cljrs.edn` config model is used here; git operations go through
+# the runtime's `VcsProvider`.
 cljrs-project  = { workspace = true }
 cljrs-types    = { workspace = true }
 cljrs-ir       = { workspace = true }

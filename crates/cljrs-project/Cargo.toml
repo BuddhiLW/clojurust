@@ -7,9 +7,25 @@ license.workspace = true
 repository.workspace = true
 
 [features]
+default = ["vcs", "vcs-net"]
+
+# The `vcs` module: local git operations (gitoxide) plus commit-signature
+# verification (rPGP / ssh-key). Without it the crate is just the `cljrs.edn`
+# config model and has no dependencies outside the workspace.
+vcs = ["dep:gix", "dep:pgp", "dep:ssh-key"]
+
+# `fetch_remote` and friends: cloning/fetching a remote into the local cache.
+# Selects gix's blocking http transport, which is what pulls
+# reqwest/hyper/rustls/aws-lc-rs/tokio into the build — so consumers that only
+# *read* a local repository (the interpreter's versioned-var resolution, for
+# one) should leave this off. Note that gitoxide routes local-path and file://
+# clones through the same transport layer, so this gates all fetching, not just
+# the https:// case.
+vcs-net = ["vcs", "gix/blocking-http-transport-reqwest-rust-tls"]
+
 # Native pure-Rust SSH transport for ssh:// remotes (host keys verified
 # against ~/.ssh/known_hosts; ssh-agent authentication). Off by default.
-ssh = ["dep:russh", "dep:tokio", "dep:tokio-util"]
+ssh = ["vcs-net", "dep:russh", "dep:tokio", "dep:tokio-util"]
 
 [dependencies]
 cljrs-types  = { workspace = true }
@@ -18,11 +34,13 @@ cljrs-reader = { workspace = true }
 thiserror    = { workspace = true }
 
 # The `vcs` module is native-only: gitoxide and the signature verifiers do not
-# build for wasm32, and no wasm consumer resolves git dependencies.
+# build for wasm32, and no wasm consumer resolves git dependencies. It is also
+# feature-gated (`vcs`), so a consumer of the config model alone links none of
+# this.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-gix       = { workspace = true }
-pgp       = { workspace = true }
-ssh-key   = { workspace = true }
+gix       = { workspace = true, optional = true }
+pgp       = { workspace = true, optional = true }
+ssh-key   = { workspace = true, optional = true }
 # Optional native SSH transport (enabled by the `ssh` feature).
 russh      = { workspace = true, optional = true }
 tokio      = { workspace = true, optional = true, features = [

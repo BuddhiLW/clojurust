@@ -41,7 +41,7 @@ cljrs-value    = { workspace = true }
 cljrs-stdlib   = { workspace = true }
 cljrs-compiler = { workspace = true }
 cljrs-interop  = { workspace = true }
-cljrs-project  = { workspace = true, features = ["ssh"] }
+cljrs-project  = { workspace = true, features = ["vcs", "vcs-net", "ssh"] }
 cljrs-lsp      = { workspace = true }
 cljrs-nrepl    = { workspace = true }
 cljrs-ir       = { workspace = true }

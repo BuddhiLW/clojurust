@@ -11,6 +11,18 @@
 //! `ssh` binary) when the optional `ssh` feature is enabled (see the `ssh`
 //! module); without it they are rejected with a clear error. Other schemes
 //! (`git://`, `http://`) are unsupported.
+//!
+//! ## Feature tiers
+//!
+//! Reading a repository and verifying signatures ([`find_repo_root`],
+//! [`get_file_at_commit`], [`worktree_at_commit`], [`checkout_tree`],
+//! [`verify_commit_signature`]) needs only the `vcs` feature and links no
+//! network stack at all.
+//!
+//! Fetching — `fetch_remote` — additionally needs `vcs-net`, which selects
+//! gix's blocking http transport and with it reqwest/hyper/rustls/aws-lc-rs.
+//! Gitoxide routes every clone through that transport layer, so `vcs-net`
+//! gates local-path and `file://` fetches too, not just `https://`.
 
 use std::path::{Path, PathBuf};
 
@@ -36,7 +48,7 @@ pub enum VcsError {
     #[error("no git repository found at or above {0:?}")]
     NoRepo(PathBuf),
     #[error(
-        "unsupported remote {0:?}: supported are https:// URLs, local paths, and (with the `ssh` feature) ssh:// remotes"
+        "unsupported remote {0:?}: supported are https:// URLs (with the `vcs-net` feature), local paths, and (with the `ssh` feature) ssh:// remotes"
     )]
     UnsupportedRemote(String),
     #[error("git error: {0}")]
@@ -108,7 +120,7 @@ pub fn cache_root() -> PathBuf {
 
 /// Return the local cache path for a given remote URL, without fetching.
 ///
-/// This mirrors the slug derivation inside [`fetch_remote`] so callers can
+/// This mirrors the slug derivation inside `fetch_remote` so callers can
 /// check cache existence without triggering network access.
 pub fn cache_path_for_url(url: &str) -> PathBuf {
     cache_root().join(url_slug(url))
@@ -131,7 +143,7 @@ fn url_slug(url: &str) -> String {
 /// bare cache, returning the worktree root.
 ///
 /// **Network-free**: the bare cache must already contain `sha` (run
-/// [`fetch_remote`] / `cljrs deps fetch` first).  The checkout is the tree of
+/// `fetch_remote` / `cljrs deps fetch` first).  The checkout is the tree of
 /// `sha` with no `.git`, written under
 /// `~/.cljrs/cache/git/worktrees/<slug>@<sha>/`.  Idempotent and cached per
 /// `(url, sha)` via a `.cljrs-worktree-complete` sentinel (the worktree has no
@@ -203,6 +215,11 @@ pub fn checkout_tree(repo: &Path, commit: &str, dest: &Path) -> VcsResult<()> {
 /// `sha`  — the commit SHA that must be reachable after the operation
 ///
 /// Returns the path to the bare repository in the cache.
+///
+/// Requires the `vcs-net` feature. Gitoxide routes *every* clone/fetch through
+/// its transport layer — local paths and `file://` included — so the whole
+/// operation, not just the `https://` case, needs a transport compiled in.
+#[cfg(feature = "vcs-net")]
 pub fn fetch_remote(url: &str, sha: &str) -> VcsResult<PathBuf> {
     if !is_valid_commit_hash(sha) {
         return Err(VcsError::InvalidCommit(sha.to_string()));
@@ -214,6 +231,12 @@ pub fn fetch_remote(url: &str, sha: &str) -> VcsResult<PathBuf> {
     // ssh requires the optional `ssh` feature; without it, reject clearly.
     #[cfg(not(feature = "ssh"))]
     if matches!(kind, RemoteKind::Ssh) {
+        return Err(VcsError::UnsupportedRemote(url.to_string()));
+    }
+    // https needs a network transport, which only `vcs-net` links in. Reject
+    // here rather than letting gitoxide fail with "unsupported protocol".
+    #[cfg(not(feature = "vcs-net"))]
+    if matches!(kind, RemoteKind::Https) {
         return Err(VcsError::UnsupportedRemote(url.to_string()));
     }
 
@@ -245,9 +268,14 @@ pub fn fetch_remote(url: &str, sha: &str) -> VcsResult<PathBuf> {
 }
 
 /// How a remote URL is transported.
+#[cfg(feature = "vcs-net")]
 enum RemoteKind {
-    /// `https://` (pure-Rust network) or a local filesystem path / `file://`.
-    Supported,
+    /// `https://` — a pure-Rust network fetch, available only with the
+    /// `vcs-net` feature (which selects gix's http transport).
+    Https,
+    /// A local filesystem path or a `file://` URL. Handled in-process by
+    /// gitoxide with no network transport, so always available.
+    Local,
     /// `ssh://` or scp-like `git@host:path`. Fetched natively only with the
     /// `ssh` feature; otherwise rejected.
     Ssh,
@@ -255,13 +283,17 @@ enum RemoteKind {
     Unsupported,
 }
 
-/// Classify a remote URL. `https://` (network) plus local paths and `file://`
-/// are always supported (gitoxide handles them in-process). `ssh://` and
-/// scp-like `git@host:path` map to [`RemoteKind::Ssh`]. Other network schemes
-/// (`http://`, `git://`, …) are unsupported.
+/// Classify a remote URL. Local paths and `file://` are always supported
+/// (gitoxide handles them in-process); `https://` needs the `vcs-net` feature.
+/// `ssh://` and scp-like `git@host:path` map to [`RemoteKind::Ssh`]. Other
+/// network schemes (`http://`, `git://`, …) are unsupported.
+#[cfg(feature = "vcs-net")]
 fn classify_remote(url: &str) -> RemoteKind {
-    if url.starts_with("https://") || url.starts_with("file://") {
-        return RemoteKind::Supported;
+    if url.starts_with("https://") {
+        return RemoteKind::Https;
+    }
+    if url.starts_with("file://") {
+        return RemoteKind::Local;
     }
     if url.starts_with("ssh://") {
         return RemoteKind::Ssh;
@@ -273,11 +305,12 @@ fn classify_remote(url: &str) -> RemoteKind {
     // No scheme: an scp-like `user@host:path` is SSH; otherwise a local path.
     match url.split_once(':') {
         Some((host, _)) if !host.is_empty() && !host.contains('/') => RemoteKind::Ssh,
-        _ => RemoteKind::Supported,
+        _ => RemoteKind::Local,
     }
 }
 
 /// Clone `url` as a bare repository into `repo_dir`.
+#[cfg(feature = "vcs-net")]
 fn clone_bare(url: &str, repo_dir: &Path) -> VcsResult<()> {
     let mut prepare =
         gix::prepare_clone_bare(url, repo_dir).map_err(|e| VcsError::Git(e.to_string()))?;
@@ -288,6 +321,7 @@ fn clone_bare(url: &str, repo_dir: &Path) -> VcsResult<()> {
 }
 
 /// Fetch updates for an already-cloned bare repository at `repo_dir`.
+#[cfg(feature = "vcs-net")]
 fn fetch_existing(repo_dir: &Path) -> VcsResult<()> {
     let repo = gix::open(repo_dir).map_err(|e| VcsError::Git(e.to_string()))?;
     let remote = repo
@@ -350,16 +384,14 @@ mod tests {
         assert!(!is_valid_commit_hash(""));
     }
 
+    #[cfg(feature = "vcs-net")]
     #[test]
     fn remote_classification() {
         use RemoteKind::*;
-        assert!(matches!(
-            classify_remote("https://github.com/u/r"),
-            Supported
-        ));
-        assert!(matches!(classify_remote("file:///tmp/repo"), Supported));
-        assert!(matches!(classify_remote("/tmp/local/repo"), Supported)); // absolute local path
-        assert!(matches!(classify_remote("../relative/repo"), Supported)); // relative local path
+        assert!(matches!(classify_remote("https://github.com/u/r"), Https));
+        assert!(matches!(classify_remote("file:///tmp/repo"), Local));
+        assert!(matches!(classify_remote("/tmp/local/repo"), Local)); // absolute local path
+        assert!(matches!(classify_remote("../relative/repo"), Local)); // relative local path
         assert!(matches!(classify_remote("ssh://git@github.com/u/r"), Ssh));
         assert!(matches!(classify_remote("git@github.com:u/r.git"), Ssh)); // scp-like
         assert!(matches!(

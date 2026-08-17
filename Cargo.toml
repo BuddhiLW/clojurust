@@ -41,7 +41,10 @@ cljrs-ir           = { path = "crates/cljrs-ir",           version = "0.1.0" }
 cljrs-compiler     = { path = "crates/cljrs-compiler",     version = "0.1.0" }
 cljrs-interop      = { path = "crates/cljrs-interop",      version = "0.1.0" }
 cljrs-export-macro = { path = "crates/cljrs-export-macro", version = "0.1.0" }
-cljrs-project      = { path = "crates/cljrs-project",      version = "0.1.0" }
+# Default-off so each member opts in to what it needs: the config model alone
+# (nothing extra), `vcs` for local git + signature verification, `vcs-net` for
+# network fetch. See crates/cljrs-project/Cargo.toml.
+cljrs-project      = { path = "crates/cljrs-project",      version = "0.1.0", default-features = false }
 cljrs-async        = { path = "crates/cljrs-async",        version = "0.1.0" }
 cljrs-io           = { path = "crates/cljrs-io",           version = "0.1.0" }
 cljrs-net          = { path = "crates/cljrs-net",          version = "0.1.0" }
@@ -81,10 +84,12 @@ tower-lsp     = "0.20"
 dashmap       = "6"
 
 # Pure-Rust git (gitoxide) + native commit-signature verification
+# The http transport (and with it reqwest/hyper/rustls/aws-lc-rs) is *not*
+# selected here: it comes from cljrs-project's `vcs-net` feature, so consumers
+# that only read local repositories do not link a TLS stack.
 gix      = { version = "0.84", default-features = false, features = [
     "sha1",
     "max-performance-safe",
-    "blocking-http-transport-reqwest-rust-tls",
     "revision",
     "worktree-mutation",
 ] }

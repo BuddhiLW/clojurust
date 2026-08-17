@@ -57,6 +57,8 @@ src/
     taps.rs             — tap> / add-tap registry
     async_hook.rs       — AsyncRuntime seam and the async-JIT compile hook
     depth.rs            — call-depth cap for ExecutionMode::NoGcTransaction
+    vcs.rs              — VcsProvider trait (the runtime's git seam) and the
+                          cljrs-project-backed ProjectVcs impl (`deps` feature)
     versioned.rs        — (non-WASM) versioned symbol/namespace resolution
 
   builtins/
@@ -102,6 +104,9 @@ src/
 tests/
   no_gc_eval.rs                    — (no-gc) arithmetic, def provenance, region stack
   versioned_resolution.rs          — versioned resolution against a real git fixture
+  vcs_provider.rs                  — the VcsProvider seam: default provider, degradation
+                                     with none installed, signature-check routing
+                                     (passes with and without the `deps` feature)
   require_spec_reader_conditional.rs — reader conditionals in ns require specs
   declare_macro.rs, doc.rs, gas_meter.rs, into_seq_target.rs, map_entry.rs,
   named_fn_identity.rs, ns_metadata.rs, partition_arities.rs, shared_atom.rs,
@@ -328,6 +333,58 @@ versioned namespace loading, and Rust object construction. `check_native`,
 final dispatch seams. `next_transaction_gensym()` supplies an invocation-local
 deterministic sequence for syntax-quote hygiene. Violations return
 `EvalError::ForbiddenEffect(String)`.
+
+### `vcs` submodule
+
+The runtime's seam to version control. Everywhere the interpreter would touch
+git — locating a source file's repository, reading a file out of history,
+checking a commit signature — it goes through a `VcsProvider` trait object held
+by `GlobalEnv`, rather than calling `cljrs-project::vcs` directly. That is what
+lets the `deps` feature (see [Features](#features)) drop gitoxide, rPGP and
+`ssh-key` from an embedding without the rest of the runtime noticing.
+
+```rust
+pub trait VcsProvider: Send + Sync {
+    /// Walk up from `start` to the enclosing git working-tree root.
+    fn find_repo_root(&self, start: &Path) -> Option<PathBuf>;
+    /// Read `rel_path` (relative to `repo_root`) as of `commit`.
+    fn file_at_commit(&self, repo_root: &Path, rel_path: &str, commit: &str)
+        -> Result<String, String>;
+    /// Ok only when `commit` carries a valid signature by a trusted key.
+    fn verify_commit_signature(&self, repo_root: &Path, commit: &str)
+        -> Result<(), SignatureFailure>;
+    /// Install the trusted-signer key set, replacing any previous one;
+    /// returns the number of keys loaded.
+    fn load_trusted_signers(&self, signers: &[TrustedSigner]) -> usize;
+}
+
+/// Untrusted → EvalError::CommitSignatureVerificationFailed;
+/// Error     → EvalError::Runtime.
+pub enum SignatureFailure {
+    Untrusted { commit: String, reason: String },
+    Error(String),
+}
+
+/// What `GlobalEnv::new` installs: `Some(ProjectVcs)` with the `deps` feature
+/// on a native target, `None` otherwise.
+pub fn default_provider() -> Option<Arc<dyn VcsProvider>>;
+
+/// `cljrs-project`-backed implementation (`deps` feature, non-WASM).  Owns the
+/// trusted-key set, which used to be the `GlobalEnv::trusted_keys` field.
+pub struct ProjectVcs { /* … */ }
+```
+
+On `GlobalEnv`:
+
+- `vcs(&self) -> Option<Arc<dyn VcsProvider>>` — the installed provider.
+  Callers must degrade gracefully: `None` means "this file is not in a git
+  repository".
+- `set_vcs_provider(&self, Option<Arc<dyn VcsProvider>>)` — supply your own
+  implementation, or pass `None` to strip git access from a sandboxed host.
+
+Callers: `loader::do_load` (records a namespace's repo root),
+`versioned::versioned_source_available` and `versioned::fetch_versioned_source`,
+and `GlobalEnv::check_commit_signature` / `load_trusted_signers`.
 
 ### `versioned` submodule (non-WASM)
 
@@ -1056,9 +1113,37 @@ by the lowerer — resolve at Tier 1 exactly as they do tree-walked.
 
 ## Features
 
-| Feature | Effect |
-|---|---|
-| `no-gc` | Forwards to `cljrs-gc/no-gc` and `cljrs-value/no-gc`; switches `env::gc_roots`, `interp::special`, and `interp::apply` to the region/`StaticArena` allocation protocol |
+| Feature | Default | Effect |
+|---|---|---|
+| `no-gc` | off | Forwards to `cljrs-gc/no-gc` and `cljrs-value/no-gc`; switches `env::gc_roots`, `interp::special`, and `interp::apply` to the region/`StaticArena` allocation protocol |
+| `deps` | **on** | Enables `cljrs-project/vcs` and installs the `cljrs-project`-backed [`VcsProvider`](#vcs-submodule) in `GlobalEnv::new`, so versioned vars (`ns/name@commit`) resolve out of git history and `:verify-commit-signatures` can check signatures |
+
+### Turning `deps` off
+
+`--no-default-features` drops the whole gitoxide/rPGP/`ssh-key` tree — roughly
+290 transitive crates, or three quarters of a minimal embedding's build — for
+anything that links the interpreter but never resolves a git-hosted dependency:
+an editor plugin, a sandboxed evaluator, `cljrs-tx`, an embedded host. It is
+also the first prerequisite for any `no_std`/embedded profile, since none of
+those crates build for a bare-metal target.
+
+What changes when it is off:
+
+* `GlobalEnv::vcs()` returns `None`, so every source file is treated as living
+  outside a git repository. Versioned resolution then works only against
+  sources embedded at AOT-compile time; a live fetch reports the existing
+  "not in a git repository" error.
+* `check_commit_signature` **fails** rather than passing when
+  `:verify-commit-signatures` is on — a build that cannot verify must not
+  silently accept.
+* `load_trusted_signers` returns 0.
+
+The `GlobalEnv` field holding the provider is present in either configuration,
+so the struct's layout does not vary with the feature and an embedder cannot be
+caught out by Cargo feature unification. An embedder that wants git without
+`cljrs-project` can implement `VcsProvider` itself and install it with
+`set_vcs_provider`; passing `None` there also lets a sandboxed host *remove*
+the default provider at runtime.
 
 ---
 
@@ -1072,7 +1157,7 @@ by the lowerer — resolve at Tier 1 exactly as they do tree-walked.
 | `cljrs-reader` | `Form` AST and `Parser` |
 | `cljrs-ir` | IR types (`IrFunction`, `Block`, `Inst`, `IrBundle`) and lowering |
 | `tracing` / `tracing-subscriber` (non-WASM) | the `gc`/`env`/`ir`/`jit` diagnostic targets, and the `logging` module that filters and installs them |
-| `cljrs-project` | `config` — project configuration consulted by the namespace loader; `vcs` (non-WASM) — git history access for versioned namespace resolution |
+| `cljrs-project` | `config` — project configuration consulted by the namespace loader (always; no external dependencies of its own). `vcs` (non-WASM, `deps` feature) — git history access for versioned namespace resolution. Never `vcs-net`: the interpreter reads local repositories and never fetches, so no HTTP/TLS stack is linked. |
 | `num-bigint`, `num-rational`, `bigdecimal`, `num-traits` | numeric tower |
 | `rand`, `rpds`, `uuid`, `regex` | builtin implementations |
 | `log`, `thiserror` | diagnostics and error derivation |

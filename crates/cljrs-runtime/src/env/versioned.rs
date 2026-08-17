@@ -173,7 +173,10 @@ fn versioned_source_available(globals: &GlobalEnv, base_ns: &str, versioned_ns: 
     let rel_path = base_ns.replace('.', "/").replace('-', "_");
     let src_paths = globals.source_paths.read().unwrap().clone();
     match crate::env::loader::find_source_file(&rel_path, &src_paths) {
-        Some((_, file_path)) => cljrs_project::vcs::find_repo_root(Path::new(&file_path)).is_some(),
+        Some((_, file_path)) => globals
+            .vcs()
+            .and_then(|vcs| vcs.find_repo_root(Path::new(&file_path)))
+            .is_some(),
         None => false,
     }
 }
@@ -302,13 +305,19 @@ fn fetch_versioned_source(
             ))
         })?;
 
-    // Locate the git repository.
-    let repo_root = cljrs_project::vcs::find_repo_root(Path::new(&file_path)).ok_or_else(|| {
+    // Locate the git repository.  A build with no VCS provider has no git
+    // history to reach for, so it lands in the same "not in a repository" path
+    // as a source tree that genuinely is not checked in.
+    let not_in_repo = || {
         EvalError::Runtime(format!(
             "Namespace {base_ns} (file {file_path}) is not in a git repository; \
              cannot resolve {base_ns}@{commit}"
         ))
-    })?;
+    };
+    let vcs = globals.vcs().ok_or_else(not_in_repo)?;
+    let repo_root = vcs
+        .find_repo_root(Path::new(&file_path))
+        .ok_or_else(not_in_repo)?;
 
     // Verify commit signature before loading any historical code.
     globals.check_commit_signature(&repo_root.to_string_lossy(), commit)?;
@@ -324,8 +333,9 @@ fn fetch_versioned_source(
     let rel_file_str = rel_file.to_string_lossy();
 
     // Fetch the source at the requested commit.
-    let src = cljrs_project::vcs::get_file_at_commit(&repo_root, &rel_file_str, commit)
-        .map_err(|e| EvalError::Runtime(format!("{e}")))?;
+    let src = vcs
+        .file_at_commit(&repo_root, &rel_file_str, commit)
+        .map_err(EvalError::Runtime)?;
 
     // Record for AOT embedding.
     globals.record_versioned_source(&format!("{base_ns}@{commit}"), &src);

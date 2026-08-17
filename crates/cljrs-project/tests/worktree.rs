@@ -1,6 +1,12 @@
 //! Integration test for `worktree_at_commit`: materializing a files-only
 //! working checkout of a pinned commit from the local bare cache, with no
 //! network access.
+//!
+//! Needs `vcs-net`: the cache is primed with `fetch_remote`, which lives
+//! behind that feature (gitoxide routes even local clones through its
+//! transport layer).
+
+#![cfg(feature = "vcs-net")]
 
 use std::path::Path;
 use std::process::Command;
