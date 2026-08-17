@@ -177,6 +177,13 @@ deadlocks, because the task that would resolve the future cannot run while the o
 thread is parked. In Phase B, await async results from within async context. A top-level
 blocking bridge is a later phase.
 
+`clojure.core/future` (registered in `cljrs-runtime`, executed through the
+`AsyncRuntime` hook this crate installs) inherits exactly this rule: its body is
+a task on the caller's executor, so it is cooperative rather than parallel and
+must be read with `(await f)`, not `@f`. See "`future` — cooperative, not
+parallel" in `cljrs-runtime/README.md`. Parallelism across OS threads is the
+isolate boundary, where values cross by copy.
+
 ## File layout
 
 | File | Description |

@@ -1186,6 +1186,21 @@ impl CljxFuture {
         matches!(&*self.state.lock().unwrap(), FutureState::Cancelled)
     }
 
+    /// Mark a still-running future cancelled, waking anyone waiting on it.
+    ///
+    /// Returns false when it had already settled. The task itself is not
+    /// interrupted; what is cancelled is the result.
+    pub fn cancel(&self) -> bool {
+        let mut state = self.state.lock().unwrap();
+        if matches!(&*state, FutureState::Running) {
+            *state = FutureState::Cancelled;
+            self.cond.notify_all();
+            true
+        } else {
+            false
+        }
+    }
+
     /// Mark this future's result as observed. Call when a consumer reads the
     /// settled value (`await`/`deref`), so a later drop doesn't warn about an
     /// unobserved error.

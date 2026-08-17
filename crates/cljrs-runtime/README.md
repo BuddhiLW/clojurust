@@ -708,6 +708,30 @@ the async tree-walker). It converts the form *value* back into a `Form`
 environment of the current namespace, so it sees vars but not the caller's
 locals.
 
+### `future` — cooperative, not parallel
+
+`(future body…)` (bootstrap macro) expands to `(future-call (fn [] body…))`,
+which hands the thunk to the installed async runtime's executor and returns a
+`Value::Future` immediately. Alongside it: `future?`, `future-done?`,
+`future-cancelled?`, `future-cancel`, and `realized?`.
+
+**How this differs from the JVM, and why.** Every Clojure value is `!Send` —
+`GcPtr` cannot cross a thread, which is what makes per-isolate heaps collectable
+without cross-thread coordination. A future therefore cannot run on another OS
+thread; it is a task on the *caller's* executor. Consequences:
+
+- The body does not start until the caller yields. `(let [f (future (f!))] …)`
+  runs nothing until something awaits.
+- **Read a future with `(await f)`, never `@f`.** `deref` blocks the one thread
+  the task needs in order to finish, so it hangs. This is the same rule Phase C
+  already enforces inside `^:async` bodies, where `@future` is a runtime error;
+  in sync code it is currently a hang, which is the known sharp edge here.
+- `future-cancel` marks the result cancelled (awaiting it raises) but does not
+  interrupt a task already running, like a JVM future past its interrupt point.
+
+Genuine parallelism across threads is the isolate boundary
+(`cljrs-async`'s `Isolate` + `isolate-chan`), where values cross by copy.
+
 ## Module `interp`
 
 Self-contained tree-walking interpreter for Clojure.
