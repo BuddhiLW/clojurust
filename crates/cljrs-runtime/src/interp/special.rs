@@ -152,7 +152,7 @@ fn extract_def_name(form: &Form, env: &mut Env) -> EvalResult<(String, Option<Va
 }
 
 /// Expand a metadata shorthand form into a map value.
-fn compile_meta_form(meta: &Form, env: &mut Env) -> EvalResult<Value> {
+pub fn compile_meta_form(meta: &Form, env: &mut Env) -> EvalResult<Value> {
     match &meta.kind {
         FormKind::Keyword(k) => {
             // ^:dynamic  →  {:dynamic true}
@@ -160,10 +160,10 @@ fn compile_meta_form(meta: &Form, env: &mut Env) -> EvalResult<Value> {
             Ok(Value::Map(m))
         }
         FormKind::Symbol(s) => {
-            // ^TypeHint  →  {:tag "TypeHint"}
+            // ^TypeHint  →  {:tag TypeHint}
             let m = MapValue::empty().assoc(
                 Value::keyword(Keyword::parse("tag")),
-                Value::string(s.clone()),
+                Value::symbol(cljrs_value::Symbol::parse(s)),
             );
             Ok(Value::Map(m))
         }
