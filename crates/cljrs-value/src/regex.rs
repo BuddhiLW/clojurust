@@ -211,6 +211,9 @@ impl<'h> Captures<'h> {
 #[derive(Debug, Clone)]
 pub enum MatchPhase {
     New,
+    /// A match is available from `capture()`; the payload is the byte offset
+    /// the next search resumes from, which is past the end of the haystack once
+    /// there is nothing left to search.
     Matching(usize),
     Complete,
 }
@@ -288,19 +291,19 @@ impl Matcher {
                 } else {
                     pattern.captures(haystack)
                 };
-                *state = Self::step(cap);
+                *state = Self::step(cap, haystack);
             }
             MatchPhase::Matching(n) => {
                 // A `match_all` matcher yields at most one match: it spans the
                 // whole haystack, so there is nothing left to step to. Without
                 // this, patterns that can match empty (`a*`) would keep
                 // handing back the zero-width match at the end.
-                let cap = if self.match_all {
+                let cap = if self.match_all || n > haystack.len() {
                     None
                 } else {
                     pattern.captures_at(haystack, n)
                 };
-                *state = Self::step(cap);
+                *state = Self::step(cap, haystack);
             }
             MatchPhase::Complete => {}
         }
@@ -309,10 +312,10 @@ impl Matcher {
 
     /// The state a search lands in: `Matching` while matches remain, `Complete`
     /// once one comes up empty.
-    fn step(cap: Option<Captures<'_>>) -> MatcherState {
+    fn step(cap: Option<Captures<'_>>, haystack: &str) -> MatcherState {
         match cap {
             Some(cap) => MatcherState {
-                phase: MatchPhase::Matching(cap.end()),
+                phase: MatchPhase::Matching(resume_from(&cap, haystack)),
                 last_match: Some(MatchResult::new(&cap)),
             },
             None => MatcherState {
@@ -329,6 +332,23 @@ impl Matcher {
 
     pub fn phase(&self) -> MatchPhase {
         self.state.lock().unwrap().phase.clone()
+    }
+}
+
+/// Where the search after `cap` resumes, following Java's `Matcher.find`: the
+/// end of the match, bumped past one character when the match was zero-width.
+/// Without the bump an empty match is found at the same offset forever, so
+/// `(re-seq #"a*" "aaa")` never terminates. The result can land one past the
+/// end of the haystack, which is how the matcher knows it is done.
+fn resume_from(cap: &Captures<'_>, haystack: &str) -> usize {
+    let end = cap.end();
+    if cap.start() != end {
+        return end;
+    }
+    // One *character*, not one byte: `captures_at` panics off a UTF-8 boundary.
+    match haystack[end..].chars().next() {
+        Some(c) => end + c.len_utf8(),
+        None => end + 1,
     }
 }
 
@@ -527,6 +547,43 @@ mod tests {
             steps += 1;
             assert!(steps < 10, "matcher never reached a terminal state");
         }
+    }
+
+    /// Every match a matcher yields, with a bound so a regression fails instead
+    /// of hanging the suite.
+    fn drain(pattern: &str, haystack: &str) -> Vec<String> {
+        let m = Matcher::new(Pattern::new(pattern).unwrap(), haystack.to_string(), false);
+        let mut found = Vec::new();
+        while let MatchPhase::Matching(_) = m.next() {
+            found.push(m.capture().unwrap().full);
+            assert!(
+                found.len() < 16,
+                "matcher never reached Complete: {found:?}"
+            );
+        }
+        assert!(matches!(m.phase(), MatchPhase::Complete));
+        found
+    }
+
+    /// A zero-width match is found at the same offset forever unless the search
+    /// moves on. Java's `find` bumps by one character after an empty match, so
+    /// `#"a*"` terminates and yields the trailing empty match Clojure does.
+    #[test]
+    fn zero_width_matches_advance_and_terminate() {
+        assert_eq!(drain(r"a*", "aaa"), vec!["aaa", ""]);
+        assert_eq!(drain(r"a*", "bab"), vec!["", "a", "", ""]);
+        assert_eq!(drain(r"", "ab"), vec!["", "", ""]);
+        assert_eq!(drain(r"", ""), vec![""]);
+        assert_eq!(drain(r"x*", "ab"), vec!["", "", ""]);
+    }
+
+    /// The bump is one character, not one byte: a byte-sized step would land
+    /// inside `é` and panic in `captures_at`.
+    #[test]
+    fn zero_width_advance_respects_utf8_boundaries() {
+        assert_eq!(drain(r"x*", "é"), vec!["", ""]);
+        assert_eq!(drain(r"x*", "日本"), vec!["", "", ""]);
+        assert_eq!(drain(r"é*", "éé"), vec!["éé", ""]);
     }
 
     #[test]

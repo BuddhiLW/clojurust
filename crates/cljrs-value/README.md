@@ -181,6 +181,9 @@ anchored to the whole haystack — Java's `Matcher.matches()` semantics — and
 yields at most one match: the next `next()` is `Complete` either way.
 
 ```rust
+/// Matching's payload is the byte offset the next search resumes from: the end
+/// of the match, bumped one character past a zero-width one (Java `find`), so
+/// `#"a*"` terminates instead of re-finding the empty match forever.
 pub enum MatchPhase { New, Matching(usize), Complete }
 
 pub struct Matcher { pub pattern: GcPtr<Pattern>, /* haystack, state, match_all */ }
