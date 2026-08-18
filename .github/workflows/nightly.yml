@@ -91,6 +91,12 @@ jobs:
         with:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
+        with:
+          # Restore only.  Caches written from a default-branch context are
+          # readable by every branch and pull request, so a job that checks
+          # out a ref chosen at runtime must not be able to write one.  The
+          # entries this restores are saved by ci.yml on pushes to main.
+          save-if: "false"
       - name: Check formatting
         run: cargo fmt --check
       - name: Clippy
@@ -122,8 +128,10 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
-      - uses: Swatinem/rust-cache@v2
-
+      # No build cache here on purpose.  This job compiles nothing — it edits
+      # manifests, reads `cargo metadata`, and publishes with --no-verify — so
+      # a cache would buy nothing while giving the one job that holds the
+      # registry token a way to both read and write shared cache entries.
       - name: Install cargo-release
         uses: taiki-e/install-action@v2
         with:
