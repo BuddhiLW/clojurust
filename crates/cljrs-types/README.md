@@ -50,7 +50,9 @@ impl Span {
 
 Unified error type for all clojurust subsystems. Derives
 [`miette::Diagnostic`](https://docs.rs/miette) so errors render with source
-snippets and labels in the terminal.
+snippets and labels in the terminal. This crate depends on miette's type half
+only; the `fancy` feature that does the rendering is enabled by the `cljrs`
+binary, so embedders and the wasm build do not link a terminal renderer.
 
 ```rust
 pub enum CljxError {
