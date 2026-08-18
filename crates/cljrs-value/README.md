@@ -163,6 +163,7 @@ pub struct Captures<'h>(/* private */);
 
 impl<'h> Captures<'h> {
     pub fn full(&self) -> &'h str;        // group 0
+    pub fn start(&self) -> usize;         // byte offset where group 0 begins
     pub fn end(&self) -> usize;           // byte offset past group 0
     pub fn group_count(&self) -> usize;   // groups incl. group 0; ≥ 1
     pub fn groups(&self) -> impl Iterator<Item = Option<&'h str>> + '_;
@@ -171,7 +172,9 @@ impl<'h> Captures<'h> {
 
 `Matcher` is the stateful driver behind `re-find`/`re-matches`/`re-seq`: it
 holds `pattern: GcPtr<Pattern>` plus a haystack and walks matches left to
-right, one per `next()` call.
+right, one per `next()` call. With `match_all` set (`re-matches`) it yields at
+most one match, and only when that match covers the whole haystack — Java's
+`Matcher.matches()` semantics; otherwise it goes straight to `Complete`.
 
 ```rust
 pub enum MatchPhase { New, Matching(usize), Complete }

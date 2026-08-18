@@ -135,6 +135,12 @@ impl<'h> Captures<'h> {
         self.whole().as_str()
     }
 
+    /// Byte offset where the whole match begins. Non-zero whenever the
+    /// leftmost match starts part-way into the haystack.
+    pub fn start(&self) -> usize {
+        self.whole().start()
+    }
+
     /// Byte offset just past the whole match — where the next search starts.
     pub fn end(&self) -> usize {
         self.whole().end()
@@ -224,14 +230,25 @@ impl Matcher {
         match state.phase {
             MatchPhase::New => match self.pattern.get().captures(self.haystack.get()) {
                 Some(cap) => {
-                    // TODO: the `match_all` (re-matches) guard compares a group
-                    // count against a byte length; anchoring wants
-                    // `cap.end() == haystack.len()` and a start of 0 instead.
-                    // Left as-is here so the engine swap is behaviour-neutral.
-                    if !self.match_all || cap.group_count() == self.haystack.get().len() {
+                    // `match_all` is `re-matches`, which follows Java's
+                    // `Matcher.matches()`: the whole region has to match, so
+                    // both ends are anchored. `captures` finds the leftmost
+                    // match, which can begin part-way in, hence the check on
+                    // `start` as well as `end`.
+                    if !self.match_all
+                        || (cap.start() == 0 && cap.end() == self.haystack.get().len())
+                    {
                         *state = MatcherState {
                             phase: MatchPhase::Matching(cap.end()),
                             last_match: Some(MatchResult::new(&cap)),
+                        }
+                    } else {
+                        // A partial match is no match for `re-matches`, and
+                        // there is nothing further to step to: `Complete` keeps
+                        // a caller draining the matcher from spinning on `New`.
+                        *state = MatcherState {
+                            phase: MatchPhase::Complete,
+                            last_match: None,
                         }
                     }
                 }
@@ -354,6 +371,63 @@ mod tests {
         assert_eq!(p.replace_all("a, b,c", "|"), "a|b|c");
         assert_eq!(p.as_str(), r",\s*");
         assert_eq!(p.to_string(), r",\s*");
+    }
+
+    /// `re-matches` semantics: the whole haystack has to match, and a
+    /// group-less pattern is no different from one with groups.
+    #[test]
+    fn match_all_requires_the_whole_haystack() {
+        fn full_match(pattern: &str, haystack: &str) -> Option<MatchResult> {
+            let m = Matcher::new(Pattern::new(pattern).unwrap(), haystack.to_string(), true);
+            m.next();
+            m.capture()
+        }
+
+        for (pattern, haystack) in [
+            (r"\d+", "42"),
+            (r"\d+", "424"),
+            (r"\d+", "4"),
+            (r"a+", "aaa"),
+            (r".*", "hello"),
+        ] {
+            assert_eq!(
+                full_match(pattern, haystack).map(|c| c.full),
+                Some(haystack.to_string()),
+                "{pattern} should match all of {haystack}"
+            );
+        }
+
+        let cap = full_match(r"(\d+)-(\d+)", "12-345").unwrap();
+        assert_eq!(cap.full, "12-345");
+        assert_eq!(
+            cap.groups,
+            vec![Some("12-345".into()), Some("12".into()), Some("345".into())]
+        );
+
+        // A match that stops short of the end, whatever the group count.
+        assert!(full_match(r"(a)(b)", "abc").is_none());
+        assert!(full_match(r"(a)", "ab").is_none());
+        assert!(full_match(r"\d+", "42x").is_none());
+        // …and one that starts part-way in.
+        assert!(full_match(r"(a)(b)", "xab").is_none());
+        assert!(full_match(r"\d+", "x42").is_none());
+        // No match at all.
+        assert!(full_match(r"\d+", "abc").is_none());
+    }
+
+    /// A rejected `match_all` search has nowhere left to step, so it must land
+    /// in `Complete` rather than sitting in `New` forever.
+    #[test]
+    fn match_all_completes_when_the_match_is_partial() {
+        let m = Matcher::new(Pattern::new(r"(a)").unwrap(), "ab".to_string(), true);
+        assert!(matches!(m.next(), MatchPhase::Complete));
+        assert!(m.capture().is_none());
+
+        let mut steps = 0;
+        while let MatchPhase::New | MatchPhase::Matching(_) = m.next() {
+            steps += 1;
+            assert!(steps < 10, "matcher never reached a terminal state");
+        }
     }
 
     #[test]
