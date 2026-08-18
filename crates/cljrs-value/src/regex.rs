@@ -31,7 +31,7 @@ use crate::{PersistentVector, Value};
 use cljrs_gc::{GcPtr, GcVisitor, MarkVisitor, Trace};
 use std::borrow::Cow;
 use std::fmt;
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 
 #[cfg(feature = "regex-full")]
 use regex as engine;
@@ -49,7 +49,16 @@ compile_error!(
 /// Every regex operation in the runtime goes through this type, so swapping
 /// engines is confined to this file.
 #[derive(Debug, Clone)]
-pub struct Pattern(engine::Regex);
+pub struct Pattern {
+    re: engine::Regex,
+    /// The `\A(?:…)\z` form, compiled on the first `re-matches` against this
+    /// pattern and shared by every later one. `Some(None)` records a
+    /// compilation that failed. Neither engine exposes an anchored search, and
+    /// filtering an unanchored one is not the same thing: both pick the
+    /// leftmost-first match and would offer `a` for `a|ab`, so the anchors have
+    /// to be inside the automaton where they can steer the match.
+    anchored: OnceLock<Option<engine::Regex>>,
+}
 
 /// A pattern that failed to compile. Engine-independent so that callers do not
 /// name `regex::Error` or `regex_lite::Error`.
@@ -68,47 +77,80 @@ impl Pattern {
     /// Compile `pattern`.
     pub fn new(pattern: &str) -> Result<Pattern, PatternError> {
         engine::Regex::new(pattern)
-            .map(Pattern)
+            .map(|re| Pattern {
+                re,
+                anchored: OnceLock::new(),
+            })
             .map_err(|e| PatternError(e.to_string()))
     }
 
     /// The pattern source, as written in the `#"…"` literal.
     pub fn as_str(&self) -> &str {
-        self.0.as_str()
+        self.re.as_str()
     }
 
     /// Leftmost match anywhere in `haystack`.
     pub fn captures<'h>(&self, haystack: &'h str) -> Option<Captures<'h>> {
-        self.0.captures(haystack).map(Captures)
+        self.re.captures(haystack).map(Captures)
+    }
+
+    /// Match the whole of `haystack`, or nothing — Java's `Matcher.matches()`,
+    /// which Clojure's `re-matches` delegates to.
+    ///
+    /// Anchored inside the pattern rather than by checking the span of an
+    /// unanchored match, because the two differ wherever the engine's
+    /// leftmost-first preference picks a shorter alternative: `a|ab` prefers
+    /// `a`, and `.*?x?` prefers the empty match, neither of which reaches the
+    /// end of the haystack even though a full match exists. With `\A`/`\z` in
+    /// the automaton the engine only ever offers a whole-haystack match.
+    pub fn captures_full<'h>(&self, haystack: &'h str) -> Option<Captures<'h>> {
+        match self.anchored() {
+            Some(re) => re.captures(haystack).map(Captures),
+            // Anchoring an already-valid pattern can only fail on a size or
+            // nesting limit. Fall back to the span of an unanchored match: it
+            // still never accepts a partial one, it can only miss a full match
+            // the engine resolved in favour of a shorter alternative.
+            None => self
+                .captures(haystack)
+                .filter(|cap| cap.start() == 0 && cap.end() == haystack.len()),
+        }
+    }
+
+    /// The anchored twin of this pattern, compiled once. `(?:…)` keeps the
+    /// group numbering — and any leading inline flags — of the original.
+    fn anchored(&self) -> Option<&engine::Regex> {
+        self.anchored
+            .get_or_init(|| engine::Regex::new(&format!(r"\A(?:{})\z", self.as_str())).ok())
+            .as_ref()
     }
 
     /// Leftmost match at or after byte offset `start`. Look-around still sees
     /// the text before `start`, which is what makes this the right primitive
     /// for stepping a `Matcher` forward.
     pub fn captures_at<'h>(&self, haystack: &'h str, start: usize) -> Option<Captures<'h>> {
-        self.0.captures_at(haystack, start).map(Captures)
+        self.re.captures_at(haystack, start).map(Captures)
     }
 
     /// Replace the leftmost match in `haystack`; `$1`-style references in
     /// `replacement` expand to capture groups.
     pub fn replace<'h>(&self, haystack: &'h str, replacement: &str) -> Cow<'h, str> {
-        self.0.replace(haystack, replacement)
+        self.re.replace(haystack, replacement)
     }
 
     /// Replace every non-overlapping match in `haystack`.
     pub fn replace_all<'h>(&self, haystack: &'h str, replacement: &str) -> Cow<'h, str> {
-        self.0.replace_all(haystack, replacement)
+        self.re.replace_all(haystack, replacement)
     }
 
     /// Split `haystack` around each match.
     pub fn split<'h>(&self, haystack: &'h str) -> impl Iterator<Item = &'h str> {
-        self.0.split(haystack)
+        self.re.split(haystack)
     }
 
     /// Split `haystack` around each match, yielding at most `limit` pieces;
     /// the last piece holds the unsplit remainder.
     pub fn splitn<'h>(&self, haystack: &'h str, limit: usize) -> impl Iterator<Item = &'h str> {
-        self.0.splitn(haystack, limit)
+        self.re.splitn(haystack, limit)
     }
 }
 
@@ -133,6 +175,12 @@ impl<'h> Captures<'h> {
     /// Text of the whole match (group 0).
     pub fn full(&self) -> &'h str {
         self.whole().as_str()
+    }
+
+    /// Byte offset where the whole match begins. Non-zero whenever the
+    /// leftmost match starts part-way into the haystack.
+    pub fn start(&self) -> usize {
+        self.whole().start()
     }
 
     /// Byte offset just past the whole match — where the next search starts.
@@ -163,6 +211,9 @@ impl<'h> Captures<'h> {
 #[derive(Debug, Clone)]
 pub enum MatchPhase {
     New,
+    /// A match is available from `capture()`; the payload is the byte offset
+    /// the next search resumes from, which is past the end of the haystack once
+    /// there is nothing left to search.
     Matching(usize),
     Complete,
 }
@@ -208,8 +259,15 @@ impl Trace for Matcher {
 
 impl Matcher {
     pub fn new(pattern: Pattern, source: String, match_all: bool) -> Self {
+        Self::from_ptr(GcPtr::new(pattern), source, match_all)
+    }
+
+    /// As `new`, but sharing an already-allocated pattern — a `#"…"` literal
+    /// keeps its `Pattern` across evaluations, so its anchored form (see
+    /// `Pattern::captures_full`) is compiled once rather than per call.
+    pub fn from_ptr(pattern: GcPtr<Pattern>, source: String, match_all: bool) -> Self {
         Self {
-            pattern: GcPtr::new(pattern),
+            pattern,
             haystack: GcPtr::new(source),
             state: Mutex::new(MatcherState {
                 phase: MatchPhase::New,
@@ -221,46 +279,50 @@ impl Matcher {
 
     pub fn next(&self) -> MatchPhase {
         let mut state = self.state.lock().unwrap();
+        let pattern = self.pattern.get();
+        let haystack = self.haystack.get();
         match state.phase {
-            MatchPhase::New => match self.pattern.get().captures(self.haystack.get()) {
-                Some(cap) => {
-                    // TODO: the `match_all` (re-matches) guard compares a group
-                    // count against a byte length; anchoring wants
-                    // `cap.end() == haystack.len()` and a start of 0 instead.
-                    // Left as-is here so the engine swap is behaviour-neutral.
-                    if !self.match_all || cap.group_count() == self.haystack.get().len() {
-                        *state = MatcherState {
-                            phase: MatchPhase::Matching(cap.end()),
-                            last_match: Some(MatchResult::new(&cap)),
-                        }
-                    }
-                }
-                None => {
-                    *state = MatcherState {
-                        phase: MatchPhase::Complete,
-                        last_match: None,
-                    }
-                }
-            },
+            MatchPhase::New => {
+                // `match_all` is `re-matches`: the whole haystack has to match,
+                // so the search itself is anchored rather than filtered after
+                // the fact.
+                let cap = if self.match_all {
+                    pattern.captures_full(haystack)
+                } else {
+                    pattern.captures(haystack)
+                };
+                *state = Self::step(cap, haystack);
+            }
             MatchPhase::Matching(n) => {
-                match self.pattern.get().captures_at(self.haystack.get(), n) {
-                    Some(cap) => {
-                        *state = MatcherState {
-                            phase: MatchPhase::Matching(cap.end()),
-                            last_match: Some(MatchResult::new(&cap)),
-                        }
-                    }
-                    None => {
-                        *state = MatcherState {
-                            phase: MatchPhase::Complete,
-                            last_match: None,
-                        };
-                    }
-                }
+                // A `match_all` matcher yields at most one match: it spans the
+                // whole haystack, so there is nothing left to step to. Without
+                // this, patterns that can match empty (`a*`) would keep
+                // handing back the zero-width match at the end.
+                let cap = if self.match_all || n > haystack.len() {
+                    None
+                } else {
+                    pattern.captures_at(haystack, n)
+                };
+                *state = Self::step(cap, haystack);
             }
             MatchPhase::Complete => {}
         }
         state.phase.clone()
+    }
+
+    /// The state a search lands in: `Matching` while matches remain, `Complete`
+    /// once one comes up empty.
+    fn step(cap: Option<Captures<'_>>, haystack: &str) -> MatcherState {
+        match cap {
+            Some(cap) => MatcherState {
+                phase: MatchPhase::Matching(resume_from(&cap, haystack)),
+                last_match: Some(MatchResult::new(&cap)),
+            },
+            None => MatcherState {
+                phase: MatchPhase::Complete,
+                last_match: None,
+            },
+        }
     }
 
     pub fn capture(&self) -> Option<MatchResult> {
@@ -270,6 +332,23 @@ impl Matcher {
 
     pub fn phase(&self) -> MatchPhase {
         self.state.lock().unwrap().phase.clone()
+    }
+}
+
+/// Where the search after `cap` resumes, following Java's `Matcher.find`: the
+/// end of the match, bumped past one character when the match was zero-width.
+/// Without the bump an empty match is found at the same offset forever, so
+/// `(re-seq #"a*" "aaa")` never terminates. The result can land one past the
+/// end of the haystack, which is how the matcher knows it is done.
+fn resume_from(cap: &Captures<'_>, haystack: &str) -> usize {
+    let end = cap.end();
+    if cap.start() != end {
+        return end;
+    }
+    // One *character*, not one byte: `captures_at` panics off a UTF-8 boundary.
+    match haystack[end..].chars().next() {
+        Some(c) => end + c.len_utf8(),
+        None => end + 1,
     }
 }
 
@@ -354,6 +433,157 @@ mod tests {
         assert_eq!(p.replace_all("a, b,c", "|"), "a|b|c");
         assert_eq!(p.as_str(), r",\s*");
         assert_eq!(p.to_string(), r",\s*");
+    }
+
+    /// `re-matches` semantics: the whole haystack has to match, and a
+    /// group-less pattern is no different from one with groups.
+    /// One `re-matches` against `haystack`, as `builtin_re_matches` drives it.
+    fn full_match(pattern: &str, haystack: &str) -> Option<MatchResult> {
+        let m = Matcher::new(Pattern::new(pattern).unwrap(), haystack.to_string(), true);
+        m.next();
+        m.capture()
+    }
+
+    #[test]
+    fn match_all_requires_the_whole_haystack() {
+        for (pattern, haystack) in [
+            (r"\d+", "42"),
+            (r"\d+", "424"),
+            (r"\d+", "4"),
+            (r"a+", "aaa"),
+            (r".*", "hello"),
+        ] {
+            assert_eq!(
+                full_match(pattern, haystack).map(|c| c.full),
+                Some(haystack.to_string()),
+                "{pattern} should match all of {haystack}"
+            );
+        }
+
+        let cap = full_match(r"(\d+)-(\d+)", "12-345").unwrap();
+        assert_eq!(cap.full, "12-345");
+        assert_eq!(
+            cap.groups,
+            vec![Some("12-345".into()), Some("12".into()), Some("345".into())]
+        );
+
+        // A match that stops short of the end, whatever the group count.
+        assert!(full_match(r"(a)(b)", "abc").is_none());
+        assert!(full_match(r"(a)", "ab").is_none());
+        assert!(full_match(r"\d+", "42x").is_none());
+        // …and one that starts part-way in.
+        assert!(full_match(r"(a)(b)", "xab").is_none());
+        assert!(full_match(r"\d+", "x42").is_none());
+        // No match at all.
+        assert!(full_match(r"\d+", "abc").is_none());
+    }
+
+    /// Both engines are leftmost-first, so an unanchored search offers the
+    /// shorter alternative and a span check would reject a haystack that does
+    /// match in full. Anchoring the pattern itself is what makes these work.
+    #[test]
+    fn match_all_beats_leftmost_first_preference() {
+        assert_eq!(full_match(r"a|ab", "ab").map(|c| c.full), Some("ab".into()));
+        assert_eq!(
+            full_match(r"(a|ab)(c|bc)", "abc").map(|c| c.full),
+            Some("abc".into())
+        );
+        // Lazy repetition prefers to stop early; `\z` forces it to the end.
+        assert_eq!(
+            full_match(r".*?", "hello").map(|c| c.full),
+            Some("hello".into())
+        );
+        assert_eq!(
+            full_match(r"(\w+?)(\d*)", "ab12").map(|c| c.groups),
+            Some(vec![
+                Some("ab12".into()),
+                Some("ab".into()),
+                Some("12".into())
+            ])
+        );
+        // The unanchored search these replace really does come up short.
+        let p = Pattern::new(r"a|ab").unwrap();
+        assert_eq!(p.captures("ab").unwrap().full(), "a");
+    }
+
+    /// Anchoring wraps the source in `(?:…)`, which must not renumber groups or
+    /// swallow a leading inline flag.
+    #[test]
+    fn match_all_preserves_groups_and_inline_flags() {
+        let cap = full_match(r"(?i)(a)(b)", "AB").unwrap();
+        assert_eq!(cap.full, "AB");
+        assert_eq!(
+            cap.groups,
+            vec![Some("AB".into()), Some("A".into()), Some("B".into())]
+        );
+        // An empty pattern matches only an empty haystack.
+        assert_eq!(full_match(r"", "").map(|c| c.full), Some(String::new()));
+        assert!(full_match(r"", "a").is_none());
+    }
+
+    /// A successful `match_all` search consumes the haystack, so the matcher
+    /// has nothing left to yield — `a*` must not keep offering the zero-width
+    /// match at the end.
+    #[test]
+    fn match_all_yields_at_most_one_match() {
+        let m = Matcher::new(Pattern::new(r"a*").unwrap(), "aaa".to_string(), true);
+        assert!(matches!(m.next(), MatchPhase::Matching(3)));
+        assert_eq!(m.capture().unwrap().full, "aaa");
+        assert!(matches!(m.next(), MatchPhase::Complete));
+        assert!(m.capture().is_none());
+        assert!(matches!(m.next(), MatchPhase::Complete));
+    }
+
+    /// A rejected `match_all` search has nowhere left to step, so it must land
+    /// in `Complete` rather than sitting in `New` forever.
+    #[test]
+    fn match_all_completes_when_the_match_is_partial() {
+        let m = Matcher::new(Pattern::new(r"(a)").unwrap(), "ab".to_string(), true);
+        assert!(matches!(m.next(), MatchPhase::Complete));
+        assert!(m.capture().is_none());
+
+        let mut steps = 0;
+        while let MatchPhase::New | MatchPhase::Matching(_) = m.next() {
+            steps += 1;
+            assert!(steps < 10, "matcher never reached a terminal state");
+        }
+    }
+
+    /// Every match a matcher yields, with a bound so a regression fails instead
+    /// of hanging the suite.
+    fn drain(pattern: &str, haystack: &str) -> Vec<String> {
+        let m = Matcher::new(Pattern::new(pattern).unwrap(), haystack.to_string(), false);
+        let mut found = Vec::new();
+        while let MatchPhase::Matching(_) = m.next() {
+            found.push(m.capture().unwrap().full);
+            assert!(
+                found.len() < 16,
+                "matcher never reached Complete: {found:?}"
+            );
+        }
+        assert!(matches!(m.phase(), MatchPhase::Complete));
+        found
+    }
+
+    /// A zero-width match is found at the same offset forever unless the search
+    /// moves on. Java's `find` bumps by one character after an empty match, so
+    /// `#"a*"` terminates and yields the trailing empty match Clojure does.
+    #[test]
+    fn zero_width_matches_advance_and_terminate() {
+        assert_eq!(drain(r"a*", "aaa"), vec!["aaa", ""]);
+        assert_eq!(drain(r"a*", "bab"), vec!["", "a", "", ""]);
+        assert_eq!(drain(r"", "ab"), vec!["", "", ""]);
+        assert_eq!(drain(r"", ""), vec![""]);
+        assert_eq!(drain(r"x*", "ab"), vec!["", "", ""]);
+    }
+
+    /// The bump is one character, not one byte: a byte-sized step would land
+    /// inside `é` and panic in `captures_at`.
+    #[test]
+    fn zero_width_advance_respects_utf8_boundaries() {
+        assert_eq!(drain(r"x*", "é"), vec!["", ""]);
+        assert_eq!(drain(r"x*", "日本"), vec!["", "", ""]);
+        assert_eq!(drain(r"é*", "éé"), vec!["éé", ""]);
     }
 
     #[test]

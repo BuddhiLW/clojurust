@@ -75,9 +75,12 @@ pub fn builtin_re_groups(args: &[Value]) -> ValueResult<Value> {
 }
 
 fn new_matcher(args: &[Value], match_all: bool) -> ValueResult<Matcher> {
+    // Reuse the literal's own `GcPtr<Pattern>` rather than cloning the pattern:
+    // `re-matches` compiles an anchored twin on first use and caches it there,
+    // so sharing keeps that out of the per-call path.
     let pattern = match &args[0] {
-        Value::Pattern(p) => Ok(p.get().clone()),
-        Value::Str(s) => Pattern::new(s.get()),
+        Value::Pattern(p) => Ok(p.clone()),
+        Value::Str(s) => Pattern::new(s.get()).map(GcPtr::new),
         v => {
             return Err(ValueError::WrongType {
                 expected: "str or pattern",
@@ -95,7 +98,7 @@ fn new_matcher(args: &[Value], match_all: bool) -> ValueResult<Matcher> {
         }
     };
     match pattern {
-        Ok(pattern) => Ok(Matcher::new(pattern, haystack, match_all)),
+        Ok(pattern) => Ok(Matcher::from_ptr(pattern, haystack, match_all)),
         Err(e) => Err(ValueError::Other(e.to_string())),
     }
 }
