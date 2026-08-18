@@ -3,6 +3,10 @@ name: CI
 on:
   pull_request:
     branches: [main]
+  # Releases are cut nightly rather than per-merge, so main is verified here on
+  # every push to catch a broken merge before the nightly tries to publish it.
+  push:
+    branches: [main]
 
 env:
   CARGO_TERM_COLOR: always

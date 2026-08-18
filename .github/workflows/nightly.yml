@@ -1,0 +1,225 @@
+name: Nightly Release
+
+# Publishes to crates.io once a night rather than on every merge to main, and
+# only when the day's merges actually changed the crates: a day of pure
+# documentation or website edits produces no release.
+#
+# Each release pushes a `v0.1.N` tag and a GitHub release whose notes are
+# generated from the merged pull requests, optionally with a Claude-written
+# highlights section (see .github/scripts/summarize-changelog.sh).
+on:
+  schedule:
+    # 07:00 UTC daily — after the US working day, before the European one.
+    - cron: '0 7 * * *'
+  workflow_dispatch:
+    inputs:
+      force:
+        description: 'Release even if only docs/www changed'
+        type: boolean
+        default: false
+      dry_run:
+        description: 'Build and generate notes, but do not tag, publish, or release'
+        type: boolean
+        default: false
+
+# One release at a time; never cancel a run that may be halfway through
+# pushing crates to the registry.
+concurrency:
+  group: nightly-release
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  BASE_VERSION: "0.1"
+
+jobs:
+  check:
+    name: Check for releasable changes
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      should_release: ${{ steps.decide.outputs.should_release }}
+      version: ${{ steps.decide.outputs.version }}
+      tag: ${{ steps.decide.outputs.tag }}
+      prev_tag: ${{ steps.decide.outputs.prev_tag }}
+      prev_base: ${{ steps.decide.outputs.prev_base }}
+      head_sha: ${{ steps.decide.outputs.head_sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          # Tags carry the version series, so they must come along.
+          fetch-tags: true
+
+      - name: Decide
+        id: decide
+        env:
+          FORCE: ${{ inputs.force }}
+          # Lets the script spot a tag whose release never finished shipping.
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: .github/scripts/should-release.sh
+
+      - name: Summary
+        env:
+          SHOULD_RELEASE: ${{ steps.decide.outputs.should_release }}
+          TAG: ${{ steps.decide.outputs.tag }}
+          PREV_TAG: ${{ steps.decide.outputs.prev_tag }}
+        run: |
+          {
+            if [ "$SHOULD_RELEASE" = "true" ]; then
+              echo "Releasing **$TAG** (previous: ${PREV_TAG:-none})."
+            else
+              echo "No release: nothing but documentation or website changes since ${PREV_TAG}."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  ci:
+    name: Build & test
+    needs: check
+    if: needs.check.outputs.should_release == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      # Pin every job to the commit the gate judged, so a merge landing
+      # mid-run cannot publish a tree that was never tested.
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.check.outputs.head_sha }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - name: Check formatting
+        run: cargo fmt --check
+      - name: Clippy
+        run: cargo clippy --workspace -- -D warnings
+      - name: Tests
+        run: cargo test --workspace
+      - name: Clojure Tests
+        run: cargo run -p cljrs compile -o test-suite --test ./clojure-test-suite/test && ./test-suite
+
+  release:
+    name: Tag, publish, and release
+    needs: [check, ci]
+    if: needs.check.outputs.should_release == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ needs.check.outputs.version }}
+      TAG: ${{ needs.check.outputs.tag }}
+      PREV_TAG: ${{ needs.check.outputs.prev_tag }}
+      PREV_BASE: ${{ needs.check.outputs.prev_base }}
+      DRY_RUN: ${{ inputs.dry_run || 'false' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.check.outputs.head_sha }}
+          fetch-depth: 0
+          fetch-tags: true
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-release
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-release
+
+      - name: Install nightly toolchain
+        run: rustup toolchain install nightly --profile minimal --no-self-update
+
+      - name: Set crate versions
+        run: |
+          echo "Publishing version: $VERSION"
+          cargo release version "$VERSION" --execute --no-confirm
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config user.name "github-actions[bot]"
+          git add -A
+          # Commit the bump so `cargo publish` sees a clean tree.  The commit
+          # is never pushed to main: only the tag references it, which keeps
+          # main's manifests at their development version.
+          git diff --cached --quiet || git commit -m "chore: release $VERSION"
+
+      - name: Push tag
+        if: env.DRY_RUN != 'true'
+        run: |
+          # Only create the tag if it isn't already on the remote, so a retry
+          # after a partially failed publish is safe.
+          if git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null 2>&1; then
+            echo "Tag $TAG already exists on remote — skipping tag push"
+          else
+            git tag "$TAG"
+            git push origin "$TAG"
+          fi
+
+      - name: Generate release notes
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          CHANGELOG_MODEL: ${{ vars.CHANGELOG_MODEL }}
+        run: .github/scripts/generate-changelog.sh "$RUNNER_TEMP/release-notes.md"
+
+      - name: Publish crates
+        if: env.DRY_RUN != 'true'
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          # Build --exclude list for packages already live at this version.
+          # Makes the step idempotent so a retry after a partial failure is safe.
+          EXCLUDE=()
+          while IFS= read -r pkg; do
+            name="${pkg%%@*}"
+            ver="${pkg##*@}"
+            if curl -sf "https://crates.io/api/v1/crates/${name}/${ver}" \
+                 -H "User-Agent: clojurust-publish/1.0" | grep -q '"num"'; then
+              echo "Already published: ${name}@${ver} — skipping"
+              EXCLUDE+=(--exclude "${name}")
+            fi
+          done < <(cargo metadata --no-deps --format-version 1 \
+                     | jq -r '.packages[] | "\(.name)@\(.version)"')
+
+          # Use nightly cargo for -Zpublish-timeout, which extends the
+          # per-crate registry confirmation wait to 600 s.  Without this,
+          # a slow crates.io response causes "no packages ready to publish
+          # … 1 awaiting confirmation" (rust-lang/cargo#17028).
+          # --no-verify is safe here because CI already ran checks above.
+          cargo +nightly publish --workspace \
+            -Zpublish-timeout \
+            --config 'publish.timeout=600' \
+            --no-verify \
+            "${EXCLUDE[@]}"
+
+      - name: Create GitHub release
+        if: env.DRY_RUN != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG already exists — updating its notes."
+            gh release edit "$TAG" \
+              --title "$TAG" \
+              --notes-file "$RUNNER_TEMP/release-notes.md"
+          else
+            gh release create "$TAG" \
+              --title "$TAG" \
+              --notes-file "$RUNNER_TEMP/release-notes.md" \
+              --latest
+          fi
+
+      - name: Summary
+        env:
+          REPO: ${{ github.repository }}
+        run: |
+          {
+            if [ "$DRY_RUN" = "true" ]; then
+              echo "### Dry run — $TAG was not tagged, published, or released"
+            else
+              echo "### Released [$TAG](https://github.com/$REPO/releases/tag/$TAG)"
+            fi
+            echo
+            cat "$RUNNER_TEMP/release-notes.md"
+          } >> "$GITHUB_STEP_SUMMARY"
