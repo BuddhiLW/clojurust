@@ -198,7 +198,7 @@ exists purely so that idiomatic specs which `(:require [clojure.spec.gen.alpha
 
 | Feature | Default | Effect |
 |---|---|---|
-| `deps` | **on** | Pass-through for `cljrs-runtime/deps` (git-backed dependency and versioned-var support). `cljrs-runtime` is depended on with default features off so this crate does not force the choice on an embedder; leaving `default` alone keeps the historical behaviour. |
+| `deps` | **on** | Pass-through for `cljrs-runtime/deps` — git-backed dependency and versioned-var support. |
 | `regex-full` | **on** | Forwards `cljrs-value/regex-full` and `cljrs-runtime/regex-full` — `Value::Pattern` uses the `regex` crate. |
 | `small-regex` | off | Forwards `cljrs-value/small-regex` and `cljrs-runtime/small-regex` — `regex-lite` instead, trading Unicode character classes for ~277 KB of text. See [cljrs-value's README](../cljrs-value/README.md#features). |
 | `no-gc` | off | Forwards `no-gc` to `cljrs-gc`, `cljrs-value`, and `cljrs-runtime`. |
@@ -214,3 +214,9 @@ That combination — interpreter plus `clojure.core`/`clojure.string`, no git
 dependency support, small regex engine — is the profile where the engine swap
 actually removes `regex` from the build. With `deps` on, `cljrs-project/vcs`
 pulls `regex` in through `pgp` anyway.
+
+`cljrs-runtime` is taken with default features off here (as everywhere in the
+workspace — see the note in the root `Cargo.toml`), which is why `regex-full` and
+`deps` are forwarded rather than inherited. Cargo unions features across every
+edge to a package, so an edge left at its defaults would re-enable them for the
+whole graph and no second, direct dependency could switch them back off.

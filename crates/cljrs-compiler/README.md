@@ -647,8 +647,15 @@ versioned loader rather than the plain `require` path.
 | `wasm-aot` | on | The WebAssembly backend (`wasm/`), `aot::compile_file_to_wasm`, and the `wasm-encoder` dependency.  `--no-default-features` produces a native-only compiler. |
 | `no-gc` | off | Propagated to `cljrs-gc`/`cljrs-value`/`cljrs-runtime`/`cljrs-stdlib`/`cljrs-async`; enables the `escape.rs` blacklist analysis. |
 | `aot_full_test` | off | Runs the full (~120 test) AOT end-to-end suite instead of its core subset. |
-| `regex-full` | on | Forwards `cljrs-value/regex-full` — `Value::Pattern` uses the `regex` crate. |
-| `small-regex` | off | Forwards `cljrs-value/small-regex` — `regex-lite` instead; see [cljrs-value's README](../cljrs-value/README.md#features). |
+| `regex-full` | on | Forwards `regex-full` to `cljrs-value`/`cljrs-runtime`/`cljrs-async`/`cljrs-stdlib` — `Value::Pattern` uses the `regex` crate. |
+| `small-regex` | off | Forwards `small-regex` instead: `regex-lite`; see [cljrs-value's README](../cljrs-value/README.md#features). |
+| `deps` | on | Pass-through for `cljrs-runtime/deps` — git-backed dependency and versioned-var support. |
+
+All four workspace dependencies above are taken with default features off (see the
+note in the root `Cargo.toml`), so `regex-full` and `deps` are what put back what
+their defaults used to provide; both are in `default`, leaving plain builds
+unchanged. Selecting `small-regex` means `default-features = false` on *this*
+crate — a second direct dependency cannot undo a feature another edge enabled.
 
 ---
 

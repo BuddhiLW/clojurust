@@ -629,8 +629,12 @@ only) and is materially slower on pathological patterns. `re-find`/`re-matches`/
 are unaffected in behaviour.
 
 Because `regex-full` wins ties, selecting the small engine means turning default
-features off on every workspace crate you depend on directly; each of them
-re-exports both features:
+features off on every workspace crate you depend on **directly**. Cargo unions
+features across all edges to a package, so an edge left at its defaults re-enables
+`regex-full` for the whole graph — and a second, direct dependency declaration
+cannot switch it off again. Every workspace crate therefore takes its own internal
+dependencies with default features off and re-exports both features, so one
+`default-features = false` at your edge is enough:
 
 ```toml
 [dependencies]
@@ -642,6 +646,9 @@ One crate left at its defaults anywhere in the graph puts `regex` back — the s
 unification caveat that applies to `cljrs-runtime`'s `deps` feature. And `deps`
 itself has to be off for the swap to pay: `cljrs-project/vcs` pulls `regex` in
 through `pgp`, so an embedding that resolves git-hosted dependencies links the
-full engine no matter what this feature says. `cljrs-stdlib` therefore depends on
-`cljrs-runtime` with default features off and re-exports `deps` alongside the two
-regex features.
+full engine no matter what this feature says. Every crate that re-exports the regex pair also
+re-exports `deps` for that reason.
+
+The one crate where the swap cannot pay is the CLI: `cljrs` depends on
+`cljrs-project` with `vcs`/`vcs-net`/`ssh` unconditionally, so `pgp` — and with it
+`regex` — is always in that binary.

@@ -19,9 +19,13 @@
 //! Features are additive, so `regex-full` wins when both are enabled: a build
 //! that pulls in one dependent asking for the small engine and another taking
 //! the default gets the more capable engine rather than a silent semantic
-//! downgrade. Selecting `small-regex` therefore requires
-//! `default-features = false` on every workspace crate in the graph, which is
-//! why each of them re-exports both features.
+//! downgrade. Cargo also unions features across every edge to a package, so one
+//! internal edge left at its defaults would re-enable `regex-full` for the whole
+//! graph and no second, direct dependency could switch it off again. Every
+//! workspace crate therefore takes its own internal dependencies with default
+//! features off and re-exports both features (along with `deps`, which those
+//! defaults used to carry), so `default-features = false` at the embedder's own
+//! edge is enough to select the small engine.
 
 use crate::{PersistentVector, Value};
 use cljrs_gc::{GcPtr, GcVisitor, MarkVisitor, Trace};

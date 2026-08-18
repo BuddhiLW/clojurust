@@ -511,16 +511,34 @@ first `SourceLoc` marker rather than a span range.
 
 ---
 
-## Features
+## Regex engine and pass-through features
+
+Beyond `async`/`net`/`charset`/`base64`/`no-gc`/`enable-rustyline`, the CLI
+re-exports what its workspace dependencies' defaults used to provide, because all
+of them are now taken with default features off (see the note in the root
+`Cargo.toml`). All three are in `default`, so a plain `cargo build -p cljrs` is
+unchanged:
 
 | Feature | Default | Effect |
 |---|---|---|
-| `regex-full` | on | Forwards `cljrs-value/regex-full` — `Value::Pattern` uses the `regex` crate. |
-| `small-regex` | off | Forwards `cljrs-value/small-regex` — `regex-lite` instead, trading Unicode character classes for ~277 KB of text. See [cljrs-value's README](../cljrs-value/README.md#features). |
+| `regex-full` | **on** | Forwards `regex-full` to every workspace dependency — `Value::Pattern` uses the `regex` crate. |
+| `small-regex` | off | Forwards `small-regex` instead: `regex-lite`, which trades Unicode character classes for ~277 KB of text. |
+| `deps` | **on** | Forwards `cljrs-runtime/deps` — git-backed dependency and versioned-var support. |
 
-`regex-full` wins when both are enabled, so `small-regex` only takes effect with
-`--no-default-features`. This crate depends on `cljrs-runtime` with *its* default
-features on, which re-enables `regex-full` — so selecting the small engine here
-also means depending on `cljrs-runtime` (and `cljrs-stdlib`, if present) directly
-with default features off. `cljrs-runtime`'s `deps` feature pulls `regex` in
-through `pgp` regardless, so the size win only lands once `deps` is off too.
+The forwards to the optional extension crates use Cargo's weak `?/` syntax, so
+they apply only when the feature that pulls the package in (`async`, `net`,
+`charset`, `base64`) is also enabled.
+
+`cljrs-compiler`'s `wasm-aot` is *not* a pass-through: `commands::compile` calls
+`aot::compile_file_to_wasm` unconditionally for `--target wasm`, so the CLI's
+dependency pins that feature on rather than offering a knob that would fail to
+compile.
+
+One caveat specific to the CLI: `--no-default-features --features small-regex`
+does switch `Value::Pattern` to `regex-lite`, but it does **not** remove the
+`regex` crate from the binary. `cljrs` depends on `cljrs-project` with
+`features = ["vcs", "vcs-net", "ssh"]` unconditionally — `cljrs deps` needs git
+fetch and commit-signature verification — and `pgp` pulls `regex` in. A CLI built
+that way therefore links both engines and is *larger*, not smaller. The engine
+swap only pays off for an embedding that has no `pgp` in its graph; see
+[cljrs-value's README](../cljrs-value/README.md#features).

@@ -7,12 +7,53 @@ license.workspace = true
 repository.workspace = true
 
 [features]
-default = ["async", "net", "charset", "base64", "regex-full"]
+default = ["async", "net", "charset", "base64", "regex-full", "deps"]
 
-# Regex engine, forwarded to cljrs-value (which owns the choice); `regex-full`
-# is the default engine, `small-regex` swaps in regex-lite.
-regex-full  = ["cljrs-value/regex-full"]
-small-regex = ["cljrs-value/small-regex"]
+# Regex engine and pass-throughs. Every workspace dependency below is taken
+# with default features off (see the note in the root Cargo.toml), so what
+# their defaults used to provide is re-exported here and kept in `default`.
+# The `?/` entries are weak: they only apply when the optional feature that
+# pulls the package in is also enabled.
+regex-full = [
+    "cljrs-value/regex-full",
+    "cljrs-runtime/regex-full",
+    "cljrs-stdlib/regex-full",
+    "cljrs-compiler/regex-full",
+    "cljrs-interop/regex-full",
+    "cljrs-nrepl/regex-full",
+    "cljrs-async?/regex-full",
+    "cljrs-io?/regex-full",
+    "cljrs-net?/regex-full",
+    "cljrs-charset?/regex-full",
+    "cljrs-base64?/regex-full",
+]
+small-regex = [
+    "cljrs-value/small-regex",
+    "cljrs-runtime/small-regex",
+    "cljrs-stdlib/small-regex",
+    "cljrs-compiler/small-regex",
+    "cljrs-interop/small-regex",
+    "cljrs-nrepl/small-regex",
+    "cljrs-async?/small-regex",
+    "cljrs-io?/small-regex",
+    "cljrs-net?/small-regex",
+    "cljrs-charset?/small-regex",
+    "cljrs-base64?/small-regex",
+]
+
+# Pass-through for cljrs-runtime's git-backed dependency support.
+deps = [
+    "cljrs-runtime/deps",
+    "cljrs-stdlib/deps",
+    "cljrs-compiler/deps",
+    "cljrs-interop/deps",
+    "cljrs-nrepl/deps",
+    "cljrs-async?/deps",
+    "cljrs-io?/deps",
+    "cljrs-net?/deps",
+    "cljrs-charset?/deps",
+    "cljrs-base64?/deps",
+]
 
 # Propagate no-gc to all direct dependencies; transitive deps pick it up through their own feature chains.
 no-gc = [
@@ -45,7 +86,9 @@ cljrs-gc       = { workspace = true }
 cljrs-reader   = { workspace = true }
 cljrs-value    = { workspace = true }
 cljrs-stdlib   = { workspace = true }
-cljrs-compiler = { workspace = true }
+# `wasm-aot` is not optional here: `commands::compile` calls
+# `aot::compile_file_to_wasm` unconditionally for `--target wasm`.
+cljrs-compiler = { workspace = true, features = ["wasm-aot"] }
 cljrs-interop  = { workspace = true }
 cljrs-project  = { workspace = true, features = ["vcs", "vcs-net", "ssh"] }
 cljrs-lsp      = { workspace = true }

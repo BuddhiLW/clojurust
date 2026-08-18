@@ -246,12 +246,26 @@ Event maps delivered to callbacks:
 
 | Feature | Default | Effect |
 |---|---|---|
-| `regex-full` | on | Forwards `cljrs-value/regex-full` — `Value::Pattern` uses the `regex` crate. |
-| `small-regex` | off | Forwards `cljrs-value/small-regex` — `regex-lite` instead, trading Unicode character classes for ~277 KB of text. See [cljrs-value's README](../cljrs-value/README.md#features). |
+| `regex-full` | **on** | Forwards `regex-full` to this crate's workspace dependencies — `Value::Pattern` uses the `regex` crate. |
+| `small-regex` | off | Forwards `small-regex` instead: `regex-lite`, which trades Unicode character classes for ~277 KB of text. |
+| `deps` | **on** | Pass-through for `cljrs-runtime/deps` — git-backed dependency and versioned-var support. |
 
-`regex-full` wins when both are enabled, so `small-regex` only takes effect with
-`--no-default-features`. This crate depends on `cljrs-runtime` with *its* default
-features on, which re-enables `regex-full` — so selecting the small engine here
-also means depending on `cljrs-runtime` (and `cljrs-stdlib`, if present) directly
-with default features off. `cljrs-runtime`'s `deps` feature pulls `regex` in
-through `pgp` regardless, so the size win only lands once `deps` is off too.
+Every workspace dependency of this crate is taken with default features off (see
+the note in the root `Cargo.toml`), so these pass-throughs are what put back what
+those crates' defaults used to provide. `default` enables all of them, so a plain
+build is unchanged.
+
+`regex-full` wins when both regex features are enabled, so selecting the small
+engine means turning default features off **on this crate** and re-adding what
+you want:
+
+```toml
+cljrs-wasm = { version = "0.1", default-features = false, features = ["small-regex"] }
+```
+
+Adding a second, direct dependency on `cljrs-runtime` with
+`default-features = false` would not undo it — Cargo unions features across every
+edge to a package, so one edge left at its defaults re-enables `regex-full` for
+the whole graph. `deps` has to be off as well for the size win to land, since
+`cljrs-project/vcs` pulls `regex` in through `pgp`. See
+[cljrs-value's README](../cljrs-value/README.md#features).
