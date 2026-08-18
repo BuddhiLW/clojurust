@@ -34,9 +34,17 @@ gate would never close.
 
 ## Versioning
 
-Versions are `0.1.N`, where `N` is one past the highest existing `v0.1.*` tag.
-The tags are the source of truth for the series — a workflow run number is not,
-because it resets whenever the workflow file is replaced.
+Versions are `0.2.N`, where `N` is one past the highest existing `v0.2.*` tag,
+starting from `0.2.0`. The tags are the source of truth for the series — a
+workflow run number is not, because it resets whenever the workflow file is
+replaced.
+
+The series is set by `BASE_VERSION` in `nightly.yml`. Moving it restarts the
+patch counter at 0, so the first release of a new series is `<base>.0`. The
+release it *follows* is still the newest tag overall, whatever series that
+belongs to: the first `0.2.0` reports its changes against the last `0.1.x` and
+is gated on the same path rules, rather than firing unconditionally with a
+changelog running back to the first commit.
 
 One exception: if the highest tag was cut from the current `HEAD` and has no
 GitHub release, a previous attempt died partway through publishing. The gate

@@ -4,7 +4,7 @@ name: Nightly Release
 # only when the day's merges actually changed the crates: a day of pure
 # documentation or website edits produces no release.
 #
-# Each release pushes a `v0.1.N` tag and a GitHub release whose notes are
+# Each release pushes a `v0.2.N` tag and a GitHub release whose notes are
 # generated from the merged pull requests, optionally with a Claude-written
 # highlights section (see .github/scripts/summarize-changelog.sh).
 on:
@@ -30,7 +30,7 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
-  BASE_VERSION: "0.1"
+  BASE_VERSION: "0.2"
 
 jobs:
   check:
