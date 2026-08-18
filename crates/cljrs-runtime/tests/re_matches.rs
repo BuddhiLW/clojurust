@@ -66,6 +66,28 @@ fn re_matches_yields_nil_for_a_non_participating_group() {
     assert_eval(r#"(re-matches #"(a)|(b)" "b")"#, r#"["b" nil "b"]"#);
 }
 
+#[test]
+fn re_matches_outranks_the_engines_leftmost_first_preference() {
+    // The engine's first choice for these is a strict prefix ("a", ""), which
+    // an unanchored search plus a span check would reject; Clojure returns the
+    // full match, so the search itself has to be anchored.
+    assert_eval(r#"(re-matches #"a|ab" "ab")"#, r#""ab""#);
+    assert_eval(
+        r#"(re-matches #"(a|ab)(c|bc)" "abc")"#,
+        r#"["abc" "a" "bc"]"#,
+    );
+    assert_eval(r#"(re-matches #".*?" "hello")"#, r#""hello""#);
+    // …while `re-find` keeps taking that first choice.
+    assert_eval(r#"(re-find #"a|ab" "ab")"#, r#""a""#);
+}
+
+#[test]
+fn re_matches_keeps_group_numbering_and_inline_flags() {
+    assert_eval(r#"(re-matches #"(?i)(a)(b)" "AB")"#, r#"["AB" "A" "B"]"#);
+    assert_eval(r#"(re-matches #"" "")"#, r#""""#);
+    assert_eval(r#"(re-matches #"" "a")"#, "nil");
+}
+
 // ── partial matches are not matches ─────────────────────────────────────────
 
 #[test]

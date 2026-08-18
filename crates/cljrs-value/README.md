@@ -142,6 +142,10 @@ impl Pattern {
     pub fn new(pattern: &str) -> Result<Pattern, PatternError>;
     pub fn as_str(&self) -> &str;
     pub fn captures<'h>(&self, haystack: &'h str) -> Option<Captures<'h>>;
+    /// Whole-haystack match (Java `Matcher.matches()`), via a `\A(?:…)\z` twin
+    /// compiled once per Pattern — neither engine has an anchored search, and
+    /// span-filtering an unanchored one loses to leftmost-first (`a|ab`).
+    pub fn captures_full<'h>(&self, haystack: &'h str) -> Option<Captures<'h>>;
     pub fn captures_at<'h>(&self, haystack: &'h str, start: usize) -> Option<Captures<'h>>;
     pub fn replace<'h>(&self, haystack: &'h str, replacement: &str) -> Cow<'h, str>;
     pub fn replace_all<'h>(&self, haystack: &'h str, replacement: &str) -> Cow<'h, str>;
@@ -172,9 +176,9 @@ impl<'h> Captures<'h> {
 
 `Matcher` is the stateful driver behind `re-find`/`re-matches`/`re-seq`: it
 holds `pattern: GcPtr<Pattern>` plus a haystack and walks matches left to
-right, one per `next()` call. With `match_all` set (`re-matches`) it yields at
-most one match, and only when that match covers the whole haystack — Java's
-`Matcher.matches()` semantics; otherwise it goes straight to `Complete`.
+right, one per `next()` call. With `match_all` set (`re-matches`) the search is
+anchored to the whole haystack — Java's `Matcher.matches()` semantics — and
+yields at most one match: the next `next()` is `Complete` either way.
 
 ```rust
 pub enum MatchPhase { New, Matching(usize), Complete }
@@ -183,6 +187,8 @@ pub struct Matcher { pub pattern: GcPtr<Pattern>, /* haystack, state, match_all 
 
 impl Matcher {
     pub fn new(pattern: Pattern, source: String, match_all: bool) -> Matcher;
+    /// As `new`, sharing an allocated pattern so its anchored form is compiled once.
+    pub fn from_ptr(pattern: GcPtr<Pattern>, source: String, match_all: bool) -> Matcher;
     pub fn next(&self) -> MatchPhase;            // advance; Complete once exhausted
     pub fn capture(&self) -> Option<MatchResult>; // last match, owned
     pub fn phase(&self) -> MatchPhase;
