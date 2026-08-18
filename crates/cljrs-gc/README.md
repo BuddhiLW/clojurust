@@ -123,7 +123,12 @@ counted separately when allocated.
 
 Built-in leaf impls: `String` (overrides `gc_size_extra` to return `capacity()`),
 `i64`, `f64`, `bool`, `num_bigint::BigInt`, `bigdecimal::BigDecimal`,
-`num_rational::Ratio<BigInt>`.
+`num_rational::Ratio<BigInt>`, and `Mutex<Vec<T>>` for the primitive array
+element types (`i8`/`i16`/`i32`/`i64`/`f32`/`f64`/`bool`/`char`).
+
+Compiled regular expressions are *not* here: `Trace` for them lives on
+`cljrs-value`'s `Pattern` wrapper, so `cljrs-gc` does not depend on a regex
+engine.
 
 ### `GcPtr<T: Trace + 'static>`
 

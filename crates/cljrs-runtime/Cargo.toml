@@ -7,7 +7,13 @@ license.workspace = true
 repository.workspace = true
 
 [features]
-default = ["deps"]
+default = ["deps", "regex-full"]
+
+# Regex engine, forwarded to cljrs-value (which owns the choice); `regex-full`
+# is the default engine, `small-regex` swaps in regex-lite.
+regex-full  = ["cljrs-value/regex-full"]
+small-regex = ["cljrs-value/small-regex"]
+
 no-gc = ["cljrs-gc/no-gc", "cljrs-value/no-gc"]
 
 # Git-backed dependency and versioned-var support: installs the
@@ -36,7 +42,6 @@ num-traits   = { workspace = true }
 rand         = { workspace = true }
 rpds         = { workspace = true }
 uuid         = { workspace = true, features = ["v4"] }
-regex        = { workspace = true }
 
 # `logging` installs a subscriber, which is a host-side concern: a wasm32
 # runtime has no stderr to format to and installs none.

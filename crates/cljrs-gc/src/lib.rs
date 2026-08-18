@@ -100,9 +100,6 @@ impl Trace for bigdecimal::BigDecimal {
 impl Trace for num_rational::Ratio<num_bigint::BigInt> {
     fn trace(&self, _: &mut MarkVisitor) {}
 }
-impl Trace for regex::Regex {
-    fn trace(&self, _: &mut MarkVisitor) {}
-}
 macro_rules! impl_trace_prim_array {
     ($t:ty) => {
         impl Trace for std::sync::Mutex<Vec<$t>> {

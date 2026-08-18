@@ -14,7 +14,6 @@ no-gc = []
 num-bigint   = { workspace = true }
 bigdecimal   = { workspace = true }
 num-rational = { workspace = true }
-regex        = { workspace = true }
 tracing       = { workspace = true }
 
 # Not available on wasm32-unknown-unknown (pulls in errno).  The wasm build

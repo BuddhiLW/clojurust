@@ -377,3 +377,33 @@ own `async` feature pulls this package in.
 **Timer portability:** On `wasm32` the `time` feature of tokio is present but
 `platform_sleep` (used internally by `timeout`) delegates to `gloo-timers` so that
 the browser's `setTimeout` is used instead of a non-functional OS-level clock.
+
+---
+
+## Features
+
+| Feature | Default | Effect |
+|---|---|---|
+| `regex-full` | **on** | Forwards `regex-full` to this crate's workspace dependencies — `Value::Pattern` uses the `regex` crate. |
+| `small-regex` | off | Forwards `small-regex` instead: `regex-lite`, which trades Unicode character classes for ~277 KB of text. |
+| `deps` | **on** | Pass-through for `cljrs-runtime/deps` — git-backed dependency and versioned-var support. |
+
+Every workspace dependency of this crate is taken with default features off (see
+the note in the root `Cargo.toml`), so these pass-throughs are what put back what
+those crates' defaults used to provide. `default` enables all of them, so a plain
+build is unchanged.
+
+`regex-full` wins when both regex features are enabled, so selecting the small
+engine means turning default features off **on this crate** and re-adding what
+you want:
+
+```toml
+cljrs-async = { version = "0.1", default-features = false, features = ["small-regex"] }
+```
+
+Adding a second, direct dependency on `cljrs-runtime` with
+`default-features = false` would not undo it — Cargo unions features across every
+edge to a package, so one edge left at its defaults re-enables `regex-full` for
+the whole graph. `deps` has to be off as well for the size win to land, since
+`cljrs-project/vcs` pulls `regex` in through `pgp`. See
+[cljrs-value's README](../cljrs-value/README.md#features).

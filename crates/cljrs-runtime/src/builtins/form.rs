@@ -3,11 +3,11 @@
 use crate::env::error::{EvalError, EvalResult};
 use cljrs_gc::GcPtr;
 use cljrs_reader::{Form, FormKind};
+use cljrs_value::regex::Pattern;
 use cljrs_value::value::SetValue;
 use cljrs_value::{
     Keyword, MapValue, PersistentHashSet, PersistentList, PersistentVector, Symbol, Value,
 };
-use regex::Regex;
 
 // ── anon fn expansion ─────────────────────────────────────────────────────────
 
@@ -249,7 +249,7 @@ pub fn form_to_value(form: &Form) -> EvalResult<Value> {
         FormKind::Keyword(s) => Value::keyword(Keyword::parse(s)),
         FormKind::AutoKeyword(s) => Value::keyword(Keyword::simple(s.as_str())),
         FormKind::AutoSymbol(s) => Value::symbol(Symbol::parse(s)),
-        FormKind::Regex(s) => match Regex::new(s.as_str()) {
+        FormKind::Regex(s) => match Pattern::new(s.as_str()) {
             Ok(pattern) => Value::Pattern(GcPtr::new(pattern)),
             Err(_) => Value::Nil, // should already have been caught
         },
