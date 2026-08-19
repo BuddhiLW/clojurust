@@ -61,7 +61,7 @@ pub fn init(globals: &Arc<GlobalEnv>) {
         return;
     }
     globals.get_or_create_ns(NS);
-    globals.refer_all(NS, "clojure.core");
+    globals.refer_core(NS);
     fns::register(globals, NS);
     globals.mark_loaded(NS);
 }
@@ -76,7 +76,7 @@ pub fn init_async(globals: &Arc<GlobalEnv>) {
         return;
     }
     globals.get_or_create_ns(NS_ASYNC);
-    globals.refer_all(NS_ASYNC, "clojure.core");
+    globals.refer_core(NS_ASYNC);
     codec_chan::register(globals, NS_ASYNC);
     globals.mark_loaded(NS_ASYNC);
 }

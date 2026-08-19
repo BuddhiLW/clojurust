@@ -77,7 +77,7 @@ pub fn init(globals: &Arc<cljrs_runtime::env::env::GlobalEnv>) {
 
     if !globals.is_loaded(NS_TCP) {
         globals.get_or_create_ns(NS_TCP);
-        globals.refer_all(NS_TCP, "clojure.core");
+        globals.refer_core(NS_TCP);
         tcp::register(globals, NS_TCP);
         load_source(globals, NS_TCP, NET_TCP_SOURCE);
         globals.mark_loaded(NS_TCP);
@@ -85,7 +85,7 @@ pub fn init(globals: &Arc<cljrs_runtime::env::env::GlobalEnv>) {
 
     if !globals.is_loaded(NS_FRAME) {
         globals.get_or_create_ns(NS_FRAME);
-        globals.refer_all(NS_FRAME, "clojure.core");
+        globals.refer_core(NS_FRAME);
         frame::register(globals, NS_FRAME);
         load_source(globals, NS_FRAME, NET_FRAME_SOURCE);
         globals.mark_loaded(NS_FRAME);
@@ -93,7 +93,7 @@ pub fn init(globals: &Arc<cljrs_runtime::env::env::GlobalEnv>) {
 
     if !globals.is_loaded(NS_UDP) {
         globals.get_or_create_ns(NS_UDP);
-        globals.refer_all(NS_UDP, "clojure.core");
+        globals.refer_core(NS_UDP);
         udp::register(globals, NS_UDP);
         load_source(globals, NS_UDP, NET_UDP_SOURCE);
         globals.mark_loaded(NS_UDP);
@@ -101,7 +101,7 @@ pub fn init(globals: &Arc<cljrs_runtime::env::env::GlobalEnv>) {
 
     if !globals.is_loaded(NS_TLS) {
         globals.get_or_create_ns(NS_TLS);
-        globals.refer_all(NS_TLS, "clojure.core");
+        globals.refer_core(NS_TLS);
         tls::register(globals, NS_TLS);
         load_source(globals, NS_TLS, NET_TLS_SOURCE);
         globals.mark_loaded(NS_TLS);
@@ -109,7 +109,7 @@ pub fn init(globals: &Arc<cljrs_runtime::env::env::GlobalEnv>) {
 
     if !globals.is_loaded(NS_UNIX) {
         globals.get_or_create_ns(NS_UNIX);
-        globals.refer_all(NS_UNIX, "clojure.core");
+        globals.refer_core(NS_UNIX);
         unix::register(globals, NS_UNIX);
         load_source(globals, NS_UNIX, NET_UNIX_SOURCE);
         globals.mark_loaded(NS_UNIX);
@@ -117,7 +117,7 @@ pub fn init(globals: &Arc<cljrs_runtime::env::env::GlobalEnv>) {
 
     if !globals.is_loaded(NS_QUIC) {
         globals.get_or_create_ns(NS_QUIC);
-        globals.refer_all(NS_QUIC, "clojure.core");
+        globals.refer_core(NS_QUIC);
         quic::register(globals, NS_QUIC);
         load_source(globals, NS_QUIC, NET_QUIC_SOURCE);
         globals.mark_loaded(NS_QUIC);
@@ -125,7 +125,7 @@ pub fn init(globals: &Arc<cljrs_runtime::env::env::GlobalEnv>) {
 
     if !globals.is_loaded(NS_H3) {
         globals.get_or_create_ns(NS_H3);
-        globals.refer_all(NS_H3, "clojure.core");
+        globals.refer_core(NS_H3);
         h3::register(globals, NS_H3);
         load_source(globals, NS_H3, NET_H3_SOURCE);
         globals.mark_loaded(NS_H3);
@@ -133,7 +133,7 @@ pub fn init(globals: &Arc<cljrs_runtime::env::env::GlobalEnv>) {
 
     if !globals.is_loaded(NS_HTTP2) {
         globals.get_or_create_ns(NS_HTTP2);
-        globals.refer_all(NS_HTTP2, "clojure.core");
+        globals.refer_core(NS_HTTP2);
         h2::register(globals, NS_HTTP2);
         load_source(globals, NS_HTTP2, NET_HTTP2_SOURCE);
         globals.mark_loaded(NS_HTTP2);
@@ -141,7 +141,7 @@ pub fn init(globals: &Arc<cljrs_runtime::env::env::GlobalEnv>) {
 
     if !globals.is_loaded(NS) {
         globals.get_or_create_ns(NS);
-        globals.refer_all(NS, "clojure.core");
+        globals.refer_core(NS);
         load_source(globals, NS, NET_SOURCE);
         globals.mark_loaded(NS);
     }

@@ -1,6 +1,6 @@
 //! Special form evaluators.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::builtins::form::{
@@ -18,7 +18,7 @@ use cljrs_reader::form::FormKind;
 use cljrs_value::error::ExceptionInfo;
 use cljrs_value::{
     CljxFn, CljxFnArity, FutureState, Keyword, MapValue, MultiFn, Protocol, ProtocolFn,
-    ProtocolMethod, TypeHint, TypeInstance, Value, ValueError,
+    ProtocolMethod, ReferClojureFilter, TypeHint, TypeInstance, Value, ValueError,
 };
 
 /// Dispatch to the right special-form handler.
@@ -1531,13 +1531,73 @@ fn merge_meta(base: Option<Value>, overlay: Option<Value>) -> Option<Value> {
     }
 }
 
+/// Parse the body of a `(:refer-clojure ...)` clause into the filter applied
+/// to the automatic `clojure.core` refer.  Accepts `:exclude`, `:only` and
+/// `:rename`, each once, in any order.
+fn parse_refer_clojure_clause(items: &[Form]) -> Result<ReferClojureFilter, String> {
+    let mut filter = ReferClojureFilter::default();
+    let items = expand_reader_conds(items);
+    let mut i = 0;
+    while i < items.len() {
+        let FormKind::Keyword(k) = &items[i].kind else {
+            return Err(":refer-clojure expects keyword options (:exclude, :only, :rename)".into());
+        };
+        let arg = items
+            .get(i + 1)
+            .ok_or_else(|| format!(":refer-clojure :{k} expects a value"))?;
+        match k.as_str() {
+            "exclude" => filter.exclude = symbol_name_set(arg, "exclude")?,
+            "only" => filter.only = Some(symbol_name_set(arg, "only")?),
+            "rename" => {
+                let FormKind::Map(entries) = &arg.kind else {
+                    return Err(":refer-clojure :rename expects a map".into());
+                };
+                if entries.len() % 2 != 0 {
+                    return Err(":refer-clojure :rename expects an even-sized map".into());
+                }
+                for pair in entries.chunks(2) {
+                    match (&pair[0].kind, &pair[1].kind) {
+                        (FormKind::Symbol(from), FormKind::Symbol(to)) => {
+                            filter
+                                .rename
+                                .insert(Arc::from(from.as_str()), Arc::from(to.as_str()));
+                        }
+                        _ => {
+                            return Err(
+                                ":refer-clojure :rename expects symbol keys and values".into()
+                            );
+                        }
+                    }
+                }
+            }
+            other => return Err(format!(":refer-clojure does not support :{other}")),
+        }
+        i += 2;
+    }
+    Ok(filter)
+}
+
+/// Read a vector of symbols (an `:exclude`/`:only` list) as a set of names.
+fn symbol_name_set(form: &Form, opt: &str) -> Result<HashSet<Arc<str>>, String> {
+    let FormKind::Vector(items) = &form.kind else {
+        return Err(format!(":refer-clojure :{opt} expects a vector of symbols"));
+    };
+    expand_reader_conds(items)
+        .iter()
+        .map(|f| match &f.kind {
+            FormKind::Symbol(sym) => Ok(Arc::from(sym.as_str())),
+            _ => Err(format!(":refer-clojure :{opt} expects symbols")),
+        })
+        .collect()
+}
+
 fn eval_ns(args: &[Form], env: &mut Env) -> EvalResult {
     let (name, name_meta) = extract_ns_name_form(args.first(), env)?;
     env.globals.get_or_create_ns(&name);
     env.current_ns = Arc::from(name.as_str());
     // Auto-refer clojure.core (Clojure default behaviour).
     if name != "clojure.core" {
-        env.globals.refer_all(&name, "clojure.core");
+        env.globals.refer_core(&name);
     }
     sync_star_ns(env);
 
@@ -1557,6 +1617,31 @@ fn eval_ns(args: &[Form], env: &mut Env) -> EvalResult {
         ns_ptr.get().set_meta(m);
     }
 
+    // `:refer-clojure` first: it narrows the automatic core refer done above,
+    // and an explicit `:require ... :refer` below must be able to override it.
+    // Re-evaluating an `ns` form without the clause clears a filter left by an
+    // earlier evaluation, restoring the full core refer.
+    //
+    // More than one `:refer-clojure` clause is not meaningful, so the last one
+    // wins rather than accumulating.  (Clojure runs each clause as a separate
+    // `refer` call, where a second clause silently *re-adds* what the first
+    // excluded; there is no reading of that under which both clauses do what
+    // they say.)
+    let mut refer_clojure = None;
+    for clause in rest {
+        if let FormKind::List(items) = &clause.kind
+            && matches!(items.first().map(|f| &f.kind), Some(FormKind::Keyword(k)) if k == "refer-clojure")
+        {
+            refer_clojure =
+                Some(parse_refer_clojure_clause(&items[1..]).map_err(EvalError::Runtime)?);
+        }
+    }
+    if name != "clojure.core" {
+        env.globals
+            .set_refer_clojure_filter(&name, refer_clojure)
+            .map_err(EvalError::Runtime)?;
+    }
+
     for clause in rest {
         if let FormKind::List(items) = &clause.kind {
             match items.first().map(|f| &f.kind) {
@@ -1569,7 +1654,8 @@ fn eval_ns(args: &[Form], env: &mut Env) -> EvalResult {
                         load_ns(env.globals.clone(), &spec, &name)?;
                     }
                 }
-                // Other clauses (:refer-clojure, :use, :import) — skip for now.
+                // `:refer-clojure` was handled in the pass above; other clauses
+                // (`:use`, `:import`) — skip for now.
                 _ => {}
             }
         }
@@ -1666,7 +1752,7 @@ fn eval_in_ns(args: &[Form], env: &mut Env) -> EvalResult {
     let ns_val = eval(&args[0], env)?;
     let ns_name = extract_ns_name(&ns_val)?;
     env.globals.get_or_create_ns(&ns_name);
-    env.globals.refer_all(&ns_name, "clojure.core");
+    env.globals.refer_core(&ns_name);
     env.current_ns = Arc::from(ns_name.as_str());
     sync_star_ns(env);
     let ns_ptr = env.globals.get_or_create_ns(&env.current_ns);

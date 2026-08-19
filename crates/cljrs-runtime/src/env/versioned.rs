@@ -258,7 +258,7 @@ fn do_versioned_load(
     }
 
     // Pre-refer clojure.core.
-    globals.refer_all(versioned_ns_name, "clojure.core");
+    globals.refer_core(versioned_ns_name);
 
     // Evaluate all forms with a versioned commit context so that
     // same-namespace calls inside the historical source also resolve at

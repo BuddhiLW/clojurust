@@ -158,8 +158,10 @@ deviations)
   bound.
 - Users must `:require` the namespace with an alias (`:as s`, the universal
   convention anyway). `:refer`ing names like `and`, `or`, or `def` collides
-  with clojurust's special forms, and `:refer-clojure :exclude` is a no-op
-  in this runtime, so it cannot be used to work around the collision.
+  with clojurust's special forms, which are dispatched on the head symbol's
+  text before any var lookup, so `(:refer-clojure :exclude [and or def])` —
+  which does work — is not enough to reach the referred spec vars in call
+  position.
 
 ### clojure.spec.test.alpha functions and macros
 

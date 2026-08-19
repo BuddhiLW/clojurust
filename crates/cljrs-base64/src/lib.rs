@@ -18,7 +18,7 @@ pub fn init(globals: &Arc<GlobalEnv>) {
         return;
     }
     globals.get_or_create_ns(NS);
-    globals.refer_all(NS, "clojure.core");
+    globals.refer_core(NS);
     let mut registry = Registry::for_require(globals.clone());
     register(&mut registry);
 }

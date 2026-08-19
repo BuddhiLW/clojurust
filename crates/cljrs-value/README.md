@@ -439,6 +439,7 @@ pub struct Namespace {
     pub git_repo_root: Mutex<Option<Arc<str>>>,               // repo root of source_file, if any
     pub is_versioned: bool,                                   // true for `name@commit` namespaces
     pub meta: Mutex<Option<Value>>,                           // from `(ns ^{...} name ...)` / attr-map
+    pub refer_clojure_filter: Mutex<Option<ReferClojureFilter>>, // from `(:refer-clojure ...)`
 }
 
 impl Namespace {
@@ -449,6 +450,33 @@ impl Namespace {
     pub fn set_meta(&self, m: Value);
 }
 ```
+
+### `ReferClojureFilter` (Phase 4)
+
+How much of `clojure.core` a namespace auto-refers, as narrowed by an
+`(:refer-clojure ...)` clause in `ns`.  `None` on the namespace means the
+default: every public core name is referred.  Applied by
+`GlobalEnv::refer_core`, and only there — an explicit refer (`refer_all` /
+`refer_named`) bypasses it.
+
+```rust
+#[derive(Debug, Clone, Default)]
+pub struct ReferClojureFilter {
+    pub only: Option<HashSet<Arc<str>>>,     // `:only` — nothing outside this set is referred
+    pub exclude: HashSet<Arc<str>>,          // `:exclude` — never referred
+    pub rename: HashMap<Arc<str>, Arc<str>>, // `:rename` — core name → local name
+}
+
+impl ReferClojureFilter {
+    /// The local name `name` is referred under, or `None` when dropped.
+    pub fn local_name(&self, name: &Arc<str>) -> Option<Arc<str>>;
+}
+```
+
+A renamed name is *not* also referred under its original name, matching
+`clojure.core/refer`.  `local_name` is a pure lookup: validating the filter
+against what core actually defines, and rejecting two names that collide on
+one local name, happens once in `GlobalEnv::set_refer_clojure_filter`.
 
 ### `Thunk` / `LazySeq` / `CljxCons` (Phase 5)
 

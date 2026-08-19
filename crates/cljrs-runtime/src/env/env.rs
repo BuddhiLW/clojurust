@@ -10,7 +10,7 @@ use crate::env::error::EvalResult;
 use crate::mode::{ExecutionMode, TierState};
 use cljrs_gc::{GcConfig, GcPtr};
 use cljrs_reader::Form;
-use cljrs_value::{CljxFn, Namespace, Value, Var};
+use cljrs_value::{CljxFn, Namespace, ReferClojureFilter, Value, Var};
 // ── RequireSpec / RequireRefer ─────────────────────────────────────────────────
 
 /// How symbols should be referred into the requiring namespace.
@@ -407,6 +407,12 @@ impl GlobalEnv {
     }
 
     /// Copy all interns from `src_ns` into `dst_ns` as refers.
+    ///
+    /// This is the *explicit* refer — `(:require [x :refer :all])` — so it is
+    /// never narrowed by `dst_ns`'s `(:refer-clojure ...)` filter, matching
+    /// `clojure.core/refer`: naming a namespace explicitly re-maps even names
+    /// an earlier `refer-clojure` left out.  The automatic core refer every
+    /// namespace starts with goes through [`GlobalEnv::refer_core`] instead.
     pub fn refer_all(&self, dst_ns: &str, src_ns: &str) {
         let map = self.namespaces.read().unwrap();
         let src = match map.get(src_ns) {
@@ -422,6 +428,151 @@ impl GlobalEnv {
         for (name, var) in src_interns.iter() {
             dst_refers.insert(name.clone(), var.clone());
         }
+    }
+
+    /// Apply the automatic `clojure.core` refer that every namespace starts
+    /// with, narrowed by `dst_ns`'s `(:refer-clojure ...)` filter.
+    pub fn refer_core(&self, dst_ns: &str) {
+        self.refer_core_impl(dst_ns, false);
+    }
+
+    /// `replace`: drop the refers `dst_ns` already inherited from
+    /// `clojure.core` before re-referring, under the same lock — so installing
+    /// a filter after the namespace was pre-referred neither leaves stale
+    /// names behind nor exposes a window where core is only half-referred.
+    fn refer_core_impl(&self, dst_ns: &str, replace: bool) {
+        let map = self.namespaces.read().unwrap();
+        let src = match map.get("clojure.core") {
+            Some(ns) => ns.clone(),
+            None => return,
+        };
+        let dst = match map.get(dst_ns) {
+            Some(ns) => ns.clone(),
+            None => return,
+        };
+        // Lock order is filter → src interns → dst refers throughout.
+        let filter = dst.get().refer_clojure_filter.lock().unwrap();
+        let src_interns = src.get().interns.lock().unwrap();
+        let mut dst_refers = dst.get().refers.lock().unwrap();
+        if replace {
+            dst_refers.retain(|_, var| var.get().namespace.as_ref() != "clojure.core");
+        }
+        match filter.as_ref() {
+            Some(f) => {
+                for (name, var) in src_interns.iter() {
+                    if let Some(local) = f.local_name(name) {
+                        dst_refers.insert(local, var.clone());
+                    }
+                }
+            }
+            None => {
+                for (name, var) in src_interns.iter() {
+                    dst_refers.insert(name.clone(), var.clone());
+                }
+            }
+        }
+    }
+
+    /// Install `dst_ns`'s `(:refer-clojure ...)` filter (`None` removes any
+    /// previous one) and re-apply the automatic `clojure.core` refer under it.
+    ///
+    /// Refers already inherited from `clojure.core` are dropped first, so a
+    /// filter set after the namespace was pre-referred — the loader refers core
+    /// before it reads the file, and `ns` itself refers core before it reaches
+    /// the clause — still takes effect.
+    pub fn set_refer_clojure_filter(
+        &self,
+        dst_ns: &str,
+        filter: Option<ReferClojureFilter>,
+    ) -> Result<(), String> {
+        if let Some(f) = &filter {
+            self.validate_refer_clojure_filter(f)?;
+        }
+        let dst = self.get_or_create_ns(dst_ns);
+        {
+            let mut slot = dst.get().refer_clojure_filter.lock().unwrap();
+            // Nothing to install and nothing to undo: leave the refers alone.
+            if slot.is_none() && filter.is_none() {
+                return Ok(());
+            }
+            *slot = filter;
+        }
+        self.refer_core_impl(dst_ns, true);
+        Ok(())
+    }
+
+    /// Check a `(:refer-clojure ...)` filter against the names `clojure.core`
+    /// actually publishes, so a typo fails at the `ns` form rather than as an
+    /// unbound symbol somewhere further down the file.
+    ///
+    /// `:only` and `:rename` name specific vars and must resolve; `:exclude` is
+    /// subtractive and stays permissive (excluding a name core does not have is
+    /// harmless, and lets a file stay portable across core versions).  Clojure
+    /// validates `:only` the same way but ignores an unresolvable `:rename`
+    /// key, since it only consults the rename map for names already in its
+    /// to-do list.
+    ///
+    /// Two names landing on the same local name is an error rather than a coin
+    /// flip: with `:rename {inc str}` both `inc` and core's own `str` want the
+    /// name `str`.  Clojure warns and lets whichever one its intern table
+    /// yields last win; picking a winner by hash order here would make the
+    /// choice unstable from run to run.
+    fn validate_refer_clojure_filter(&self, filter: &ReferClojureFilter) -> Result<(), String> {
+        let map = self.namespaces.read().unwrap();
+        let Some(core) = map.get("clojure.core").cloned() else {
+            return Ok(());
+        };
+        drop(map);
+        let interns = core.get().interns.lock().unwrap();
+        // A runtime built without the core bootstrap has nothing to check
+        // against; do not fail every name.
+        if interns.is_empty() {
+            return Ok(());
+        }
+
+        for (opt, names) in [
+            ("only", filter.only.iter().flatten().collect::<Vec<_>>()),
+            ("rename", filter.rename.keys().collect::<Vec<_>>()),
+        ] {
+            let mut unknown: Vec<&str> = names
+                .into_iter()
+                .filter(|n| !interns.contains_key(*n))
+                .map(|n| n.as_ref())
+                .collect();
+            if !unknown.is_empty() {
+                unknown.sort_unstable();
+                return Err(format!(
+                    ":refer-clojure :{opt} names {}, which clojure.core does not define",
+                    unknown.join(", ")
+                ));
+            }
+        }
+
+        // local name → the core name referred under it.
+        let mut taken: HashMap<Arc<str>, Arc<str>> = HashMap::new();
+        let mut conflicts: Vec<(Arc<str>, Arc<str>, Arc<str>)> = Vec::new();
+        for name in interns.keys() {
+            let Some(local) = filter.local_name(name) else {
+                continue;
+            };
+            if let Some(prev) = taken.insert(local.clone(), name.clone()) {
+                let (a, b) = if prev.as_ref() <= name.as_ref() {
+                    (prev, name.clone())
+                } else {
+                    (name.clone(), prev)
+                };
+                conflicts.push((local, a, b));
+            }
+        }
+        if !conflicts.is_empty() {
+            conflicts.sort_unstable();
+            let (local, a, b) = &conflicts[0];
+            return Err(format!(
+                ":refer-clojure would refer both {a} and {b} as {local}; \
+                 rename or exclude one of them"
+            ));
+        }
+        Ok(())
     }
 
     /// Copy selected interns from `src_ns` into `dst_ns` as refers.

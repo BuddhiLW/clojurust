@@ -113,7 +113,7 @@ fn do_load(globals: &Arc<GlobalEnv>, ns_name: &Arc<str>) -> EvalResult<()> {
         // own `(ns ...)` form (mirrors the source-file path below).
         globals.get_or_create_ns(ns_name);
         if ns_name.as_ref() != "clojure.core" {
-            globals.refer_all(ns_name, "clojure.core");
+            globals.refer_core(ns_name);
         }
         // Save and restore *ns* so the caller's namespace is not disturbed by
         // the `(ns ...)` form in the loaded namespace's preamble.
@@ -168,7 +168,7 @@ fn do_load(globals: &Arc<GlobalEnv>, ns_name: &Arc<str>) -> EvalResult<()> {
 
     // Pre-refer clojure.core so code in the file can use core fns before (ns ...).
     if ns_name.as_ref() != "clojure.core" {
-        globals.refer_all(ns_name, "clojure.core");
+        globals.refer_core(ns_name);
     }
 
     // Evaluate the file in a new Env rooted at the namespace being loaded.

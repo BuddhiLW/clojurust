@@ -193,13 +193,13 @@ impl RuntimeBuilder {
         // Native clojure.core, then a `user` namespace referring it.
         builtins::register_all(&globals, "clojure.core");
         globals.get_or_create_ns("user");
-        globals.refer_all("user", "clojure.core");
+        globals.refer_core("user");
 
         // Bootstrap Clojure source (higher-order fns defined in Clojure).
         eval_embedded(&globals, builtins::BOOTSTRAP_SOURCE, "<bootstrap>")?;
 
         // Re-refer clojure.core now that the bootstrap has defined its HOFs.
-        globals.refer_all("user", "clojure.core");
+        globals.refer_core("user");
         globals.mark_loaded("clojure.core");
 
         for (ns, src) in &self.builtin_sources {
