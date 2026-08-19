@@ -816,17 +816,38 @@ pub fn compile_file(src_path: &Path, out_path: &Path, session: &CompileSession) 
     // The rest is AOT-compiled.
     let mut interpreted_source = String::new();
     let mut compilable = Vec::new();
+    // The entry `ns` form, held back: if it is the ONLY interpreted form, the
+    // harness can establish the namespace structurally and ship no text at all.
+    // Held back rather than dropped, because any OTHER interpreted form may
+    // depend on the aliases and refers this form installs.
+    let mut structural_ns: Option<(String, Vec<String>)> = None;
+    let mut ns_form_text = String::new();
     for (i, form) in expanded.iter().enumerate() {
         if needs_interpreter(&forms[i]) || expanded_needs_interpreter(form) {
             // Extract the original source text using span byte offsets.
             let span = &forms[i].span;
             let src_text = &source[span.start..span.end];
-            interpreted_source.push_str(src_text);
-            interpreted_source.push('\n');
+            match structural_ns_form(&forms[i]) {
+                Some(decl) if structural_ns.is_none() && ns_form_text.is_empty() => {
+                    structural_ns = Some(decl);
+                    ns_form_text.push_str(src_text);
+                    ns_form_text.push('\n');
+                }
+                _ => {
+                    interpreted_source.push_str(src_text);
+                    interpreted_source.push('\n');
+                }
+            }
         } else {
             let form = expand_anon_fns(form);
             compilable.push(qualify_aliases(&form, &env.current_ns, &env.globals));
         }
+    }
+    // Another form needs the interpreter, so the ns form must be evaluated the
+    // old way — its aliases have to exist before that form runs.
+    if !interpreted_source.is_empty() && structural_ns.is_some() {
+        structural_ns = None;
+        interpreted_source.insert_str(0, &ns_form_text);
     }
     if !interpreted_source.is_empty() {
         eprintln!(
@@ -946,6 +967,7 @@ pub fn compile_file(src_path: &Path, out_path: &Path, session: &CompileSession) 
         out_path,
         &obj_bytes,
         &interpreted_source,
+        structural_ns.as_ref(),
         &compiled_namespaces,
         &versioned_bundled,
         &async_polls,
@@ -1192,6 +1214,63 @@ pub fn audit_source(
         })
         .collect();
     SourceAudit { leaks }
+}
+
+/// An entry `(ns ...)` form the harness can establish WITHOUT embedding its text.
+///
+/// Returns `(name, required namespaces)` for `(ns NAME)` and for an `ns` whose
+/// only clauses are `(:require ...)`; `None` for anything richer (`:import`,
+/// `:gen-class`, metadata, a docstring), which still goes through the
+/// interpreted preamble.
+///
+/// Why this exists: `needs_interpreter` sends every `ns` form to the preamble
+/// as VERBATIM SOURCE, so the smallest possible program — `(ns m)` — ships 7
+/// bytes of readable Clojure and `--require-fully-compiled` refuses it. The ns
+/// declaration is not program text; it is a fact the compiler already knows.
+fn structural_ns_form(form: &cljrs_reader::Form) -> Option<(String, Vec<String>)> {
+    use cljrs_reader::form::FormKind;
+    let FormKind::List(parts) = &form.kind else {
+        return None;
+    };
+    let (head, rest) = parts.split_first()?;
+    let FormKind::Symbol(h) = &head.kind else {
+        return None;
+    };
+    if h != "ns" {
+        return None;
+    }
+    let (name_form, clauses) = rest.split_first()?;
+    let FormKind::Symbol(name) = &name_form.kind else {
+        return None;
+    };
+    let mut requires = Vec::new();
+    for clause in clauses {
+        let FormKind::List(items) = &clause.kind else {
+            return None;
+        };
+        let Some(kw) = items.first() else {
+            return None;
+        };
+        let FormKind::Keyword(k) = &kw.kind else {
+            return None;
+        };
+        if k != "require" {
+            // :import, :gen-class, :refer-clojure with exclusions — richer than
+            // this path models. Keep the textual preamble; the gate will say so.
+            return None;
+        }
+        for spec in &items[1..] {
+            match &spec.kind {
+                FormKind::Symbol(ns) => requires.push(ns.clone()),
+                FormKind::Vector(v) => match v.first().map(|f| &f.kind) {
+                    Some(FormKind::Symbol(ns)) => requires.push(ns.clone()),
+                    _ => return None,
+                },
+                _ => return None,
+            }
+        }
+    }
+    Some((name.clone(), requires))
 }
 
 /// Check if a top-level form needs the interpreter (can't be AOT-compiled yet).
@@ -1869,6 +1948,8 @@ fn build_harness(
     out_path: &Path,
     obj_bytes: &[u8],
     interpreted_source: &str,
+    // The entry namespace, when it can be established without embedding text.
+    structural_ns: Option<&(String, Vec<String>)>,
     compiled_namespaces: &[CompiledNamespace],
     versioned_bundled: &[(Arc<str>, String)],
     async_polls: &[AsyncPollEntry],
@@ -2027,6 +2108,36 @@ edition = "2024"
     }
 "#;
 
+    // Establish the entry namespace structurally when its `ns` form carried no
+    // program text. Requires are loaded through the same loader `require` uses,
+    // so an AOT-compiled dependency still runs its native initializer. Aliases
+    // and refers are deliberately NOT installed: nothing interpreted remains to
+    // use them, and the compiled body was alias-qualified at compile time.
+    let ns_setup = match structural_ns {
+        Some((ns, requires)) => {
+            let mut code = format!(
+                "    let mut env = cljrs_runtime::tiered::Env::new(globals.clone(), {ns:?});\n\
+                 \x20   globals.get_or_create_ns({ns:?});\n\
+                 \x20   globals.refer_all({ns:?}, \"clojure.core\");\n\
+                 \x20   // Bind *ns* the way `eval_ns` does. Without this the namespace is\n\
+                 \x20   // established but `(resolve '-main)` still looks in `user`, finds\n\
+                 \x20   // nothing, and the program exits 0 having run nothing at all.\n\
+                 \x20   cljrs_runtime::interp::special::sync_star_ns(&mut env);\n"
+            );
+            for req in requires {
+                code.push_str(&format!(
+                    "    cljrs_runtime::env::loader::load_ns(globals.clone(), \
+                     &cljrs_runtime::env::env::RequireSpec {{ ns: std::sync::Arc::from({req:?}), \
+                     version: None, alias: None, \
+                     refer: cljrs_runtime::env::env::RequireRefer::None }}, {ns:?})\n\
+                     \x20       .expect(\"require failed at startup\");\n"
+                ));
+            }
+            code
+        }
+        None => "    let mut env = cljrs_runtime::tiered::Env::new(globals, \"user\");\n\n".to_string(),
+    };
+
     let preamble_code = if has_preamble {
         r#"
     // Evaluate interpreted preamble (ns, require, defn, defmacro, etc.).
@@ -2135,9 +2246,7 @@ async fn run() {{
     // Register AOT-compiled namespace loaders so `require` runs their native
     // initializers instead of interpreting source.
 {compiled_ns}{native_init}
-    let mut env = cljrs_runtime::tiered::Env::new(globals, "user");
-
-    // Push an eval context so rt_call can dispatch through the interpreter.
+{ns_setup}    // Push an eval context so rt_call can dispatch through the interpreter.
     cljrs_runtime::env::callback::push_eval_context(&env);
 {preamble}
     // Call the compiled code.
@@ -2174,6 +2283,7 @@ fn main() {{
 }}
 "#,
         preamble = preamble_code,
+        ns_setup = ns_setup,
         bundled = bundled_registration,
         compiled_ns = compiled_ns_registration,
         ns_init_externs = ns_init_externs,
@@ -3013,6 +3123,52 @@ edition = "2024"
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn parse_one(src: &str) -> cljrs_reader::Form {
+        cljrs_reader::Parser::new(src.to_string(), "<test>".to_string())
+            .parse_all()
+            .expect("parse")
+            .remove(0)
+    }
+
+    #[test]
+    fn a_bare_ns_form_is_structural() {
+        let (name, requires) = structural_ns_form(&parse_one("(ns m)")).expect("recognised");
+        assert_eq!(name, "m");
+        assert!(requires.is_empty());
+    }
+
+    #[test]
+    fn a_require_clause_is_structural_and_its_namespaces_are_collected() {
+        let (name, requires) =
+            structural_ns_form(&parse_one("(ns m (:require [a.b :as b] c.d))")).expect("recognised");
+        assert_eq!(name, "m");
+        assert_eq!(requires, vec!["a.b".to_string(), "c.d".to_string()]);
+    }
+
+    #[test]
+    fn richer_ns_clauses_are_not_structural() {
+        // :import and :gen-class carry behaviour this path does not model, and
+        // a docstring is text. Each must keep the textual preamble — which the
+        // opacity gate will then (correctly) refuse.
+        for src in [
+            "(ns m (:import [java.util List]))",
+            "(ns m (:gen-class))",
+            "(ns m \"a docstring\")",
+            "(ns m (:refer-clojure :exclude [map]))",
+        ] {
+            assert!(
+                structural_ns_form(&parse_one(src)).is_none(),
+                "should not be structural: {src}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_non_ns_form_is_not_structural() {
+        assert!(structural_ns_form(&parse_one("(defn f [x] x)")).is_none());
+        assert!(structural_ns_form(&parse_one("42")).is_none());
+    }
 
     #[test]
     fn workspace_deps_use_path() {
