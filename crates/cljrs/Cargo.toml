@@ -95,7 +95,9 @@ cljrs-lsp      = { workspace = true }
 cljrs-nrepl    = { workspace = true }
 cljrs-ir       = { workspace = true }
 clap          = { workspace = true }
-miette        = { workspace = true }
+# The binary is the only crate that *renders* diagnostics (see `cli::main`'s
+# `MietteHandlerOpts` hook), so `fancy` is enabled here rather than workspace-wide.
+miette        = { workspace = true, features = ["fancy"] }
 tracing            = { workspace = true }
 rustyline   = { workspace = true, optional = true }
 libloading  = { workspace = true }
