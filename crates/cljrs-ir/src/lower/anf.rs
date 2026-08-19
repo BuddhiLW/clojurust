@@ -11,7 +11,7 @@ use cljrs_reader::form::{Form, FormKind};
 use crate::{BlockId, ClosureTemplate, Const, Inst, IrFunction, KnownFn, Terminator, VarId};
 
 use super::context::{LowerCtx, fresh_global_name_id};
-use super::known::{resolve_known_fn, strip_ns_prefix};
+use super::known::{CoreShadows, resolve_known_core_fn};
 
 // ── Free-variable approximation for closure captures ─────────────────────────
 
@@ -57,6 +57,64 @@ fn collect_symbol_names_form<'a>(form: &'a Form, out: &mut HashSet<&'a str>) {
         // Atoms (Nil, Bool, Int, …, Keyword, …) contain no symbol references.
         _ => {}
     }
+}
+
+// ── Namespace-level `def` collection ─────────────────────────────────────────
+
+/// Collect the names the forms being lowered `def` into the lowering
+/// namespace.
+///
+/// Such a name is bound to *this* namespace's var, so an unqualified call to
+/// it is not `clojure.core`'s even when it reuses a core name — the same
+/// shadowing an already-interned var causes, except that the unit's own `def`s
+/// may not have run yet: AOT compiles a whole file without evaluating its
+/// `def`s, so the environment cannot report them (issue #337).
+///
+/// Collected up front, so a call site above the `def` is lowered the same way
+/// as one below it.  Both become dynamic calls that resolve per call, which is
+/// what the tree-walking interpreter does.
+fn collect_defined_names(forms: &[Form], out: &mut HashSet<Arc<str>>) {
+    for form in forms {
+        collect_defined_names_form(form, out);
+    }
+}
+
+fn collect_defined_names_form(form: &Form, out: &mut HashSet<Arc<str>>) {
+    match &form.kind {
+        FormKind::List(parts) => {
+            if let Some(FormKind::Symbol(head)) = parts.first().map(|f| &f.kind)
+                && matches!(head.as_str(), "def" | "defn" | "defn-" | "defonce")
+                && let Some(name) = parts.get(1).and_then(def_name)
+            {
+                out.insert(Arc::from(name));
+            }
+            collect_defined_names(parts, out);
+        }
+        FormKind::Vector(v) | FormKind::Map(v) | FormKind::Set(v) | FormKind::AnonFn(v) => {
+            collect_defined_names(v, out)
+        }
+        FormKind::Meta(_, f) | FormKind::Deref(f) | FormKind::TaggedLiteral(_, f) => {
+            collect_defined_names_form(f, out)
+        }
+        FormKind::ReaderCond { clauses, .. } => collect_defined_names(clauses, out),
+        // A quoted `(def x ...)` is data, not a definition; every other form
+        // kind is an atom.
+        _ => {}
+    }
+}
+
+/// The bare name a `def` form binds — `(def ^:private x 1)` binds `x` — or
+/// `None` when the name position is not a symbol.
+fn def_name(form: &Form) -> Option<&str> {
+    let inner = match &form.kind {
+        FormKind::Meta(_, inner) => inner,
+        _ => form,
+    };
+    let FormKind::Symbol(s) = &inner.kind else {
+        return None;
+    };
+    // `(def my.ns/x ...)` still binds `x` in `my.ns`.
+    Some(split_ns_name(s).1)
 }
 
 // ── Error type ───────────────────────────────────────────────────────────────
@@ -131,6 +189,26 @@ pub fn lower_fn_body(
     lower_fn_body_destructured(name, ns, params, &[], body, is_async)
 }
 
+/// Lower a function arity's body, told what the lowering namespace binds.
+///
+/// The shorter entry points above lower with no namespace information, which
+/// makes every `clojure.core` name resolve to core.  Callers that hold an
+/// environment should build a real [`CoreShadows`] instead
+/// (`cljrs_runtime::tiered::lower::core_shadows_for`), so a namespace that
+/// `def`s, `:refer`s, or `:refer-clojure :exclude`s a core name does not get
+/// core's semantics inlined at its call sites.
+pub fn lower_fn_body_shadowed(
+    name: Option<&str>,
+    ns: &str,
+    params: &[Arc<str>],
+    destructures: &[(usize, Form)],
+    body: &[Form],
+    is_async: bool,
+    shadows: &CoreShadows,
+) -> Result<IrFunction, LowerError> {
+    lower_fn_body_impl(name, ns, params, destructures, body, is_async, shadows)
+}
+
 /// Like [`lower_fn_body_destructured`] but also records static parameter
 /// representation seeds (from `^long`/`^double` type hints) on the resulting
 /// `IrFunction::seed_reprs`.  `seed_reprs` is positional with `params`.
@@ -170,7 +248,39 @@ pub fn lower_fn_body_destructured(
     body: &[Form],
     is_async: bool,
 ) -> Result<IrFunction, LowerError> {
-    let mut ctx = LowerCtx::new(name.map(Arc::from), Arc::from(ns));
+    lower_fn_body_impl(
+        name,
+        ns,
+        params,
+        destructures,
+        body,
+        is_async,
+        &CoreShadows::none(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn lower_fn_body_impl(
+    name: Option<&str>,
+    ns: &str,
+    params: &[Arc<str>],
+    destructures: &[(usize, Form)],
+    body: &[Form],
+    is_async: bool,
+    shadows: &CoreShadows,
+) -> Result<IrFunction, LowerError> {
+    // `clojure.core`'s own `def`s *are* the core names, so only other
+    // namespaces' definitions shadow.
+    let base_ns = versioned_ns_base(ns).unwrap_or(ns);
+    let shadows = if base_ns == "clojure.core" {
+        shadows.clone()
+    } else {
+        let mut defined: HashSet<Arc<str>> = HashSet::new();
+        collect_defined_names(body, &mut defined);
+        shadows.union(defined)
+    };
+
+    let mut ctx = LowerCtx::new(name.map(Arc::from), Arc::from(ns)).with_core_shadows(shadows);
     ctx.is_async = is_async;
 
     // Bind each param to a fresh VarId.
@@ -1327,7 +1437,7 @@ fn lower_fn(ctx: &mut LowerCtx, args: &[Form], is_async: bool) -> R {
 
 #[allow(clippy::too_many_arguments)]
 fn lower_fn_arity(
-    _parent_ctx: &mut LowerCtx,
+    parent_ctx: &mut LowerCtx,
     arity_name: Option<Arc<str>>,
     ns: Arc<str>,
     capture_names: &[Arc<str>],
@@ -1403,7 +1513,9 @@ fn lower_fn_arity(
         all_param_names.push(ri.name.clone());
     }
 
-    let mut sub = LowerCtx::new(arity_name, ns);
+    // A nested `fn*` is lowered in the same namespace as its parent, so it
+    // inherits the parent's view of what that namespace shadows.
+    let mut sub = LowerCtx::new(arity_name, ns).with_core_shadows(parent_ctx.core_shadows.clone());
     sub.is_async = is_async;
 
     // Bind all params.
@@ -2044,18 +2156,28 @@ fn lower_call(ctx: &mut LowerCtx, callee_form: &Form, arg_forms: &[Form]) -> R {
         None
     };
 
+    // Only a symbol that actually resolves to `clojure.core` here may be
+    // inlined or turned into a `CallKnown`: a local, a parameter, a var this
+    // namespace defs or refers from elsewhere, and an explicitly qualified
+    // `other.ns/count` all name something else, and the tree-walker calls that
+    // something else.  Lowering them as core's would make the answer depend on
+    // which tier is running.
+    let core_name = sym_name.and_then(|name| ctx.core_call_name(name));
+
     // Try inline expansions first.
-    if let Some(name) = sym_name
-        && let Some(result) = try_inline_expansion(ctx, name, arg_forms)?
+    if let Some(bare) = core_name
+        && let Some(result) = try_inline_expansion(ctx, bare, arg_forms)?
     {
         return Ok(result);
     }
 
     // Known function?
-    if let Some(name) = sym_name
-        && let Some(known) = resolve_known_fn(name)
+    if let Some(bare) = core_name
+        && let Some(known) = resolve_known_core_fn(bare)
     {
-        return lower_known_call(ctx, known, name, arg_forms);
+        // `lower_known_call` falls back to a dynamic call for unsupported
+        // arities; it needs the symbol as written to resolve the var.
+        return lower_known_call(ctx, known, sym_name.unwrap_or(bare), arg_forms);
     }
 
     // Generic dynamic call.
@@ -2353,12 +2475,15 @@ fn emit_comparison_chain(ctx: &mut LowerCtx, kf: KnownFn, args: Vec<VarId>) -> R
 
 // ── Inline expansions ─────────────────────────────────────────────────────────
 
+/// Expand a `clojure.core` call into IR directly, or `None` when the name has
+/// no inline expansion.  `core_name` is the bare core name the call site
+/// resolves to (see `LowerCtx::core_call_name`), never a raw symbol.
 fn try_inline_expansion(
     ctx: &mut LowerCtx,
-    callee_name: &str,
+    core_name: &str,
     args: &[Form],
 ) -> Result<Option<VarId>, LowerError> {
-    match strip_ns_prefix(callee_name) {
+    match core_name {
         "inc" => {
             let x = lower_form(
                 ctx,

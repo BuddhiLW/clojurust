@@ -54,6 +54,10 @@ tests/
                       documented host API cannot drift
   pinned_dylib_e2e.rs — gated (`CLJRS_DYLIB_E2E=1`) pinned-native end-to-end
                       test; described under Pinned native packages below
+  core_shadowing_tiers.rs — shadowed `clojure.core` names (a `let`-bound `inc`,
+                      a parameter named `inc`, a redefined var, an excluded
+                      name) must answer the same before and after a function
+                      crosses the IR promotion threshold (issue #337)
 ```
 
 ---

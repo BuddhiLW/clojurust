@@ -1,26 +1,107 @@
 //! Known-function name → KnownFn dispatch table.
 //!
-//! Maps Clojure symbol names (possibly namespace-qualified) to `KnownFn`
-//! variants.
+//! Maps `clojure.core` symbol names to `KnownFn` variants, plus the two pieces
+//! that decide whether a symbol names core at all: [`core_name`] (qualifier
+//! check) and [`CoreShadows`] (what the lowering namespace binds).
+
+use std::collections::HashSet;
+use std::sync::Arc;
 
 use crate::KnownFn;
 
-/// Strip a namespace prefix from a symbol/function name.
-/// `"clojure.core/+"` → `"+"`, `"+"` → `"+"`, `"/"` → `"/"`.
-pub fn strip_ns_prefix(s: &str) -> &str {
-    if s == "/" {
-        return s;
+/// The bare `clojure.core` name `sym` denotes, or `None` when it names
+/// something else.
+///
+/// An unqualified symbol is a candidate (the caller still has to rule out a
+/// local or a namespace-level shadow — see [`CoreShadows`]), and an explicit
+/// `clojure.core/x` always is one.  Any other qualifier names a different
+/// namespace's var: `my.ns/count` is not core's `count`, so it must not be
+/// lowered as one.
+pub fn core_name(sym: &str) -> Option<&str> {
+    // `/` is division, not a namespace separator; `clojure.core//` is that
+    // same var written qualified.
+    if sym == "/" {
+        return Some(sym);
     }
-    match s.rfind('/') {
-        Some(pos) => &s[pos + 1..],
-        None => s,
+    if let Some(ns) = sym.strip_suffix("//") {
+        return (ns == "clojure.core").then(|| &sym[sym.len() - 1..]);
+    }
+    match sym.rfind('/') {
+        None => Some(sym),
+        Some(pos) => {
+            let (ns, name) = (&sym[..pos], &sym[pos + 1..]);
+            (ns == "clojure.core" && !name.is_empty()).then_some(name)
+        }
+    }
+}
+
+/// Names the namespace being lowered does *not* resolve to `clojure.core`.
+///
+/// A `def` in the namespace itself, a `:refer` of the same name from another
+/// namespace, and a `(:refer-clojure :exclude [...])` clause all mean an
+/// unqualified call to that name is not core's — so the lowerer must leave it
+/// as a dynamic call instead of inlining core's semantics (which is what the
+/// tree-walking interpreter does, and the two tiers have to agree).
+///
+/// The empty set means "no namespace information available": every core name
+/// is assumed to resolve to core, which is what lowering did before shadows
+/// were threaded through.  Callers that hold an environment
+/// (`cljrs_runtime::tiered::lower::core_shadows_for`) should always build a
+/// real one.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CoreShadows {
+    names: Arc<HashSet<Arc<str>>>,
+}
+
+impl CoreShadows {
+    /// No shadowing information — every core name resolves to core.
+    pub fn none() -> Self {
+        Self::default()
+    }
+
+    pub fn new(names: impl IntoIterator<Item = Arc<str>>) -> Self {
+        Self {
+            names: Arc::new(names.into_iter().collect()),
+        }
+    }
+
+    /// Does the lowering namespace resolve `name` to something other than
+    /// `clojure.core/name`?
+    pub fn contains(&self, name: &str) -> bool {
+        self.names.contains(name)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.names.is_empty()
+    }
+
+    /// This set plus `extra` — used to fold in shadows only the forms being
+    /// lowered know about (see `anf::collect_defined_names`).
+    pub fn union(&self, extra: impl IntoIterator<Item = Arc<str>>) -> Self {
+        let mut names: HashSet<Arc<str>> = extra.into_iter().collect();
+        if names.is_empty() {
+            return self.clone();
+        }
+        names.extend(self.names.iter().cloned());
+        Self {
+            names: Arc::new(names),
+        }
     }
 }
 
 /// Resolve a symbol name to a `KnownFn`, or `None` if not recognized.
-/// Strips namespace prefix so `"clojure.core/+"` and `"+"` both resolve.
+///
+/// Only unqualified names and explicit `clojure.core/…` ones resolve; a symbol
+/// qualified with any other namespace names a different var.  Callers in call
+/// position must additionally rule out locals and namespace-level shadowing —
+/// see `LowerCtx::core_call_name`.
 pub fn resolve_known_fn(sym_name: &str) -> Option<KnownFn> {
-    match strip_ns_prefix(sym_name) {
+    resolve_known_core_fn(core_name(sym_name)?)
+}
+
+/// Resolve an already-unqualified `clojure.core` name to a `KnownFn`.
+pub fn resolve_known_core_fn(bare_name: &str) -> Option<KnownFn> {
+    match bare_name {
         "vector" => Some(KnownFn::Vector),
         "hash-map" => Some(KnownFn::HashMap),
         "hash-set" => Some(KnownFn::HashSet),

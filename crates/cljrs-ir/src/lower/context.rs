@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 use cljrs_types::span::Span;
 
+use crate::lower::known::{CoreShadows, core_name};
 use crate::{Block, BlockId, Inst, IrFunction, Terminator, VarId};
 
 // ── Global name counter (shared across all lowering calls in the process) ────
@@ -64,6 +65,10 @@ pub struct LowerCtx {
     /// Static representation seeds for `let`/`loop`-bound locals, keyed by the
     /// local's `VarId`.  Propagated to `IrFunction::local_seed_reprs`.
     pub(crate) local_seed_reprs: Vec<(VarId, crate::Repr)>,
+
+    /// Names `ns` does not resolve to `clojure.core` — see [`CoreShadows`].
+    /// Cheap to clone (shared set) so nested `fn*` contexts inherit it.
+    pub(crate) core_shadows: CoreShadows,
 }
 
 impl LowerCtx {
@@ -86,7 +91,34 @@ impl LowerCtx {
             is_async: false,
             seed_reprs: Vec::new(),
             local_seed_reprs: Vec::new(),
+            core_shadows: CoreShadows::none(),
         }
+    }
+
+    /// Record what the lowering namespace binds, so call-position symbols that
+    /// name a shadowing var are not lowered as `clojure.core` builtins.
+    pub fn with_core_shadows(mut self, shadows: CoreShadows) -> Self {
+        self.core_shadows = shadows;
+        self
+    }
+
+    /// The bare `clojure.core` name a call-position symbol denotes, or `None`
+    /// when it names something else and must be lowered as a dynamic call.
+    ///
+    /// An unqualified symbol loses to a lexical binding (`(let [inc ...] (inc
+    /// x))`, a parameter named `inc`) and to a namespace-level shadow (a local
+    /// `def`, a `:refer` of that name, a `(:refer-clojure :exclude [inc])`).
+    /// An explicit `clojure.core/inc` bypasses both — that is what it is for.
+    pub fn core_call_name<'a>(&self, sym: &'a str) -> Option<&'a str> {
+        let bare = core_name(sym)?;
+        // `core_name` returns a suffix of `sym`, so equal lengths mean the
+        // symbol was written unqualified.
+        if bare.len() == sym.len()
+            && (self.lookup_local(sym).is_some() || self.core_shadows.contains(sym))
+        {
+            return None;
+        }
+        Some(bare)
     }
 
     // ── ID allocation ────────────────────────────────────────────────────────
