@@ -504,6 +504,42 @@ impl cljrs_gc::Trace for Atom {
 
 // ── Namespace ─────────────────────────────────────────────────────────────────
 
+/// Which `clojure.core` names a namespace auto-refers, as narrowed by an
+/// `(:refer-clojure ...)` clause in `ns`.  An absent filter (the default)
+/// refers every public core name.
+#[derive(Debug, Clone, Default)]
+pub struct ReferClojureFilter {
+    /// `:only` — when set, no core name outside this set is referred.
+    pub only: Option<std::collections::HashSet<Arc<str>>>,
+    /// `:exclude` — core names that are never referred.
+    pub exclude: std::collections::HashSet<Arc<str>>,
+    /// `:rename` — core name → the local name it is referred under.  A renamed
+    /// name is *not* also referred under its original name (matching
+    /// `clojure.core/refer`).
+    pub rename: HashMap<Arc<str>, Arc<str>>,
+}
+
+impl ReferClojureFilter {
+    /// The local name `name` is referred under, or `None` when this filter
+    /// drops it.
+    pub fn local_name(&self, name: &Arc<str>) -> Option<Arc<str>> {
+        if self.exclude.contains(name) {
+            return None;
+        }
+        if let Some(only) = &self.only
+            && !only.contains(name)
+        {
+            return None;
+        }
+        Some(
+            self.rename
+                .get(name)
+                .cloned()
+                .unwrap_or_else(|| name.clone()),
+        )
+    }
+}
+
 /// A Clojure namespace with intern table, refers, and aliases.
 #[derive(Debug)]
 pub struct Namespace {
@@ -525,6 +561,9 @@ pub struct Namespace {
     pub is_versioned: bool,
     /// Metadata attached via `(ns ^{...} name ...)` or an `ns` attr-map.
     pub meta: Mutex<Option<Value>>,
+    /// Narrowing applied to the automatic `clojure.core` refer, set by an
+    /// `(:refer-clojure ...)` clause.  `None` refers all of core.
+    pub refer_clojure_filter: Mutex<Option<ReferClojureFilter>>,
 }
 
 impl Namespace {
@@ -538,6 +577,7 @@ impl Namespace {
             git_repo_root: Mutex::new(None),
             is_versioned: false,
             meta: Mutex::new(None),
+            refer_clojure_filter: Mutex::new(None),
         }
     }
 

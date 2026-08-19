@@ -285,6 +285,18 @@ pub fn ir_cache(&self) -> &Arc<tiered::ir_cache::IrCache>;
 pub fn eval(&self, form: &Form, env: &mut Env) -> EvalResult;
 pub fn call_cljrs_fn(&self, f: &CljxFn, args: &[Value], env: &mut Env) -> EvalResult;
 pub fn on_fn_defined(&self, f: &CljxFn, env: &mut Env);
+
+/// Copy `src_ns`'s interns into `dst_ns` as refers.  When `src_ns` is
+/// `clojure.core`, `dst_ns`'s `ReferClojureFilter` (if any) decides which
+/// names are referred and under what local name.
+pub fn refer_all(&self, dst_ns: &str, src_ns: &str);
+pub fn refer_named(&self, dst_ns: &str, src_ns: &str, names: &[Arc<str>]);
+
+/// Install (or, with `None`, remove) the `(:refer-clojure ...)` filter for
+/// `dst_ns` and re-apply the automatic core refer under it.  Refers inherited
+/// from `clojure.core` are dropped first, so a filter installed after the
+/// namespace was pre-referred still takes effect.
+pub fn set_refer_clojure_filter(&self, dst_ns: &str, filter: Option<ReferClojureFilter>);
 ```
 
 ### `depth` submodule

@@ -10,7 +10,7 @@ use crate::env::error::EvalResult;
 use crate::mode::{ExecutionMode, TierState};
 use cljrs_gc::{GcConfig, GcPtr};
 use cljrs_reader::Form;
-use cljrs_value::{CljxFn, Namespace, Value, Var};
+use cljrs_value::{CljxFn, Namespace, ReferClojureFilter, Value, Var};
 // ── RequireSpec / RequireRefer ─────────────────────────────────────────────────
 
 /// How symbols should be referred into the requiring namespace.
@@ -407,6 +407,10 @@ impl GlobalEnv {
     }
 
     /// Copy all interns from `src_ns` into `dst_ns` as refers.
+    ///
+    /// When `src_ns` is `clojure.core`, `dst_ns`'s `(:refer-clojure ...)`
+    /// filter (if any) decides which names are referred and under what local
+    /// name.
     pub fn refer_all(&self, dst_ns: &str, src_ns: &str) {
         let map = self.namespaces.read().unwrap();
         let src = match map.get(src_ns) {
@@ -417,11 +421,49 @@ impl GlobalEnv {
             Some(ns) => ns.clone(),
             None => return,
         };
+        let filter = if src_ns == "clojure.core" {
+            dst.get().refer_clojure_filter.lock().unwrap().clone()
+        } else {
+            None
+        };
         let src_interns = src.get().interns.lock().unwrap();
         let mut dst_refers = dst.get().refers.lock().unwrap();
         for (name, var) in src_interns.iter() {
-            dst_refers.insert(name.clone(), var.clone());
+            match &filter {
+                Some(f) => {
+                    if let Some(local) = f.local_name(name) {
+                        dst_refers.insert(local, var.clone());
+                    }
+                }
+                None => {
+                    dst_refers.insert(name.clone(), var.clone());
+                }
+            }
         }
+    }
+
+    /// Install `dst_ns`'s `(:refer-clojure ...)` filter (`None` removes any
+    /// previous one) and re-apply the automatic `clojure.core` refer under it.
+    ///
+    /// Refers already inherited from `clojure.core` are dropped first, so a
+    /// filter set after the namespace was pre-referred — the loader refers core
+    /// before it reads the file, and `ns` itself refers core before it reaches
+    /// the clause — still takes effect.
+    pub fn set_refer_clojure_filter(&self, dst_ns: &str, filter: Option<ReferClojureFilter>) {
+        let dst = self.get_or_create_ns(dst_ns);
+        {
+            let mut slot = dst.get().refer_clojure_filter.lock().unwrap();
+            // Nothing to install and nothing to undo: leave the refers alone.
+            if slot.is_none() && filter.is_none() {
+                return;
+            }
+            *slot = filter;
+        }
+        {
+            let mut refers = dst.get().refers.lock().unwrap();
+            refers.retain(|_, var| var.get().namespace.as_ref() != "clojure.core");
+        }
+        self.refer_all(dst_ns, "clojure.core");
     }
 
     /// Copy selected interns from `src_ns` into `dst_ns` as refers.
