@@ -286,18 +286,39 @@ pub fn eval(&self, form: &Form, env: &mut Env) -> EvalResult;
 pub fn call_cljrs_fn(&self, f: &CljxFn, args: &[Value], env: &mut Env) -> EvalResult;
 pub fn on_fn_defined(&self, f: &CljxFn, env: &mut Env);
 
-/// Copy `src_ns`'s interns into `dst_ns` as refers.  When `src_ns` is
-/// `clojure.core`, `dst_ns`'s `ReferClojureFilter` (if any) decides which
-/// names are referred and under what local name.
+/// Copy `src_ns`'s interns into `dst_ns` as refers.  Both are *explicit*
+/// refers (`(:require [x :refer :all])` / `:refer [...]`) and are never
+/// narrowed by `dst_ns`'s `ReferClojureFilter` — matching
+/// `clojure.core/refer`, where naming a namespace explicitly re-maps even
+/// names an earlier `refer-clojure` left out.
 pub fn refer_all(&self, dst_ns: &str, src_ns: &str);
 pub fn refer_named(&self, dst_ns: &str, src_ns: &str, names: &[Arc<str>]);
 
+/// The automatic `clojure.core` refer every namespace starts with, narrowed
+/// by `dst_ns`'s `ReferClojureFilter`.  This — not `refer_all` — is what
+/// runtime init, the loader, `in-ns`, `ns` and versioned-namespace setup use
+/// to seed a namespace with core.
+pub fn refer_core(&self, dst_ns: &str);
+
 /// Install (or, with `None`, remove) the `(:refer-clojure ...)` filter for
 /// `dst_ns` and re-apply the automatic core refer under it.  Refers inherited
-/// from `clojure.core` are dropped first, so a filter installed after the
-/// namespace was pre-referred still takes effect.
-pub fn set_refer_clojure_filter(&self, dst_ns: &str, filter: Option<ReferClojureFilter>);
+/// from `clojure.core` are dropped and re-added under one lock, so a filter
+/// installed after the namespace was pre-referred takes effect without
+/// exposing a half-referred namespace to a concurrent reader.  Errors when
+/// the filter names something `clojure.core` does not define (`:only`,
+/// `:rename`) or would refer two core names under one local name.
+pub fn set_refer_clojure_filter(
+    &self,
+    dst_ns: &str,
+    filter: Option<ReferClojureFilter>,
+) -> Result<(), String>;
 ```
+
+`:exclude` stays permissive where `:only`/`:rename` are validated: it is
+subtractive, so excluding a name core does not define is harmless and keeps a
+file portable across core versions.  The collision check is stricter than Clojure,
+which warns (`Namespace.checkReplacement`) and then lets whichever mapping
+`(keys (ns-publics ...))` yields last win.
 
 ### `depth` submodule
 

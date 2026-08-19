@@ -456,7 +456,8 @@ impl Namespace {
 How much of `clojure.core` a namespace auto-refers, as narrowed by an
 `(:refer-clojure ...)` clause in `ns`.  `None` on the namespace means the
 default: every public core name is referred.  Applied by
-`GlobalEnv::refer_all` whenever the source namespace is `clojure.core`.
+`GlobalEnv::refer_core`, and only there — an explicit refer (`refer_all` /
+`refer_named`) bypasses it.
 
 ```rust
 #[derive(Debug, Clone, Default)]
@@ -473,7 +474,9 @@ impl ReferClojureFilter {
 ```
 
 A renamed name is *not* also referred under its original name, matching
-`clojure.core/refer`.
+`clojure.core/refer`.  `local_name` is a pure lookup: validating the filter
+against what core actually defines, and rejecting two names that collide on
+one local name, happens once in `GlobalEnv::set_refer_clojure_filter`.
 
 ### `Thunk` / `LazySeq` / `CljxCons` (Phase 5)
 

@@ -1597,7 +1597,7 @@ fn eval_ns(args: &[Form], env: &mut Env) -> EvalResult {
     env.current_ns = Arc::from(name.as_str());
     // Auto-refer clojure.core (Clojure default behaviour).
     if name != "clojure.core" {
-        env.globals.refer_all(&name, "clojure.core");
+        env.globals.refer_core(&name);
     }
     sync_star_ns(env);
 
@@ -1621,6 +1621,12 @@ fn eval_ns(args: &[Form], env: &mut Env) -> EvalResult {
     // and an explicit `:require ... :refer` below must be able to override it.
     // Re-evaluating an `ns` form without the clause clears a filter left by an
     // earlier evaluation, restoring the full core refer.
+    //
+    // More than one `:refer-clojure` clause is not meaningful, so the last one
+    // wins rather than accumulating.  (Clojure runs each clause as a separate
+    // `refer` call, where a second clause silently *re-adds* what the first
+    // excluded; there is no reading of that under which both clauses do what
+    // they say.)
     let mut refer_clojure = None;
     for clause in rest {
         if let FormKind::List(items) = &clause.kind
@@ -1631,7 +1637,9 @@ fn eval_ns(args: &[Form], env: &mut Env) -> EvalResult {
         }
     }
     if name != "clojure.core" {
-        env.globals.set_refer_clojure_filter(&name, refer_clojure);
+        env.globals
+            .set_refer_clojure_filter(&name, refer_clojure)
+            .map_err(EvalError::Runtime)?;
     }
 
     for clause in rest {
@@ -1744,7 +1752,7 @@ fn eval_in_ns(args: &[Form], env: &mut Env) -> EvalResult {
     let ns_val = eval(&args[0], env)?;
     let ns_name = extract_ns_name(&ns_val)?;
     env.globals.get_or_create_ns(&ns_name);
-    env.globals.refer_all(&ns_name, "clojure.core");
+    env.globals.refer_core(&ns_name);
     env.current_ns = Arc::from(ns_name.as_str());
     sync_star_ns(env);
     let ns_ptr = env.globals.get_or_create_ns(&env.current_ns);

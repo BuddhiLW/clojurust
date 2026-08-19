@@ -58,7 +58,7 @@ pub fn init(globals: &Arc<GlobalEnv>) {
     }
 
     globals.get_or_create_ns(NS);
-    globals.refer_all(NS, "clojure.core");
+    globals.refer_core(NS);
     fs::register(globals, NS);
     load_source(globals, NS, IO_ASYNC_SOURCE);
     globals.mark_loaded(NS);

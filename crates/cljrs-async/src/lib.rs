@@ -57,7 +57,7 @@ pub fn init(globals: &Arc<cljrs_runtime::env::env::GlobalEnv>) {
     // clojure.rust.error first — the <? family refers its `throw-err`.
     if !globals.is_loaded("clojure.rust.error") {
         globals.get_or_create_ns("clojure.rust.error");
-        globals.refer_all("clojure.rust.error", "clojure.core");
+        globals.refer_core("clojure.rust.error");
         load_source(globals, "clojure.rust.error", ERROR_SOURCE);
         globals.mark_loaded("clojure.rust.error");
     }
@@ -70,7 +70,7 @@ pub fn init(globals: &Arc<cljrs_runtime::env::env::GlobalEnv>) {
     // Build the namespace: refer clojure.core so the macro source can use core
     // fns/macros, register the native primitives, then evaluate the source.
     globals.get_or_create_ns(ns);
-    globals.refer_all(ns, "clojure.core");
+    globals.refer_core(ns);
     builtins::register(globals, ns);
     isolate_builtins::register(globals, ns);
     load_source(globals, ns, CORE_ASYNC_SOURCE);

@@ -154,3 +154,102 @@ fn exclude_expects_a_vector_of_symbols() {
         "unexpected error: {err}"
     );
 }
+
+#[test]
+fn explicit_refer_all_of_core_overrides_the_exclusion() {
+    let (_, mut env) = make_env();
+    // An explicit `:refer :all` names `clojure.core` directly, so — as with
+    // `clojure.core/refer` — it re-refers everything the clause left out.
+    eval_all(
+        &mut env,
+        "(ns rc.all
+           (:refer-clojure :exclude [inc])
+           (:require [clojure.core :refer :all]))",
+    );
+    assert_eq!(eval_all(&mut env, "(inc 1)"), Value::Long(2));
+}
+
+#[test]
+fn rename_onto_an_existing_core_name_is_an_error() {
+    let (_, mut env) = make_env();
+    // Both `inc` (renamed) and core's own `str` want the name `str`; picking a
+    // winner by hash order would be unstable from run to run.
+    let err = try_eval_all(&mut env, "(ns rc.clash (:refer-clojure :rename {inc str}))")
+        .expect_err("expected an error");
+    let msg = format!("{err}");
+    assert!(msg.contains("inc") && msg.contains("str"), "{msg}");
+}
+
+#[test]
+fn two_renames_onto_one_name_is_an_error() {
+    let (_, mut env) = make_env();
+    let err = try_eval_all(
+        &mut env,
+        "(ns rc.clash2 (:refer-clojure :rename {inc bump dec bump}))",
+    )
+    .expect_err("expected an error");
+    assert!(format!("{err}").contains("bump"), "{err}");
+}
+
+#[test]
+fn renaming_onto_an_excluded_name_is_fine() {
+    let (_, mut env) = make_env();
+    eval_all(
+        &mut env,
+        "(ns rc.clash3 (:refer-clojure :rename {inc str} :exclude [str]))",
+    );
+    assert_eq!(eval_all(&mut env, "(str 1)"), Value::Long(2));
+}
+
+#[test]
+fn only_must_name_vars_core_actually_defines() {
+    let (_, mut env) = make_env();
+    let err = try_eval_all(
+        &mut env,
+        "(ns rc.typo (:refer-clojure :only [inc no-such-fn]))",
+    )
+    .expect_err("expected an error");
+    let msg = format!("{err}");
+    assert!(msg.contains("no-such-fn"), "{msg}");
+    assert!(
+        !msg.contains("inc"),
+        "only the unknown name is reported: {msg}"
+    );
+}
+
+#[test]
+fn rename_must_name_vars_core_actually_defines() {
+    let (_, mut env) = make_env();
+    let err = try_eval_all(
+        &mut env,
+        "(ns rc.typo2 (:refer-clojure :rename {no-such-fn f}))",
+    )
+    .expect_err("expected an error");
+    assert!(format!("{err}").contains("no-such-fn"), "{err}");
+}
+
+#[test]
+fn exclude_of_an_unknown_name_is_allowed() {
+    let (_, mut env) = make_env();
+    // `:exclude` is subtractive: excluding a name core does not define is
+    // harmless, and lets a file stay portable across core versions.
+    eval_all(
+        &mut env,
+        "(ns rc.tolerant (:refer-clojure :exclude [inc no-such-fn]))",
+    );
+    assert_unbound(&mut env, "(inc 1)", "inc");
+    assert_eq!(eval_all(&mut env, "(dec 1)"), Value::Long(0));
+}
+
+#[test]
+fn the_last_refer_clojure_clause_wins() {
+    let (_, mut env) = make_env();
+    eval_all(
+        &mut env,
+        "(ns rc.twice
+           (:refer-clojure :exclude [inc])
+           (:refer-clojure :exclude [dec]))",
+    );
+    assert_eq!(eval_all(&mut env, "(inc 1)"), Value::Long(2));
+    assert_unbound(&mut env, "(dec 1)", "dec");
+}
