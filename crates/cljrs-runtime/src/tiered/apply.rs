@@ -225,6 +225,10 @@ fn request_background_lower(f: &CljxFn, caller_env: &mut Env) {
         })
         .collect();
 
+    // The defining namespace's bindings are read here, on the mutator thread:
+    // the worker sees only plain data.
+    let core_shadows = crate::tiered::lower::core_shadows_for(&caller_env.globals, &f.defining_ns);
+
     caller_env.current_ns = saved_ns;
     let arity_ids: Vec<u64> = arities.iter().map(|a| a.arity_id).collect();
 
@@ -234,6 +238,7 @@ fn request_background_lower(f: &CljxFn, caller_env: &mut Env) {
             name: f.name.clone(),
             ns: f.defining_ns.clone(),
             is_async: f.is_async,
+            core_shadows,
             arities,
         });
     if accepted {

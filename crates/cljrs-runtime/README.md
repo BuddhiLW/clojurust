@@ -109,6 +109,9 @@ tests/
                                      cache invalidation on provider/trust-set change
                                      (passes with and without the `deps` feature)
   require_spec_reader_conditional.rs — reader conditionals in ns require specs
+  refer_clojure.rs                 — `(:refer-clojure ...)` narrowing of the core refer
+  core_shadows.rs                  — core_shadowed_names: what a namespace binds
+                                     instead of clojure.core (issue #337)
   declare_macro.rs, doc.rs, gas_meter.rs, into_seq_target.rs, map_entry.rs,
   named_fn_identity.rs, ns_metadata.rs, partition_arities.rs, shared_atom.rs,
   symbolic_nan.rs, threading_macros.rs, auto_gensym.rs, auto_keyword_macro.rs,
@@ -312,6 +315,13 @@ pub fn set_refer_clojure_filter(
     dst_ns: &str,
     filter: Option<ReferClojureFilter>,
 ) -> Result<(), String>;
+
+/// Names `ns_name` resolves to something other than `clojure.core`'s var of
+/// the same name: its own interns, refers from other namespaces (or of a
+/// renamed core var), and names a `(:refer-clojure ...)` filter keeps out of
+/// the automatic core refer.  The IR lowerer must not inline these as core
+/// builtins — see `tiered::lower::core_shadows_for` and issue #337.
+pub fn core_shadowed_names(&self, ns_name: &str) -> HashSet<Arc<str>>;
 ```
 
 `:exclude` stays permissive where `:only`/`:rename` are validated: it is
@@ -854,9 +864,17 @@ pub mod lower {
     /// dependent recording, required off the mutator thread); `None` uses the
     /// legacy externals_for (synchronous callers record dependents themselves).
     pub fn lower_expanded_arity(name, params, rest, destructure_params,
-        destructure_rest, expanded_body, ns, globals_id: u64,
-        arity_id: Option<u64>, do_optimize: bool, is_async: bool)
+        destructure_rest, expanded_body, ns, shadows: &CoreShadows,
+        globals_id: u64, arity_id: Option<u64>, do_optimize: bool,
+        is_async: bool)
         -> Result<(IrFunction, Vec<(Arc<str>, Arc<str>)>), LowerError>;
+
+    /// What `ns` binds that `clojure.core` also publishes, for the lowerer's
+    /// call-position core check (issue #337).  Reads the namespace tables, so
+    /// it must be sampled on the mutator thread — `lower_arity` does it for
+    /// its callers, and `tiered::apply` does it before enqueueing a background
+    /// lowering request.
+    pub fn core_shadows_for(globals: &GlobalEnv, ns: &str) -> CoreShadows;
 }
 
 /// Cross-defn IR registry (in submodule `defn_registry`, Phase 10.5):

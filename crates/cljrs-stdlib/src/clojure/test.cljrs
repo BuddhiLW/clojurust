@@ -68,7 +68,9 @@
   ([form msg]
    (cond
      ;; (is (thrown? ExClass expr)) or (is (thrown? expr)) — expect an exception.
-     (and (seq? form) (= 'thrown? (first form)))
+     ;; Matched on the symbol's NAME, so an aliased call (`(is (p/thrown? …))`,
+     ;; the shape portable .cljc suites use) is recognised too.
+     (and (seq? form) (symbol? (first form)) (= "thrown?" (name (first form))))
      (let [expr (if (= 3 (count form))
                   (nth form 2)
                   (nth form 1))]
