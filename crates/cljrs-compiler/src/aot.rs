@@ -114,11 +114,23 @@ pub fn lower_via_rust(
     ns: &str,
     params: &[Arc<str>],
     compilable_forms: &[cljrs_reader::Form],
-    _env: &mut cljrs_runtime::tiered::Env,
+    env: &mut cljrs_runtime::tiered::Env,
 ) -> AotResult<IrFunction> {
     let ns_arc: Arc<str> = Arc::from(ns);
-    let ir = cljrs_ir::lower::lower_fn_body(name, &ns_arc, params, compilable_forms, false)
-        .map_err(|e| AotError::Eval(format!("lowering: {e:?}")))?;
+    // `ns` has already been evaluated into `env`, so its own `def`s, refers and
+    // `(:refer-clojure ...)` filter are visible: a name it rebinds must not be
+    // compiled as `clojure.core`'s (issue #337).
+    let shadows = cljrs_runtime::tiered::lower::core_shadows_for(&env.globals, ns);
+    let ir = cljrs_ir::lower::lower_fn_body_shadowed(
+        name,
+        &ns_arc,
+        params,
+        &[],
+        compilable_forms,
+        false,
+        &shadows,
+    )
+    .map_err(|e| AotError::Eval(format!("lowering: {e:?}")))?;
     let ir = cljrs_ir::lower::optimize(ir);
 
     #[cfg(feature = "no-gc")]

@@ -265,8 +265,8 @@ pub fn form_to_value(form: &Form) -> EvalResult<Value> {
         FormKind::Map(forms) => {
             let forms = expand_pairs(forms).map_err(|_| map_literal_arity_error())?;
             let mut m = MapValue::empty();
-            for pair in forms.chunks_exact(2) {
-                m = m.assoc(form_to_value(&pair[0])?, form_to_value(&pair[1])?);
+            for [k, v] in forms.as_chunks::<2>().0 {
+                m = m.assoc(form_to_value(k)?, form_to_value(v)?);
             }
             Value::Map(m)
         }
@@ -341,8 +341,7 @@ fn map_literal_arity_error() -> EvalError {
 /// `None` if no `:rust` or `:default` clause is present.
 pub fn select_reader_cond(clauses: &[Form]) -> Option<&Form> {
     let mut default: Option<&Form> = None;
-    for pair in clauses.chunks_exact(2) {
-        let (feature, branch) = (&pair[0], &pair[1]);
+    for [feature, branch] in clauses.as_chunks::<2>().0 {
         match &feature.kind {
             FormKind::Keyword(k) if k == "rust" => return Some(branch),
             FormKind::Keyword(k) if k == "default" => default = Some(branch),
