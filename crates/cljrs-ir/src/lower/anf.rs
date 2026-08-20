@@ -61,8 +61,27 @@ fn collect_symbol_names_form<'a>(form: &'a Form, out: &mut HashSet<&'a str>) {
 
 // ── Namespace-level `def` collection ─────────────────────────────────────────
 
-/// Collect the names the forms being lowered `def` into the lowering
-/// namespace.
+/// Heads that bind their first argument as a var in the current namespace.
+///
+/// `def` and `defn` are the ones that reach a successful lowering: the rest
+/// are interpreter-only (`lower_list` rejects them, and AOT evaluates them
+/// instead of compiling them), so a unit containing one falls back to the
+/// tree-walker before shadowing can matter.  They are listed anyway because
+/// each does bind the name — if one ever becomes lowerable, its shadow is
+/// already accounted for rather than silently inlining core's semantics.
+/// `declare` binds every argument, so it is handled separately below.
+const DEF_HEADS: &[&str] = &[
+    "def",
+    "defn",
+    "defn-",
+    "defonce",
+    "defmulti",
+    "defprotocol",
+    "defrecord",
+    "deftype",
+];
+
+/// Collect the names the forms being lowered bind in the lowering namespace.
 ///
 /// Such a name is bound to *this* namespace's var, so an unqualified call to
 /// it is not `clojure.core`'s even when it reuses a core name — the same
@@ -73,6 +92,11 @@ fn collect_symbol_names_form<'a>(form: &'a Form, out: &mut HashSet<&'a str>) {
 /// Collected up front, so a call site above the `def` is lowered the same way
 /// as one below it.  Both become dynamic calls that resolve per call, which is
 /// what the tree-walking interpreter does.
+///
+/// Only the name a form binds directly is collected: a `defprotocol`'s method
+/// names are not walked out of its body.  Over-collecting costs an inline;
+/// under-collecting would inline core's semantics over another binding, so the
+/// walk stays on the conservative side wherever the two differ.
 fn collect_defined_names(forms: &[Form], out: &mut HashSet<Arc<str>>) {
     for form in forms {
         collect_defined_names_form(form, out);
@@ -82,11 +106,26 @@ fn collect_defined_names(forms: &[Form], out: &mut HashSet<Arc<str>>) {
 fn collect_defined_names_form(form: &Form, out: &mut HashSet<Arc<str>>) {
     match &form.kind {
         FormKind::List(parts) => {
-            if let Some(FormKind::Symbol(head)) = parts.first().map(|f| &f.kind)
-                && matches!(head.as_str(), "def" | "defn" | "defn-" | "defonce")
-                && let Some(name) = parts.get(1).and_then(def_name)
-            {
-                out.insert(Arc::from(name));
+            let head = match parts.first().map(|f| &f.kind) {
+                Some(FormKind::Symbol(head)) => Some(head.as_str()),
+                _ => None,
+            };
+            match head {
+                // `(quote (def inc 1))` is data, exactly like `'(def inc 1)`
+                // (which arrives as `FormKind::Quote` and is skipped below).
+                Some("quote") => return,
+                // `(declare a b c)` binds every argument.
+                Some("declare") => {
+                    for name in parts[1..].iter().filter_map(def_name) {
+                        out.insert(Arc::from(name));
+                    }
+                }
+                Some(h) if DEF_HEADS.contains(&h) => {
+                    if let Some(name) = parts.get(1).and_then(def_name) {
+                        out.insert(Arc::from(name));
+                    }
+                }
+                _ => {}
             }
             collect_defined_names(parts, out);
         }
@@ -103,18 +142,24 @@ fn collect_defined_names_form(form: &Form, out: &mut HashSet<Arc<str>>) {
     }
 }
 
-/// The bare name a `def` form binds — `(def ^:private x 1)` binds `x` — or
-/// `None` when the name position is not a symbol.
+/// The bare name a `def`-like form binds — `(def ^:private x 1)` binds `x` —
+/// or `None` when the name position is not a symbol.
 fn def_name(form: &Form) -> Option<&str> {
-    let inner = match &form.kind {
-        FormKind::Meta(_, inner) => inner,
-        _ => form,
-    };
-    let FormKind::Symbol(s) = &inner.kind else {
+    let FormKind::Symbol(s) = &peel_meta(form).kind else {
         return None;
     };
     // `(def my.ns/x ...)` still binds `x` in `my.ns`.
     Some(split_ns_name(s).1)
+}
+
+/// Strip every layer of `^meta` from a form: metadata stacks, so
+/// `^:private ^:dynamic x` reads as `Meta(_, Meta(_, Symbol))`.
+fn peel_meta(form: &Form) -> &Form {
+    let mut inner = form;
+    while let FormKind::Meta(_, next) = &inner.kind {
+        inner = next;
+    }
+    inner
 }
 
 // ── Error type ───────────────────────────────────────────────────────────────
@@ -207,26 +252,6 @@ pub fn lower_fn_body_shadowed(
     shadows: &CoreShadows,
 ) -> Result<IrFunction, LowerError> {
     lower_fn_body_impl(name, ns, params, destructures, body, is_async, shadows)
-}
-
-/// Like [`lower_fn_body_destructured`] but also records static parameter
-/// representation seeds (from `^long`/`^double` type hints) on the resulting
-/// `IrFunction::seed_reprs`.  `seed_reprs` is positional with `params`.
-#[allow(clippy::too_many_arguments)]
-pub fn lower_fn_body_seeded(
-    name: Option<&str>,
-    ns: &str,
-    params: &[Arc<str>],
-    destructures: &[(usize, Form)],
-    body: &[Form],
-    is_async: bool,
-    seed_reprs: &[crate::Repr],
-) -> Result<IrFunction, LowerError> {
-    let mut ir = lower_fn_body_destructured(name, ns, params, destructures, body, is_async)?;
-    if seed_reprs.iter().any(|r| *r != crate::Repr::Boxed) {
-        ir.seed_reprs = seed_reprs.to_vec();
-    }
-    Ok(ir)
 }
 
 /// Like [`lower_fn_body`], but expands destructuring patterns on the parameters
@@ -1072,23 +1097,13 @@ fn lower_def(ctx: &mut LowerCtx, args: &[Form]) -> R {
             "def requires a name".into(),
         ));
     }
-    // Name may carry metadata: `(def ^:private x 1)`.
-    let name_str: Arc<str> = match &args[0].kind {
-        FormKind::Symbol(s) => Arc::from(s.as_str()),
-        FormKind::Meta(_, inner) => {
-            let FormKind::Symbol(s) = &inner.kind else {
-                return Err(LowerError::MalformedSpecialForm(
-                    "def name must be a symbol".into(),
-                ));
-            };
-            Arc::from(s.as_str())
-        }
-        _ => {
-            return Err(LowerError::MalformedSpecialForm(
-                "def name must be a symbol".into(),
-            ));
-        }
+    // Name may carry metadata, possibly stacked: `(def ^:private ^:dynamic x 1)`.
+    let FormKind::Symbol(s) = &peel_meta(&args[0]).kind else {
+        return Err(LowerError::MalformedSpecialForm(
+            "def name must be a symbol".into(),
+        ));
     };
+    let name_str: Arc<str> = Arc::from(s.as_str());
     let ns = ctx.ns().clone();
 
     let val = if args.len() >= 2 {
@@ -2172,12 +2187,13 @@ fn lower_call(ctx: &mut LowerCtx, callee_form: &Form, arg_forms: &[Form]) -> R {
     }
 
     // Known function?
-    if let Some(bare) = core_name
+    if let Some(name) = sym_name
+        && let Some(bare) = core_name
         && let Some(known) = resolve_known_core_fn(bare)
     {
         // `lower_known_call` falls back to a dynamic call for unsupported
         // arities; it needs the symbol as written to resolve the var.
-        return lower_known_call(ctx, known, sym_name.unwrap_or(bare), arg_forms);
+        return lower_known_call(ctx, known, name, arg_forms);
     }
 
     // Generic dynamic call.

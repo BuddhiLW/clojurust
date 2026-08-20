@@ -27,8 +27,8 @@ src/
              live-in values (loop φs + pre-loop defs) arriving as parameters
   lower/
     mod.rs      — re-exports: lower_fn_body, lower_fn_body_destructured,
-                  lower_fn_body_seeded, lower_fn_body_shadowed, CoreShadows,
-                  analyze, inline, optimize, EscapeContext …
+                  lower_fn_body_shadowed, CoreShadows, analyze, inline,
+                  optimize, EscapeContext …
     async_lower.rs — async state-machine lowering (Phase H): rewrites an
                   `^:async` IrFunction into a non-async poll function
                   (is_async_poll_fn) whose control flow is an explicit resumable
@@ -254,7 +254,6 @@ impl CoreShadows {
     pub fn none() -> Self;
     pub fn new(names: impl IntoIterator<Item = Arc<str>>) -> Self;
     pub fn contains(&self, name: &str) -> bool;
-    pub fn is_empty(&self) -> bool;
     pub fn union(&self, extra: impl IntoIterator<Item = Arc<str>>) -> Self;
 }
 
@@ -274,10 +273,10 @@ pub fn lower_fn_body_shadowed(
 
 Lexical bindings are handled by the lowerer itself: `LowerCtx::core_call_name`
 consults `lookup_local` first, so a `let`-bound or parameter `inc` is a call to
-that binding.  `def`s in the unit being lowered are folded into the shadow set
-up front (`collect_defined_names`), because AOT compiles a whole file without
-evaluating its `def`s — the environment cannot report them yet.  See issue
-#337.
+that binding.  Names the unit being lowered binds are folded into the shadow
+set up front (`collect_defined_names`, over `DEF_HEADS` plus `declare`),
+because AOT compiles a whole file without evaluating its `def`s — the
+environment cannot report them yet.  See issue #337.
 
 ### Optimization pipeline (re-exported from `lower::`)
 

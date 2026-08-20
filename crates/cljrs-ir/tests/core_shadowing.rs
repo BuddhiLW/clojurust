@@ -193,6 +193,68 @@ fn a_def_in_the_lowered_unit_shadows_core() {
 }
 
 #[test]
+fn every_lowerable_def_head_shadows() {
+    // The interpreter-only heads (`defn-`, `defonce`, `defmulti`, …) are
+    // rejected outright by `lower_list`, so a unit containing one never
+    // lowers; these are the def-like heads a successful lowering can contain.
+    for form in [
+        "(def count 1)",
+        "(defn count [c] 1)",
+        "(declare other count)",
+        // Nested inside a form that is itself lowered.
+        "(when true (def count 1))",
+    ] {
+        let ir = lower_fn_body(
+            Some("__cljrs_main"),
+            "x",
+            &["coll".into()],
+            &parse(&format!("{form} (count coll)")),
+            false,
+        )
+        .expect("lower");
+        assert!(
+            !uses_known(&ir, KnownFn::Count),
+            "`{form}` did not shadow core's `count`"
+        );
+    }
+}
+
+#[test]
+fn stacked_metadata_on_a_def_name_still_shadows() {
+    // `^:private ^:dynamic x` nests as Meta(_, Meta(_, Symbol)); peeling only
+    // one layer would drop the shadow and inline core's `count`.
+    let ir = lower_fn_body(
+        Some("__cljrs_main"),
+        "x",
+        &["coll".into()],
+        &parse("(def ^:private ^:dynamic count (fn [c] 1)) (count coll)"),
+        false,
+    )
+    .expect("lower");
+    assert!(!uses_known(&ir, KnownFn::Count));
+    assert!(has_dynamic_call(&ir));
+}
+
+#[test]
+fn a_quoted_def_is_data_not_a_definition() {
+    // Both spellings of quote: the reader form and the explicit head.
+    for form in ["'(def count 1)", "(quote (def count 1))"] {
+        let ir = lower_fn_body(
+            Some("__cljrs_main"),
+            "x",
+            &["coll".into()],
+            &parse(&format!("{form} (count coll)")),
+            false,
+        )
+        .expect("lower");
+        assert!(
+            uses_known(&ir, KnownFn::Count),
+            "`{form}` is data; it must not shadow core's `count`"
+        );
+    }
+}
+
+#[test]
 fn clojure_cores_own_defs_are_still_core() {
     // Core defining `inc` *is* core's `inc`; lowering must keep inlining it.
     let ir = lower_fn_body(

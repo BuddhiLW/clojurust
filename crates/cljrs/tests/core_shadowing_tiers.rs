@@ -8,26 +8,16 @@
 //! the promotion boundary; these run each program well past the threshold and
 //! require every line to agree.
 
+use std::path::PathBuf;
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Run `source` through `cljrs run` with a warm threshold of 5, so the driving
 /// loop crosses into IR partway through.  Returns stdout.
 fn run_tiered(source: &str) -> String {
-    static SEQ: AtomicU64 = AtomicU64::new(0);
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
-    let dir = std::env::temp_dir().join(format!(
-        "cljrs_core_shadowing_{}_{nanos}_{seq}",
-        std::process::id()
-    ));
-    std::fs::create_dir_all(&dir).expect("create dir");
-    let file = dir.join("shadow.cljrs");
-    std::fs::write(&file, source).expect("write source");
+    let (dir, file) = write_program(source);
 
     let output = Command::new(env!("CARGO_BIN_EXE_cljrs"))
         .arg("run")
@@ -46,6 +36,24 @@ fn run_tiered(source: &str) -> String {
         String::from_utf8_lossy(&output.stdout),
     );
     String::from_utf8(output.stdout).expect("utf8 stdout")
+}
+
+/// Write `source` into a fresh temp directory; returns `(dir, file)`.
+fn write_program(source: &str) -> (PathBuf, PathBuf) {
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!(
+        "cljrs_core_shadowing_{}_{nanos}_{seq}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).expect("create dir");
+    let file = dir.join("shadow.cljrs");
+    std::fs::write(&file, source).expect("write source");
+    (dir, file)
 }
 
 /// Assert every line of `stdout` is `expected` — i.e. the answer did not
@@ -185,4 +193,61 @@ fn unshadowed_core_calls_still_work() {
 "#,
     );
     assert_all_lines(&stdout, "3", 20);
+}
+
+// ── AOT ─────────────────────────────────────────────────────────────────────
+
+/// Repro 3 of #337 is AOT-specific: `cljrs compile` lowers a whole file
+/// without evaluating its `def`s, so the shadow has to come off the forms
+/// themselves.  This guards the wiring in `aot.rs` (`core_shadows_for` +
+/// `lower_fn_body_shadowed`), which no unit test reaches.
+#[test]
+fn redefined_var_survives_aot_compilation() {
+    let (dir, file) = write_program(
+        r#"
+(ns aot.redef)
+
+(defn inc [n] (+ n 7))
+
+(println (inc 1))
+"#,
+    );
+    let binary = dir.join("shadow.bin");
+
+    // AOT compilation recurses deeply enough to want a bigger stack, as
+    // `execution_tier_parity` does.
+    let (src, bin) = (file.clone(), binary.clone());
+    thread::Builder::new()
+        .name("core-shadowing-aot-build".into())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(move || {
+            // The error type is large; carry it as text so the closure's
+            // Result stays small.
+            cljrs_compiler::aot::compile_file(
+                &src,
+                &bin,
+                &cljrs_compiler::extensions::CompileSession::default(),
+            )
+            .map_err(|e| e.to_string())
+        })
+        .expect("spawn AOT compiler")
+        .join()
+        .expect("AOT compiler panicked")
+        .expect("AOT compilation failed");
+
+    let output = Command::new(&binary).output().expect("run AOT binary");
+    let _ = std::fs::remove_dir_all(&dir);
+
+    assert!(
+        output.status.success(),
+        "AOT binary failed with {:?}\nstderr:\n{}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr),
+    );
+    let stdout = String::from_utf8(output.stdout).expect("utf8 stdout");
+    assert_eq!(
+        stdout.trim(),
+        "8",
+        "the compiled call used core's `inc` instead of aot.redef/inc"
+    );
 }

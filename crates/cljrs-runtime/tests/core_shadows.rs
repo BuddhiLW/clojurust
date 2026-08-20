@@ -67,6 +67,27 @@ fn refer_clojure_exclude_shadows_the_excluded_name() {
 }
 
 #[test]
+fn refer_clojure_only_shadows_everything_it_leaves_out() {
+    let (globals, mut env) = make_env();
+    eval_all(
+        &mut env,
+        "(ns shadow.only (:refer-clojure :only [inc dec]))",
+    );
+    let shadows = globals.core_shadowed_names("shadow.only");
+    // The two names the clause keeps are core's; every other core name is not
+    // referred here at all, so this is the one filter that makes the shadow
+    // set roughly the size of `clojure.core`.
+    assert!(!shadows.contains("inc"), "{shadows:?}");
+    assert!(!shadows.contains("dec"), "{shadows:?}");
+    assert!(shadows.contains("count"), "{shadows:?}");
+    assert!(shadows.contains("first"), "{shadows:?}");
+    assert!(
+        shadows.len() > 100,
+        "expected most of core, got {shadows:?}"
+    );
+}
+
+#[test]
 fn refer_clojure_rename_shadows_both_names() {
     let (globals, mut env) = make_env();
     eval_all(

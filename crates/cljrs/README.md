@@ -57,7 +57,8 @@ tests/
   core_shadowing_tiers.rs — shadowed `clojure.core` names (a `let`-bound `inc`,
                       a parameter named `inc`, a redefined var, an excluded
                       name) must answer the same before and after a function
-                      crosses the IR promotion threshold (issue #337)
+                      crosses the IR promotion threshold, and once more when
+                      the file is AOT-compiled (issue #337)
 ```
 
 ---

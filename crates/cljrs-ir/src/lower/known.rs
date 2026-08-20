@@ -71,10 +71,6 @@ impl CoreShadows {
         self.names.contains(name)
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.names.is_empty()
-    }
-
     /// This set plus `extra` — used to fold in shadows only the forms being
     /// lowered know about (see `anf::collect_defined_names`).
     pub fn union(&self, extra: impl IntoIterator<Item = Arc<str>>) -> Self {
@@ -89,17 +85,11 @@ impl CoreShadows {
     }
 }
 
-/// Resolve a symbol name to a `KnownFn`, or `None` if not recognized.
+/// Resolve a `clojure.core` name to a `KnownFn`, or `None` if not recognized.
 ///
-/// Only unqualified names and explicit `clojure.core/…` ones resolve; a symbol
-/// qualified with any other namespace names a different var.  Callers in call
-/// position must additionally rule out locals and namespace-level shadowing —
-/// see `LowerCtx::core_call_name`.
-pub fn resolve_known_fn(sym_name: &str) -> Option<KnownFn> {
-    resolve_known_core_fn(core_name(sym_name)?)
-}
-
-/// Resolve an already-unqualified `clojure.core` name to a `KnownFn`.
+/// The name must already be unqualified — [`core_name`] establishes that a
+/// symbol names core at all, and callers in call position must additionally
+/// rule out locals and namespace-level shadowing (`LowerCtx::core_call_name`).
 pub fn resolve_known_core_fn(bare_name: &str) -> Option<KnownFn> {
     match bare_name {
         "vector" => Some(KnownFn::Vector),
