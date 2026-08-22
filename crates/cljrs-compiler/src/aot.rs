@@ -832,18 +832,21 @@ pub fn compile_file(src_path: &Path, out_path: &Path, session: &CompileSession) 
     // harness can establish the namespace structurally and ship no text at all.
     // Held back rather than dropped, because any OTHER interpreted form may
     // depend on the aliases and refers this form installs.
-    let mut structural_ns: Option<(String, Vec<String>)> = None;
-    let mut ns_form_text = String::new();
+    let mut structural_ns: Option<(String, Vec<cljrs_runtime::env::env::RequireSpec>)> = None;
+    let mut ns_form_text: Option<String> = None;
     for (i, form) in expanded.iter().enumerate() {
         if needs_interpreter(&forms[i]) || expanded_needs_interpreter(form) {
             // Extract the original source text using span byte offsets.
             let span = &forms[i].span;
             let src_text = &source[span.start..span.end];
             match structural_ns_form(&forms[i]) {
-                Some(decl) if structural_ns.is_none() && ns_form_text.is_empty() => {
+                // Only when this is the FIRST interpreted form. Holding back an
+                // `ns` that some other interpreted form already preceded would
+                // let the fallback below re-insert it at position 0, silently
+                // reordering the program.
+                Some(decl) if structural_ns.is_none() && interpreted_source.is_empty() => {
                     structural_ns = Some(decl);
-                    ns_form_text.push_str(src_text);
-                    ns_form_text.push('\n');
+                    ns_form_text = Some(format!("{src_text}\n"));
                 }
                 _ => {
                     interpreted_source.push_str(src_text);
@@ -856,10 +859,14 @@ pub fn compile_file(src_path: &Path, out_path: &Path, session: &CompileSession) 
         }
     }
     // Another form needs the interpreter, so the ns form must be evaluated the
-    // old way — its aliases have to exist before that form runs.
-    if !interpreted_source.is_empty() && structural_ns.is_some() {
+    // old way — its aliases have to exist before that form runs. It was the
+    // first interpreted form, so restoring it at position 0 preserves order.
+    if !interpreted_source.is_empty()
+        && structural_ns.is_some()
+        && let Some(text) = ns_form_text.as_deref()
+    {
         structural_ns = None;
-        interpreted_source.insert_str(0, &ns_form_text);
+        interpreted_source.insert_str(0, text);
     }
     if !interpreted_source.is_empty() {
         eprintln!(
@@ -977,12 +984,14 @@ pub fn compile_file(src_path: &Path, out_path: &Path, session: &CompileSession) 
     // ── 5. Generate harness project & build ─────────────────────────────
     let (harness_dir, offline) = build_harness(
         out_path,
-        &obj_bytes,
-        &interpreted_source,
-        structural_ns.as_ref(),
-        &compiled_namespaces,
-        &versioned_bundled,
-        &async_polls,
+        HarnessInputs {
+            obj_bytes: &obj_bytes,
+            interpreted_source: &interpreted_source,
+            structural_ns: structural_ns.as_ref(),
+            compiled_namespaces: &compiled_namespaces,
+            versioned_bundled: &versioned_bundled,
+            async_polls: &async_polls,
+        },
         session,
     )?;
     link_with_cargo(&harness_dir, out_path, offline)?;
@@ -1239,7 +1248,9 @@ pub fn audit_source(
 /// as VERBATIM SOURCE, so the smallest possible program — `(ns m)` — ships 7
 /// bytes of readable Clojure and `--require-fully-compiled` refuses it. The ns
 /// declaration is not program text; it is a fact the compiler already knows.
-fn structural_ns_form(form: &cljrs_reader::Form) -> Option<(String, Vec<String>)> {
+fn structural_ns_form(
+    form: &cljrs_reader::Form,
+) -> Option<(String, Vec<cljrs_runtime::env::env::RequireSpec>)> {
     use cljrs_reader::form::FormKind;
     let FormKind::List(parts) = &form.kind else {
         return None;
@@ -1260,9 +1271,7 @@ fn structural_ns_form(form: &cljrs_reader::Form) -> Option<(String, Vec<String>)
         let FormKind::List(items) = &clause.kind else {
             return None;
         };
-        let Some(kw) = items.first() else {
-            return None;
-        };
+        let kw = items.first()?;
         let FormKind::Keyword(k) = &kw.kind else {
             return None;
         };
@@ -1272,17 +1281,49 @@ fn structural_ns_form(form: &cljrs_reader::Form) -> Option<(String, Vec<String>)
             return None;
         }
         for spec in &items[1..] {
-            match &spec.kind {
-                FormKind::Symbol(ns) => requires.push(ns.clone()),
-                FormKind::Vector(v) => match v.first().map(|f| &f.kind) {
-                    Some(FormKind::Symbol(ns)) => requires.push(ns.clone()),
-                    _ => return None,
-                },
-                _ => return None,
-            }
+            // Parse through the interpreter's own spec parser rather than
+            // re-deriving it here. `:refer` and an `@version` suffix are both
+            // load-bearing at runtime, and a second implementation drops them
+            // silently — the compiled body then resolves referred names to nil.
+            // Anything the parser rejects keeps the textual preamble.
+            requires.push(cljrs_runtime::interp::special::parse_require_spec_form(spec).ok()?);
         }
     }
     Some((name.clone(), requires))
+}
+
+/// Render a `RequireSpec` as the Rust literal the generated harness constructs.
+///
+/// Every field is carried. `version` routes `load_ns` to the versioned loader,
+/// and `refer` installs the names the compiled body loads through
+/// `LoadGlobal(<entry-ns>, name)`; emitting `None` for either produces a
+/// program that runs and answers wrongly rather than one that fails.
+fn render_require_spec(spec: &cljrs_runtime::env::env::RequireSpec) -> String {
+    use cljrs_runtime::env::env::RequireRefer;
+    let opt_arc = |o: &Option<std::sync::Arc<str>>| match o {
+        Some(v) => format!("Some(std::sync::Arc::from({:?}))", v.as_ref()),
+        None => "None".to_string(),
+    };
+    let refer = match &spec.refer {
+        RequireRefer::None => "cljrs_runtime::env::env::RequireRefer::None".to_string(),
+        RequireRefer::All => "cljrs_runtime::env::env::RequireRefer::All".to_string(),
+        RequireRefer::Named(names) => {
+            let items = names
+                .iter()
+                .map(|n| format!("std::sync::Arc::from({:?})", n.as_ref()))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("cljrs_runtime::env::env::RequireRefer::Named(vec![{items}])")
+        }
+    };
+    format!(
+        "cljrs_runtime::env::env::RequireSpec {{ ns: std::sync::Arc::from({:?}), \
+         version: {}, alias: {}, refer: {} }}",
+        spec.ns.as_ref(),
+        opt_arc(&spec.version),
+        opt_arc(&spec.alias),
+        refer
+    )
 }
 
 /// Check if a top-level form needs the interpreter (can't be AOT-compiled yet).
@@ -1956,17 +1997,34 @@ fn compile_async_poll_fns(
     Ok(entries)
 }
 
+/// Everything the generated Cargo harness is assembled from.
+///
+/// A parameter object rather than a longer argument list: these all answer one
+/// question — what does the harness contain? — and they are always passed
+/// together, so a caller cannot supply a coherent subset of them.
+struct HarnessInputs<'a> {
+    obj_bytes: &'a [u8],
+    interpreted_source: &'a str,
+    /// The entry namespace, when it can be established without embedding text.
+    structural_ns: Option<&'a (String, Vec<cljrs_runtime::env::env::RequireSpec>)>,
+    compiled_namespaces: &'a [CompiledNamespace],
+    versioned_bundled: &'a [(Arc<str>, String)],
+    async_polls: &'a [AsyncPollEntry],
+}
+
 fn build_harness(
     out_path: &Path,
-    obj_bytes: &[u8],
-    interpreted_source: &str,
-    // The entry namespace, when it can be established without embedding text.
-    structural_ns: Option<&(String, Vec<String>)>,
-    compiled_namespaces: &[CompiledNamespace],
-    versioned_bundled: &[(Arc<str>, String)],
-    async_polls: &[AsyncPollEntry],
+    inputs: HarnessInputs<'_>,
     session: &CompileSession,
 ) -> AotResult<(PathBuf, bool)> {
+    let HarnessInputs {
+        obj_bytes,
+        interpreted_source,
+        structural_ns,
+        compiled_namespaces,
+        versioned_bundled,
+        async_polls,
+    } = inputs;
     let rust_config = session.rust_config_ref();
     let extensions = session.extensions();
     // Place the harness in a temp dir next to the output.
@@ -2122,32 +2180,47 @@ edition = "2024"
 
     // Establish the entry namespace structurally when its `ns` form carried no
     // program text. Requires are loaded through the same loader `require` uses,
-    // so an AOT-compiled dependency still runs its native initializer. Aliases
-    // and refers are deliberately NOT installed: nothing interpreted remains to
-    // use them, and the compiled body was alias-qualified at compile time.
+    // so an AOT-compiled dependency still runs its native initializer, and each
+    // spec is emitted whole — alias and refer included. The compiled body was
+    // alias-qualified at compile time, but `LoadGlobal(<entry-ns>, name)`
+    // resolves referred names through the namespace at RUNTIME, so dropping
+    // them yields nil callees rather than an error.
     let ns_setup = match structural_ns {
         Some((ns, requires)) => {
+            // `refer_core` rather than `refer_all(.., "clojure.core")`: it is the
+            // API that MEANS "the automatic core refer", and it is what `eval_ns`
+            // calls — including skipping itself for `clojure.core`, which is
+            // decided here because the namespace is known at compile time.
+            let core_refer = if ns == "clojure.core" {
+                String::new()
+            } else {
+                format!("    globals.refer_core({ns:?});\n")
+            };
             let mut code = format!(
                 "    let mut env = cljrs_runtime::tiered::Env::new(globals.clone(), {ns:?});\n\
                  \x20   globals.get_or_create_ns({ns:?});\n\
-                 \x20   globals.refer_all({ns:?}, \"clojure.core\");\n\
+                 {core_refer}\
                  \x20   // Bind *ns* the way `eval_ns` does. Without this the namespace is\n\
                  \x20   // established but `(resolve '-main)` still looks in `user`, finds\n\
                  \x20   // nothing, and the program exits 0 having run nothing at all.\n\
                  \x20   cljrs_runtime::interp::special::sync_star_ns(&mut env);\n"
             );
             for req in requires {
+                let spec_src = render_require_spec(req);
                 code.push_str(&format!(
-                    "    cljrs_runtime::env::loader::load_ns(globals.clone(), \
-                     &cljrs_runtime::env::env::RequireSpec {{ ns: std::sync::Arc::from({req:?}), \
-                     version: None, alias: None, \
-                     refer: cljrs_runtime::env::env::RequireRefer::None }}, {ns:?})\n\
-                     \x20       .expect(\"require failed at startup\");\n"
+                    "    if let Err(e) = cljrs_runtime::env::loader::load_ns(\n\
+                     \x20       globals.clone(), &{spec_src}, {ns:?})\n\
+                     \x20   {{\n\
+                     \x20       eprintln!(\"error: require failed at startup: {{e:?}}\");\n\
+                     \x20       std::process::exit(1);\n\
+                     \x20   }}\n"
                 ));
             }
             code
         }
-        None => "    let mut env = cljrs_runtime::tiered::Env::new(globals, \"user\");\n\n".to_string(),
+        None => {
+            "    let mut env = cljrs_runtime::tiered::Env::new(globals, \"user\");\n\n".to_string()
+        }
     };
 
     let preamble_code = if has_preamble {
@@ -3152,10 +3225,38 @@ mod tests {
 
     #[test]
     fn a_require_clause_is_structural_and_its_namespaces_are_collected() {
-        let (name, requires) =
-            structural_ns_form(&parse_one("(ns m (:require [a.b :as b] c.d))")).expect("recognised");
+        let (name, requires) = structural_ns_form(&parse_one("(ns m (:require [a.b :as b] c.d))"))
+            .expect("recognised");
         assert_eq!(name, "m");
-        assert_eq!(requires, vec!["a.b".to_string(), "c.d".to_string()]);
+        let names: Vec<&str> = requires.iter().map(|r| r.ns.as_ref()).collect();
+        assert_eq!(names, vec!["a.b", "c.d"]);
+        assert_eq!(requires[0].alias.as_deref(), Some("b"));
+    }
+
+    #[test]
+    fn a_require_spec_keeps_its_refer_and_version() {
+        // Both are load-bearing at RUNTIME: `:refer` installs the names the
+        // compiled body resolves through `LoadGlobal(<entry-ns>, name)`, and a
+        // `@version` pin is what routes `load_ns` to the versioned loader.
+        // Dropping either produced a program that ran and answered wrongly.
+        use cljrs_runtime::env::env::RequireRefer;
+        let (_, requires) = structural_ns_form(&parse_one(
+            "(ns m (:require [a.b :refer [f g]] [c.d :refer :all] e.f@abc1234))",
+        ))
+        .expect("recognised");
+        assert_eq!(requires.len(), 3);
+
+        match &requires[0].refer {
+            RequireRefer::Named(names) => {
+                let names: Vec<&str> = names.iter().map(|n| n.as_ref()).collect();
+                assert_eq!(names, vec!["f", "g"]);
+            }
+            other => panic!("expected Named refer, got {other:?}"),
+        }
+        assert!(matches!(requires[1].refer, RequireRefer::All));
+
+        assert_eq!(requires[2].ns.as_ref(), "e.f");
+        assert_eq!(requires[2].version.as_deref(), Some("abc1234"));
     }
 
     #[test]
@@ -3174,6 +3275,36 @@ mod tests {
                 "should not be structural: {src}"
             );
         }
+    }
+
+    #[test]
+    fn a_rendered_spec_carries_every_field() {
+        // `render_require_spec` is the only place that knows RequireSpec's
+        // shape in generated code. A field it forgets is a field the harness
+        // constructs as None, which is exactly how :refer went missing.
+        let (_, requires) = structural_ns_form(&parse_one(
+            "(ns m (:require [a.b :as b :refer [f g]] c.d@abc1234 [e.f :refer :all]))",
+        ))
+        .expect("recognised");
+
+        let named = render_require_spec(&requires[0]);
+        assert!(named.contains(r#"std::sync::Arc::from("a.b")"#), "{named}");
+        assert!(named.contains(r#"alias: Some("#), "{named}");
+        assert!(named.contains(r#"Arc::from("b")"#), "{named}");
+        assert!(named.contains("RequireRefer::Named"), "{named}");
+        assert!(named.contains(r#"Arc::from("f")"#), "{named}");
+        assert!(named.contains(r#"Arc::from("g")"#), "{named}");
+
+        let pinned = render_require_spec(&requires[1]);
+        assert!(pinned.contains(r#"Arc::from("c.d")"#), "{pinned}");
+        assert!(
+            pinned.contains(r#"version: Some(std::sync::Arc::from("abc1234"))"#),
+            "a dropped version silently skips the versioned loader: {pinned}"
+        );
+
+        let all = render_require_spec(&requires[2]);
+        assert!(all.contains("RequireRefer::All"), "{all}");
+        assert!(all.contains("alias: None"), "{all}");
     }
 
     #[test]
