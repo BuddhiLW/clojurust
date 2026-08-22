@@ -18,7 +18,7 @@ use cljrs_reader::form::FormKind;
 use cljrs_value::error::ExceptionInfo;
 use cljrs_value::{
     CljxFn, CljxFnArity, FutureState, Keyword, MapValue, MultiFn, Protocol, ProtocolFn,
-    ProtocolMethod, ReferClojureFilter, TypeHint, TypeInstance, Value, ValueError,
+    ProtocolMethod, ReferClojureFilter, TypeHint, Value, ValueError,
 };
 
 /// Dispatch to the right special-form handler.
@@ -54,7 +54,6 @@ pub fn eval_special(head: &str, args: &[Form], env: &mut Env) -> EvalResult {
         "defmulti" => eval_defmulti(args, env),
         "defmethod" => eval_defmethod(args, env),
         "deftype*" => eval_deftype_star(args, env),
-        "reify" => eval_reify(args, env),
         "load-file" => eval_load_file(args, env),
         "binding" => eval_binding(args, env),
         "with-out-str" => eval_with_out_str(args, env),
@@ -2484,25 +2483,10 @@ fn eval_deftype_star(args: &[Form], env: &mut Env) -> EvalResult {
     // each body — same machinery as defrecord/reify. Mutable fields read
     // through the live cell and are writable with `set!`.
     register_impls_for_tag(&type_tag, &args[2..], &field_names, &mutable_names, env)?;
-    Ok(Value::Nil)
-}
-
-fn eval_reify(args: &[Form], env: &mut Env) -> EvalResult {
-    // (reify Proto1 (method [this] body) ...)
-    // Generate a unique type tag for this instance.
-    let n = crate::builtins::builtins::GENSYM_COUNTER
-        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let type_tag: Arc<str> = Arc::from(format!("reify__{}", n));
-
-    // Register protocol implementations. reify has no fields.
-    register_impls_for_tag(&type_tag, args, &[], &[], env)?;
-
-    // Return an empty TypeInstance with the unique tag.
-    Ok(Value::TypeInstance(GcPtr::new(TypeInstance {
-        type_tag,
-        fields: MapValue::empty(),
-        mutable: None,
-    })))
+    // Return the minted tag so a caller (e.g. the `reify` macro) can feed it
+    // straight to `make-type-instance` — a single dataflow source for the tag,
+    // rather than a second textual reference that a gensym could desync.
+    Ok(Value::string(type_name))
 }
 
 // ── register_impls_for_tag ────────────────────────────────────────────────────
