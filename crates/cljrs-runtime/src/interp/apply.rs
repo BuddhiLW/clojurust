@@ -306,7 +306,16 @@ pub fn dispatch_method(method: &str, target: &Value, args: &[Value]) -> EvalResu
             // is unsupported (protocol methods are called as `(proto-fn inst)`).
             if let Some(field) = method.strip_prefix('-') {
                 let key = Value::keyword(cljrs_value::Keyword::simple(field));
-                Ok(ti.get().fields.get(&key).unwrap_or(Value::Nil))
+                let inst = ti.get();
+                // A mutable field lives in the interior-mutable cell; an
+                // immutable one in the field map.
+                if let Some(atom) = &inst.mutable
+                    && let Value::Map(m) = atom.get().deref()
+                    && let Some(v) = m.get(&key)
+                {
+                    return Ok(v);
+                }
+                Ok(inst.fields.get(&key).unwrap_or(Value::Nil))
             } else {
                 Err(EvalError::Runtime(format!(
                     ".{method} not supported on {} (only .-field access is)",
