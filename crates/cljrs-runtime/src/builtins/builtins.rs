@@ -6323,7 +6323,9 @@ fn builtin_hash(args: &[Value]) -> ValueResult<Value> {
 }
 
 fn builtin_name(args: &[Value]) -> ValueResult<Value> {
-    match &args[0] {
+    // Metadata is transparent to `name`: a `^meta`-carrying symbol names the same
+    // thing it would bare (matches `pr-str`/`=`, which already peel WithMeta).
+    match args[0].unwrap_meta() {
         Value::Keyword(k) => Ok(Value::string(k.get().name.as_ref().to_string())),
         Value::Symbol(s) => Ok(Value::string(s.get().name.as_ref().to_string())),
         Value::Str(s) => Ok(Value::Str(s.clone())),
@@ -6335,7 +6337,7 @@ fn builtin_name(args: &[Value]) -> ValueResult<Value> {
 }
 
 fn builtin_namespace(args: &[Value]) -> ValueResult<Value> {
-    match &args[0] {
+    match args[0].unwrap_meta() {
         Value::Keyword(k) => Ok(match &k.get().namespace {
             Some(ns) => Value::string(ns.as_ref().to_string()),
             None => Value::Nil,

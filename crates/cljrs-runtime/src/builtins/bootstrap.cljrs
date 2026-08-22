@@ -1392,3 +1392,32 @@
      (:doc (doc-data (var ~sym)))
      (catch Exception e# nil)))
 
+;; ── datatypes: deftype as a macro over the deftype* primitive ────────────────
+;; The irreducible `deftype*` special form mints the type tag and registers the
+;; method impls (with fields in scope, mutable fields on live cells). The sugar —
+;; the positional `->T` constructor and the `T` type symbol — is a Clojure macro,
+;; so `deftype` is a particular case of an ordinary macro rather than a bespoke
+;; Rust form. Field mutability is read from each field's metadata (survives
+;; macroexpansion), splitting the constructor between immutable and mutable maps.
+(defmacro deftype [tsym fields & impls]
+  (let [tname (str tsym)
+        ctor  (symbol (str "->" tsym))
+        mut?  (fn [f] (let [m (meta f)]
+                        (boolean (or (:unsynchronized-mutable m)
+                                     (:volatile-mutable m)))))
+        bare  (fn [f] (symbol (name f)))
+        kw    (fn [f] (keyword (name f)))
+        plain (mapv bare fields)
+        imm   (remove mut? fields)
+        mut   (filter mut? fields)
+        immm  (zipmap (map kw imm) (map bare imm))
+        mutm  (zipmap (map kw mut) (map bare mut))]
+    `(do
+       (deftype* ~tsym ~fields ~@impls)
+       (defn ~ctor [~@plain]
+         ~(if (seq mut)
+            `(make-type-instance-mut ~tname ~immm ~mutm)
+            `(make-type-instance ~tname ~immm)))
+       (def ~tsym (quote ~tsym))
+       ~tsym)))
+

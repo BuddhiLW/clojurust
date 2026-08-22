@@ -54,7 +54,7 @@ pub fn eval_special(head: &str, args: &[Form], env: &mut Env) -> EvalResult {
         "defmulti" => eval_defmulti(args, env),
         "defmethod" => eval_defmethod(args, env),
         "defrecord" => eval_defrecord(args, env),
-        "deftype" => eval_deftype(args, env),
+        "deftype*" => eval_deftype_star(args, env),
         "reify" => eval_reify(args, env),
         "load-file" => eval_load_file(args, env),
         "binding" => eval_binding(args, env),
@@ -2607,19 +2607,24 @@ fn eval_defrecord(args: &[Form], env: &mut Env) -> EvalResult {
 
 // ── reify ─────────────────────────────────────────────────────────────────────
 
-fn eval_deftype(args: &[Form], env: &mut Env) -> EvalResult {
-    // (deftype TypeName [field ...] Proto (method [this] body) ...)
+/// The irreducible datatype primitive: mint a type tag and register method impls
+/// against it, with the fields in scope in each body and mutable fields backed by
+/// live cells. It does NOT synthesise constructors or intern the type symbol —
+/// that sugar lives in the `deftype` bootstrap macro (`->T`, `(def T 'T)`), which
+/// is what makes deftype a particular case of a Clojure macro over this form.
+fn eval_deftype_star(args: &[Form], env: &mut Env) -> EvalResult {
+    // (deftype* TypeName [field ...] Proto (method [this] body) ...)
     if args.len() < 2 {
         return Err(EvalError::Runtime(
-            "deftype requires a name and field vector".into(),
+            "deftype* requires a name and field vector".into(),
         ));
     }
     // Type metadata (e.g. ^:private) has no var to hold it; unwrapped so the
     // name reads, and deliberately not applied anywhere it would not belong.
-    let (type_name, _) = require_sym_meta(args, 0, "deftype", env)?;
+    let (type_name, _) = require_sym_meta(args, 0, "deftype*", env)?;
     let type_tag: Arc<str> = Arc::from(type_name.as_str());
 
-    let specs = parse_field_specs(&args[1], "deftype")?;
+    let specs = parse_field_specs(&args[1], "deftype*")?;
     let field_names: Vec<Arc<str>> = specs.iter().map(|(n, _)| n.clone()).collect();
     let mutable_names: Vec<Arc<str>> = specs
         .iter()
@@ -2631,11 +2636,6 @@ fn eval_deftype(args: &[Form], env: &mut Env) -> EvalResult {
     // each body — same machinery as defrecord/reify. Mutable fields read
     // through the live cell and are writable with `set!`.
     register_impls_for_tag(&type_tag, &args[2..], &field_names, &mutable_names, env)?;
-
-    // deftype gets a positional `->T` constructor and its type symbol, but no
-    // `map->T` (Clojure reserves that for defrecord).
-    build_positional_ctor(&type_name, &type_tag, &field_names, &mutable_names, env);
-    intern_type_symbol(&type_name, env);
     Ok(Value::Nil)
 }
 
