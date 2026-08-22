@@ -1421,3 +1421,20 @@
        (def ~tsym (quote ~tsym))
        ~tsym)))
 
+;; defrecord: like deftype but fields are always immutable and it also gets the
+;; map constructor `map->T`. Same macro-over-deftype* shape.
+(defmacro defrecord [tsym fields & impls]
+  (let [tname (str tsym)
+        pos   (symbol (str "->" tsym))
+        mapc  (symbol (str "map->" tsym))
+        bare  (fn [f] (symbol (name f)))
+        kw    (fn [f] (keyword (name f)))
+        plain (mapv bare fields)
+        fmap  (zipmap (map kw fields) (map bare fields))]
+    `(do
+       (deftype* ~tsym ~plain ~@impls)
+       (defn ~pos [~@plain] (make-type-instance ~tname ~fmap))
+       (defn ~mapc [m#] (make-type-instance ~tname m#))
+       (def ~tsym (quote ~tsym))
+       ~tsym)))
+

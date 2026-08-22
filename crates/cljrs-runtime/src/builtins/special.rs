@@ -32,7 +32,6 @@ pub const SPECIAL_FORMS: &[&str] = &[
     "extend-protocol",
     "defmulti",
     "defmethod",
-    "defrecord",
     "deftype*",
     "reify",
     "load-file",
