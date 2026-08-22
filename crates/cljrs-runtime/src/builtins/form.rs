@@ -232,6 +232,21 @@ pub fn resolve_auto_forms(form: &Form, env: &crate::env::env::Env) -> EvalResult
 /// Errors when the form cannot denote a value: a map literal whose expansion
 /// has odd length, or a `#?@` splice in a position that has no sibling
 /// sequence to splice into.
+/// Normalize a reader `^meta` form to a metadata MAP value, matching Clojure's
+/// shorthand: `^:kw` → `{:kw true}`, `^sym`/`^"str"` → `{:tag <that>}`, and an
+/// explicit `^{...}` stays the map it already is.
+fn normalize_meta_value(meta: &Form) -> EvalResult<Value> {
+    Ok(match &meta.kind {
+        FormKind::Keyword(k) => Value::Map(
+            MapValue::empty().assoc(Value::keyword(Keyword::parse(k)), Value::Bool(true)),
+        ),
+        FormKind::Symbol(_) | FormKind::Str(_) => Value::Map(
+            MapValue::empty().assoc(Value::keyword(Keyword::parse("tag")), form_to_value(meta)?),
+        ),
+        _ => form_to_value(meta)?,
+    })
+}
+
 pub fn form_to_value(form: &Form) -> EvalResult<Value> {
     let value = match &form.kind {
         FormKind::Nil => Value::Nil,
@@ -285,7 +300,18 @@ pub fn form_to_value(form: &Form) -> EvalResult<Value> {
         FormKind::UnquoteSplice(inner) => reader_form_value("unquote-splicing", inner)?,
         FormKind::Deref(inner) => reader_form_value("deref", inner)?,
         FormKind::Var(inner) => reader_form_value("var", inner)?,
-        FormKind::Meta(_meta, inner) => form_to_value(inner)?,
+        FormKind::Meta(meta, inner) => {
+            let inner_val = form_to_value(inner)?;
+            // Preserve metadata on symbols so it survives quote / syntax-quote /
+            // macroexpansion — e.g. a `deftype` field's `^:unsynchronized-mutable`
+            // reaching the macro-expanded form. Other inner forms drop meta as
+            // before (collection meta is a separate, wider change).
+            if matches!(inner_val, Value::Symbol(_)) {
+                Value::WithMeta(Box::new(inner_val), Box::new(normalize_meta_value(meta)?))
+            } else {
+                inner_val
+            }
+        }
         FormKind::AnonFn(body) => {
             // Expand #(...) to (fn* [...] ...) so it round-trips correctly through quote.
             let expanded = expand_anon_fn(body, form.span.clone());

@@ -304,6 +304,15 @@ pub fn value_to_form(val: &Value, span: Span) -> EvalResult<Form> {
             FormKind::Set(forms)
         }
 
+        // Metadata-carrying value (e.g. a `deftype` field symbol that kept its
+        // `^:unsynchronized-mutable`): re-emit `^meta inner` so the metadata
+        // survives back into the form the expanded code is read as.
+        Value::WithMeta(inner, meta) => {
+            let inner_form = value_to_form(inner, span.clone())?;
+            let meta_form = value_to_form(meta, span.clone())?;
+            FormKind::Meta(Box::new(meta_form), Box::new(inner_form))
+        }
+
         // Lazy sequences and cons cells: materialize into a list form.
         // This handles macro output like (cons 'do (map ...)).
         Value::LazySeq(ls) => {
