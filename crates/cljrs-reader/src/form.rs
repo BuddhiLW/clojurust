@@ -48,6 +48,34 @@ impl Form {
     /// paths. A tier that disagreed would make `meta` depend on how hot the
     /// code got.
     ///
+    /// True when the value this form denotes *as data* can carry metadata.
+    ///
+    /// Inside `quote` every form is a literal, so whether an annotation lands
+    /// is a question about the form and needs no runtime test: `'^{:a 1} [1]`
+    /// carries it, `'^{:a 1} 42` cannot. Mirrors `supports_meta` in
+    /// `cljrs-runtime` over the values `form_to_value` produces — a reader
+    /// macro (`'x`, `@x`, `#'x`, `` `x ``) denotes a list, and `#(…)` denotes
+    /// the `fn*` list it expands to.
+    pub fn quoted_value_supports_meta(&self) -> bool {
+        match &self.kind {
+            FormKind::List(_)
+            | FormKind::Vector(_)
+            | FormKind::Map(_)
+            | FormKind::Set(_)
+            | FormKind::Symbol(_)
+            | FormKind::AutoSymbol(_)
+            | FormKind::AnonFn(_)
+            | FormKind::Quote(_)
+            | FormKind::SyntaxQuote(_)
+            | FormKind::Unquote(_)
+            | FormKind::UnquoteSplice(_)
+            | FormKind::Deref(_)
+            | FormKind::Var(_) => true,
+            FormKind::Meta(_, inner) => inner.quoted_value_supports_meta(),
+            _ => false,
+        }
+    }
+
     /// Inside `quote` the rule does not apply: there the annotation is data and
     /// lands on any value that can carry it.
     pub fn takes_runtime_meta(&self) -> bool {

@@ -161,18 +161,22 @@ fn render() -> String {
 
     // Every row again, this time through the IR tier. A divergence between the
     // two blocks is the defect this whole change was about.
-    out.push_str("## tier-parity (evaluated position, IR tier)\n\n");
     cljrs_runtime::tiered::force_eager_lowering();
-    for &ann in ANNOTATIONS {
-        for &form in FORMS {
-            let (_g, mut env) = make_env(cljrs_runtime::ExecutionMode::Tiered);
-            let got = outcome(
-                &mut env,
-                &format!("(defn probe [] (meta ^{ann} {form})) (probe)"),
-            );
-            out.push_str(&format!("ir | (meta ^{ann} {form}) => {got}\n"));
+    for &(label, prefix) in &[("evaluated", "^"), ("quoted", "'^")] {
+        out.push_str(&format!("## tier-parity ({label} position, IR tier)\n\n"));
+        for &ann in ANNOTATIONS {
+            for &form in FORMS {
+                let (_g, mut env) = make_env(cljrs_runtime::ExecutionMode::Tiered);
+                let got = outcome(
+                    &mut env,
+                    &format!("(defn probe [] (meta {prefix}{ann} {form})) (probe)"),
+                );
+                out.push_str(&format!(
+                    "ir-{label} | (meta {prefix}{ann} {form}) => {got}\n"
+                ));
+            }
+            out.push('\n');
         }
-        out.push('\n');
     }
 
     out
@@ -222,22 +226,27 @@ fn behaviour_matches_the_golden_record() {
 #[test]
 fn the_two_tiers_agree_row_for_row() {
     let rendered = render();
-    let evaluated: Vec<&str> = rendered
-        .lines()
-        .filter_map(|l| l.strip_prefix("evaluated | (meta "))
-        .collect();
-    let ir: Vec<&str> = rendered
-        .lines()
-        .filter_map(|l| l.strip_prefix("ir | (meta "))
-        .collect();
+    for (position, ir_prefix) in [
+        ("evaluated | (meta ", "ir-evaluated | (meta "),
+        ("quoted | (meta ", "ir-quoted | (meta "),
+    ] {
+        let walked: Vec<&str> = rendered
+            .lines()
+            .filter_map(|l| l.strip_prefix(position))
+            .collect();
+        let lowered: Vec<&str> = rendered
+            .lines()
+            .filter_map(|l| l.strip_prefix(ir_prefix))
+            .collect();
 
-    assert!(!evaluated.is_empty(), "no evaluated-position rows rendered");
-    assert_eq!(
-        evaluated.len(),
-        ir.len(),
-        "the two tier blocks cover a different number of cases"
-    );
-    for (walked, lowered) in evaluated.iter().zip(&ir) {
-        assert_eq!(walked, lowered, "a row differs between the tiers");
+        assert!(!walked.is_empty(), "no `{position}` rows rendered");
+        assert_eq!(
+            walked.len(),
+            lowered.len(),
+            "the two `{position}` tier blocks cover a different number of cases"
+        );
+        for (w, l) in walked.iter().zip(&lowered) {
+            assert_eq!(w, l, "a `{position}` row differs between the tiers");
+        }
     }
 }

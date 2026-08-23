@@ -549,6 +549,42 @@ fn lower_meta_annotation(ctx: &mut LowerCtx, meta: &Form) -> R {
     }
 }
 
+/// Lower a `^meta` annotation appearing *inside* `quote`, where the general
+/// case is data rather than something to evaluate.
+///
+/// The shorthand table is the same one [`lower_meta_annotation`] uses; only the
+/// general case differs, exactly as it does between the tree-walker's two
+/// callers of `expand_meta_annotation`.
+fn lower_quote_annotation(ctx: &mut LowerCtx, meta: &Form) -> R {
+    fn entry(ctx: &mut LowerCtx, k: VarId, v: VarId) -> VarId {
+        let dst = ctx.fresh_var();
+        ctx.emit(Inst::AllocMap(dst, vec![(k, v)]));
+        dst
+    }
+    match &meta.kind {
+        FormKind::Keyword(_) | FormKind::AutoKeyword(_) => {
+            let k = lower_quote(ctx, meta)?;
+            let t = ctx.emit_const(Const::Bool(true));
+            Ok(entry(ctx, k, t))
+        }
+        FormKind::Symbol(s) => {
+            let k = ctx.emit_const(Const::Keyword(Arc::from("tag")));
+            let v = ctx.emit_const(Const::Symbol(Arc::from(s.as_str())));
+            Ok(entry(ctx, k, v))
+        }
+        FormKind::Str(s) => {
+            let k = ctx.emit_const(Const::Keyword(Arc::from("tag")));
+            let v = ctx.emit_const(Const::Str(Arc::from(s.as_str())));
+            Ok(entry(ctx, k, v))
+        }
+        FormKind::Map(_) | FormKind::Quote(_) => lower_quote(ctx, meta),
+        _ => Err(LowerError::UnsupportedForm(format!(
+            "metadata must be Symbol, Keyword, String or Map, got {:?}",
+            meta.kind
+        ))),
+    }
+}
+
 /// `^m form`, where `form` constructs an `IObj`: attach the annotation to the
 /// value it produces.
 ///
@@ -2820,7 +2856,28 @@ fn lower_quote(ctx: &mut LowerCtx, form: &Form) -> R {
         FormKind::Str(s) => Ok(ctx.emit_const(Const::Str(Arc::from(s.as_str())))),
         FormKind::Char(c) => Ok(ctx.emit_const(Const::Char(*c))),
         FormKind::Keyword(s) => Ok(ctx.emit_const(Const::Keyword(Arc::from(s.as_str())))),
+        FormKind::AutoKeyword(s) => {
+            let full = auto_qualified(ctx, s, "keyword")?;
+            Ok(ctx.emit_const(Const::Keyword(Arc::from(full.as_str()))))
+        }
         FormKind::Symbol(s) => Ok(ctx.emit_const(Const::Symbol(Arc::from(s.as_str())))),
+        // `'^m F`: the annotation is data. Whether it lands is decidable here —
+        // inside `quote` every form is a literal, so the `IObj` test is a
+        // question about the form, not about a runtime value.
+        FormKind::Meta(meta, inner) => {
+            let value = lower_quote(ctx, inner)?;
+            // Expand the annotation even when the value cannot carry it: the
+            // tree-walker rejects a malformed annotation *before* it decides
+            // whether to attach, so returning early here would make `'^42 42`
+            // an error in one tier and `nil` in the other.
+            let annotation = lower_quote_annotation(ctx, meta)?;
+            if !inner.quoted_value_supports_meta() {
+                return Ok(value);
+            }
+            let existing = call_core(ctx, "meta", vec![value])?;
+            let merged = call_core(ctx, "merge", vec![existing, annotation])?;
+            call_core(ctx, "with-meta", vec![value, merged])
+        }
         FormKind::Vector(elems) => {
             let vars: Result<Vec<VarId>, _> = elems.iter().map(|e| lower_quote(ctx, e)).collect();
             let vars = vars?;

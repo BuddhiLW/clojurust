@@ -157,3 +157,47 @@ fn a_keyword_shorthand_expands_to_a_map() {
         "the shorthand must expand to a map, not stay a bare keyword"
     );
 }
+
+// ── Inside `quote` the annotation is data ───────────────────────────────────
+
+#[test]
+fn a_quoted_annotation_attaches_to_a_form_that_can_carry_it() {
+    // `lower_quote` had no `FormKind::Meta` arm, so a body containing quoted
+    // metadata failed to lower and the whole function silently fell back to the
+    // tree-walker — correct, but never compiled.
+    for src in ["'^{:a 1} [1]", "'^:dyn sym", "'^{:a 1} (1 2)", "'^String x"] {
+        assert!(
+            attaches_meta(&lower(src)),
+            "`{src}` did not attach its annotation in the quoted position"
+        );
+    }
+}
+
+#[test]
+fn a_quoted_annotation_on_a_scalar_attaches_nothing() {
+    // Decided statically: inside `quote` every form is a literal, so whether
+    // the value can carry metadata is a question about the form.
+    for src in [
+        "'^{:a 1} 42",
+        "'^{:a 1} \"s\"",
+        "'^{:a 1} :kw",
+        "'^{:a 1} nil",
+    ] {
+        assert!(
+            !attaches_meta(&lower(src)),
+            "`{src}` attached metadata to a value that cannot carry it"
+        );
+    }
+}
+
+#[test]
+fn a_quoted_body_lowers_at_all() {
+    // The regression this arm exists to prevent: an `Err` here means the
+    // enclosing function declines IR lowering entirely.
+    for src in ["'^{:a 1} [1]", "'^::kw [1]", "(list '^{:a 1} [1] 2)"] {
+        assert!(
+            lower_fn_body(Some("test"), "user", &[], &parse(src), false).is_ok(),
+            "`{src}` still refuses to lower"
+        );
+    }
+}

@@ -132,6 +132,17 @@ fn an_evaluated_annotation_sees_the_enclosing_scope_in_both_tiers() {
     assert_same_in_every_tier("(let [x 5] (meta ^{:x x} [1]))", "{:x 5}");
 }
 
+// ── The quoted position ─────────────────────────────────────────────────────
+
+#[test]
+fn quote_keeps_the_annotation_as_data_in_both_tiers() {
+    // Inside `quote` the annotation is data in every tier: `form_to_value` is
+    // shared, and IR lowering routes a quoted form through `lower_quote`.
+    assert_same_in_every_tier("(meta '^{:a 1} [1])", "{:a 1}");
+    assert_same_in_every_tier("(meta '^:dyn sym)", "{:dyn true}");
+    assert_same_in_every_tier("(meta '^{:x (+ 1 2)} [1])", "{:x (+ 1 2)}");
+}
+
 // ── Forms that take the annotation as a hint ────────────────────────────────
 
 #[test]
