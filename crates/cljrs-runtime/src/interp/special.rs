@@ -1907,7 +1907,7 @@ fn eval_extend_type(args: &[Form], env: &mut Env) -> EvalResult {
             "extend-type: first arg must be a type symbol".into(),
         ));
     };
-    let type_tag = crate::interp::apply::resolve_type_tag(&type_sym);
+    let type_tag = crate::interp::apply::resolve_type_tag(type_sym);
 
     let mut current_proto: Option<GcPtr<Protocol>> = None;
 
