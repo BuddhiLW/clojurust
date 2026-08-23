@@ -6,12 +6,13 @@
 
 use std::sync::Arc;
 
+use cljrs_ir::lower::CoreShadows;
 use cljrs_ir::{IrFunction, Repr};
 use cljrs_reader::Form;
 use cljrs_value::TypeHint;
 
 use crate::builtins::form::resolve_auto_forms;
-use crate::env::env::Env;
+use crate::env::env::{Env, GlobalEnv};
 
 /// Map per-parameter primitive type hints onto representation seeds for type
 /// inference, positional with the function's fixed parameters.  `^long`/`^int`
@@ -50,6 +51,15 @@ pub fn seed_reprs_from_hints(param_hints: &[Option<TypeHint>]) -> Vec<Repr> {
             _ => Repr::Boxed,
         })
         .collect()
+}
+
+/// What `ns` binds that `clojure.core` also publishes, for the lowerer's
+/// call-position core check (see [`cljrs_ir::lower::CoreShadows`]).
+///
+/// Must be sampled on the mutator thread: it reads the namespace tables, which
+/// the background lowering worker may not touch.
+pub fn core_shadows_for(globals: &GlobalEnv, ns: &str) -> CoreShadows {
+    CoreShadows::new(globals.core_shadowed_names(ns))
 }
 
 // ── Error type ──────────────────────────────────────────────────────────────
@@ -186,6 +196,7 @@ fn lower_arity_inner(
         .collect();
     let expanded_body = resolved.unwrap_or(expanded_body);
     env.current_ns = prev_ns;
+    let shadows = core_shadows_for(&env.globals, ns);
     lower_expanded_arity(
         name,
         params,
@@ -194,6 +205,7 @@ fn lower_arity_inner(
         destructure_rest,
         &expanded_body,
         ns,
+        &shadows,
         env.globals.id(),
         None,
         do_optimize,
@@ -225,7 +237,9 @@ pub fn macroexpand_body(body: &[Form], env: &mut Env) -> Vec<Form> {
 /// Lower an already macro-expanded arity body to (optionally optimized) IR.
 ///
 /// Env-free and callable from the background lowering worker (Phase 10.7):
-/// everything below operates on plain `Form`/IR data.  `globals_id` is
+/// everything below operates on plain `Form`/IR data.  `shadows` is the one
+/// piece that has to be sampled from the environment first — see
+/// [`core_shadows_for`].  `globals_id` is
 /// `GlobalEnv::id`, scoping the cross-defn registry lookups to one runtime.
 ///
 /// `arity_id` selects the externals protocol:
@@ -245,6 +259,7 @@ pub fn lower_expanded_arity(
     destructure_rest: Option<&Form>,
     expanded_body: &[Form],
     ns: &Arc<str>,
+    shadows: &CoreShadows,
     globals_id: u64,
     arity_id: Option<u64>,
     do_optimize: bool,
@@ -272,13 +287,14 @@ pub fn lower_expanded_arity(
         destructures.push((params.len(), rest_pat.clone()));
     }
 
-    let ir = cljrs_ir::lower::lower_fn_body_destructured(
+    let ir = cljrs_ir::lower::lower_fn_body_shadowed(
         name,
         ns,
         &all_params,
         &destructures,
         expanded_body,
         is_async,
+        shadows,
     )
     .map_err(|e| LowerError::LowerFailed(format!("{e:?}")))?;
 

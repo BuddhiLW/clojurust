@@ -27,7 +27,8 @@ src/
              live-in values (loop φs + pre-loop defs) arriving as parameters
   lower/
     mod.rs      — re-exports: lower_fn_body, lower_fn_body_destructured,
-                  lower_fn_body_seeded, analyze, inline, optimize, EscapeContext …
+                  lower_fn_body_shadowed, CoreShadows, analyze, inline,
+                  optimize, EscapeContext …
     async_lower.rs — async state-machine lowering (Phase H): rewrites an
                   `^:async` IrFunction into a non-async poll function
                   (is_async_poll_fn) whose control flow is an explicit resumable
@@ -38,17 +39,24 @@ src/
                   resume blocks are phi-free so the codegen dispatch jump needs
                   no phi args.  Lowers `await` only; channels/spawn return
                   AsyncLowerError::Unsupported (interpreter fallback kept)
-    anf.rs      — ANF lowering: Form AST → IrFunction (pure Rust).  Closures
+    anf.rs      — ANF lowering: Form AST → IrFunction (pure Rust).  Also
+                  `collect_defined_names`, which reads the `def`s out of the
+                  unit being lowered so its own definitions shadow core.
+                  Closures
                   capture only the enclosing locals their (fully macro-expanded)
                   body references (`collect_symbol_names`, a conservative
                   free-variable over-approximation), not every local in scope.
                   `desugar_pre_post_conditions` rewrites `{:pre [...] :post [...]}`
                   maps at the head of a function body into `(assert ...)` forms
                   (binds `%` to the return value in `:post` conditions).
-    context.rs  — LowerCtx builder state used by anf.rs
+    context.rs  — LowerCtx builder state used by anf.rs; also
+                  `core_call_name`, the call-position check that decides
+                  whether a head symbol really is a clojure.core name
     escape.rs   — worklist-based escape analysis; inter-procedural via EscapeContext
     inline.rs   — inlining pass: splices small callees into call sites
-    known.rs    — symbol → KnownFn resolution
+    known.rs    — symbol → KnownFn resolution, the `clojure.core` qualifier
+                  check (core_name) and CoreShadows (what the lowering
+                  namespace binds instead of core)
     optimize.rs — region-allocation promotion; dominator/post-dominator CFG analysis
     regionalize.rs — stage-4 cross-function region promotion: clones callees
                      whose `Returns` allocs are NoEscape at a call site, wraps
@@ -61,7 +69,10 @@ src/
                      passed to an opaque call
 tests/
   capture_minimization.rs — closure-capture set regression tests
+  core_shadowing.rs       — call-position core resolution: locals, namespace
+                            shadows and qualified symbols (issue #337)
   escape_regression.rs    — escape-analysis regression tests
+  numeric_literals.rs     — numeric-literal lowering regression tests
 ```
 
 ---
@@ -221,6 +232,51 @@ bridge clones the value out, so its result does not alias the source.
 ### Closures
 
 `ClosureTemplate`: static description of an `fn*` form (arity info, capture names).
+
+### Core-name resolution
+
+Inlining `(inc x)` into an add — or `(count c)` into `CallKnown(Count, …)` —
+is only correct when that call site actually resolves to `clojure.core`.  Two
+pieces decide that, and a call that fails either one is lowered as an ordinary
+dynamic `Call`, which resolves per call exactly as the tree-walker does:
+
+```rust
+/// The bare clojure.core name `sym` denotes, or None.  Unqualified symbols and
+/// `clojure.core/x` are candidates; `other.ns/count` is not core's `count`.
+pub fn core_name(sym: &str) -> Option<&str>;
+
+/// Names the lowering namespace does *not* resolve to clojure.core: its own
+/// `def`s, names it `:refer`s from elsewhere, and names a `(:refer-clojure
+/// ...)` clause keeps out of the automatic core refer.  Empty means "no
+/// namespace information", i.e. assume core.
+pub struct CoreShadows { /* … */ }
+impl CoreShadows {
+    pub fn none() -> Self;
+    pub fn new(names: impl IntoIterator<Item = Arc<str>>) -> Self;
+    pub fn contains(&self, name: &str) -> bool;
+    pub fn union(&self, extra: impl IntoIterator<Item = Arc<str>>) -> Self;
+}
+
+/// Lower with a namespace's shadows supplied.  The other entry points lower
+/// with `CoreShadows::none()`; callers holding an environment should build a
+/// real one (`cljrs_runtime::tiered::lower::core_shadows_for`).
+pub fn lower_fn_body_shadowed(
+    name: Option<&str>,
+    ns: &str,
+    params: &[Arc<str>],
+    destructures: &[(usize, Form)],
+    body: &[Form],
+    is_async: bool,
+    shadows: &CoreShadows,
+) -> Result<IrFunction, LowerError>;
+```
+
+Lexical bindings are handled by the lowerer itself: `LowerCtx::core_call_name`
+consults `lookup_local` first, so a `let`-bound or parameter `inc` is a call to
+that binding.  Names the unit being lowered binds are folded into the shadow
+set up front (`collect_defined_names`, over `DEF_HEADS` plus `declare`),
+because AOT compiles a whole file without evaluating its `def`s — the
+environment cannot report them yet.  See issue #337.
 
 ### Optimization pipeline (re-exported from `lower::`)
 
