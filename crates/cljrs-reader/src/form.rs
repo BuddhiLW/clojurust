@@ -34,6 +34,36 @@ impl Form {
         form
     }
 
+    /// True when an evaluated-position `^meta` annotation on this form becomes
+    /// *runtime* metadata on the value it produces.
+    ///
+    /// Only a form that constructs an `IObj` qualifies — a collection literal
+    /// or a function. Every other form (a call, a symbol, `quote`, `if`, `do`)
+    /// takes the annotation as a compile-time hint and evaluates to an
+    /// unannotated value, so `(meta ^{:a 1} (list 1))` and `(meta ^{:a 1} x)`
+    /// are both `nil`.
+    ///
+    /// Every execution tier consults this one predicate: the tree-walker in
+    /// `interp::eval`, and IR lowering in `lower::anf` for the JIT and AOT
+    /// paths. A tier that disagreed would make `meta` depend on how hot the
+    /// code got.
+    ///
+    /// Inside `quote` the rule does not apply: there the annotation is data and
+    /// lands on any value that can carry it.
+    pub fn takes_runtime_meta(&self) -> bool {
+        match &self.kind {
+            FormKind::Vector(_) | FormKind::Map(_) | FormKind::Set(_) | FormKind::AnonFn(_) => true,
+            // A list is a call, except when it *is* a function form.
+            FormKind::List(parts) => matches!(
+                parts.first().map(|f| &f.kind),
+                Some(FormKind::Symbol(s)) if s == "fn" || s == "fn*"
+            ),
+            // Metadata stacks: `^:a ^:b [1]` annotates the vector twice.
+            FormKind::Meta(_, inner) => inner.takes_runtime_meta(),
+            _ => false,
+        }
+    }
+
     /// The `^meta` forms attached to this form, outermost first, together with
     /// the annotated form itself.
     pub fn peel_meta(&self) -> (Vec<&Form>, &Form) {

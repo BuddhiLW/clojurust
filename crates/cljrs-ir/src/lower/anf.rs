@@ -458,7 +458,14 @@ fn lower_form(ctx: &mut LowerCtx, form: &Form) -> R {
                 && is_meta_async(meta)
             {
                 lower_fn(ctx, &parts[1..], true)
+            } else if inner.takes_runtime_meta() {
+                // The annotation becomes runtime metadata, exactly as the
+                // tree-walker's `FormKind::Meta` arm does it. Without this the
+                // same expression would answer `meta` one way interpreted and
+                // another way once promoted or AOT-compiled.
+                lower_meta_attach(ctx, meta, inner)
             } else {
+                // A hint, not metadata: the annotation is not even evaluated.
                 lower_form(ctx, inner)
             }
         }
@@ -477,6 +484,84 @@ fn lower_form(ctx: &mut LowerCtx, form: &Form) -> R {
             "tagged literal #{tag} not supported in IR lowering"
         ))),
     }
+}
+
+// ── Reader metadata ───────────────────────────────────────────────────────────
+
+/// Emit a call to a `clojure.core` function by name.
+///
+/// Metadata attachment is rare enough that a dynamic call costs nothing worth
+/// a dedicated instruction, and going through the ordinary call path means
+/// every backend — IR interpreter, JIT and AOT codegen — supports it already.
+fn call_core(ctx: &mut LowerCtx, name: &'static str, args: Vec<VarId>) -> R {
+    let callee = ctx.fresh_var();
+    ctx.emit(Inst::LoadGlobal(
+        callee,
+        Arc::from("clojure.core"),
+        Arc::from(name),
+    ));
+    let dst = ctx.fresh_var();
+    ctx.emit(Inst::Call(dst, callee, args));
+    Ok(dst)
+}
+
+/// Lower a `^meta` annotation to the map it denotes, expanding the same reader
+/// shorthands the tree-walker's `expand_meta_annotation` does.
+fn lower_meta_annotation(ctx: &mut LowerCtx, meta: &Form) -> R {
+    fn entry(ctx: &mut LowerCtx, k: VarId, v: VarId) -> VarId {
+        let dst = ctx.fresh_var();
+        ctx.emit(Inst::AllocMap(dst, vec![(k, v)]));
+        dst
+    }
+    match &meta.kind {
+        // `^:kw` → `{:kw true}`; an auto-keyword resolves against the reading
+        // namespace, which `lower_form` already knows how to do.
+        FormKind::Keyword(_) | FormKind::AutoKeyword(_) => {
+            let k = lower_form(ctx, meta)?;
+            let t = ctx.emit_const(Const::Bool(true));
+            Ok(entry(ctx, k, t))
+        }
+        // `^Sym` → `{:tag Sym}`: the tag is the symbol itself, never the value
+        // the symbol resolves to — so this must not go through `lower_symbol`.
+        FormKind::Symbol(s) => {
+            let k = ctx.emit_const(Const::Keyword(Arc::from("tag")));
+            let v = ctx.emit_const(Const::Symbol(Arc::from(s.as_str())));
+            Ok(entry(ctx, k, v))
+        }
+        // `^"Str"` → `{:tag "Str"}`
+        FormKind::Str(s) => {
+            let k = ctx.emit_const(Const::Keyword(Arc::from("tag")));
+            let v = ctx.emit_const(Const::Str(Arc::from(s.as_str())));
+            Ok(entry(ctx, k, v))
+        }
+        // Already data — the macro expander quoted what it rebuilt from a value.
+        FormKind::Quote(inner) => lower_quote(ctx, inner),
+        // A map literal: its values are evaluated in place.
+        FormKind::Map(_) => lower_form(ctx, meta),
+        // Anything else is a malformed annotation. Declining to lower defers to
+        // the tree-walker, which rejects it with the canonical message —
+        // lowering it instead would report the *merge* failing on a non-map,
+        // so the two tiers would disagree on the error.
+        _ => Err(LowerError::UnsupportedForm(format!(
+            "metadata must be Symbol, Keyword, String or Map, got {:?}",
+            meta.kind
+        ))),
+    }
+}
+
+/// `^m form`, where `form` constructs an `IObj`: attach the annotation to the
+/// value it produces.
+///
+/// Merging rather than replacing is what makes stacked annotations
+/// (`^:a ^:b [1]`) both survive with the outer one winning, matching
+/// `builtins::form::attach_meta` in the tree-walker. `(merge nil m)` is `m`,
+/// so an unannotated value needs no special case.
+fn lower_meta_attach(ctx: &mut LowerCtx, meta: &Form, inner: &Form) -> R {
+    let value = lower_form(ctx, inner)?;
+    let annotation = lower_meta_annotation(ctx, meta)?;
+    let existing = call_core(ctx, "meta", vec![value])?;
+    let merged = call_core(ctx, "merge", vec![existing, annotation])?;
+    call_core(ctx, "with-meta", vec![value, merged])
 }
 
 // ── List dispatch ─────────────────────────────────────────────────────────────

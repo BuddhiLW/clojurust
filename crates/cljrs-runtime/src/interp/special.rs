@@ -151,24 +151,14 @@ fn extract_def_name(form: &Form, env: &mut Env) -> EvalResult<(String, Option<Va
     }
 }
 
-/// Expand a metadata shorthand form into a map value.
+/// Expand a metadata shorthand form into a map value, evaluating the general
+/// case (`^{:x (+ 1 2)}` → `{:x 3}`).
+///
+/// The shorthand table itself lives in [`crate::builtins::form`] and is shared
+/// with the quoted position, which differs only in resolving that general case
+/// as data instead.
 pub fn compile_meta_form(meta: &Form, env: &mut Env) -> EvalResult<Value> {
-    match &meta.kind {
-        FormKind::Keyword(k) => {
-            // ^:dynamic  →  {:dynamic true}
-            let m = MapValue::empty().assoc(Value::keyword(Keyword::parse(k)), Value::Bool(true));
-            Ok(Value::Map(m))
-        }
-        FormKind::Symbol(s) => {
-            // ^TypeHint  →  {:tag TypeHint}
-            let m = MapValue::empty().assoc(
-                Value::keyword(Keyword::parse("tag")),
-                Value::symbol(cljrs_value::Symbol::parse(s)),
-            );
-            Ok(Value::Map(m))
-        }
-        _ => eval(meta, env), // literal map or general expr
-    }
+    crate::builtins::form::expand_meta_annotation(meta, &mut |f| eval(f, env))
 }
 
 // ── fn* ───────────────────────────────────────────────────────────────────────
