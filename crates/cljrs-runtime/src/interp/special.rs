@@ -151,24 +151,14 @@ fn extract_def_name(form: &Form, env: &mut Env) -> EvalResult<(String, Option<Va
     }
 }
 
-/// Expand a metadata shorthand form into a map value.
+/// Expand a metadata shorthand form into a map value, evaluating the general
+/// case (`^{:x (+ 1 2)}` → `{:x 3}`).
+///
+/// The shorthand table itself lives in [`crate::builtins::form`] and is shared
+/// with the quoted position, which differs only in resolving that general case
+/// as data instead.
 pub fn compile_meta_form(meta: &Form, env: &mut Env) -> EvalResult<Value> {
-    match &meta.kind {
-        FormKind::Keyword(k) => {
-            // ^:dynamic  →  {:dynamic true}
-            let m = MapValue::empty().assoc(Value::keyword(Keyword::parse(k)), Value::Bool(true));
-            Ok(Value::Map(m))
-        }
-        FormKind::Symbol(s) => {
-            // ^TypeHint  →  {:tag TypeHint}
-            let m = MapValue::empty().assoc(
-                Value::keyword(Keyword::parse("tag")),
-                Value::symbol(cljrs_value::Symbol::parse(s)),
-            );
-            Ok(Value::Map(m))
-        }
-        _ => eval(meta, env), // literal map or general expr
-    }
+    crate::builtins::form::expand_meta_annotation(meta, &mut |f| eval(f, env))
 }
 
 // ── fn* ───────────────────────────────────────────────────────────────────────
@@ -1419,7 +1409,11 @@ fn spec_element(form: &Form) -> Option<&Form> {
 
 /// Parse a `RequireSpec` from a raw `Form` (unevaluated, used in `ns` macro).
 /// Also handles versioned namespace symbols such as `my.ns@abc1234`.
-fn parse_require_spec_form(form: &Form) -> Result<RequireSpec, String> {
+///
+/// Public so the AOT compiler can establish an entry namespace from the same
+/// parse `eval_ns` uses. A second implementation there would drift: it already
+/// did, dropping `:refer` and `@version` from structurally emitted requires.
+pub fn parse_require_spec_form(form: &Form) -> Result<RequireSpec, String> {
     match &form.kind {
         FormKind::Symbol(s) => {
             let sym = cljrs_value::Symbol::parse(s);
@@ -1903,7 +1897,7 @@ fn eval_extend_type(args: &[Form], env: &mut Env) -> EvalResult {
             "extend-type: first arg must be a type symbol".into(),
         ));
     };
-    let type_tag = crate::interp::apply::resolve_type_tag(&type_sym);
+    let type_tag = crate::interp::apply::resolve_type_tag(type_sym);
 
     let mut current_proto: Option<GcPtr<Protocol>> = None;
 

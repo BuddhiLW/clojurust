@@ -59,6 +59,9 @@ pub(crate) struct LowerRequest {
     pub name: Option<Arc<str>>,
     pub ns: Arc<str>,
     pub is_async: bool,
+    /// What `ns` binds that would otherwise be lowered as `clojure.core`,
+    /// sampled on the mutator thread (the worker has no `GlobalEnv`).
+    pub core_shadows: cljrs_ir::lower::CoreShadows,
     pub arities: Vec<LowerArityRequest>,
 }
 
@@ -155,6 +158,7 @@ fn process_request(req: &LowerRequest) {
                 arity.destructure_rest.as_ref(),
                 &arity.expanded_body,
                 &req.ns,
+                &req.core_shadows,
                 globals_id,
                 Some(id),
                 true,
@@ -247,6 +251,7 @@ mod tests {
             name: Some(Arc::from(fn_name)),
             ns: Arc::from(ns),
             is_async: false,
+            core_shadows: cljrs_ir::lower::CoreShadows::none(),
             arities: vec![LowerArityRequest {
                 arity_id,
                 params: vec![Arc::from("x")],
