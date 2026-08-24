@@ -1,3 +1,10 @@
+// `EvalResult`'s error is `cljrs_runtime`'s `EvalError`, returned by value from
+// every evaluator entry point; the synchronous side allows this lint crate-wide
+// (`cljrs-runtime/src/lib.rs`) and `runtime.rs` allows it per function.  Clippy
+// only began flagging `async fn`s for it in 1.98 — the code below is unchanged
+// from when it passed under 1.94.
+#![allow(clippy::result_large_err)]
+
 //! Asynchronous tree-walking evaluation for `^:async` function bodies.
 //!
 //! [`eval_async`] mirrors the synchronous [`cljrs_runtime::interp::eval::eval`] for the

@@ -1,3 +1,9 @@
+// Every `do_*` connect/response driver returns `cljrs_runtime`'s `EvalError` by
+// value, as the rest of the workspace does (`cljrs-runtime/src/lib.rs` allows
+// this lint crate-wide).  Clippy only began flagging `async fn`s for it in 1.98
+// — the seven sites here are unchanged from when they passed under 1.94.
+#![allow(clippy::result_large_err)]
+
 //! Networking for clojurust — TCP, Unix, UDP, TLS over core.async channels.
 //!
 //! # Usage
