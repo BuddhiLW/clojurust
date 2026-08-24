@@ -222,6 +222,100 @@ pub fn resolve_auto_forms(form: &Form, env: &crate::env::env::Env) -> EvalResult
     Ok(Form::new(kind, form.span.clone()))
 }
 
+/// True for values that carry metadata (the JVM's `IObj`).
+///
+/// Scalars silently drop an annotation rather than growing a `WithMeta`
+/// wrapper no other tier expects.
+pub fn supports_meta(value: &Value) -> bool {
+    matches!(
+        value.unwrap_meta(),
+        Value::List(_)
+            | Value::Vector(_)
+            | Value::Map(_)
+            | Value::Set(_)
+            | Value::Queue(_)
+            | Value::Symbol(_)
+            | Value::Cons(_)
+            | Value::LazySeq(_)
+            | Value::Fn(_)
+            | Value::Macro(_)
+            | Value::BoundFn(_)
+            | Value::NativeFunction(_)
+            | Value::TypeInstance(_)
+    )
+}
+
+/// The map a `^meta` annotation denotes, expanding the reader shorthands
+/// (`^:kw` → `{:kw true}`, `^Sym` / `^"Str"` → `{:tag …}`).
+///
+/// `general` resolves the non-shorthand case — a map form, or an expression
+/// yielding one — and is the *only* difference between the two positions an
+/// annotation can appear in: inside `quote` it is [`form_to_value`], so
+/// `'^{:x (+ 1 2)} [1]` keeps the unevaluated list; outside it evaluates, so
+/// `^{:x (+ 1 2)} [1]` carries `{:x 3}`.
+///
+/// Both positions share this one table so they cannot drift apart.
+pub fn expand_meta_annotation(
+    meta: &Form,
+    general: &mut dyn FnMut(&Form) -> EvalResult<Value>,
+) -> EvalResult<Value> {
+    let entry = |k: Value, v: Value| Value::Map(MapValue::empty().assoc(k, v));
+    let expanded = match &meta.kind {
+        // `^:kw` → `{:kw true}`. An auto-keyword resolves against the reading
+        // namespace, which only `general` knows how to do in either position.
+        FormKind::Keyword(_) => entry(form_to_value(meta)?, Value::Bool(true)),
+        FormKind::AutoKeyword(_) => entry(general(meta)?, Value::Bool(true)),
+        // `^Sym` → `{:tag Sym}`, `^"Str"` → `{:tag "Str"}`. The tag is the
+        // symbol/string itself, never the value the symbol resolves to.
+        FormKind::Symbol(_) | FormKind::Str(_) => {
+            entry(Value::keyword(Keyword::parse("tag")), form_to_value(meta)?)
+        }
+        // An annotation the macro expander rebuilt out of a value is already
+        // data: `value_to_form` quotes it so that neither position analyses it
+        // a second time.
+        FormKind::Quote(inner) => form_to_value(inner)?,
+        _ => general(meta)?,
+    };
+    // `^42 [1]` is a malformed annotation, not metadata `42` — the JVM reader
+    // rejects it outright rather than attaching a non-map.
+    match expanded {
+        v @ (Value::Map(_) | Value::Nil) => Ok(v),
+        other => Err(EvalError::Runtime(format!(
+            "Metadata must be Symbol, Keyword, String or Map, got {}",
+            other.type_name()
+        ))),
+    }
+}
+
+/// Assoc every entry of `overlay` onto `base`, as the reader does for stacked
+/// metadata (`^:a ^:b x`): both survive, the outer annotation wins a clash.
+pub fn merge_meta_values(base: &Value, overlay: &Value) -> Value {
+    match (base, overlay) {
+        (Value::Map(base), Value::Map(overlay)) => {
+            let mut merged = base.clone();
+            overlay.for_each(|k, v| merged = merged.assoc(k.clone(), v.clone()));
+            Value::Map(merged)
+        }
+        _ => overlay.clone(),
+    }
+}
+
+/// Attach an expanded `^meta` annotation to the value it annotates.
+///
+/// A value that cannot carry metadata keeps none, and an annotation stacked on
+/// one already present merges with it, the outer one winning a clash. Shared by
+/// the quoted and evaluated positions so they attach identically.
+pub fn attach_meta(value: Value, annotation: Value) -> Value {
+    if matches!(annotation, Value::Nil) || !supports_meta(&value) {
+        return value;
+    }
+    let merged = match value.get_meta() {
+        Some(existing) => merge_meta_values(existing, &annotation),
+        None => annotation,
+    };
+    value.with_meta(merged)
+}
+
 /// Convert a `Form` to its literal `Value` without evaluating.
 /// Used by `quote` and macro expansion.
 ///
@@ -285,7 +379,12 @@ pub fn form_to_value(form: &Form) -> EvalResult<Value> {
         FormKind::UnquoteSplice(inner) => reader_form_value("unquote-splicing", inner)?,
         FormKind::Deref(inner) => reader_form_value("deref", inner)?,
         FormKind::Var(inner) => reader_form_value("var", inner)?,
-        FormKind::Meta(_meta, inner) => form_to_value(inner)?,
+        FormKind::Meta(meta, inner) => {
+            let value = form_to_value(inner)?;
+            // Inside `quote` the annotation is data: nothing in it is evaluated.
+            let m = expand_meta_annotation(meta, &mut form_to_value)?;
+            attach_meta(value, m)
+        }
         FormKind::AnonFn(body) => {
             // Expand #(...) to (fn* [...] ...) so it round-trips correctly through quote.
             let expanded = expand_anon_fn(body, form.span.clone());

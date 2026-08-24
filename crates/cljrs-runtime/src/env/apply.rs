@@ -21,7 +21,7 @@ fn check_arity(arity: &Arity, argc: usize, name: &str) -> EvalResult<()> {
 
 /// Return the canonical type tag for a value (used by protocol dispatch).
 pub fn type_tag_of(val: &Value) -> Arc<str> {
-    match val {
+    match val.unwrap_meta() {
         Value::Nil => Arc::from("nil"),
         Value::Bool(_) => Arc::from("Boolean"),
         Value::Long(_) => Arc::from("Long"),
@@ -61,6 +61,10 @@ pub fn type_tag_of(val: &Value) -> Arc<str> {
 /// (`rt_call_ic` in `cljrs-compiler`'s rt_abi) can validate a cached dispatch
 /// tag on the hot path without building a fresh `Arc<str>` per call.
 pub fn type_tag_matches(val: &Value, tag: &str) -> bool {
+    // `type_tag_of` unwraps a metadata wrapper; so must this, or an annotated
+    // dispatch value is a permanent inline-cache miss that re-resolves and
+    // rewrites the entry under lock on every call.
+    let val = val.unwrap_meta();
     match val {
         Value::TypeInstance(ti) => &*ti.get().type_tag == tag,
         Value::NativeObject(obj) => obj.get().type_tag() == tag,

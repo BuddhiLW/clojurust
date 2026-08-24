@@ -404,6 +404,28 @@ fn test_reader_conditional() {
     );
 }
 
+/// Ungated: AOT lowers through `lower::anf`, so a rule the tree-walker applies
+/// and lowering does not is *unconditionally* wrong in a compiled binary —
+/// there is no cold tier to mask it. Before the fix every line below answered
+/// `nil`.
+#[test]
+fn test_reader_metadata_survives_compilation() {
+    assert_output(
+        "reader_metadata",
+        r#"
+(defn probe []
+  [(meta ^{:a 1} [1])
+   (meta ^:dyn {:k 1})
+   (meta ^String #{1})
+   (meta ^:a ^:b [1])
+   (meta ^{:a 1} (list 1))
+   (meta ^{:a 1} 42)])
+(println (pr-str (probe)))
+"#,
+        "[{:a 1} {:dyn true} {:tag String} {:b true, :a true} nil nil]",
+    );
+}
+
 #[test]
 fn test_recursive_defn() {
     assert_output(

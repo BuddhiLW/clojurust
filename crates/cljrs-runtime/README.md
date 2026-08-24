@@ -646,6 +646,57 @@ Callers phrase `OddArity` in their own words (`map literal must have an even
 number of forms`, `let* binding vector must have even length`, ...), so the
 parity rule lives here while the message stays at the boundary.
 
+### Reader metadata on values
+
+`form_to_value` attaches a `^meta` annotation to the value it denotes, so
+`(meta '^{:x 1} [1])` answers `{:x 1}` as on the JVM. Shorthands expand as the
+reader does, stacked annotations merge with the outer one winning, and values
+that cannot carry metadata (the JVM's `IObj`) drop it rather than growing a
+wrapper. A nil annotation carries nothing, and `(with-meta x nil)` clears
+metadata instead of storing a nil-meta wrapper.
+
+An annotation appears in two positions, and they differ in exactly one thing:
+inside `quote` it is data (`'^{:x (+ 1 2)} [1]` keeps the unevaluated list),
+outside it is evaluated (`^{:x (+ 1 2)} [1]` carries `{:x 3}`). Both go through
+`expand_meta_annotation`, parameterised on that one difference, so the two
+shorthand tables cannot drift apart.
+
+*Which* forms take an evaluated annotation as runtime metadata is
+`Form::takes_runtime_meta` in `cljrs-reader` — shared with IR lowering so a
+promoted or AOT-compiled body answers `meta` the same way an interpreted one
+does.
+
+```rust
+/// Values that can carry metadata (the JVM's `IObj`).
+pub fn supports_meta(value: &Value) -> bool;
+
+/// The map a `^meta` annotation denotes, expanding the reader shorthands
+/// (`^:kw` → `{:kw true}`, `^Sym` → `{:tag Sym}`, `^"Str"` → `{:tag "Str"}`).
+/// `general` resolves the non-shorthand case — `form_to_value` inside `quote`,
+/// evaluation outside it. Errors on an annotation that denotes a non-map.
+pub fn expand_meta_annotation(
+    meta: &Form,
+    general: &mut dyn FnMut(&Form) -> EvalResult<Value>,
+) -> EvalResult<Value>;
+
+/// Assoc every entry of `overlay` onto `base`; the outer annotation wins a clash.
+pub fn merge_meta_values(base: &Value, overlay: &Value) -> Value;
+
+/// Attach an expanded annotation to the value it annotates, merging with any
+/// metadata already present and dropping it for a value that cannot carry one.
+pub fn attach_meta(value: Value, annotation: Value) -> Value;
+```
+
+`interp::special::compile_meta_form(meta: &Form, env: &mut Env) ->
+EvalResult<Value>` is the evaluated-position wrapper over
+`expand_meta_annotation`; `def` uses it for a `^meta` on the name.
+
+Metadata is *transparent* to type dispatch and to every `clojure.core`
+predicate: `type_tag_of` and `type_tag_matches` both unwrap (they must agree, or
+an annotated dispatch value is a permanent inline-cache miss), and
+`tests/meta_predicate_gate.rs` drives `ns-publics` rather than a hand-written
+list so a predicate added later is checked without being remembered.
+
 ### Phase B3 — `shared-atom` (cross-isolate, two-tier atom ADR)
 
 `shared-atom` is the cross-isolate tier of the two-tier atom design in
