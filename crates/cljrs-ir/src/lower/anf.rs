@@ -11,7 +11,7 @@ use cljrs_reader::form::{Form, FormKind};
 use crate::{BlockId, ClosureTemplate, Const, Inst, IrFunction, KnownFn, Terminator, VarId};
 
 use super::context::{LowerCtx, fresh_global_name_id};
-use super::known::{resolve_known_fn, strip_ns_prefix};
+use super::known::{CoreShadows, resolve_known_core_fn};
 
 // ── Free-variable approximation for closure captures ─────────────────────────
 
@@ -57,6 +57,109 @@ fn collect_symbol_names_form<'a>(form: &'a Form, out: &mut HashSet<&'a str>) {
         // Atoms (Nil, Bool, Int, …, Keyword, …) contain no symbol references.
         _ => {}
     }
+}
+
+// ── Namespace-level `def` collection ─────────────────────────────────────────
+
+/// Heads that bind their first argument as a var in the current namespace.
+///
+/// `def` and `defn` are the ones that reach a successful lowering: the rest
+/// are interpreter-only (`lower_list` rejects them, and AOT evaluates them
+/// instead of compiling them), so a unit containing one falls back to the
+/// tree-walker before shadowing can matter.  They are listed anyway because
+/// each does bind the name — if one ever becomes lowerable, its shadow is
+/// already accounted for rather than silently inlining core's semantics.
+/// `declare` binds every argument, so it is handled separately below.
+const DEF_HEADS: &[&str] = &[
+    "def",
+    "defn",
+    "defn-",
+    "defonce",
+    "defmulti",
+    "defprotocol",
+    "defrecord",
+    "deftype",
+];
+
+/// Collect the names the forms being lowered bind in the lowering namespace.
+///
+/// Such a name is bound to *this* namespace's var, so an unqualified call to
+/// it is not `clojure.core`'s even when it reuses a core name — the same
+/// shadowing an already-interned var causes, except that the unit's own `def`s
+/// may not have run yet: AOT compiles a whole file without evaluating its
+/// `def`s, so the environment cannot report them (issue #337).
+///
+/// Collected up front, so a call site above the `def` is lowered the same way
+/// as one below it.  Both become dynamic calls that resolve per call, which is
+/// what the tree-walking interpreter does.
+///
+/// Only the name a form binds directly is collected: a `defprotocol`'s method
+/// names are not walked out of its body.  Over-collecting costs an inline;
+/// under-collecting would inline core's semantics over another binding, so the
+/// walk stays on the conservative side wherever the two differ.
+fn collect_defined_names(forms: &[Form], out: &mut HashSet<Arc<str>>) {
+    for form in forms {
+        collect_defined_names_form(form, out);
+    }
+}
+
+fn collect_defined_names_form(form: &Form, out: &mut HashSet<Arc<str>>) {
+    match &form.kind {
+        FormKind::List(parts) => {
+            let head = match parts.first().map(|f| &f.kind) {
+                Some(FormKind::Symbol(head)) => Some(head.as_str()),
+                _ => None,
+            };
+            match head {
+                // `(quote (def inc 1))` is data, exactly like `'(def inc 1)`
+                // (which arrives as `FormKind::Quote` and is skipped below).
+                Some("quote") => return,
+                // `(declare a b c)` binds every argument.
+                Some("declare") => {
+                    for name in parts[1..].iter().filter_map(def_name) {
+                        out.insert(Arc::from(name));
+                    }
+                }
+                Some(h) if DEF_HEADS.contains(&h) => {
+                    if let Some(name) = parts.get(1).and_then(def_name) {
+                        out.insert(Arc::from(name));
+                    }
+                }
+                _ => {}
+            }
+            collect_defined_names(parts, out);
+        }
+        FormKind::Vector(v) | FormKind::Map(v) | FormKind::Set(v) | FormKind::AnonFn(v) => {
+            collect_defined_names(v, out)
+        }
+        FormKind::Meta(_, f) | FormKind::Deref(f) | FormKind::TaggedLiteral(_, f) => {
+            collect_defined_names_form(f, out)
+        }
+        FormKind::ReaderCond { clauses, .. } => collect_defined_names(clauses, out),
+        // A quoted `(def x ...)` is data, not a definition; every other form
+        // kind is an atom.
+        _ => {}
+    }
+}
+
+/// The bare name a `def`-like form binds — `(def ^:private x 1)` binds `x` —
+/// or `None` when the name position is not a symbol.
+fn def_name(form: &Form) -> Option<&str> {
+    let FormKind::Symbol(s) = &peel_meta(form).kind else {
+        return None;
+    };
+    // `(def my.ns/x ...)` still binds `x` in `my.ns`.
+    Some(split_ns_name(s).1)
+}
+
+/// Strip every layer of `^meta` from a form: metadata stacks, so
+/// `^:private ^:dynamic x` reads as `Meta(_, Meta(_, Symbol))`.
+fn peel_meta(form: &Form) -> &Form {
+    let mut inner = form;
+    while let FormKind::Meta(_, next) = &inner.kind {
+        inner = next;
+    }
+    inner
 }
 
 // ── Error type ───────────────────────────────────────────────────────────────
@@ -131,24 +234,24 @@ pub fn lower_fn_body(
     lower_fn_body_destructured(name, ns, params, &[], body, is_async)
 }
 
-/// Like [`lower_fn_body_destructured`] but also records static parameter
-/// representation seeds (from `^long`/`^double` type hints) on the resulting
-/// `IrFunction::seed_reprs`.  `seed_reprs` is positional with `params`.
-#[allow(clippy::too_many_arguments)]
-pub fn lower_fn_body_seeded(
+/// Lower a function arity's body, told what the lowering namespace binds.
+///
+/// The shorter entry points above lower with no namespace information, which
+/// makes every `clojure.core` name resolve to core.  Callers that hold an
+/// environment should build a real [`CoreShadows`] instead
+/// (`cljrs_runtime::tiered::lower::core_shadows_for`), so a namespace that
+/// `def`s, `:refer`s, or `:refer-clojure :exclude`s a core name does not get
+/// core's semantics inlined at its call sites.
+pub fn lower_fn_body_shadowed(
     name: Option<&str>,
     ns: &str,
     params: &[Arc<str>],
     destructures: &[(usize, Form)],
     body: &[Form],
     is_async: bool,
-    seed_reprs: &[crate::Repr],
+    shadows: &CoreShadows,
 ) -> Result<IrFunction, LowerError> {
-    let mut ir = lower_fn_body_destructured(name, ns, params, destructures, body, is_async)?;
-    if seed_reprs.iter().any(|r| *r != crate::Repr::Boxed) {
-        ir.seed_reprs = seed_reprs.to_vec();
-    }
-    Ok(ir)
+    lower_fn_body_impl(name, ns, params, destructures, body, is_async, shadows)
 }
 
 /// Like [`lower_fn_body`], but expands destructuring patterns on the parameters
@@ -170,7 +273,39 @@ pub fn lower_fn_body_destructured(
     body: &[Form],
     is_async: bool,
 ) -> Result<IrFunction, LowerError> {
-    let mut ctx = LowerCtx::new(name.map(Arc::from), Arc::from(ns));
+    lower_fn_body_impl(
+        name,
+        ns,
+        params,
+        destructures,
+        body,
+        is_async,
+        &CoreShadows::none(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn lower_fn_body_impl(
+    name: Option<&str>,
+    ns: &str,
+    params: &[Arc<str>],
+    destructures: &[(usize, Form)],
+    body: &[Form],
+    is_async: bool,
+    shadows: &CoreShadows,
+) -> Result<IrFunction, LowerError> {
+    // `clojure.core`'s own `def`s *are* the core names, so only other
+    // namespaces' definitions shadow.
+    let base_ns = versioned_ns_base(ns).unwrap_or(ns);
+    let shadows = if base_ns == "clojure.core" {
+        shadows.clone()
+    } else {
+        let mut defined: HashSet<Arc<str>> = HashSet::new();
+        collect_defined_names(body, &mut defined);
+        shadows.union(defined)
+    };
+
+    let mut ctx = LowerCtx::new(name.map(Arc::from), Arc::from(ns)).with_core_shadows(shadows);
     ctx.is_async = is_async;
 
     // Bind each param to a fresh VarId.
@@ -323,7 +458,14 @@ fn lower_form(ctx: &mut LowerCtx, form: &Form) -> R {
                 && is_meta_async(meta)
             {
                 lower_fn(ctx, &parts[1..], true)
+            } else if inner.takes_runtime_meta() {
+                // The annotation becomes runtime metadata, exactly as the
+                // tree-walker's `FormKind::Meta` arm does it. Without this the
+                // same expression would answer `meta` one way interpreted and
+                // another way once promoted or AOT-compiled.
+                lower_meta_attach(ctx, meta, inner)
             } else {
+                // A hint, not metadata: the annotation is not even evaluated.
                 lower_form(ctx, inner)
             }
         }
@@ -342,6 +484,120 @@ fn lower_form(ctx: &mut LowerCtx, form: &Form) -> R {
             "tagged literal #{tag} not supported in IR lowering"
         ))),
     }
+}
+
+// ── Reader metadata ───────────────────────────────────────────────────────────
+
+/// Emit a call to a `clojure.core` function by name.
+///
+/// Metadata attachment is rare enough that a dynamic call costs nothing worth
+/// a dedicated instruction, and going through the ordinary call path means
+/// every backend — IR interpreter, JIT and AOT codegen — supports it already.
+fn call_core(ctx: &mut LowerCtx, name: &'static str, args: Vec<VarId>) -> R {
+    let callee = ctx.fresh_var();
+    ctx.emit(Inst::LoadGlobal(
+        callee,
+        Arc::from("clojure.core"),
+        Arc::from(name),
+    ));
+    let dst = ctx.fresh_var();
+    ctx.emit(Inst::Call(dst, callee, args));
+    Ok(dst)
+}
+
+/// Lower a `^meta` annotation to the map it denotes, expanding the same reader
+/// shorthands the tree-walker's `expand_meta_annotation` does.
+fn lower_meta_annotation(ctx: &mut LowerCtx, meta: &Form) -> R {
+    fn entry(ctx: &mut LowerCtx, k: VarId, v: VarId) -> VarId {
+        let dst = ctx.fresh_var();
+        ctx.emit(Inst::AllocMap(dst, vec![(k, v)]));
+        dst
+    }
+    match &meta.kind {
+        // `^:kw` → `{:kw true}`; an auto-keyword resolves against the reading
+        // namespace, which `lower_form` already knows how to do.
+        FormKind::Keyword(_) | FormKind::AutoKeyword(_) => {
+            let k = lower_form(ctx, meta)?;
+            let t = ctx.emit_const(Const::Bool(true));
+            Ok(entry(ctx, k, t))
+        }
+        // `^Sym` → `{:tag Sym}`: the tag is the symbol itself, never the value
+        // the symbol resolves to — so this must not go through `lower_symbol`.
+        FormKind::Symbol(s) => {
+            let k = ctx.emit_const(Const::Keyword(Arc::from("tag")));
+            let v = ctx.emit_const(Const::Symbol(Arc::from(s.as_str())));
+            Ok(entry(ctx, k, v))
+        }
+        // `^"Str"` → `{:tag "Str"}`
+        FormKind::Str(s) => {
+            let k = ctx.emit_const(Const::Keyword(Arc::from("tag")));
+            let v = ctx.emit_const(Const::Str(Arc::from(s.as_str())));
+            Ok(entry(ctx, k, v))
+        }
+        // Already data — the macro expander quoted what it rebuilt from a value.
+        FormKind::Quote(inner) => lower_quote(ctx, inner),
+        // A map literal: its values are evaluated in place.
+        FormKind::Map(_) => lower_form(ctx, meta),
+        // Anything else is a malformed annotation. Declining to lower defers to
+        // the tree-walker, which rejects it with the canonical message —
+        // lowering it instead would report the *merge* failing on a non-map,
+        // so the two tiers would disagree on the error.
+        _ => Err(LowerError::UnsupportedForm(format!(
+            "metadata must be Symbol, Keyword, String or Map, got {:?}",
+            meta.kind
+        ))),
+    }
+}
+
+/// Lower a `^meta` annotation appearing *inside* `quote`, where the general
+/// case is data rather than something to evaluate.
+///
+/// The shorthand table is the same one [`lower_meta_annotation`] uses; only the
+/// general case differs, exactly as it does between the tree-walker's two
+/// callers of `expand_meta_annotation`.
+fn lower_quote_annotation(ctx: &mut LowerCtx, meta: &Form) -> R {
+    fn entry(ctx: &mut LowerCtx, k: VarId, v: VarId) -> VarId {
+        let dst = ctx.fresh_var();
+        ctx.emit(Inst::AllocMap(dst, vec![(k, v)]));
+        dst
+    }
+    match &meta.kind {
+        FormKind::Keyword(_) | FormKind::AutoKeyword(_) => {
+            let k = lower_quote(ctx, meta)?;
+            let t = ctx.emit_const(Const::Bool(true));
+            Ok(entry(ctx, k, t))
+        }
+        FormKind::Symbol(s) => {
+            let k = ctx.emit_const(Const::Keyword(Arc::from("tag")));
+            let v = ctx.emit_const(Const::Symbol(Arc::from(s.as_str())));
+            Ok(entry(ctx, k, v))
+        }
+        FormKind::Str(s) => {
+            let k = ctx.emit_const(Const::Keyword(Arc::from("tag")));
+            let v = ctx.emit_const(Const::Str(Arc::from(s.as_str())));
+            Ok(entry(ctx, k, v))
+        }
+        FormKind::Map(_) | FormKind::Quote(_) => lower_quote(ctx, meta),
+        _ => Err(LowerError::UnsupportedForm(format!(
+            "metadata must be Symbol, Keyword, String or Map, got {:?}",
+            meta.kind
+        ))),
+    }
+}
+
+/// `^m form`, where `form` constructs an `IObj`: attach the annotation to the
+/// value it produces.
+///
+/// Merging rather than replacing is what makes stacked annotations
+/// (`^:a ^:b [1]`) both survive with the outer one winning, matching
+/// `builtins::form::attach_meta` in the tree-walker. `(merge nil m)` is `m`,
+/// so an unannotated value needs no special case.
+fn lower_meta_attach(ctx: &mut LowerCtx, meta: &Form, inner: &Form) -> R {
+    let value = lower_form(ctx, inner)?;
+    let annotation = lower_meta_annotation(ctx, meta)?;
+    let existing = call_core(ctx, "meta", vec![value])?;
+    let merged = call_core(ctx, "merge", vec![existing, annotation])?;
+    call_core(ctx, "with-meta", vec![value, merged])
 }
 
 // ── List dispatch ─────────────────────────────────────────────────────────────
@@ -962,7 +1218,7 @@ fn lower_def(ctx: &mut LowerCtx, args: &[Form]) -> R {
             "def requires a name".into(),
         ));
     }
-    // Name may carry metadata: `(def ^:private x 1)`.
+    // Name may carry metadata, possibly stacked: `(def ^:private ^:dynamic x 1)`.
     let Some(name_str) = args[0].as_symbol().map(Arc::<str>::from) else {
         return Err(LowerError::MalformedSpecialForm(
             "def name must be a symbol".into(),
@@ -1298,7 +1554,7 @@ fn lower_fn(ctx: &mut LowerCtx, args: &[Form], is_async: bool) -> R {
 
 #[allow(clippy::too_many_arguments)]
 fn lower_fn_arity(
-    _parent_ctx: &mut LowerCtx,
+    parent_ctx: &mut LowerCtx,
     arity_name: Option<Arc<str>>,
     ns: Arc<str>,
     capture_names: &[Arc<str>],
@@ -1367,7 +1623,9 @@ fn lower_fn_arity(
         all_param_names.push(ri.name.clone());
     }
 
-    let mut sub = LowerCtx::new(arity_name, ns);
+    // A nested `fn*` is lowered in the same namespace as its parent, so it
+    // inherits the parent's view of what that namespace shadows.
+    let mut sub = LowerCtx::new(arity_name, ns).with_core_shadows(parent_ctx.core_shadows.clone());
     sub.is_async = is_async;
 
     // Bind all params.
@@ -1997,17 +2255,28 @@ fn lower_or(ctx: &mut LowerCtx, args: &[Form]) -> R {
 fn lower_call(ctx: &mut LowerCtx, callee_form: &Form, arg_forms: &[Form]) -> R {
     let sym_name = callee_form.as_symbol();
 
+    // Only a symbol that actually resolves to `clojure.core` here may be
+    // inlined or turned into a `CallKnown`: a local, a parameter, a var this
+    // namespace defs or refers from elsewhere, and an explicitly qualified
+    // `other.ns/count` all name something else, and the tree-walker calls that
+    // something else.  Lowering them as core's would make the answer depend on
+    // which tier is running.
+    let core_name = sym_name.and_then(|name| ctx.core_call_name(name));
+
     // Try inline expansions first.
-    if let Some(name) = sym_name
-        && let Some(result) = try_inline_expansion(ctx, name, arg_forms)?
+    if let Some(bare) = core_name
+        && let Some(result) = try_inline_expansion(ctx, bare, arg_forms)?
     {
         return Ok(result);
     }
 
     // Known function?
     if let Some(name) = sym_name
-        && let Some(known) = resolve_known_fn(name)
+        && let Some(bare) = core_name
+        && let Some(known) = resolve_known_core_fn(bare)
     {
+        // `lower_known_call` falls back to a dynamic call for unsupported
+        // arities; it needs the symbol as written to resolve the var.
         return lower_known_call(ctx, known, name, arg_forms);
     }
 
@@ -2306,12 +2575,15 @@ fn emit_comparison_chain(ctx: &mut LowerCtx, kf: KnownFn, args: Vec<VarId>) -> R
 
 // ── Inline expansions ─────────────────────────────────────────────────────────
 
+/// Expand a `clojure.core` call into IR directly, or `None` when the name has
+/// no inline expansion.  `core_name` is the bare core name the call site
+/// resolves to (see `LowerCtx::core_call_name`), never a raw symbol.
 fn try_inline_expansion(
     ctx: &mut LowerCtx,
-    callee_name: &str,
+    core_name: &str,
     args: &[Form],
 ) -> Result<Option<VarId>, LowerError> {
-    match strip_ns_prefix(callee_name) {
+    match core_name {
         "inc" => {
             let x = lower_form(
                 ctx,
@@ -2584,7 +2856,28 @@ fn lower_quote(ctx: &mut LowerCtx, form: &Form) -> R {
         FormKind::Str(s) => Ok(ctx.emit_const(Const::Str(Arc::from(s.as_str())))),
         FormKind::Char(c) => Ok(ctx.emit_const(Const::Char(*c))),
         FormKind::Keyword(s) => Ok(ctx.emit_const(Const::Keyword(Arc::from(s.as_str())))),
+        FormKind::AutoKeyword(s) => {
+            let full = auto_qualified(ctx, s, "keyword")?;
+            Ok(ctx.emit_const(Const::Keyword(Arc::from(full.as_str()))))
+        }
         FormKind::Symbol(s) => Ok(ctx.emit_const(Const::Symbol(Arc::from(s.as_str())))),
+        // `'^m F`: the annotation is data. Whether it lands is decidable here —
+        // inside `quote` every form is a literal, so the `IObj` test is a
+        // question about the form, not about a runtime value.
+        FormKind::Meta(meta, inner) => {
+            let value = lower_quote(ctx, inner)?;
+            // Expand the annotation even when the value cannot carry it: the
+            // tree-walker rejects a malformed annotation *before* it decides
+            // whether to attach, so returning early here would make `'^42 42`
+            // an error in one tier and `nil` in the other.
+            let annotation = lower_quote_annotation(ctx, meta)?;
+            if !inner.quoted_value_supports_meta() {
+                return Ok(value);
+            }
+            let existing = call_core(ctx, "meta", vec![value])?;
+            let merged = call_core(ctx, "merge", vec![existing, annotation])?;
+            call_core(ctx, "with-meta", vec![value, merged])
+        }
         FormKind::Vector(elems) => {
             let vars: Result<Vec<VarId>, _> = elems.iter().map(|e| lower_quote(ctx, e)).collect();
             let vars = vars?;

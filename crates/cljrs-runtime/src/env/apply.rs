@@ -140,6 +140,10 @@ pub fn type_tag_of(val: &Value) -> Arc<str> {
 /// (`rt_call_ic` in `cljrs-compiler`'s rt_abi) can validate a cached dispatch
 /// tag on the hot path without building a fresh `Arc<str>` per call.
 pub fn type_tag_matches(val: &Value, tag: &str) -> bool {
+    // `type_tag_of` unwraps a metadata wrapper; so must this, or an annotated
+    // dispatch value is a permanent inline-cache miss that re-resolves and
+    // rewrites the entry under lock on every call.
+    let val = val.unwrap_meta();
     match val {
         Value::TypeInstance(ti) => &*ti.get().type_tag == tag,
         Value::NativeObject(obj) => obj.get().type_tag() == tag,

@@ -143,21 +143,19 @@ pub fn eval(form: &Form, env: &mut Env) -> EvalResult {
             }
         }
         FormKind::Meta(meta, form) => {
-            // `^m expr` evaluates `expr` and attaches the annotation, as the
-            // JVM reader does. Values that cannot carry metadata drop it.
+            // `^m expr` evaluates `expr`; the annotation becomes runtime
+            // metadata only on a form that constructs an `IObj` (a collection
+            // literal or an `fn`). Everywhere else it is a compile-time hint,
+            // and — as on the JVM — is not evaluated at all.
+            //
+            // `lower::anf` applies the same rule, so a promoted or AOT-compiled
+            // body answers `meta` the same way an interpreted one does.
             let value = eval(form, env)?;
-            if !crate::builtins::form::supports_meta(&value) {
+            if !form.takes_runtime_meta() {
                 return Ok(value);
             }
-            let m = crate::interp::special::compile_meta_form(meta, env)?;
-            if matches!(m, Value::Nil) {
-                return Ok(value);
-            }
-            let merged = match value.get_meta() {
-                Some(existing) => crate::builtins::form::merge_meta_values(existing, &m),
-                None => m,
-            };
-            Ok(value.with_meta(merged))
+            let m = crate::builtins::form::expand_meta_annotation(meta, &mut |f| eval(f, env))?;
+            Ok(crate::builtins::form::attach_meta(value, m))
         }
 
         // ── Dispatch ──────────────────────────────────────────────────────

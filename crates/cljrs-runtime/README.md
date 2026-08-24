@@ -109,6 +109,9 @@ tests/
                                      cache invalidation on provider/trust-set change
                                      (passes with and without the `deps` feature)
   require_spec_reader_conditional.rs — reader conditionals in ns require specs
+  refer_clojure.rs                 — `(:refer-clojure ...)` narrowing of the core refer
+  core_shadows.rs                  — core_shadowed_names: what a namespace binds
+                                     instead of clojure.core (issue #337)
   declare_macro.rs, doc.rs, gas_meter.rs, into_seq_target.rs, map_entry.rs,
   named_fn_identity.rs, ns_metadata.rs, partition_arities.rs, shared_atom.rs,
   symbolic_nan.rs, threading_macros.rs, auto_gensym.rs, auto_keyword_macro.rs,
@@ -312,6 +315,13 @@ pub fn set_refer_clojure_filter(
     dst_ns: &str,
     filter: Option<ReferClojureFilter>,
 ) -> Result<(), String>;
+
+/// Names `ns_name` resolves to something other than `clojure.core`'s var of
+/// the same name: its own interns, refers from other namespaces (or of a
+/// renamed core var), and names a `(:refer-clojure ...)` filter keeps out of
+/// the automatic core refer.  The IR lowerer must not inline these as core
+/// builtins — see `tiered::lower::core_shadows_for` and issue #337.
+pub fn core_shadowed_names(&self, ns_name: &str) -> HashSet<Arc<str>>;
 ```
 
 `:exclude` stays permissive where `:only`/`:rename` are validated: it is
@@ -652,11 +662,52 @@ parity rule lives here while the message stays at the boundary.
 
 `form_to_value` attaches a `^meta` annotation to the value it denotes, so
 `(meta '^{:x 1} [1])` answers `{:x 1}` as on the JVM. Shorthands expand as the
-reader does (`^:kw` → `{:kw true}`, `^Sym` → `{:tag Sym}`), stacked
-annotations merge with the outer one winning (`merge_meta_values`), and values
-that cannot carry metadata (`supports_meta` — the JVM's `IObj`) drop it rather
-than growing a wrapper. A nil annotation carries nothing, and
-`(with-meta x nil)` clears metadata instead of storing a nil-meta wrapper.
+reader does, stacked annotations merge with the outer one winning, and values
+that cannot carry metadata (the JVM's `IObj`) drop it rather than growing a
+wrapper. A nil annotation carries nothing, and `(with-meta x nil)` clears
+metadata instead of storing a nil-meta wrapper.
+
+An annotation appears in two positions, and they differ in exactly one thing:
+inside `quote` it is data (`'^{:x (+ 1 2)} [1]` keeps the unevaluated list),
+outside it is evaluated (`^{:x (+ 1 2)} [1]` carries `{:x 3}`). Both go through
+`expand_meta_annotation`, parameterised on that one difference, so the two
+shorthand tables cannot drift apart.
+
+*Which* forms take an evaluated annotation as runtime metadata is
+`Form::takes_runtime_meta` in `cljrs-reader` — shared with IR lowering so a
+promoted or AOT-compiled body answers `meta` the same way an interpreted one
+does.
+
+```rust
+/// Values that can carry metadata (the JVM's `IObj`).
+pub fn supports_meta(value: &Value) -> bool;
+
+/// The map a `^meta` annotation denotes, expanding the reader shorthands
+/// (`^:kw` → `{:kw true}`, `^Sym` → `{:tag Sym}`, `^"Str"` → `{:tag "Str"}`).
+/// `general` resolves the non-shorthand case — `form_to_value` inside `quote`,
+/// evaluation outside it. Errors on an annotation that denotes a non-map.
+pub fn expand_meta_annotation(
+    meta: &Form,
+    general: &mut dyn FnMut(&Form) -> EvalResult<Value>,
+) -> EvalResult<Value>;
+
+/// Assoc every entry of `overlay` onto `base`; the outer annotation wins a clash.
+pub fn merge_meta_values(base: &Value, overlay: &Value) -> Value;
+
+/// Attach an expanded annotation to the value it annotates, merging with any
+/// metadata already present and dropping it for a value that cannot carry one.
+pub fn attach_meta(value: Value, annotation: Value) -> Value;
+```
+
+`interp::special::compile_meta_form(meta: &Form, env: &mut Env) ->
+EvalResult<Value>` is the evaluated-position wrapper over
+`expand_meta_annotation`; `def` uses it for a `^meta` on the name.
+
+Metadata is *transparent* to type dispatch and to every `clojure.core`
+predicate: `type_tag_of` and `type_tag_matches` both unwrap (they must agree, or
+an annotated dispatch value is a permanent inline-cache miss), and
+`tests/meta_predicate_gate.rs` drives `ns-publics` rather than a hand-written
+list so a predicate added later is checked without being remembered.
 
 ### Phase B3 — `shared-atom` (cross-isolate, two-tier atom ADR)
 
@@ -942,9 +993,17 @@ pub mod lower {
     /// dependent recording, required off the mutator thread); `None` uses the
     /// legacy externals_for (synchronous callers record dependents themselves).
     pub fn lower_expanded_arity(name, params, rest, destructure_params,
-        destructure_rest, expanded_body, ns, globals_id: u64,
-        arity_id: Option<u64>, do_optimize: bool, is_async: bool)
+        destructure_rest, expanded_body, ns, shadows: &CoreShadows,
+        globals_id: u64, arity_id: Option<u64>, do_optimize: bool,
+        is_async: bool)
         -> Result<(IrFunction, Vec<(Arc<str>, Arc<str>)>), LowerError>;
+
+    /// What `ns` binds that `clojure.core` also publishes, for the lowerer's
+    /// call-position core check (issue #337).  Reads the namespace tables, so
+    /// it must be sampled on the mutator thread — `lower_arity` does it for
+    /// its callers, and `tiered::apply` does it before enqueueing a background
+    /// lowering request.
+    pub fn core_shadows_for(globals: &GlobalEnv, ns: &str) -> CoreShadows;
 }
 
 /// Cross-defn IR registry (in submodule `defn_registry`, Phase 10.5):

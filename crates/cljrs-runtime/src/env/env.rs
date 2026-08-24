@@ -575,6 +575,63 @@ impl GlobalEnv {
         Ok(())
     }
 
+    /// Names `ns_name` resolves to something other than `clojure.core`'s var
+    /// of the same name — what the IR lowerer must not inline as a builtin.
+    ///
+    /// Three things put a name in here: a `def` in `ns_name` itself, a refer
+    /// of that name from another namespace (or of a *different* core name
+    /// under it, via `:rename`), and a `(:refer-clojure ...)` filter that
+    /// leaves the name out of the automatic core refer.  In each case an
+    /// unqualified call resolves to something that is not `clojure.core/name`
+    /// — or to nothing at all — and the tree-walking interpreter calls that,
+    /// so the lowered call site has to as well (issue #337).
+    ///
+    /// A name absent from the namespace's tables is *not* reported: with no
+    /// evidence to the contrary the lowerer keeps assuming core, which is what
+    /// the automatic core refer makes true for the overwhelming majority of
+    /// call sites (and keeps the lowerer's synthetic names, e.g. `case=`,
+    /// working in namespaces whose refers are not populated yet).
+    pub fn core_shadowed_names(&self, ns_name: &str) -> HashSet<Arc<str>> {
+        let mut out: HashSet<Arc<str>> = HashSet::new();
+        let (ns, core) = {
+            let map = self.namespaces.read().unwrap();
+            match map.get(ns_name) {
+                Some(ns) => (ns.clone(), map.get("clojure.core").cloned()),
+                None => return out,
+            }
+        };
+        let ns_ref = ns.get();
+
+        // A var bound here is core's only if it *is* core's var under its own
+        // name; core's own namespace passes this trivially for its interns.
+        let shadows = |name: &Arc<str>, var: &GcPtr<Var>| {
+            let v = var.get();
+            v.namespace.as_ref() != "clojure.core" || v.name != *name
+        };
+        for table in [&ns_ref.interns, &ns_ref.refers] {
+            let entries = table.lock().unwrap();
+            for (name, var) in entries.iter() {
+                if shadows(name, var) {
+                    out.insert(name.clone());
+                }
+            }
+        }
+
+        // Names the `(:refer-clojure ...)` filter kept out of the automatic
+        // refer: nothing binds them here, so they are not core's either.
+        // Lock order is filter → core interns, as in `refer_core_impl`.
+        let filter = ns_ref.refer_clojure_filter.lock().unwrap();
+        if let (Some(filter), Some(core)) = (filter.as_ref(), core) {
+            let interns = core.get().interns.lock().unwrap();
+            for name in interns.keys() {
+                if filter.local_name(name).as_ref() != Some(name) {
+                    out.insert(name.clone());
+                }
+            }
+        }
+        out
+    }
+
     /// Copy selected interns from `src_ns` into `dst_ns` as refers.
     pub fn refer_named(&self, dst_ns: &str, src_ns: &str, names: &[Arc<str>]) {
         let map = self.namespaces.read().unwrap();
