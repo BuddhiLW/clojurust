@@ -749,6 +749,7 @@ dependencies = [
  "cljrs-interop",
  "cljrs-io",
  "cljrs-ir",
+ "cljrs-json",
  "cljrs-lsp",
  "cljrs-net",
  "cljrs-nrepl",
@@ -907,6 +908,19 @@ dependencies = [
  "cljrs-types",
  "postcard",
  "serde",
+]
+
+[[package]]
+name = "cljrs-json"
+version = "0.1.0"
+dependencies = [
+ "cljrs-gc",
+ "cljrs-interop",
+ "cljrs-reader",
+ "cljrs-runtime",
+ "cljrs-stdlib",
+ "cljrs-value",
+ "serde_json",
 ]
 
 [[package]]
@@ -5646,6 +5660,7 @@ version = "1.0.150"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e8014e44b4736ed0538adeecded0fce2a272f22dc9578a7eb6b2d9993c74cfb9"
 dependencies = [
+ "indexmap",
  "itoa",
  "memchr",
  "serde",

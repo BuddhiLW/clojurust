@@ -1,0 +1,40 @@
+[package]
+name = "cljrs-json"
+version = "0.1.0"
+edition = "2024"
+description = "JSON codec for Clojurust, registered as clojure.data.json"
+license.workspace = true
+repository.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = ["regex-full", "deps", "dylib-init"]
+
+# The `cljrs_init` FFI export, for loading this crate as a cdylib at runtime.
+# `#[no_mangle]` makes it a single global symbol, so at most ONE crate carrying
+# it can be linked statically into the cljrs binary — a second is a duplicate-
+# symbol link error. The binary takes this crate with default-features = false
+# and calls `init` directly, so the export stays out of that build.
+dylib-init = []
+
+# Regex engine and pass-throughs. Every workspace dependency below is taken
+# with default features off (see the note in the root Cargo.toml), so what
+# their defaults used to provide is re-exported here and kept in `default`.
+regex-full  = ["cljrs-value/regex-full", "cljrs-runtime/regex-full", "cljrs-interop/regex-full"]
+small-regex = ["cljrs-value/small-regex", "cljrs-runtime/small-regex", "cljrs-interop/small-regex"]
+
+# Pass-through for cljrs-runtime's git-backed dependency support.
+deps = ["cljrs-runtime/deps", "cljrs-interop/deps"]
+
+[dependencies]
+cljrs-runtime = { workspace = true }
+cljrs-interop = { workspace = true }
+cljrs-gc      = { workspace = true }
+cljrs-value   = { workspace = true }
+serde_json = { version = "1", features = ["preserve_order"] }
+
+[dev-dependencies]
+cljrs-stdlib  = { workspace = true }
+cljrs-reader  = { workspace = true }
