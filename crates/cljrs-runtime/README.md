@@ -741,9 +741,11 @@ value; the 2-arity forms read and `alter-var-root`
 
 - `(nanotime)` — nanoseconds since the Unix epoch (wall clock).
 - `(System/currentTimeMillis)` — milliseconds since the Unix epoch.
-- `(System/nanoTime)` — nanoseconds from a fixed origin taken at startup
-  (`init_clock`, called from `register_all`). Monotonic and unaffected by
-  wall-clock adjustments, so only differences are meaningful.
+- `(System/nanoTime)` — nanoseconds from a fixed origin taken at startup on
+  native targets (`init_clock`, called from `register_all`). The eager
+  initialization is skipped on `wasm32-unknown-unknown`, where
+  `Instant::now()` is unavailable. Monotonic and unaffected by wall-clock
+  adjustments, so only differences are meaningful.
 - `(Thread/sleep ms)` — blocks the current thread, same as `(sleep ms)`.
 
 The `System/…` and `Thread/…` names follow the existing `Math/…` convention: a
