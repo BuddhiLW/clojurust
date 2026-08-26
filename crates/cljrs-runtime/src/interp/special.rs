@@ -2429,12 +2429,6 @@ fn require_sym_meta(
     }
 }
 
-fn require_sym<'a>(args: &'a [Form], idx: usize, form_name: &str) -> EvalResult<&'a str> {
-    args.get(idx).and_then(|f| f.as_symbol()).ok_or_else(|| {
-        EvalError::Runtime(format!("{form_name} requires a symbol at position {idx}"))
-    })
-}
-
 // ── with-out-str ──────────────────────────────────────────────────────────────
 
 fn eval_with_out_str(body: &[Form], env: &mut Env) -> EvalResult {
