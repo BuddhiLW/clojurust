@@ -11,7 +11,11 @@ use crate::builtins::new::{builtin_exception_dot, builtin_new};
 use crate::builtins::regex::{
     builtin_re_find, builtin_re_groups, builtin_re_matcher, builtin_re_matches, builtin_re_pattern,
 };
-use crate::builtins::time::builtin_nanotime;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::builtins::time::init_clock;
+use crate::builtins::time::{
+    builtin_current_time_millis, builtin_nanotime, builtin_system_nano_time,
+};
 use crate::builtins::transients::{
     builtin_assoc_bang, builtin_conj_bang, builtin_disj_bang, builtin_dissoc_bang,
     builtin_persistent_bang, builtin_pop_bang, builtin_transient,
@@ -538,21 +542,24 @@ const BUILTIN_DOCS: &[(&str, &str)] = &[
         "Removes the method of a multimethod associated with dispatch-val.",
     ),
     (
+        "System/currentTimeMillis",
+        "Returns the current time in milliseconds since the Unix epoch.",
+    ),
+    (
+        "System/nanoTime",
+        "Returns a monotonic time in nanoseconds from an arbitrary origin; only differences are meaningful.",
+    ),
+    (
+        "Thread/sleep",
+        "Blocks the current thread for n milliseconds.",
+    ),
+    (
+        "eval",
+        "Evaluates a form data structure and returns the result. Sees namespace bindings, not the enclosing lexical scope.",
+    ),
+    (
         "make-hierarchy",
         "Creates a new, independent global hierarchy for use with derive/isa?.",
-    ),
-    (
-        "ancestors",
-        "Returns the immediate and indirect parents of tag, as a set.",
-    ),
-    (
-        "descendants",
-        "Returns the immediate and indirect children of tag, as a set.",
-    ),
-    ("parents", "Returns the immediate parents of tag, as a set."),
-    (
-        "isa?",
-        "Returns true if (= child parent), or child is directly or transitively derived from parent.",
     ),
     // Seq ops
     ("seq", "Returns a seq on coll, or nil if coll is empty/nil."),
@@ -1066,6 +1073,11 @@ const BUILTIN_DOCS: &[(&str, &str)] = &[
 // ── Registration ──────────────────────────────────────────────────────────────
 
 pub fn register_all(globals: &Arc<GlobalEnv>, ns: &str) {
+    // Fix `System/nanoTime`'s origin at startup rather than at the first read.
+    // `Instant::now()` panics on wasm32-unknown-unknown, so keep the origin lazy
+    // there and avoid trapping while the runtime is being constructed.
+    #[cfg(not(target_arch = "wasm32"))]
+    init_clock();
     let fns: Vec<(&str, Arity, fn(&[Value]) -> ValueResult<Value>)> = vec![
         // Arithmetic
         ("+", Arity::Variadic { min: 0 }, builtin_add),
@@ -1444,17 +1456,9 @@ pub fn register_all(globals: &Arc<GlobalEnv>, ns: &str) {
         ("binding", Arity::Variadic { min: 1 }, builtin_stub_nil),
         ("with-out-str", Arity::Variadic { min: 0 }, builtin_stub_nil),
         ("deftype", Arity::Variadic { min: 2 }, builtin_stub_nil),
-        // Hierarchy (stubs — return global hierarchy or nil)
+        // Hierarchy — derive/underive/isa?/parents/ancestors/descendants are
+        // defined in bootstrap.cljrs and documented there.
         ("make-hierarchy", Arity::Fixed(0), builtin_make_hierarchy),
-        ("derive", Arity::Variadic { min: 2 }, builtin_stub_nil),
-        ("underive", Arity::Variadic { min: 2 }, builtin_stub_nil),
-        ("ancestors", Arity::Variadic { min: 1 }, builtin_ancestors),
-        (
-            "descendants",
-            Arity::Variadic { min: 1 },
-            builtin_descendants,
-        ),
-        ("parents", Arity::Variadic { min: 1 }, builtin_parents),
         // Tap system
         (
             "add-tap",
@@ -1545,7 +1549,6 @@ pub fn register_all(globals: &Arc<GlobalEnv>, ns: &str) {
         ("prefer-method", Arity::Fixed(3), builtin_prefer_method),
         ("remove-method", Arity::Fixed(2), builtin_remove_method),
         ("methods", Arity::Fixed(1), builtin_methods),
-        ("isa?", Arity::Fixed(2), builtin_isa_q),
         // Records / reify
         (
             "make-type-instance",
@@ -1656,6 +1659,15 @@ pub fn register_all(globals: &Arc<GlobalEnv>, ns: &str) {
         ),
         // time utils
         ("nanotime", Arity::Fixed(0), builtin_nanotime),
+        (
+            "System/currentTimeMillis",
+            Arity::Fixed(0),
+            builtin_current_time_millis,
+        ),
+        ("System/nanoTime", Arity::Fixed(0), builtin_system_nano_time),
+        ("Thread/sleep", Arity::Fixed(1), builtin_sleep),
+        // eval — intercepted where the environment is available
+        ("eval", Arity::Fixed(1), builtin_eval_sentinel),
     ];
 
     let docs: HashMap<&str, &str> = BUILTIN_DOCS.iter().copied().collect();
@@ -3046,10 +3058,10 @@ fn builtin_compare(args: &[Value]) -> ValueResult<Value> {
 // ── Predicates ────────────────────────────────────────────────────────────────
 
 fn builtin_nil_q(args: &[Value]) -> ValueResult<Value> {
-    Ok(Value::Bool(matches!(args[0], Value::Nil)))
+    Ok(Value::Bool(matches!(args[0].unwrap_meta(), Value::Nil)))
 }
 fn builtin_zero_q(args: &[Value]) -> ValueResult<Value> {
-    let zero = match &args[0] {
+    let zero = match args[0].unwrap_meta() {
         Value::Nil => return Err(ValueError::Other("expected number, got nil".into())),
         Value::Long(n) => *n == 0,
         Value::Double(f) => *f == 0.0,
@@ -3066,7 +3078,7 @@ fn builtin_zero_q(args: &[Value]) -> ValueResult<Value> {
     Ok(Value::Bool(zero))
 }
 fn builtin_pos_q(args: &[Value]) -> ValueResult<Value> {
-    Ok(Value::Bool(match &args[0] {
+    Ok(Value::Bool(match args[0].unwrap_meta() {
         Value::Long(n) => *n > 0,
         Value::Double(f) => *f > 0.0,
         Value::Ratio(r) => r.get().numer().is_positive(),
@@ -3081,7 +3093,7 @@ fn builtin_pos_q(args: &[Value]) -> ValueResult<Value> {
     }))
 }
 fn builtin_neg_q(args: &[Value]) -> ValueResult<Value> {
-    Ok(Value::Bool(match &args[0] {
+    Ok(Value::Bool(match args[0].unwrap_meta() {
         Value::Nil => return Err(ValueError::Other("expected number, got nil".into())),
         Value::Long(n) => *n < 0,
         Value::Double(f) => *f < 0.0,
@@ -3100,14 +3112,20 @@ fn builtin_not(args: &[Value]) -> ValueResult<Value> {
     Ok(Value::Bool(!is_truthy(&args[0])))
 }
 fn builtin_true_q(args: &[Value]) -> ValueResult<Value> {
-    Ok(Value::Bool(matches!(args[0], Value::Bool(true))))
+    Ok(Value::Bool(matches!(
+        args[0].unwrap_meta(),
+        Value::Bool(true)
+    )))
 }
 fn builtin_false_q(args: &[Value]) -> ValueResult<Value> {
-    Ok(Value::Bool(matches!(args[0], Value::Bool(false))))
+    Ok(Value::Bool(matches!(
+        args[0].unwrap_meta(),
+        Value::Bool(false)
+    )))
 }
 fn builtin_number_q(args: &[Value]) -> ValueResult<Value> {
     Ok(Value::Bool(matches!(
-        args[0],
+        args[0].unwrap_meta(),
         Value::Long(_)
             | Value::Double(_)
             | Value::BigInt(_)
@@ -3117,51 +3135,66 @@ fn builtin_number_q(args: &[Value]) -> ValueResult<Value> {
 }
 fn builtin_integer_q(args: &[Value]) -> ValueResult<Value> {
     Ok(Value::Bool(matches!(
-        args[0],
+        args[0].unwrap_meta(),
         Value::Long(_) | Value::BigInt(_)
     )))
 }
 
 fn builtin_int_q(args: &[Value]) -> ValueResult<Value> {
-    Ok(Value::Bool(matches!(args[0], Value::Long(_))))
+    Ok(Value::Bool(matches!(args[0].unwrap_meta(), Value::Long(_))))
 }
 
 fn builtin_double_q(args: &[Value]) -> ValueResult<Value> {
-    Ok(Value::Bool(matches!(args[0], Value::Double(_))))
+    Ok(Value::Bool(matches!(
+        args[0].unwrap_meta(),
+        Value::Double(_)
+    )))
 }
 
 fn builtin_decimal_q(args: &[Value]) -> ValueResult<Value> {
-    Ok(Value::Bool(matches!(args[0], Value::BigDecimal(_))))
+    Ok(Value::Bool(matches!(
+        args[0].unwrap_meta(),
+        Value::BigDecimal(_)
+    )))
 }
 
 fn builtin_rational_q(args: &[Value]) -> ValueResult<Value> {
     Ok(Value::Bool(matches!(
-        args[0],
+        args[0].unwrap_meta(),
         Value::Long(_) | Value::BigInt(_) | Value::Ratio(_) | Value::BigDecimal(_)
     )))
 }
 
 fn builtin_float_q(args: &[Value]) -> ValueResult<Value> {
-    Ok(Value::Bool(matches!(args[0], Value::Double(_))))
+    Ok(Value::Bool(matches!(
+        args[0].unwrap_meta(),
+        Value::Double(_)
+    )))
 }
 fn builtin_string_q(args: &[Value]) -> ValueResult<Value> {
-    Ok(Value::Bool(matches!(args[0], Value::Str(_))))
+    Ok(Value::Bool(matches!(args[0].unwrap_meta(), Value::Str(_))))
 }
 fn builtin_keyword_q(args: &[Value]) -> ValueResult<Value> {
-    Ok(Value::Bool(matches!(args[0], Value::Keyword(_))))
+    Ok(Value::Bool(matches!(
+        args[0].unwrap_meta(),
+        Value::Keyword(_)
+    )))
 }
 fn builtin_symbol_q(args: &[Value]) -> ValueResult<Value> {
-    Ok(Value::Bool(matches!(args[0], Value::Symbol(_))))
+    Ok(Value::Bool(matches!(
+        args[0].unwrap_meta(),
+        Value::Symbol(_)
+    )))
 }
 fn builtin_fn_q(args: &[Value]) -> ValueResult<Value> {
     Ok(Value::Bool(matches!(
-        args[0],
+        args[0].unwrap_meta(),
         Value::Fn(_) | Value::BoundFn(_) | Value::NativeFunction(_)
     )))
 }
 fn builtin_ifn_q(args: &[Value]) -> ValueResult<Value> {
     Ok(Value::Bool(matches!(
-        args[0],
+        args[0].unwrap_meta(),
         Value::Fn(_)
             | Value::BoundFn(_)
             | Value::NativeFunction(_)
@@ -3179,7 +3212,7 @@ fn builtin_ifn_q(args: &[Value]) -> ValueResult<Value> {
 }
 fn builtin_seq_q(args: &[Value]) -> ValueResult<Value> {
     Ok(Value::Bool(matches!(
-        args[0],
+        args[0].unwrap_meta(),
         Value::List(_) | Value::Cons(_) | Value::LazySeq(_)
     )))
 }
@@ -3242,16 +3275,16 @@ fn builtin_coll_q(args: &[Value]) -> ValueResult<Value> {
     Ok(Value::Bool(args[0].is_coll()))
 }
 fn builtin_boolean_q(args: &[Value]) -> ValueResult<Value> {
-    Ok(Value::Bool(matches!(args[0], Value::Bool(_))))
+    Ok(Value::Bool(matches!(args[0].unwrap_meta(), Value::Bool(_))))
 }
 fn builtin_char_q(args: &[Value]) -> ValueResult<Value> {
-    Ok(Value::Bool(matches!(args[0], Value::Char(_))))
+    Ok(Value::Bool(matches!(args[0].unwrap_meta(), Value::Char(_))))
 }
 fn builtin_var_q(args: &[Value]) -> ValueResult<Value> {
-    Ok(Value::Bool(matches!(args[0], Value::Var(_))))
+    Ok(Value::Bool(matches!(args[0].unwrap_meta(), Value::Var(_))))
 }
 fn builtin_atom_q(args: &[Value]) -> ValueResult<Value> {
-    Ok(Value::Bool(matches!(args[0], Value::Atom(_))))
+    Ok(Value::Bool(matches!(args[0].unwrap_meta(), Value::Atom(_))))
 }
 fn builtin_empty_q(args: &[Value]) -> ValueResult<Value> {
     let empty = match args[0].unwrap_meta() {
@@ -6317,7 +6350,10 @@ fn builtin_hash(args: &[Value]) -> ValueResult<Value> {
 }
 
 fn builtin_name(args: &[Value]) -> ValueResult<Value> {
-    match &args[0] {
+    // Metadata-transparent: an annotated symbol is still `named`, and the
+    // name-mangling macro idiom `(symbol (str "make-" (name n)))` routinely
+    // hands one over.
+    match args[0].unwrap_meta() {
         Value::Keyword(k) => Ok(Value::string(k.get().name.as_ref().to_string())),
         Value::Symbol(s) => Ok(Value::string(s.get().name.as_ref().to_string())),
         Value::Str(s) => Ok(Value::Str(s.clone())),
@@ -6329,7 +6365,7 @@ fn builtin_name(args: &[Value]) -> ValueResult<Value> {
 }
 
 fn builtin_namespace(args: &[Value]) -> ValueResult<Value> {
-    match &args[0] {
+    match args[0].unwrap_meta() {
         Value::Keyword(k) => Ok(match &k.get().namespace {
             Some(ns) => Value::string(ns.as_ref().to_string()),
             None => Value::Nil,
@@ -7189,26 +7225,6 @@ fn builtin_make_hierarchy(_args: &[Value]) -> ValueResult<Value> {
     Ok(Value::Map(MapValue::Hash(GcPtr::new(m))))
 }
 
-fn builtin_ancestors(args: &[Value]) -> ValueResult<Value> {
-    // Stub: return empty set
-    let _ = args;
-    Ok(Value::Set(SetValue::Hash(GcPtr::new(
-        cljrs_value::collections::PersistentHashSet::empty(),
-    ))))
-}
-
-fn builtin_descendants(args: &[Value]) -> ValueResult<Value> {
-    let _ = args;
-    Ok(Value::Set(SetValue::Hash(GcPtr::new(
-        cljrs_value::collections::PersistentHashSet::empty(),
-    ))))
-}
-
-fn builtin_parents(args: &[Value]) -> ValueResult<Value> {
-    let _ = args;
-    Ok(Value::Nil)
-}
-
 // ── bound-fn* ────────────────────────────────────────────────────────────────
 
 fn builtin_bound_fn_star(args: &[Value]) -> ValueResult<Value> {
@@ -7927,6 +7943,7 @@ fn builtin_remove_method(args: &[Value]) -> ValueResult<Value> {
     };
     let key = format!("{}", args[1]);
     mf.get().methods.lock().unwrap().remove(&key);
+    mf.get().dispatch_vals.lock().unwrap().remove(&key);
     Ok(Value::MultiFn(mf.clone()))
 }
 
@@ -7946,11 +7963,6 @@ fn builtin_methods(args: &[Value]) -> ValueResult<Value> {
         m = m.assoc(Value::string(k.clone()), v.clone());
     }
     Ok(Value::Map(m))
-}
-
-fn builtin_isa_q(args: &[Value]) -> ValueResult<Value> {
-    // Stub: equality only; full hierarchy deferred.
-    Ok(Value::Bool(args[0] == args[1]))
 }
 
 // ── Phase 7 — Concurrency primitives ─────────────────────────────────────────
@@ -8452,8 +8464,19 @@ fn builtin_with_meta(args: &[Value]) -> ValueResult<Value> {
             ns.get().set_meta(args[1].clone());
             Ok(args[0].clone())
         }
+        // `(with-meta x nil)` clears metadata; storing a nil-meta wrapper would
+        // leave a value that is no longer `identical?` to itself after a clone.
+        _ if matches!(args[1], Value::Nil) => Ok(args[0].unwrap_meta().clone()),
         _ => Ok(args[0].clone().with_meta(args[1].clone())),
     }
+}
+
+/// Sentinel — `eval` is intercepted in `eval_call` because it needs env.
+fn builtin_eval_sentinel(_args: &[Value]) -> ValueResult<Value> {
+    Err(ValueError::WrongType {
+        expected: "intercepted",
+        got: "eval sentinel should not be called directly".to_string(),
+    })
 }
 
 /// Sentinel — `vary-meta` is intercepted in `eval_call` because it needs env.

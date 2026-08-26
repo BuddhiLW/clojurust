@@ -458,7 +458,14 @@ fn lower_form(ctx: &mut LowerCtx, form: &Form) -> R {
                 && is_meta_async(meta)
             {
                 lower_fn(ctx, &parts[1..], true)
+            } else if inner.takes_runtime_meta() {
+                // The annotation becomes runtime metadata, exactly as the
+                // tree-walker's `FormKind::Meta` arm does it. Without this the
+                // same expression would answer `meta` one way interpreted and
+                // another way once promoted or AOT-compiled.
+                lower_meta_attach(ctx, meta, inner)
             } else {
+                // A hint, not metadata: the annotation is not even evaluated.
                 lower_form(ctx, inner)
             }
         }
@@ -477,6 +484,120 @@ fn lower_form(ctx: &mut LowerCtx, form: &Form) -> R {
             "tagged literal #{tag} not supported in IR lowering"
         ))),
     }
+}
+
+// ── Reader metadata ───────────────────────────────────────────────────────────
+
+/// Emit a call to a `clojure.core` function by name.
+///
+/// Metadata attachment is rare enough that a dynamic call costs nothing worth
+/// a dedicated instruction, and going through the ordinary call path means
+/// every backend — IR interpreter, JIT and AOT codegen — supports it already.
+fn call_core(ctx: &mut LowerCtx, name: &'static str, args: Vec<VarId>) -> R {
+    let callee = ctx.fresh_var();
+    ctx.emit(Inst::LoadGlobal(
+        callee,
+        Arc::from("clojure.core"),
+        Arc::from(name),
+    ));
+    let dst = ctx.fresh_var();
+    ctx.emit(Inst::Call(dst, callee, args));
+    Ok(dst)
+}
+
+/// Lower a `^meta` annotation to the map it denotes, expanding the same reader
+/// shorthands the tree-walker's `expand_meta_annotation` does.
+fn lower_meta_annotation(ctx: &mut LowerCtx, meta: &Form) -> R {
+    fn entry(ctx: &mut LowerCtx, k: VarId, v: VarId) -> VarId {
+        let dst = ctx.fresh_var();
+        ctx.emit(Inst::AllocMap(dst, vec![(k, v)]));
+        dst
+    }
+    match &meta.kind {
+        // `^:kw` → `{:kw true}`; an auto-keyword resolves against the reading
+        // namespace, which `lower_form` already knows how to do.
+        FormKind::Keyword(_) | FormKind::AutoKeyword(_) => {
+            let k = lower_form(ctx, meta)?;
+            let t = ctx.emit_const(Const::Bool(true));
+            Ok(entry(ctx, k, t))
+        }
+        // `^Sym` → `{:tag Sym}`: the tag is the symbol itself, never the value
+        // the symbol resolves to — so this must not go through `lower_symbol`.
+        FormKind::Symbol(s) => {
+            let k = ctx.emit_const(Const::Keyword(Arc::from("tag")));
+            let v = ctx.emit_const(Const::Symbol(Arc::from(s.as_str())));
+            Ok(entry(ctx, k, v))
+        }
+        // `^"Str"` → `{:tag "Str"}`
+        FormKind::Str(s) => {
+            let k = ctx.emit_const(Const::Keyword(Arc::from("tag")));
+            let v = ctx.emit_const(Const::Str(Arc::from(s.as_str())));
+            Ok(entry(ctx, k, v))
+        }
+        // Already data — the macro expander quoted what it rebuilt from a value.
+        FormKind::Quote(inner) => lower_quote(ctx, inner),
+        // A map literal: its values are evaluated in place.
+        FormKind::Map(_) => lower_form(ctx, meta),
+        // Anything else is a malformed annotation. Declining to lower defers to
+        // the tree-walker, which rejects it with the canonical message —
+        // lowering it instead would report the *merge* failing on a non-map,
+        // so the two tiers would disagree on the error.
+        _ => Err(LowerError::UnsupportedForm(format!(
+            "metadata must be Symbol, Keyword, String or Map, got {:?}",
+            meta.kind
+        ))),
+    }
+}
+
+/// Lower a `^meta` annotation appearing *inside* `quote`, where the general
+/// case is data rather than something to evaluate.
+///
+/// The shorthand table is the same one [`lower_meta_annotation`] uses; only the
+/// general case differs, exactly as it does between the tree-walker's two
+/// callers of `expand_meta_annotation`.
+fn lower_quote_annotation(ctx: &mut LowerCtx, meta: &Form) -> R {
+    fn entry(ctx: &mut LowerCtx, k: VarId, v: VarId) -> VarId {
+        let dst = ctx.fresh_var();
+        ctx.emit(Inst::AllocMap(dst, vec![(k, v)]));
+        dst
+    }
+    match &meta.kind {
+        FormKind::Keyword(_) | FormKind::AutoKeyword(_) => {
+            let k = lower_quote(ctx, meta)?;
+            let t = ctx.emit_const(Const::Bool(true));
+            Ok(entry(ctx, k, t))
+        }
+        FormKind::Symbol(s) => {
+            let k = ctx.emit_const(Const::Keyword(Arc::from("tag")));
+            let v = ctx.emit_const(Const::Symbol(Arc::from(s.as_str())));
+            Ok(entry(ctx, k, v))
+        }
+        FormKind::Str(s) => {
+            let k = ctx.emit_const(Const::Keyword(Arc::from("tag")));
+            let v = ctx.emit_const(Const::Str(Arc::from(s.as_str())));
+            Ok(entry(ctx, k, v))
+        }
+        FormKind::Map(_) | FormKind::Quote(_) => lower_quote(ctx, meta),
+        _ => Err(LowerError::UnsupportedForm(format!(
+            "metadata must be Symbol, Keyword, String or Map, got {:?}",
+            meta.kind
+        ))),
+    }
+}
+
+/// `^m form`, where `form` constructs an `IObj`: attach the annotation to the
+/// value it produces.
+///
+/// Merging rather than replacing is what makes stacked annotations
+/// (`^:a ^:b [1]`) both survive with the outer one winning, matching
+/// `builtins::form::attach_meta` in the tree-walker. `(merge nil m)` is `m`,
+/// so an unannotated value needs no special case.
+fn lower_meta_attach(ctx: &mut LowerCtx, meta: &Form, inner: &Form) -> R {
+    let value = lower_form(ctx, inner)?;
+    let annotation = lower_meta_annotation(ctx, meta)?;
+    let existing = call_core(ctx, "meta", vec![value])?;
+    let merged = call_core(ctx, "merge", vec![existing, annotation])?;
+    call_core(ctx, "with-meta", vec![value, merged])
 }
 
 // ── List dispatch ─────────────────────────────────────────────────────────────
@@ -952,7 +1073,7 @@ fn lower_let(ctx: &mut LowerCtx, args: &[Form]) -> R {
             "let requires a binding vector".into(),
         ));
     }
-    let FormKind::Vector(bindings) = &args[0].kind else {
+    let Some(bindings) = args[0].as_vector() else {
         return Err(LowerError::MalformedSpecialForm(
             "let bindings must be a vector".into(),
         ));
@@ -990,7 +1111,7 @@ fn lower_loop(ctx: &mut LowerCtx, args: &[Form]) -> R {
             "loop requires a binding vector".into(),
         ));
     }
-    let FormKind::Vector(bindings) = &args[0].kind else {
+    let Some(bindings) = args[0].as_vector() else {
         return Err(LowerError::MalformedSpecialForm(
             "loop bindings must be a vector".into(),
         ));
@@ -1098,12 +1219,11 @@ fn lower_def(ctx: &mut LowerCtx, args: &[Form]) -> R {
         ));
     }
     // Name may carry metadata, possibly stacked: `(def ^:private ^:dynamic x 1)`.
-    let FormKind::Symbol(s) = &peel_meta(&args[0]).kind else {
+    let Some(name_str) = args[0].as_symbol().map(Arc::<str>::from) else {
         return Err(LowerError::MalformedSpecialForm(
             "def name must be a symbol".into(),
         ));
     };
-    let name_str: Arc<str> = Arc::from(s.as_str());
     let ns = ctx.ns().clone();
 
     let val = if args.len() >= 2 {
@@ -1126,33 +1246,20 @@ fn lower_defn(ctx: &mut LowerCtx, args: &[Form]) -> R {
         ));
     }
     // Name may carry `^:async` metadata: `(defn ^:async foo [x] ...)`.
-    let (name_str, is_async) = match &args[0].kind {
-        FormKind::Symbol(s) => (s.clone(), false),
-        FormKind::Meta(meta, inner) => {
-            let FormKind::Symbol(s) = &inner.kind else {
-                return Err(LowerError::MalformedSpecialForm(
-                    "defn name must be a symbol".into(),
-                ));
-            };
-            (s.clone(), is_meta_async(meta))
-        }
-        _ => {
-            return Err(LowerError::MalformedSpecialForm(
-                "defn name must be a symbol".into(),
-            ));
-        }
+    let (name_metas, name_form) = args[0].peel_meta();
+    let Some(name_str) = name_form.as_symbol().map(str::to_string) else {
+        return Err(LowerError::MalformedSpecialForm(
+            "defn name must be a symbol".into(),
+        ));
     };
+    let is_async = name_metas.iter().any(|m| is_meta_async(m));
 
     // Normalise args[0] to a plain symbol (strip metadata for fn name arg).
     let plain_name_form = Form::new(FormKind::Symbol(name_str.clone()), args[0].span.clone());
 
     // Skip optional docstring.
     let rest_start = if args.len() > 2 {
-        if let FormKind::Str(_) = &args[1].kind {
-            2
-        } else {
-            1
-        }
+        if args[1].as_string().is_some() { 2 } else { 1 }
     } else {
         1
     };
@@ -1182,9 +1289,9 @@ fn desugar_pre_post_conditions(body: &[Form]) -> Vec<Form> {
         Some(f) => f,
         None => return body.to_vec(),
     };
-    let entries = match &first.kind {
-        FormKind::Map(entries) => entries,
-        _ => return body.to_vec(),
+    let entries = match first.as_map() {
+        Some(entries) => entries,
+        None => return body.to_vec(),
     };
 
     let mut pre_conds: Vec<Form> = Vec::new();
@@ -1271,9 +1378,7 @@ fn parse_params(params_vec: &[Form]) -> Result<(Vec<Form>, Option<Form>), LowerE
     let mut rest: Option<Form> = None;
     let mut i = 0;
     while i < params_vec.len() {
-        if let FormKind::Symbol(s) = &params_vec[i].kind
-            && s == "&"
-        {
+        if params_vec[i].as_symbol() == Some("&") {
             i += 1;
             if i >= params_vec.len() {
                 return Err(LowerError::MalformedSpecialForm(
@@ -1297,8 +1402,8 @@ struct AritySpec {
 
 fn lower_fn(ctx: &mut LowerCtx, args: &[Form], is_async: bool) -> R {
     // Detect optional name.
-    let (fn_name, body_start) = if let Some(FormKind::Symbol(s)) = args.first().map(|f| &f.kind) {
-        (Some(s.clone()), 1)
+    let (fn_name, body_start) = if let Some(s) = args.first().and_then(|f| f.as_symbol()) {
+        (Some(s.to_string()), 1)
     } else {
         (None, 0)
     };
@@ -1351,12 +1456,9 @@ fn lower_fn(ctx: &mut LowerCtx, args: &[Form], is_async: bool) -> R {
 
     // Parse arities: single [params] body... or multi ([params] body...) ...
     let raw_arities: Vec<AritySpec> = if !rest_args.is_empty() {
-        if let FormKind::Vector(_) = &rest_args[0].kind {
+        if let Some(params_vec) = rest_args[0].as_vector() {
             // Single arity
-            let (fixed, rest) = parse_params(match &rest_args[0].kind {
-                FormKind::Vector(v) => v,
-                _ => unreachable!(),
-            })?;
+            let (fixed, rest) = parse_params(params_vec)?;
             vec![AritySpec {
                 fixed,
                 rest,
@@ -1367,12 +1469,12 @@ fn lower_fn(ctx: &mut LowerCtx, args: &[Form], is_async: bool) -> R {
             rest_args
                 .iter()
                 .map(|arity_form| {
-                    let FormKind::List(arity_parts) = &arity_form.kind else {
+                    let Some(arity_parts) = arity_form.as_list() else {
                         return Err(LowerError::MalformedSpecialForm(
                             "fn* multi-arity: expected list".into(),
                         ));
                     };
-                    let FormKind::Vector(params_vec) = &arity_parts[0].kind else {
+                    let Some(params_vec) = arity_parts[0].as_vector() else {
                         return Err(LowerError::MalformedSpecialForm(
                             "fn* arity: first element must be param vector".into(),
                         ));
@@ -1475,11 +1577,8 @@ fn lower_fn_arity(
         .map(|p| {
             // Peel a `^hint` wrapper, recording the scalar repr seed; the inner
             // form is then handled as a plain symbol or destructuring pattern.
-            let (repr, p) = if let FormKind::Meta(meta, inner) = &p.kind {
-                (meta_tag_repr(meta), inner.as_ref())
-            } else {
-                (None, p)
-            };
+            let (metas, p) = p.peel_meta();
+            let repr = metas.iter().find_map(|m| meta_tag_repr(m));
             if let FormKind::Symbol(s) = &p.kind {
                 ParamInfo {
                     name: Arc::from(s.as_str()),
@@ -1499,11 +1598,7 @@ fn lower_fn_arity(
     let rest_info: Option<ParamInfo> = rest_param.map(|p| {
         // A rest param binds a seq, so any hint carries no scalar repr; just
         // peel it so the inner symbol/pattern is handled correctly.
-        let p = if let FormKind::Meta(_, inner) = &p.kind {
-            inner.as_ref()
-        } else {
-            p
-        };
+        let p = p.unmeta();
         if let FormKind::Symbol(s) = &p.kind {
             ParamInfo {
                 name: Arc::from(s.as_str()),
@@ -1689,19 +1784,17 @@ fn lower_try(ctx: &mut LowerCtx, args: &[Form]) -> R {
         .collect();
 
     let catch_form = args.iter().find(|f| {
-        if let FormKind::List(p) = &f.kind {
-            matches!(p.first().map(|h| &h.kind), Some(FormKind::Symbol(s)) if s == "catch")
-        } else {
-            false
-        }
+        f.as_list()
+            .and_then(|p| p.first())
+            .and_then(|h| h.as_symbol())
+            == Some("catch")
     });
 
     let finally_form = args.iter().find(|f| {
-        if let FormKind::List(p) = &f.kind {
-            matches!(p.first().map(|h| &h.kind), Some(FormKind::Symbol(s)) if s == "finally")
-        } else {
-            false
-        }
+        f.as_list()
+            .and_then(|p| p.first())
+            .and_then(|h| h.as_symbol())
+            == Some("finally")
     });
 
     let ns = ctx.ns().clone();
@@ -1739,16 +1832,12 @@ fn lower_try(ctx: &mut LowerCtx, args: &[Form]) -> R {
 
     // Catch closure.
     let catch_closure = if let Some(cf) = catch_form {
-        if let FormKind::List(cp) = &cf.kind {
-            let catch_sym = if cp.len() > 2 {
-                if let FormKind::Symbol(s) = &cp[2].kind {
-                    s.clone()
-                } else {
-                    "e".to_string()
-                }
-            } else {
-                "e".to_string()
-            };
+        if let Some(cp) = cf.as_list() {
+            let catch_sym = cp
+                .get(2)
+                .and_then(|f| f.as_symbol())
+                .unwrap_or("e")
+                .to_string();
             let catch_body = if cp.len() > 3 {
                 cp[3..].to_vec()
             } else {
@@ -1794,7 +1883,7 @@ fn lower_try(ctx: &mut LowerCtx, args: &[Form]) -> R {
 
     // Finally closure.
     let finally_closure = if let Some(ff) = finally_form {
-        if let FormKind::List(fp) = &ff.kind {
+        if let Some(fp) = ff.as_list() {
             let fin_body = fp[1..].to_vec();
             let fin_name: Arc<str> =
                 Arc::from(format!("__cljrs_try_finally_{}", fresh_global_name_id()).as_str());
@@ -1856,7 +1945,7 @@ fn lower_binding(ctx: &mut LowerCtx, args: &[Form]) -> R {
             "binding requires a binding vector".into(),
         ));
     }
-    let FormKind::Vector(bindings) = &args[0].kind else {
+    let Some(bindings) = args[0].as_vector() else {
         return Err(LowerError::MalformedSpecialForm(
             "binding bindings must be a vector".into(),
         ));
@@ -1871,8 +1960,7 @@ fn lower_binding(ctx: &mut LowerCtx, args: &[Form]) -> R {
     let mut flat_bindings: Vec<VarId> = Vec::new();
     let mut i = 0;
     while i + 1 < bindings.len() {
-        let var_sym = &bindings[i];
-        let FormKind::Symbol(sym_str) = &var_sym.kind else {
+        let Some(sym_str) = bindings[i].as_symbol() else {
             return Err(LowerError::MalformedSpecialForm(
                 "binding var must be a symbol".into(),
             ));
@@ -1938,7 +2026,7 @@ fn lower_letfn(ctx: &mut LowerCtx, args: &[Form]) -> R {
             "letfn requires bindings and body".into(),
         ));
     }
-    let FormKind::Vector(bindings) = &args[0].kind else {
+    let Some(bindings) = args[0].as_vector() else {
         return Err(LowerError::MalformedSpecialForm(
             "letfn bindings must be a vector".into(),
         ));
@@ -1955,12 +2043,12 @@ fn lower_letfn(ctx: &mut LowerCtx, args: &[Form]) -> R {
     let parsed: Vec<LetfnBinding> = bindings
         .iter()
         .map(|b| {
-            let FormKind::List(parts) = &b.kind else {
+            let Some(parts) = b.as_list() else {
                 return Err(LowerError::MalformedSpecialForm(
                     "letfn binding must be a list".into(),
                 ));
             };
-            let FormKind::Symbol(sym) = &parts[0].kind else {
+            let Some(sym) = parts[0].as_symbol() else {
                 return Err(LowerError::MalformedSpecialForm(
                     "letfn binding name must be a symbol".into(),
                 ));
@@ -1971,7 +2059,7 @@ fn lower_letfn(ctx: &mut LowerCtx, args: &[Form]) -> R {
                 ));
             }
             Ok(LetfnBinding {
-                name: Arc::from(sym.as_str()),
+                name: Arc::from(sym),
                 params: parts[1].clone(),
                 body: parts[2..].to_vec(),
             })
@@ -2165,11 +2253,7 @@ fn lower_or(ctx: &mut LowerCtx, args: &[Form]) -> R {
 // ── Call lowering ─────────────────────────────────────────────────────────────
 
 fn lower_call(ctx: &mut LowerCtx, callee_form: &Form, arg_forms: &[Form]) -> R {
-    let sym_name = if let FormKind::Symbol(s) = &callee_form.kind {
-        Some(s.as_str())
-    } else {
-        None
-    };
+    let sym_name = callee_form.as_symbol();
 
     // Only a symbol that actually resolves to `clojure.core` here may be
     // inlined or turned into a `CallKnown`: a local, a parameter, a var this
@@ -2772,7 +2856,28 @@ fn lower_quote(ctx: &mut LowerCtx, form: &Form) -> R {
         FormKind::Str(s) => Ok(ctx.emit_const(Const::Str(Arc::from(s.as_str())))),
         FormKind::Char(c) => Ok(ctx.emit_const(Const::Char(*c))),
         FormKind::Keyword(s) => Ok(ctx.emit_const(Const::Keyword(Arc::from(s.as_str())))),
+        FormKind::AutoKeyword(s) => {
+            let full = auto_qualified(ctx, s, "keyword")?;
+            Ok(ctx.emit_const(Const::Keyword(Arc::from(full.as_str()))))
+        }
         FormKind::Symbol(s) => Ok(ctx.emit_const(Const::Symbol(Arc::from(s.as_str())))),
+        // `'^m F`: the annotation is data. Whether it lands is decidable here —
+        // inside `quote` every form is a literal, so the `IObj` test is a
+        // question about the form, not about a runtime value.
+        FormKind::Meta(meta, inner) => {
+            let value = lower_quote(ctx, inner)?;
+            // Expand the annotation even when the value cannot carry it: the
+            // tree-walker rejects a malformed annotation *before* it decides
+            // whether to attach, so returning early here would make `'^42 42`
+            // an error in one tier and `nil` in the other.
+            let annotation = lower_quote_annotation(ctx, meta)?;
+            if !inner.quoted_value_supports_meta() {
+                return Ok(value);
+            }
+            let existing = call_core(ctx, "meta", vec![value])?;
+            let merged = call_core(ctx, "merge", vec![existing, annotation])?;
+            call_core(ctx, "with-meta", vec![value, merged])
+        }
         FormKind::Vector(elems) => {
             let vars: Result<Vec<VarId>, _> = elems.iter().map(|e| lower_quote(ctx, e)).collect();
             let vars = vars?;

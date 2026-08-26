@@ -142,9 +142,20 @@ pub fn eval(form: &Form, env: &mut Env) -> EvalResult {
                 Err(EvalError::Runtime("var requires a symbol".into()))
             }
         }
-        FormKind::Meta(_, form) => {
-            // Ignore metadata in Phase 4; just eval the annotated form.
-            eval(form, env)
+        FormKind::Meta(meta, form) => {
+            // `^m expr` evaluates `expr`; the annotation becomes runtime
+            // metadata only on a form that constructs an `IObj` (a collection
+            // literal or an `fn`). Everywhere else it is a compile-time hint,
+            // and — as on the JVM — is not evaluated at all.
+            //
+            // `lower::anf` applies the same rule, so a promoted or AOT-compiled
+            // body answers `meta` the same way an interpreted one does.
+            let value = eval(form, env)?;
+            if !form.takes_runtime_meta() {
+                return Ok(value);
+            }
+            let m = crate::builtins::form::expand_meta_annotation(meta, &mut |f| eval(f, env))?;
+            Ok(crate::builtins::form::attach_meta(value, m))
         }
 
         // ── Dispatch ──────────────────────────────────────────────────────
@@ -194,7 +205,7 @@ fn eval_list(forms: &[Form], env: &mut Env) -> EvalResult {
     };
 
     // Check for special form.
-    if let FormKind::Symbol(s) = &forms[0].kind
+    if let Some(s) = forms[0].as_symbol()
         && is_special_form(s)
     {
         return eval_special(s, &forms[1..], env);
