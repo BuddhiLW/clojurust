@@ -49,6 +49,7 @@ pub(crate) fn builtin_system_nano_time(_args: &[Value]) -> ValueResult<Value> {
 }
 
 /// Force the origin to be taken at startup rather than at the first reading.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn init_clock() {
     let _ = epoch();
 }

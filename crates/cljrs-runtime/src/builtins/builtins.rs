@@ -11,8 +11,10 @@ use crate::builtins::new::{builtin_exception_dot, builtin_new};
 use crate::builtins::regex::{
     builtin_re_find, builtin_re_groups, builtin_re_matcher, builtin_re_matches, builtin_re_pattern,
 };
+#[cfg(not(target_arch = "wasm32"))]
+use crate::builtins::time::init_clock;
 use crate::builtins::time::{
-    builtin_current_time_millis, builtin_nanotime, builtin_system_nano_time, init_clock,
+    builtin_current_time_millis, builtin_nanotime, builtin_system_nano_time,
 };
 use crate::builtins::transients::{
     builtin_assoc_bang, builtin_conj_bang, builtin_disj_bang, builtin_dissoc_bang,
@@ -1086,6 +1088,9 @@ const BUILTIN_DOCS: &[(&str, &str)] = &[
 
 pub fn register_all(globals: &Arc<GlobalEnv>, ns: &str) {
     // Fix `System/nanoTime`'s origin at startup rather than at the first read.
+    // `Instant::now()` panics on wasm32-unknown-unknown, so keep the origin lazy
+    // there and avoid trapping while the runtime is being constructed.
+    #[cfg(not(target_arch = "wasm32"))]
     init_clock();
     let fns: Vec<(&str, Arity, fn(&[Value]) -> ValueResult<Value>)> = vec![
         // Arithmetic

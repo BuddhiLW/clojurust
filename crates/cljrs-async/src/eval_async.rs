@@ -464,7 +464,9 @@ async fn eval_loop_async(args: &[Form], env: &mut Env) -> EvalResult {
 async fn eval_call_async(head: &Form, args: &[Form], whole: &Form, env: &mut Env) -> EvalResult {
     let callee = eval(head, env)?;
     match &callee {
-        Value::NativeFunction(nf) if cljrs_runtime::interp::apply::is_form_intercepted(&nf.get().name) => {
+        Value::NativeFunction(nf)
+            if cljrs_runtime::interp::apply::is_form_intercepted(&nf.get().name) =>
+        {
             return eval(whole, env);
         }
         // A macro head should have been expanded already, but guard regardless.
