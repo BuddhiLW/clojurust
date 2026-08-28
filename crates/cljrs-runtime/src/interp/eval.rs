@@ -15,8 +15,8 @@ use cljrs_reader::form::FormKind;
 use cljrs_value::regex::Pattern;
 use cljrs_value::value::SetValue;
 use cljrs_value::{
-    FutureState, Keyword, MapValue, PersistentHashSet, PersistentList, PersistentVector, Symbol,
-    Value,
+    CljxFuture, FutureState, Keyword, MapValue, PersistentHashSet, PersistentList,
+    PersistentVector, Symbol, Value,
 };
 
 /// Evaluate a `Form` in the given `Env`.
@@ -372,7 +372,7 @@ pub fn deref_value(v: Value) -> EvalResult {
                         return Err(EvalError::GasExhausted);
                     }
                     FutureState::Cancelled => {
-                        return Err(EvalError::Runtime("future was cancelled".into()));
+                        return Err(EvalError::Thrown(CljxFuture::cancelled_error()));
                     }
                     FutureState::Running => {
                         guard = f.get().cond.wait(guard).unwrap();

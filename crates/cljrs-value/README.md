@@ -533,6 +533,19 @@ pub struct CljxFuture {
     pub cond: Condvar,
 }
 
+impl CljxFuture {
+    pub fn is_done(&self) -> bool;
+    pub fn is_cancelled(&self) -> bool;
+    /// Running -> Cancelled, waking waiters; false if it had already settled.
+    pub fn cancel(&self) -> bool;
+    /// The catchable `Value::Error` every reader of a cancelled future raises.
+    pub fn cancelled_error() -> Value;
+    pub fn mark_observed(&self);
+}
+
+/// Message carried by `CljxFuture::cancelled_error()`.
+pub const FUTURE_CANCELLED_MSG: &str = "future was cancelled";
+
 pub struct Agent {
     pub state: Arc<Mutex<Value>>,
     pub error: Arc<Mutex<Option<String>>>,

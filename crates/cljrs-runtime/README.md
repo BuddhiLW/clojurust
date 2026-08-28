@@ -781,6 +781,20 @@ thread; it is a task on the *caller's* executor. Consequences:
   in sync code it is currently a hang, which is the known sharp edge here.
 - `future-cancel` marks the result cancelled (awaiting it raises) but does not
   interrupt a task already running, like a JVM future past its interrupt point.
+  Cancellation is *sticky*: a task cancelled mid-body still runs to completion,
+  so its side effects happen, but its result is discarded — `future-cancelled?`
+  never un-becomes true and `await` keeps raising. Every reader of a cancelled
+  future (sync `await`/`deref`, the async tree-walker, the compiled state
+  machine) raises the same catchable error, message `future was cancelled`.
+- **Dynamic bindings are not conveyed.** `binding` is a thread-local stack with
+  an RAII guard, and `future-call` builds a fresh `Env` for the task, so
+  `(binding [*foo* 1] (future *foo*))` sees the *root* binding — unlike the JVM,
+  which conveys the caller's frame. The converse also holds: because the stack
+  is per-thread and tasks share the thread, a task polled while another task
+  holds a binding frame across a yield can observe that frame. This is a
+  property of the async substrate rather than of `future` itself, but `future`
+  is what makes it reachable from ordinary code; bind inside the body if the
+  task needs a binding.
 
 Genuine parallelism across threads is the isolate boundary
 (`cljrs-async`'s `Isolate` + `isolate-chan`), where values cross by copy.

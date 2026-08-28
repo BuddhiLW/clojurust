@@ -155,3 +155,62 @@ fn the_future_predicates_reject_other_values() {
         );
     });
 }
+
+#[test]
+fn cancellation_is_sticky_when_the_cancelled_task_later_completes() {
+    // `future-cancel` does not interrupt the task: a future parked mid-body
+    // keeps running once whatever it awaits resolves, and settles afterwards.
+    // Cancel still wins — the state must not flip back from Cancelled, or
+    // `future-cancelled?` would un-become true and `await` would yield a value
+    // it had already raised on.
+    assert_eq!(
+        run("(def log (atom [])) \
+             (let [p (promise) \
+                   f (future (await p) (swap! log conj :finished) :v)] \
+               (await (future nil))                      ; f starts, parks on (await p)
+               (let [cancelled (future-cancel f)] \
+                 (deliver p nil) \
+                 (await (future nil)) (await (future nil)) ; f's task resumes and settles
+                 [cancelled (future-cancelled? f) (future-done? f) @log \
+                  (try (await f) (catch Exception e (ex-message e)))]))"),
+        "[true true true [:finished] \"future was cancelled\"]"
+    );
+}
+
+#[test]
+fn both_await_paths_report_cancellation_the_same_way() {
+    // The tree-walker awaits with `.await`; a JIT-compiled `^:async` fn polls
+    // through `check_ready`. Both must hand user code the same catchable
+    // error, or a `catch` would behave differently depending on whether the
+    // enclosing fn happened to be compiled.
+    let globals = async_env();
+    block_on_local(async move {
+        let mut env = Env::new(globals, "user");
+        let err = eval_err(
+            "(let [f (future :late)] (future-cancel f) (await f))",
+            &mut env,
+        )
+        .await;
+        assert!(
+            err.contains(cljrs_value::FUTURE_CANCELLED_MSG),
+            "tree-walker should raise the cancelled error, got: {err}"
+        );
+
+        let f = eval_all("(let [f (future :late)] (future-cancel f) f)", &mut env).await;
+        match cljrs_async::state_machine::check_ready(&f) {
+            cljrs_async::state_machine::Readiness::Failed(Value::Error(e)) => {
+                assert_eq!(e.get().message(), cljrs_value::FUTURE_CANCELLED_MSG);
+            }
+            other => panic!(
+                "compiled path should fail with the same error value, got {}",
+                match other {
+                    cljrs_async::state_machine::Readiness::Ready(v) => format!("Ready({v})"),
+                    cljrs_async::state_machine::Readiness::Failed(v) => format!("Failed({v})"),
+                    cljrs_async::state_machine::Readiness::Pending => "Pending".to_string(),
+                    cljrs_async::state_machine::Readiness::GasExhausted =>
+                        "GasExhausted".to_string(),
+                }
+            ),
+        }
+    });
+}

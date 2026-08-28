@@ -1506,6 +1506,7 @@
 (defmacro future
   "Runs body as a task and returns a future. Read the result with
   (await f) — the task shares this isolate's executor, so (deref f) blocks
-  the thread it needs in order to finish."
+  the thread it needs in order to finish. Dynamic bindings are not conveyed
+  to the task: bind inside body if it needs them."
   [& body]
   (list 'future-call (list 'fn [] (cons 'do body))))

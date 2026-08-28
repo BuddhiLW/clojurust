@@ -26,10 +26,10 @@ use bigdecimal::{BigDecimal, RoundingMode};
 use cljrs_gc::GcPtr;
 use cljrs_value::value::{PrintValue, SetValue};
 use cljrs_value::{
-    Arity, Atom, CljxCons, CljxPromise, ExceptionInfo, FutureState, Keyword, LazySeq, MapValue,
-    Namespace, NativeFn, ObjectArray, PersistentHashMap, PersistentHashSet, PersistentList,
-    PersistentQueue, PersistentVector, SharedAtom, SortedSet, Symbol, Thunk, TypeInstance, Value,
-    ValueError, ValueResult, Volatile, demote, promote,
+    Arity, Atom, CljxCons, CljxFuture, CljxPromise, ExceptionInfo, FutureState, Keyword, LazySeq,
+    MapValue, Namespace, NativeFn, ObjectArray, PersistentHashMap, PersistentHashSet,
+    PersistentList, PersistentQueue, PersistentVector, SharedAtom, SortedSet, Symbol, Thunk,
+    TypeInstance, Value, ValueError, ValueResult, Volatile, demote, promote,
 };
 use num_bigint::{BigInt, Sign, ToBigInt};
 use num_rational::Ratio;
@@ -6121,7 +6121,9 @@ fn builtin_deref(args: &[Value]) -> ValueResult<Value> {
                         f.get().mark_observed();
                         Err(ValueError::GasExhausted)
                     }
-                    FutureState::Cancelled => Err(ValueError::Other("future was cancelled".into())),
+                    FutureState::Cancelled => {
+                        Err(ValueError::Thrown(CljxFuture::cancelled_error()))
+                    }
                     FutureState::Running => {
                         let (guard, _) = f
                             .get()
@@ -6142,7 +6144,7 @@ fn builtin_deref(args: &[Value]) -> ValueResult<Value> {
                                 Err(ValueError::GasExhausted)
                             }
                             FutureState::Cancelled => {
-                                Err(ValueError::Other("future was cancelled".into()))
+                                Err(ValueError::Thrown(CljxFuture::cancelled_error()))
                             }
                             FutureState::Running => Ok(timeout_val),
                         }
@@ -6165,7 +6167,7 @@ fn builtin_deref(args: &[Value]) -> ValueResult<Value> {
                             return Err(ValueError::GasExhausted);
                         }
                         FutureState::Cancelled => {
-                            return Err(ValueError::Other("future was cancelled".into()));
+                            return Err(ValueError::Thrown(CljxFuture::cancelled_error()));
                         }
                         FutureState::Running => {
                             guard = f.get().cond.wait(guard).unwrap();
@@ -8458,7 +8460,16 @@ fn builtin_with_meta(args: &[Value]) -> ValueResult<Value> {
 /// Read the result with `(await f)`; `(deref f)` blocks the one thread the task
 /// needs in order to finish.
 fn builtin_future_call(args: &[Value]) -> ValueResult<Value> {
-    let thunk = args.first().cloned().unwrap_or(Value::Nil);
+    let thunk = match args {
+        [thunk] => thunk.clone(),
+        other => {
+            return Err(ValueError::ArityError {
+                name: "future-call".to_string(),
+                expected: "1".to_string(),
+                got: other.len(),
+            });
+        }
+    };
     let (globals, ns) = crate::env::callback::capture_eval_context()
         .ok_or_else(|| ValueError::Other("future called outside an eval context".into()))?;
     let rt = globals.async_runtime().ok_or_else(|| {
