@@ -1706,9 +1706,9 @@ fn eval_letfn(args: &[Form], env: &mut Env) -> EvalResult {
     // built therefore gave letfn `let`-like sequential scope — a backward
     // reference resolved, a forward one or a mutual pair raised "unbound
     // symbol", which defeats the only reason letfn exists.
-    let bindings = match args.first().map(|f| &f.kind) {
-        Some(FormKind::Vector(v)) => expand_reader_conds_cow(v).into_owned(),
-        _ => return Err(EvalError::Runtime("letfn requires a binding vector".into())),
+    let bindings = match args.first().and_then(|f| f.as_vector()) {
+        Some(v) => expand_reader_conds_cow(v).into_owned(),
+        None => return Err(EvalError::Runtime("letfn requires a binding vector".into())),
     };
 
     env.push_frame();
@@ -1716,19 +1716,17 @@ fn eval_letfn(args: &[Form], env: &mut Env) -> EvalResult {
     // Pass 1: bind every name to nil, so the pass-2 snapshot CONTAINS all of
     // them. A capture list cannot grow after the fact; it can only be corrected.
     for binding in &bindings {
-        if let FormKind::List(parts) = &binding.kind {
+        if let Some(parts) = binding.as_list() {
             if parts.is_empty() {
                 continue;
             }
-            match &parts[0].kind {
-                FormKind::Symbol(s) => env.bind(Arc::from(s.as_str()), Value::Nil),
-                _ => {
-                    env.pop_frame();
-                    return Err(EvalError::Runtime(
-                        "letfn binding name must be a symbol".into(),
-                    ));
-                }
-            }
+            let Some(name) = parts[0].as_symbol() else {
+                env.pop_frame();
+                return Err(EvalError::Runtime(
+                    "letfn binding name must be a symbol".into(),
+                ));
+            };
+            env.bind(Arc::from(name), Value::Nil);
         }
     }
 
@@ -1749,11 +1747,11 @@ fn eval_letfn(args: &[Form], env: &mut Env) -> EvalResult {
                     return Err(e);
                 }
             };
-            let name: Arc<str> = match &parts[0].kind {
-                FormKind::Symbol(s) => Arc::from(s.as_str()),
-                _ => unreachable!("pass 1 rejected every non-symbol name"),
+            let name: Arc<str> = match parts[0].as_symbol() {
+                Some(s) => Arc::from(s),
+                None => unreachable!("pass 1 rejected every non-symbol name"),
             };
-            env.bind(Arc::from(name), fn_val);
+            env.bind(Arc::clone(&name), fn_val.clone());
             built.push((name, fn_val));
         }
     }
