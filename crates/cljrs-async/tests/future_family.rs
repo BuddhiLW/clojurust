@@ -1,14 +1,17 @@
-//! `future` — a task on this isolate's executor.
+//! `cljrs.core.experimental/future` — a task on this isolate's executor.
 //!
 //! Cooperative, not parallel: every Clojure value is `!Send`, so the body runs
 //! on the same thread as its caller and advances only while that thread is
-//! awaiting. The tests below pin exactly that contract, including the parts
+//! awaiting. That is not `clojure.core/future`'s contract, which is why this
+//! family lives in `cljrs.core.experimental` and these tests evaluate there.
+//! The tests below pin exactly what it does guarantee, including the parts
 //! that differ from the JVM.
 
 use std::sync::Arc;
 
 use cljrs_async::eval_async::eval_async;
 use cljrs_reader::Parser;
+use cljrs_runtime::builtins::builtins::EXPERIMENTAL_NS;
 use cljrs_runtime::env::env::{Env, GlobalEnv};
 use cljrs_value::Value;
 
@@ -57,7 +60,7 @@ async fn eval_err(src: &str, env: &mut Env) -> String {
 fn run(src: &str) -> String {
     let globals = async_env();
     block_on_local(async move {
-        let mut env = Env::new(globals, "user");
+        let mut env = Env::new(globals, EXPERIMENTAL_NS);
         format!("{}", eval_all(src, &mut env).await)
     })
 }
@@ -137,7 +140,7 @@ fn futures_interleave_with_each_other() {
 fn the_future_predicates_reject_other_values() {
     let globals = async_env();
     block_on_local(async move {
-        let mut env = Env::new(globals, "user");
+        let mut env = Env::new(globals, EXPERIMENTAL_NS);
         for src in [
             "(future-done? 1)",
             "(future-cancel :x)",
@@ -185,7 +188,7 @@ fn both_await_paths_report_cancellation_the_same_way() {
     // enclosing fn happened to be compiled.
     let globals = async_env();
     block_on_local(async move {
-        let mut env = Env::new(globals, "user");
+        let mut env = Env::new(globals, EXPERIMENTAL_NS);
         let err = eval_err(
             "(let [f (future :late)] (future-cancel f) (await f))",
             &mut env,

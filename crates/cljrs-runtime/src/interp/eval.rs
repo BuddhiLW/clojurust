@@ -1704,7 +1704,9 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "future/thread spawn not yet implemented (Phase A1 — GcPtr: !Send)"]
+    #[ignore = "clojure.core/future is undefined by design: @f deadlocks the one \
+                thread the task needs (GcPtr: !Send). cljrs.core.experimental/future \
+                is the cooperative stand-in, read with (await f)"]
     fn test_future() {
         let result = eval_str(
             r#"
@@ -2145,7 +2147,8 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "future/thread spawn not yet implemented (Phase A1 — GcPtr: !Send)"]
+    #[ignore = "clojure.core/future is undefined by design; the experimental \
+                stand-in does not convey dynamic bindings to its task"]
     fn test_binding_conveyance() {
         let (_, mut env) = make_env();
         eval_src("(def ^:dynamic *x* 10)", &mut env).unwrap();

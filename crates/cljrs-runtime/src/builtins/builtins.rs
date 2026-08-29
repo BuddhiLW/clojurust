@@ -558,20 +558,6 @@ const BUILTIN_DOCS: &[(&str, &str)] = &[
         "Evaluates a form data structure and returns the result. Sees namespace bindings, not the enclosing lexical scope.",
     ),
     (
-        "future-call",
-        "Runs a zero-arg fn as a task and returns a future. Read it with (await f), not @f.",
-    ),
-    ("future?", "Returns true if x is a future."),
-    ("future-done?", "Returns true if the future has settled."),
-    (
-        "future-cancelled?",
-        "Returns true if the future was cancelled.",
-    ),
-    (
-        "future-cancel",
-        "Cancels a still-running future, so awaiting it raises. Returns false if it had already settled.",
-    ),
-    (
         "make-hierarchy",
         "Creates a new, independent global hierarchy for use with derive/isa?.",
     ),
@@ -1682,6 +1668,73 @@ pub fn register_all(globals: &Arc<GlobalEnv>, ns: &str) {
         ("Thread/sleep", Arity::Fixed(1), builtin_sleep),
         // eval — intercepted where the environment is available
         ("eval", Arity::Fixed(1), builtin_eval_sentinel),
+    ];
+
+    intern_builtins(globals, ns, fns, BUILTIN_DOCS);
+
+    // Math constants.
+    globals.intern(
+        ns,
+        Arc::from("Math/PI"),
+        Value::Double(std::f64::consts::PI),
+    );
+    globals.intern(ns, Arc::from("Math/E"), Value::Double(std::f64::consts::E));
+}
+
+/// Intern `fns` into `ns`, attaching the `:doc` meta named in `docs`.
+fn intern_builtins(
+    globals: &Arc<GlobalEnv>,
+    ns: &str,
+    fns: Vec<(&str, Arity, fn(&[Value]) -> ValueResult<Value>)>,
+    docs: &[(&str, &str)],
+) {
+    let docs: HashMap<&str, &str> = docs.iter().copied().collect();
+    for (name, arity, func) in fns {
+        let nf = NativeFn::new(name, arity, func);
+        let var = globals.intern(ns, Arc::from(name), Value::NativeFunction(GcPtr::new(nf)));
+        if let Some(doc) = docs.get(name) {
+            var.get().set_meta(Value::Map(MapValue::empty().assoc(
+                Value::keyword(Keyword::parse("doc")),
+                Value::string((*doc).to_string()),
+            )));
+        }
+    }
+}
+
+/// The namespace experimental APIs live in.
+///
+/// Deliberately not referred into `user` and not part of `clojure.core`:
+/// everything here is reachable only by an explicit `require`, so
+/// `(when-var-exists future ...)` and similar feature probes see the same
+/// absence a JVM-less runtime would report.
+pub const EXPERIMENTAL_NS: &str = "cljrs.core.experimental";
+
+/// Doc meta for the experimental builtins, kept separate from `BUILTIN_DOCS`
+/// so each table can be checked against the namespace it is registered in.
+const EXPERIMENTAL_DOCS: &[(&str, &str)] = &[
+    (
+        "future-call",
+        "Runs a zero-arg fn as a task on this isolate's executor and returns a future. Read it with (await f) from an ^:async fn: (deref f) blocks the one thread the task needs in order to finish.",
+    ),
+    ("future?", "Returns true if x is a future."),
+    ("future-done?", "Returns true if the future has settled."),
+    (
+        "future-cancelled?",
+        "Returns true if the future was cancelled.",
+    ),
+    (
+        "future-cancel",
+        "Cancels a still-running future, so awaiting it raises. Returns false if it had already settled. The task is not interrupted; what is cancelled is the result.",
+    ),
+];
+
+/// Register the experimental native builtins into `ns` (see [`EXPERIMENTAL_NS`]).
+///
+/// The future family lives here rather than in `clojure.core` because it cannot
+/// honour `clojure.core/future`'s contract on this runtime — see the crate
+/// README's "Experimental namespace" section.
+pub fn register_experimental(globals: &Arc<GlobalEnv>, ns: &str) {
+    let fns: Vec<(&str, Arity, fn(&[Value]) -> ValueResult<Value>)> = vec![
         // futures — the executor comes from the installed async runtime
         ("future-call", Arity::Fixed(1), builtin_future_call),
         ("future?", Arity::Fixed(1), builtin_future_q),
@@ -1693,31 +1746,14 @@ pub fn register_all(globals: &Arc<GlobalEnv>, ns: &str) {
         ),
         ("future-cancel", Arity::Fixed(1), builtin_future_cancel),
     ];
-
-    let docs: HashMap<&str, &str> = BUILTIN_DOCS.iter().copied().collect();
-    for (name, arity, func) in fns {
-        let nf = NativeFn::new(name, arity, func);
-        let var = globals.intern(ns, Arc::from(name), Value::NativeFunction(GcPtr::new(nf)));
-        if let Some(doc) = docs.get(name) {
-            var.get().set_meta(Value::Map(MapValue::empty().assoc(
-                Value::keyword(Keyword::parse("doc")),
-                Value::string((*doc).to_string()),
-            )));
-        }
-    }
-
-    // Math constants.
-    globals.intern(
-        ns,
-        Arc::from("Math/PI"),
-        Value::Double(std::f64::consts::PI),
-    );
-    globals.intern(ns, Arc::from("Math/E"), Value::Double(std::f64::consts::E));
+    intern_builtins(globals, ns, fns, EXPERIMENTAL_DOCS);
 }
 
 // Bootstrap Clojure source defining higher-order functions.
 pub const BOOTSTRAP_SOURCE: &str = include_str!("bootstrap.cljrs");
 pub const CLOJURE_TEST_SOURCE: &str = include_str!("clojure_test.cljrs");
+// Clojure source for the experimental namespace (see `EXPERIMENTAL_NS`).
+pub const EXPERIMENTAL_SOURCE: &str = include_str!("experimental.cljrs");
 
 // ── Helper: lazy value iterator ──────────────────────────────────────────────
 
@@ -8791,6 +8827,39 @@ mod doc_tests {
                 "BUILTIN_DOCS has an entry for {name:?}, but no builtin is registered under that name"
             );
         }
+    }
+
+    /// Same invariant for the experimental table, checked against the
+    /// namespace those builtins are actually registered in.
+    #[test]
+    fn experimental_docs_names_are_all_registered() {
+        let globals = test_globals();
+        register_experimental(&globals, EXPERIMENTAL_NS);
+        for (name, _) in EXPERIMENTAL_DOCS {
+            assert!(
+                globals.lookup_var(EXPERIMENTAL_NS, name).is_some(),
+                "EXPERIMENTAL_DOCS has an entry for {name:?}, but no builtin is registered under that name"
+            );
+        }
+    }
+
+    /// The future family is deliberately absent from `clojure.core`: it cannot
+    /// honour that namespace's contract on a one-thread-per-isolate runtime, and
+    /// feature probes (`when-var-exists future`) must keep seeing nothing there.
+    #[test]
+    fn future_family_is_not_in_clojure_core() {
+        let globals = test_globals();
+        register_experimental(&globals, EXPERIMENTAL_NS);
+        for (name, _) in EXPERIMENTAL_DOCS {
+            assert!(
+                globals.lookup_var("clojure.core", name).is_none(),
+                "{name:?} is registered in clojure.core; it belongs in {EXPERIMENTAL_NS}"
+            );
+        }
+        assert!(
+            globals.lookup_var("clojure.core", "future").is_none(),
+            "clojure.core/future is defined; it belongs in {EXPERIMENTAL_NS}"
+        );
     }
 
     #[test]

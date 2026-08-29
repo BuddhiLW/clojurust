@@ -177,12 +177,14 @@ deadlocks, because the task that would resolve the future cannot run while the o
 thread is parked. In Phase B, await async results from within async context. A top-level
 blocking bridge is a later phase.
 
-`clojure.core/future` (registered in `cljrs-runtime`, executed through the
-`AsyncRuntime` hook this crate installs) inherits exactly this rule: its body is
-a task on the caller's executor, so it is cooperative rather than parallel and
-must be read with `(await f)`, not `@f`. See "`future` — cooperative, not
-parallel" in `cljrs-runtime/README.md`. Parallelism across OS threads is the
-isolate boundary, where values cross by copy.
+`cljrs.core.experimental/future` (registered in `cljrs-runtime`, executed through
+the `AsyncRuntime` hook this crate installs) inherits exactly this rule: its body
+is a task on the caller's executor, so it is cooperative rather than parallel and
+must be read with `(await f)`, not `@f`. That is why it is *not*
+`clojure.core/future`, which stays undefined: see
+"`cljrs.core.experimental/future` — cooperative, not parallel" in
+`cljrs-runtime/README.md`. Parallelism across OS threads is the isolate boundary,
+where values cross by copy.
 
 ## File layout
 
@@ -204,7 +206,7 @@ isolate boundary, where values cross by copy.
 | `tests/async_fn.rs` | integration tests for dispatch, `await`, `deref` enforcement, `timeout`/`alts`/`alt`, channels, Phase F utilities, and `<!!`/`>!!` |
 | `tests/worker_pool.rs` | Phase A2 integration tests: offload, concurrent tasks, handle spawning, LocalSet context, singleton invariant, byte processing round-trip |
 | `tests/isolate_channel_clj.rs` | Clojure-level Phase B2 tests: `isolate-chan` pair, put/poll round-trip, FIFO order, located error on a non-shareable value, async `isolate-take!` |
-| `tests/future_family.rs` | `future`/`future-call`/`future?`/`future-done?`/`future-cancelled?`/`future-cancel` on the isolate executor: cooperative start, interleaving, throwing bodies, sticky cancellation, and cancelled-error parity between the tree-walking and compiled await paths |
+| `tests/future_family.rs` | `cljrs.core.experimental`'s `future`/`future-call`/`future?`/`future-done?`/`future-cancelled?`/`future-cancel` on the isolate executor: cooperative start, interleaving, throwing bodies, sticky cancellation, and cancelled-error parity between the tree-walking and compiled await paths |
 | `tests/reader_conditional_parity.rs` | property + example tests that `#?`/`#?@` resolve identically in `eval_async` and the sync evaluator (containers, `let*`/`loop*` binding vectors) |
 
 ## Public API
