@@ -1920,7 +1920,7 @@ fn eval_extend_type(args: &[Form], env: &mut Env) -> EvalResult {
                         )));
                     }
                 }
-            },
+            }
             FormKind::List(parts) => {
                 // (method-name [params] body...)
                 let proto = current_proto.as_ref().ok_or_else(|| {
@@ -2379,7 +2379,7 @@ fn register_impls_for_tag(type_tag: &Arc<str>, forms: &[Form], env: &mut Env) ->
                         )));
                     }
                 }
-            },
+            }
             FormKind::List(parts) => {
                 let proto = current_proto.as_ref().ok_or_else(|| {
                     EvalError::Runtime("reify/defrecord: method impl before protocol name".into())
