@@ -11,7 +11,11 @@ use crate::builtins::new::{builtin_exception_dot, builtin_new};
 use crate::builtins::regex::{
     builtin_re_find, builtin_re_groups, builtin_re_matcher, builtin_re_matches, builtin_re_pattern,
 };
-use crate::builtins::time::builtin_nanotime;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::builtins::time::init_clock;
+use crate::builtins::time::{
+    builtin_current_time_millis, builtin_nanotime, builtin_system_nano_time,
+};
 use crate::builtins::transients::{
     builtin_assoc_bang, builtin_conj_bang, builtin_disj_bang, builtin_dissoc_bang,
     builtin_persistent_bang, builtin_pop_bang, builtin_transient,
@@ -22,10 +26,10 @@ use bigdecimal::{BigDecimal, RoundingMode};
 use cljrs_gc::GcPtr;
 use cljrs_value::value::{PrintValue, SetValue};
 use cljrs_value::{
-    Arity, Atom, CljxCons, CljxPromise, ExceptionInfo, FutureState, Keyword, LazySeq, MapValue,
-    Namespace, NativeFn, ObjectArray, PersistentHashMap, PersistentHashSet, PersistentList,
-    PersistentQueue, PersistentVector, SharedAtom, SortedSet, Symbol, Thunk, TypeInstance, Value,
-    ValueError, ValueResult, Volatile, demote, promote,
+    Arity, Atom, CljxCons, CljxFuture, CljxPromise, ExceptionInfo, FutureState, Keyword, LazySeq,
+    MapValue, Namespace, NativeFn, ObjectArray, PersistentHashMap, PersistentHashSet,
+    PersistentList, PersistentQueue, PersistentVector, SharedAtom, SortedSet, Symbol, Thunk,
+    TypeInstance, Value, ValueError, ValueResult, Volatile, demote, promote,
 };
 use num_bigint::{BigInt, Sign, ToBigInt};
 use num_rational::Ratio;
@@ -538,21 +542,24 @@ const BUILTIN_DOCS: &[(&str, &str)] = &[
         "Removes the method of a multimethod associated with dispatch-val.",
     ),
     (
+        "System/currentTimeMillis",
+        "Returns the current time in milliseconds since the Unix epoch.",
+    ),
+    (
+        "System/nanoTime",
+        "Returns a monotonic time in nanoseconds from an arbitrary origin; only differences are meaningful.",
+    ),
+    (
+        "Thread/sleep",
+        "Blocks the current thread for n milliseconds.",
+    ),
+    (
+        "eval",
+        "Evaluates a form data structure and returns the result. Sees namespace bindings, not the enclosing lexical scope.",
+    ),
+    (
         "make-hierarchy",
         "Creates a new, independent global hierarchy for use with derive/isa?.",
-    ),
-    (
-        "ancestors",
-        "Returns the immediate and indirect parents of tag, as a set.",
-    ),
-    (
-        "descendants",
-        "Returns the immediate and indirect children of tag, as a set.",
-    ),
-    ("parents", "Returns the immediate parents of tag, as a set."),
-    (
-        "isa?",
-        "Returns true if (= child parent), or child is directly or transitively derived from parent.",
     ),
     // Seq ops
     ("seq", "Returns a seq on coll, or nil if coll is empty/nil."),
@@ -1066,6 +1073,11 @@ const BUILTIN_DOCS: &[(&str, &str)] = &[
 // ── Registration ──────────────────────────────────────────────────────────────
 
 pub fn register_all(globals: &Arc<GlobalEnv>, ns: &str) {
+    // Fix `System/nanoTime`'s origin at startup rather than at the first read.
+    // `Instant::now()` panics on wasm32-unknown-unknown, so keep the origin lazy
+    // there and avoid trapping while the runtime is being constructed.
+    #[cfg(not(target_arch = "wasm32"))]
+    init_clock();
     let fns: Vec<(&str, Arity, fn(&[Value]) -> ValueResult<Value>)> = vec![
         // Arithmetic
         ("+", Arity::Variadic { min: 0 }, builtin_add),
@@ -1443,17 +1455,10 @@ pub fn register_all(globals: &Arc<GlobalEnv>, ns: &str) {
         ("load-file", Arity::Fixed(1), builtin_stub_nil),
         ("binding", Arity::Variadic { min: 1 }, builtin_stub_nil),
         ("with-out-str", Arity::Variadic { min: 0 }, builtin_stub_nil),
-        // Hierarchy (stubs — return global hierarchy or nil)
+        ("deftype", Arity::Variadic { min: 2 }, builtin_stub_nil),
+        // Hierarchy — derive/underive/isa?/parents/ancestors/descendants are
+        // defined in bootstrap.cljrs and documented there.
         ("make-hierarchy", Arity::Fixed(0), builtin_make_hierarchy),
-        ("derive", Arity::Variadic { min: 2 }, builtin_stub_nil),
-        ("underive", Arity::Variadic { min: 2 }, builtin_stub_nil),
-        ("ancestors", Arity::Variadic { min: 1 }, builtin_ancestors),
-        (
-            "descendants",
-            Arity::Variadic { min: 1 },
-            builtin_descendants,
-        ),
-        ("parents", Arity::Variadic { min: 1 }, builtin_parents),
         // Tap system
         (
             "add-tap",
@@ -1544,7 +1549,6 @@ pub fn register_all(globals: &Arc<GlobalEnv>, ns: &str) {
         ("prefer-method", Arity::Fixed(3), builtin_prefer_method),
         ("remove-method", Arity::Fixed(2), builtin_remove_method),
         ("methods", Arity::Fixed(1), builtin_methods),
-        ("isa?", Arity::Fixed(2), builtin_isa_q),
         // Records / reify
         (
             "make-type-instance",
@@ -1655,19 +1659,18 @@ pub fn register_all(globals: &Arc<GlobalEnv>, ns: &str) {
         ),
         // time utils
         ("nanotime", Arity::Fixed(0), builtin_nanotime),
+        (
+            "System/currentTimeMillis",
+            Arity::Fixed(0),
+            builtin_current_time_millis,
+        ),
+        ("System/nanoTime", Arity::Fixed(0), builtin_system_nano_time),
+        ("Thread/sleep", Arity::Fixed(1), builtin_sleep),
+        // eval — intercepted where the environment is available
+        ("eval", Arity::Fixed(1), builtin_eval_sentinel),
     ];
 
-    let docs: HashMap<&str, &str> = BUILTIN_DOCS.iter().copied().collect();
-    for (name, arity, func) in fns {
-        let nf = NativeFn::new(name, arity, func);
-        let var = globals.intern(ns, Arc::from(name), Value::NativeFunction(GcPtr::new(nf)));
-        if let Some(doc) = docs.get(name) {
-            var.get().set_meta(Value::Map(MapValue::empty().assoc(
-                Value::keyword(Keyword::parse("doc")),
-                Value::string((*doc).to_string()),
-            )));
-        }
-    }
+    intern_builtins(globals, ns, fns, BUILTIN_DOCS);
 
     // Math constants.
     globals.intern(
@@ -1678,9 +1681,79 @@ pub fn register_all(globals: &Arc<GlobalEnv>, ns: &str) {
     globals.intern(ns, Arc::from("Math/E"), Value::Double(std::f64::consts::E));
 }
 
+/// Intern `fns` into `ns`, attaching the `:doc` meta named in `docs`.
+fn intern_builtins(
+    globals: &Arc<GlobalEnv>,
+    ns: &str,
+    fns: Vec<(&str, Arity, fn(&[Value]) -> ValueResult<Value>)>,
+    docs: &[(&str, &str)],
+) {
+    let docs: HashMap<&str, &str> = docs.iter().copied().collect();
+    for (name, arity, func) in fns {
+        let nf = NativeFn::new(name, arity, func);
+        let var = globals.intern(ns, Arc::from(name), Value::NativeFunction(GcPtr::new(nf)));
+        if let Some(doc) = docs.get(name) {
+            var.get().set_meta(Value::Map(MapValue::empty().assoc(
+                Value::keyword(Keyword::parse("doc")),
+                Value::string((*doc).to_string()),
+            )));
+        }
+    }
+}
+
+/// The namespace experimental APIs live in.
+///
+/// Deliberately not referred into `user` and not part of `clojure.core`:
+/// everything here is reachable only by an explicit `require`, so
+/// `(when-var-exists future ...)` and similar feature probes see the same
+/// absence a JVM-less runtime would report.
+pub const EXPERIMENTAL_NS: &str = "cljrs.core.experimental";
+
+/// Doc meta for the experimental builtins, kept separate from `BUILTIN_DOCS`
+/// so each table can be checked against the namespace it is registered in.
+const EXPERIMENTAL_DOCS: &[(&str, &str)] = &[
+    (
+        "future-call",
+        "Runs a zero-arg fn as a task on this isolate's executor and returns a future. Read it with (await f) from an ^:async fn: (deref f) blocks the one thread the task needs in order to finish.",
+    ),
+    ("future?", "Returns true if x is a future."),
+    ("future-done?", "Returns true if the future has settled."),
+    (
+        "future-cancelled?",
+        "Returns true if the future was cancelled.",
+    ),
+    (
+        "future-cancel",
+        "Cancels a still-running future, so awaiting it raises. Returns false if it had already settled. The task is not interrupted; what is cancelled is the result.",
+    ),
+];
+
+/// Register the experimental native builtins into `ns` (see [`EXPERIMENTAL_NS`]).
+///
+/// The future family lives here rather than in `clojure.core` because it cannot
+/// honour `clojure.core/future`'s contract on this runtime — see the crate
+/// README's "Experimental namespace" section.
+pub fn register_experimental(globals: &Arc<GlobalEnv>, ns: &str) {
+    let fns: Vec<(&str, Arity, fn(&[Value]) -> ValueResult<Value>)> = vec![
+        // futures — the executor comes from the installed async runtime
+        ("future-call", Arity::Fixed(1), builtin_future_call),
+        ("future?", Arity::Fixed(1), builtin_future_q),
+        ("future-done?", Arity::Fixed(1), builtin_future_done_q),
+        (
+            "future-cancelled?",
+            Arity::Fixed(1),
+            builtin_future_cancelled_q,
+        ),
+        ("future-cancel", Arity::Fixed(1), builtin_future_cancel),
+    ];
+    intern_builtins(globals, ns, fns, EXPERIMENTAL_DOCS);
+}
+
 // Bootstrap Clojure source defining higher-order functions.
 pub const BOOTSTRAP_SOURCE: &str = include_str!("bootstrap.cljrs");
 pub const CLOJURE_TEST_SOURCE: &str = include_str!("clojure_test.cljrs");
+// Clojure source for the experimental namespace (see `EXPERIMENTAL_NS`).
+pub const EXPERIMENTAL_SOURCE: &str = include_str!("experimental.cljrs");
 
 // ── Helper: lazy value iterator ──────────────────────────────────────────────
 
@@ -3045,10 +3118,10 @@ fn builtin_compare(args: &[Value]) -> ValueResult<Value> {
 // ── Predicates ────────────────────────────────────────────────────────────────
 
 fn builtin_nil_q(args: &[Value]) -> ValueResult<Value> {
-    Ok(Value::Bool(matches!(args[0], Value::Nil)))
+    Ok(Value::Bool(matches!(args[0].unwrap_meta(), Value::Nil)))
 }
 fn builtin_zero_q(args: &[Value]) -> ValueResult<Value> {
-    let zero = match &args[0] {
+    let zero = match args[0].unwrap_meta() {
         Value::Nil => return Err(ValueError::Other("expected number, got nil".into())),
         Value::Long(n) => *n == 0,
         Value::Double(f) => *f == 0.0,
@@ -3065,7 +3138,7 @@ fn builtin_zero_q(args: &[Value]) -> ValueResult<Value> {
     Ok(Value::Bool(zero))
 }
 fn builtin_pos_q(args: &[Value]) -> ValueResult<Value> {
-    Ok(Value::Bool(match &args[0] {
+    Ok(Value::Bool(match args[0].unwrap_meta() {
         Value::Long(n) => *n > 0,
         Value::Double(f) => *f > 0.0,
         Value::Ratio(r) => r.get().numer().is_positive(),
@@ -3080,7 +3153,7 @@ fn builtin_pos_q(args: &[Value]) -> ValueResult<Value> {
     }))
 }
 fn builtin_neg_q(args: &[Value]) -> ValueResult<Value> {
-    Ok(Value::Bool(match &args[0] {
+    Ok(Value::Bool(match args[0].unwrap_meta() {
         Value::Nil => return Err(ValueError::Other("expected number, got nil".into())),
         Value::Long(n) => *n < 0,
         Value::Double(f) => *f < 0.0,
@@ -3099,14 +3172,20 @@ fn builtin_not(args: &[Value]) -> ValueResult<Value> {
     Ok(Value::Bool(!is_truthy(&args[0])))
 }
 fn builtin_true_q(args: &[Value]) -> ValueResult<Value> {
-    Ok(Value::Bool(matches!(args[0], Value::Bool(true))))
+    Ok(Value::Bool(matches!(
+        args[0].unwrap_meta(),
+        Value::Bool(true)
+    )))
 }
 fn builtin_false_q(args: &[Value]) -> ValueResult<Value> {
-    Ok(Value::Bool(matches!(args[0], Value::Bool(false))))
+    Ok(Value::Bool(matches!(
+        args[0].unwrap_meta(),
+        Value::Bool(false)
+    )))
 }
 fn builtin_number_q(args: &[Value]) -> ValueResult<Value> {
     Ok(Value::Bool(matches!(
-        args[0],
+        args[0].unwrap_meta(),
         Value::Long(_)
             | Value::Double(_)
             | Value::BigInt(_)
@@ -3116,51 +3195,66 @@ fn builtin_number_q(args: &[Value]) -> ValueResult<Value> {
 }
 fn builtin_integer_q(args: &[Value]) -> ValueResult<Value> {
     Ok(Value::Bool(matches!(
-        args[0],
+        args[0].unwrap_meta(),
         Value::Long(_) | Value::BigInt(_)
     )))
 }
 
 fn builtin_int_q(args: &[Value]) -> ValueResult<Value> {
-    Ok(Value::Bool(matches!(args[0], Value::Long(_))))
+    Ok(Value::Bool(matches!(args[0].unwrap_meta(), Value::Long(_))))
 }
 
 fn builtin_double_q(args: &[Value]) -> ValueResult<Value> {
-    Ok(Value::Bool(matches!(args[0], Value::Double(_))))
+    Ok(Value::Bool(matches!(
+        args[0].unwrap_meta(),
+        Value::Double(_)
+    )))
 }
 
 fn builtin_decimal_q(args: &[Value]) -> ValueResult<Value> {
-    Ok(Value::Bool(matches!(args[0], Value::BigDecimal(_))))
+    Ok(Value::Bool(matches!(
+        args[0].unwrap_meta(),
+        Value::BigDecimal(_)
+    )))
 }
 
 fn builtin_rational_q(args: &[Value]) -> ValueResult<Value> {
     Ok(Value::Bool(matches!(
-        args[0],
+        args[0].unwrap_meta(),
         Value::Long(_) | Value::BigInt(_) | Value::Ratio(_) | Value::BigDecimal(_)
     )))
 }
 
 fn builtin_float_q(args: &[Value]) -> ValueResult<Value> {
-    Ok(Value::Bool(matches!(args[0], Value::Double(_))))
+    Ok(Value::Bool(matches!(
+        args[0].unwrap_meta(),
+        Value::Double(_)
+    )))
 }
 fn builtin_string_q(args: &[Value]) -> ValueResult<Value> {
-    Ok(Value::Bool(matches!(args[0], Value::Str(_))))
+    Ok(Value::Bool(matches!(args[0].unwrap_meta(), Value::Str(_))))
 }
 fn builtin_keyword_q(args: &[Value]) -> ValueResult<Value> {
-    Ok(Value::Bool(matches!(args[0], Value::Keyword(_))))
+    Ok(Value::Bool(matches!(
+        args[0].unwrap_meta(),
+        Value::Keyword(_)
+    )))
 }
 fn builtin_symbol_q(args: &[Value]) -> ValueResult<Value> {
-    Ok(Value::Bool(matches!(args[0], Value::Symbol(_))))
+    Ok(Value::Bool(matches!(
+        args[0].unwrap_meta(),
+        Value::Symbol(_)
+    )))
 }
 fn builtin_fn_q(args: &[Value]) -> ValueResult<Value> {
     Ok(Value::Bool(matches!(
-        args[0],
+        args[0].unwrap_meta(),
         Value::Fn(_) | Value::BoundFn(_) | Value::NativeFunction(_)
     )))
 }
 fn builtin_ifn_q(args: &[Value]) -> ValueResult<Value> {
     Ok(Value::Bool(matches!(
-        args[0],
+        args[0].unwrap_meta(),
         Value::Fn(_)
             | Value::BoundFn(_)
             | Value::NativeFunction(_)
@@ -3178,7 +3272,7 @@ fn builtin_ifn_q(args: &[Value]) -> ValueResult<Value> {
 }
 fn builtin_seq_q(args: &[Value]) -> ValueResult<Value> {
     Ok(Value::Bool(matches!(
-        args[0],
+        args[0].unwrap_meta(),
         Value::List(_) | Value::Cons(_) | Value::LazySeq(_)
     )))
 }
@@ -3241,16 +3335,16 @@ fn builtin_coll_q(args: &[Value]) -> ValueResult<Value> {
     Ok(Value::Bool(args[0].is_coll()))
 }
 fn builtin_boolean_q(args: &[Value]) -> ValueResult<Value> {
-    Ok(Value::Bool(matches!(args[0], Value::Bool(_))))
+    Ok(Value::Bool(matches!(args[0].unwrap_meta(), Value::Bool(_))))
 }
 fn builtin_char_q(args: &[Value]) -> ValueResult<Value> {
-    Ok(Value::Bool(matches!(args[0], Value::Char(_))))
+    Ok(Value::Bool(matches!(args[0].unwrap_meta(), Value::Char(_))))
 }
 fn builtin_var_q(args: &[Value]) -> ValueResult<Value> {
-    Ok(Value::Bool(matches!(args[0], Value::Var(_))))
+    Ok(Value::Bool(matches!(args[0].unwrap_meta(), Value::Var(_))))
 }
 fn builtin_atom_q(args: &[Value]) -> ValueResult<Value> {
-    Ok(Value::Bool(matches!(args[0], Value::Atom(_))))
+    Ok(Value::Bool(matches!(args[0].unwrap_meta(), Value::Atom(_))))
 }
 fn builtin_empty_q(args: &[Value]) -> ValueResult<Value> {
     let empty = match args[0].unwrap_meta() {
@@ -6063,7 +6157,9 @@ fn builtin_deref(args: &[Value]) -> ValueResult<Value> {
                         f.get().mark_observed();
                         Err(ValueError::GasExhausted)
                     }
-                    FutureState::Cancelled => Err(ValueError::Other("future was cancelled".into())),
+                    FutureState::Cancelled => {
+                        Err(ValueError::Thrown(CljxFuture::cancelled_error()))
+                    }
                     FutureState::Running => {
                         let (guard, _) = f
                             .get()
@@ -6084,7 +6180,7 @@ fn builtin_deref(args: &[Value]) -> ValueResult<Value> {
                                 Err(ValueError::GasExhausted)
                             }
                             FutureState::Cancelled => {
-                                Err(ValueError::Other("future was cancelled".into()))
+                                Err(ValueError::Thrown(CljxFuture::cancelled_error()))
                             }
                             FutureState::Running => Ok(timeout_val),
                         }
@@ -6107,7 +6203,7 @@ fn builtin_deref(args: &[Value]) -> ValueResult<Value> {
                             return Err(ValueError::GasExhausted);
                         }
                         FutureState::Cancelled => {
-                            return Err(ValueError::Other("future was cancelled".into()));
+                            return Err(ValueError::Thrown(CljxFuture::cancelled_error()));
                         }
                         FutureState::Running => {
                             guard = f.get().cond.wait(guard).unwrap();
@@ -6316,7 +6412,10 @@ fn builtin_hash(args: &[Value]) -> ValueResult<Value> {
 }
 
 fn builtin_name(args: &[Value]) -> ValueResult<Value> {
-    match &args[0] {
+    // Metadata-transparent: an annotated symbol is still `named`, and the
+    // name-mangling macro idiom `(symbol (str "make-" (name n)))` routinely
+    // hands one over.
+    match args[0].unwrap_meta() {
         Value::Keyword(k) => Ok(Value::string(k.get().name.as_ref().to_string())),
         Value::Symbol(s) => Ok(Value::string(s.get().name.as_ref().to_string())),
         Value::Str(s) => Ok(Value::Str(s.clone())),
@@ -6328,7 +6427,7 @@ fn builtin_name(args: &[Value]) -> ValueResult<Value> {
 }
 
 fn builtin_namespace(args: &[Value]) -> ValueResult<Value> {
-    match &args[0] {
+    match args[0].unwrap_meta() {
         Value::Keyword(k) => Ok(match &k.get().namespace {
             Some(ns) => Value::string(ns.as_ref().to_string()),
             None => Value::Nil,
@@ -7188,26 +7287,6 @@ fn builtin_make_hierarchy(_args: &[Value]) -> ValueResult<Value> {
     Ok(Value::Map(MapValue::Hash(GcPtr::new(m))))
 }
 
-fn builtin_ancestors(args: &[Value]) -> ValueResult<Value> {
-    // Stub: return empty set
-    let _ = args;
-    Ok(Value::Set(SetValue::Hash(GcPtr::new(
-        cljrs_value::collections::PersistentHashSet::empty(),
-    ))))
-}
-
-fn builtin_descendants(args: &[Value]) -> ValueResult<Value> {
-    let _ = args;
-    Ok(Value::Set(SetValue::Hash(GcPtr::new(
-        cljrs_value::collections::PersistentHashSet::empty(),
-    ))))
-}
-
-fn builtin_parents(args: &[Value]) -> ValueResult<Value> {
-    let _ = args;
-    Ok(Value::Nil)
-}
-
 // ── bound-fn* ────────────────────────────────────────────────────────────────
 
 fn builtin_bound_fn_star(args: &[Value]) -> ValueResult<Value> {
@@ -7926,6 +8005,7 @@ fn builtin_remove_method(args: &[Value]) -> ValueResult<Value> {
     };
     let key = format!("{}", args[1]);
     mf.get().methods.lock().unwrap().remove(&key);
+    mf.get().dispatch_vals.lock().unwrap().remove(&key);
     Ok(Value::MultiFn(mf.clone()))
 }
 
@@ -7945,11 +8025,6 @@ fn builtin_methods(args: &[Value]) -> ValueResult<Value> {
         m = m.assoc(Value::string(k.clone()), v.clone());
     }
     Ok(Value::Map(m))
-}
-
-fn builtin_isa_q(args: &[Value]) -> ValueResult<Value> {
-    // Stub: equality only; full hierarchy deferred.
-    Ok(Value::Bool(args[0] == args[1]))
 }
 
 // ── Phase 7 — Concurrency primitives ─────────────────────────────────────────
@@ -8073,52 +8148,6 @@ fn builtin_deliver(args: &[Value]) -> ValueResult<Value> {
             got: v.type_name().to_string(),
         }),
     }
-}
-
-// These functions are kept for future use but are not currently registered.
-#[allow(dead_code)]
-fn builtin_future_done_q(args: &[Value]) -> ValueResult<Value> {
-    match &args[0] {
-        Value::Future(f) => Ok(Value::Bool(f.get().is_done())),
-        v => Err(ValueError::WrongType {
-            expected: "future",
-            got: v.type_name().to_string(),
-        }),
-    }
-}
-
-#[allow(dead_code)]
-fn builtin_future_cancelled_q(args: &[Value]) -> ValueResult<Value> {
-    match &args[0] {
-        Value::Future(f) => Ok(Value::Bool(f.get().is_cancelled())),
-        v => Err(ValueError::WrongType {
-            expected: "future",
-            got: v.type_name().to_string(),
-        }),
-    }
-}
-
-#[allow(dead_code)]
-fn builtin_future_cancel(args: &[Value]) -> ValueResult<Value> {
-    match &args[0] {
-        Value::Future(f) => {
-            let mut state = f.get().state.lock().unwrap();
-            if matches!(&*state, FutureState::Running) {
-                *state = FutureState::Cancelled;
-                f.get().cond.notify_all();
-            }
-            Ok(Value::Bool(true))
-        }
-        v => Err(ValueError::WrongType {
-            expected: "future",
-            got: v.type_name().to_string(),
-        }),
-    }
-}
-
-#[allow(dead_code)]
-fn builtin_future_call_star(_args: &[Value]) -> ValueResult<Value> {
-    Err(ValueError::Other("future is not yet implemented".into()))
 }
 
 #[allow(dead_code)]
@@ -8451,8 +8480,82 @@ fn builtin_with_meta(args: &[Value]) -> ValueResult<Value> {
             ns.get().set_meta(args[1].clone());
             Ok(args[0].clone())
         }
+        // `(with-meta x nil)` clears metadata; storing a nil-meta wrapper would
+        // leave a value that is no longer `identical?` to itself after a clone.
+        _ if matches!(args[1], Value::Nil) => Ok(args[0].unwrap_meta().clone()),
         _ => Ok(args[0].clone().with_meta(args[1].clone())),
     }
+}
+
+// ── futures ──────────────────────────────────────────────────────────────────
+
+/// `(future-call thunk)` — run a zero-arg fn as a task, returning a future.
+///
+/// The task runs on the installed async runtime's executor, which is this
+/// isolate's: cooperative, not parallel, since every Clojure value is `!Send`.
+/// Read the result with `(await f)`; `(deref f)` blocks the one thread the task
+/// needs in order to finish.
+fn builtin_future_call(args: &[Value]) -> ValueResult<Value> {
+    let thunk = match args {
+        [thunk] => thunk.clone(),
+        other => {
+            return Err(ValueError::ArityError {
+                name: "future-call".to_string(),
+                expected: "1".to_string(),
+                got: other.len(),
+            });
+        }
+    };
+    let (globals, ns) = crate::env::callback::capture_eval_context()
+        .ok_or_else(|| ValueError::Other("future called outside an eval context".into()))?;
+    let rt = globals.async_runtime().ok_or_else(|| {
+        ValueError::Other(
+            "future requires an async runtime (build with the `async` feature)".into(),
+        )
+    })?;
+    let call_env = crate::env::env::Env::new(globals, &ns);
+    Ok(rt.spawn_async_call(thunk, Vec::new(), call_env))
+}
+
+fn builtin_future_q(args: &[Value]) -> ValueResult<Value> {
+    Ok(Value::Bool(matches!(args.first(), Some(Value::Future(_)))))
+}
+
+fn as_future(args: &[Value]) -> ValueResult<GcPtr<cljrs_value::CljxFuture>> {
+    match args.first() {
+        Some(Value::Future(f)) => Ok(f.clone()),
+        other => Err(ValueError::WrongType {
+            expected: "future",
+            got: other.map_or_else(|| "nothing".to_string(), |v| v.type_name().to_string()),
+        }),
+    }
+}
+
+/// `(future-done? f)` — true once the task has settled, cancelled included.
+fn builtin_future_done_q(args: &[Value]) -> ValueResult<Value> {
+    Ok(Value::Bool(as_future(args)?.get().is_done()))
+}
+
+/// `(future-cancelled? f)`
+fn builtin_future_cancelled_q(args: &[Value]) -> ValueResult<Value> {
+    Ok(Value::Bool(as_future(args)?.get().is_cancelled()))
+}
+
+/// `(future-cancel f)` — mark a still-running future cancelled, so awaiting it
+/// raises instead of yielding a value. False if it had already settled.
+///
+/// The task is cooperative and is not interrupted; what is cancelled is the
+/// result, as for a JVM future already past its interruption point.
+fn builtin_future_cancel(args: &[Value]) -> ValueResult<Value> {
+    Ok(Value::Bool(as_future(args)?.get().cancel()))
+}
+
+/// Sentinel — `eval` is intercepted in `eval_call` because it needs env.
+fn builtin_eval_sentinel(_args: &[Value]) -> ValueResult<Value> {
+    Err(ValueError::WrongType {
+        expected: "intercepted",
+        got: "eval sentinel should not be called directly".to_string(),
+    })
 }
 
 /// Sentinel — `vary-meta` is intercepted in `eval_call` because it needs env.
@@ -8724,6 +8827,39 @@ mod doc_tests {
                 "BUILTIN_DOCS has an entry for {name:?}, but no builtin is registered under that name"
             );
         }
+    }
+
+    /// Same invariant for the experimental table, checked against the
+    /// namespace those builtins are actually registered in.
+    #[test]
+    fn experimental_docs_names_are_all_registered() {
+        let globals = test_globals();
+        register_experimental(&globals, EXPERIMENTAL_NS);
+        for (name, _) in EXPERIMENTAL_DOCS {
+            assert!(
+                globals.lookup_var(EXPERIMENTAL_NS, name).is_some(),
+                "EXPERIMENTAL_DOCS has an entry for {name:?}, but no builtin is registered under that name"
+            );
+        }
+    }
+
+    /// The future family is deliberately absent from `clojure.core`: it cannot
+    /// honour that namespace's contract on a one-thread-per-isolate runtime, and
+    /// feature probes (`when-var-exists future`) must keep seeing nothing there.
+    #[test]
+    fn future_family_is_not_in_clojure_core() {
+        let globals = test_globals();
+        register_experimental(&globals, EXPERIMENTAL_NS);
+        for (name, _) in EXPERIMENTAL_DOCS {
+            assert!(
+                globals.lookup_var("clojure.core", name).is_none(),
+                "{name:?} is registered in clojure.core; it belongs in {EXPERIMENTAL_NS}"
+            );
+        }
+        assert!(
+            globals.lookup_var("clojure.core", "future").is_none(),
+            "clojure.core/future is defined; it belongs in {EXPERIMENTAL_NS}"
+        );
     }
 
     #[test]
