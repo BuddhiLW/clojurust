@@ -2341,7 +2341,7 @@ fn eval_reify(args: &[Form], env: &mut Env) -> EvalResult {
 /// the CURRENT ns, where it is neither interned nor referred. A qualified protocol
 /// symbol must resolve through its own namespace, exactly as `eval` resolves any
 /// other qualified symbol.
-#[expect(dead_code)]  // until next PR uses this
+#[expect(dead_code)] // until next PR uses this
 fn resolve_protocol_sym(env: &Env, s: &str) -> Option<GcPtr<Protocol>> {
     let parsed = cljrs_value::Symbol::parse(s);
     let val = match parsed.namespace.as_deref() {
