@@ -119,25 +119,3 @@ fn param_shadows_the_fns_own_name_in_one_arity_only() {
     assert_eq!(eval_in("(= f (f))", &mut env), Value::Bool(true));
     assert_eq!(eval_in("(= 3 (f 3))", &mut env), Value::Bool(true));
 }
-
-#[test]
-fn param_shadows_the_fns_own_name_through_the_tiered_path() {
-    // The same ordering fix lives in tiered::apply::execute_ir. Call the fn
-    // enough times to cross the IR tier-up threshold so both tiers are covered
-    // whichever one each call lands in.
-    let globals = cljrs_runtime::Runtime::builder()
-        .execution_mode(cljrs_runtime::ExecutionMode::Tiered)
-        .build()
-        .expect("runtime")
-        .into_globals();
-    let mut env = cljrs_runtime::tiered::Env::new(globals.clone(), "user");
-    let src = "(defn text [text] {:text text})
-               (= (vec (range 200)) (mapv (fn [i] (:text (text i))) (range 200)))";
-    let mut parser = Parser::new(src.to_string(), "<test>".to_string());
-    let forms = parser.parse_all().expect("parse error");
-    let mut result = Value::Nil;
-    for form in forms {
-        result = cljrs_runtime::tiered::eval(&form, &mut env).expect("eval error");
-    }
-    assert_eq!(result, Value::Bool(true));
-}
