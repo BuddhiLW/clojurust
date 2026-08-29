@@ -2405,6 +2405,35 @@ fn eval_reify(args: &[Form], env: &mut Env) -> EvalResult {
 
 // ── register_impls_for_tag ────────────────────────────────────────────────────
 
+/// Resolve a protocol NAME symbol in an impl position (extend-type, extend-protocol,
+/// reify/defrecord), honouring the current namespace's `:require :as` aliases and
+/// fully-qualified names — not just an unqualified lookup in the current ns.
+///
+/// `(defrecord R [] mp/IThing (-do [_] ...))` failed with "mp/IThing is not a
+/// protocol" even though the protocol was loaded and (resolve 'mini.proto/IThing)
+/// was truthy: the old code looked up the whole string "mp/IThing" as an intern of
+/// the CURRENT ns, where it is neither interned nor referred. A qualified protocol
+/// symbol must resolve through its own namespace, exactly as `eval` resolves any
+/// other qualified symbol.
+#[expect(dead_code)] // until next PR uses this
+fn resolve_protocol_sym(env: &Env, s: &str) -> Option<GcPtr<Protocol>> {
+    let parsed = cljrs_value::Symbol::parse(s);
+    let val = match parsed.namespace.as_deref() {
+        Some(ns_part) => {
+            let ns = env
+                .globals
+                .resolve_alias(&env.current_ns, ns_part)
+                .unwrap_or_else(|| Arc::from(ns_part));
+            env.globals.lookup_in_ns(&ns, &parsed.name)
+        }
+        None => env.globals.lookup_in_ns(&env.current_ns, s),
+    };
+    match val {
+        Some(Value::Protocol(p)) => Some(p),
+        _ => None,
+    }
+}
+
 /// Parse `Proto (method [params] body) ...` segments and register them under `type_tag`.
 /// Shared by `defrecord` and `reify`.
 fn register_impls_for_tag(
