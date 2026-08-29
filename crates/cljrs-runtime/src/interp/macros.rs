@@ -340,9 +340,20 @@ pub fn value_to_form(val: &Value, span: Span) -> EvalResult<Form> {
             )
         }
 
-        // WithMeta: strip metadata and convert the inner value.
-        Value::WithMeta(inner, _) => {
-            return value_to_form(inner, span);
+        // WithMeta: keep the annotation as a `^meta` wrapper so metadata a
+        // macro received (or attached) survives back into the AST.
+        //
+        // The annotation is *quoted*: it is already a value, and re-analysing
+        // it would resolve its contents as code — `{:tag 'String}` would look
+        // up `String`, and `{:arglists '([x])}` would look up `x`.
+        Value::WithMeta(inner, meta) => {
+            if matches!(**meta, Value::Nil) {
+                return value_to_form(inner, span);
+            }
+            let inner_form = value_to_form(inner, span.clone())?;
+            let meta_form = value_to_form(meta, span.clone())?;
+            let quoted_meta = Form::new(FormKind::Quote(Box::new(meta_form)), span.clone());
+            FormKind::Meta(Box::new(quoted_meta), Box::new(inner_form))
         }
 
         Value::Pattern(p) => FormKind::Regex(p.get().as_str().to_string()),
