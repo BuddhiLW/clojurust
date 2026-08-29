@@ -2090,10 +2090,7 @@ fn synth_field_scope(params_form: &Form, fields: &[Arc<str>], body: &[Form]) -> 
         if param_names.contains(&field.as_ref()) {
             continue;
         }
-        bindings.push(Form::new(
-            FormKind::Symbol(field.to_string()),
-            span.clone(),
-        ));
+        bindings.push(Form::new(FormKind::Symbol(field.to_string()), span.clone()));
         bindings.push(Form::new(
             FormKind::List(vec![
                 Form::new(FormKind::Keyword(field.to_string()), span.clone()),
