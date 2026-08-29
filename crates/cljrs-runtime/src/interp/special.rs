@@ -1706,9 +1706,9 @@ fn eval_letfn(args: &[Form], env: &mut Env) -> EvalResult {
     // built therefore gave letfn `let`-like sequential scope — a backward
     // reference resolved, a forward one or a mutual pair raised "unbound
     // symbol", which defeats the only reason letfn exists.
-    let bindings = match args.first().and_then(|f| f.as_vector()) {
-        Some(v) => expand_reader_conds_cow(v).into_owned(),
-        None => return Err(EvalError::Runtime("letfn requires a binding vector".into())),
+    let bindings = match args.first().map(|f| &f.kind) {
+        Some(FormKind::Vector(v)) => expand_reader_conds_cow(v).into_owned(),
+        _ => return Err(EvalError::Runtime("letfn requires a binding vector".into())),
     };
 
     env.push_frame();
@@ -1749,13 +1749,29 @@ fn eval_letfn(args: &[Form], env: &mut Env) -> EvalResult {
                     return Err(e);
                 }
             };
-            let Some(name) = parts[0].as_symbol() else {
-                env.pop_frame();
-                return Err(EvalError::Runtime(
-                    "letfn binding name must be a symbol".into(),
-                ));
+            let name: Arc<str> = match &parts[0].kind {
+                FormKind::Symbol(s) => Arc::from(s.as_str()),
+                _ => unreachable!("pass 1 rejected every non-symbol name"),
             };
             env.bind(Arc::from(name), fn_val);
+            built.push((name, fn_val));
+        }
+    }
+
+    // Pass 3: replace the nil placeholders each closure captured with the
+    // sibling it actually names. This is what makes the scope MUTUAL rather
+    // than sequential, and it necessarily builds a reference cycle between
+    // co-recursive fns — which is inherent to letfn, not an artifact here.
+    for (_, fn_val) in &built {
+        if let Value::Fn(ptr) = fn_val {
+            let mut ptr = ptr.clone();
+            let f = ptr.get_mut();
+            for i in 0..f.closed_over_names.len() {
+                let captured = f.closed_over_names[i].clone();
+                if let Some((_, real)) = built.iter().find(|(n, _)| *n == captured) {
+                    f.closed_over_vals[i] = real.clone();
+                }
+            }
         }
     }
 
