@@ -1157,6 +1157,9 @@ pub enum FutureState {
     Cancelled,
 }
 
+/// The message carried by the error raised when reading a cancelled future.
+pub const FUTURE_CANCELLED_MSG: &str = "future was cancelled";
+
 /// A future value computed asynchronously on another thread.
 pub struct CljxFuture {
     pub state: Mutex<FutureState>,
@@ -1184,6 +1187,36 @@ impl CljxFuture {
     /// True if explicitly cancelled.
     pub fn is_cancelled(&self) -> bool {
         matches!(&*self.state.lock().unwrap(), FutureState::Cancelled)
+    }
+
+    /// Mark a still-running future cancelled, waking anyone waiting on it.
+    ///
+    /// Returns false when it had already settled. The task itself is not
+    /// interrupted; what is cancelled is the result.
+    pub fn cancel(&self) -> bool {
+        let mut state = self.state.lock().unwrap();
+        if matches!(&*state, FutureState::Running) {
+            *state = FutureState::Cancelled;
+            self.cond.notify_all();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// The catchable value every reader of a cancelled future raises.
+    ///
+    /// One shape for every path — the sync tree-walker's `await`/`deref`, the
+    /// async tree-walker, and the compiled state machine all hand user code
+    /// the same `ex-info`-like error, so a `catch` behaves the same whether or
+    /// not the enclosing fn happened to be async-JIT-compiled.
+    pub fn cancelled_error() -> Value {
+        Value::Error(GcPtr::new(crate::ExceptionInfo::new(
+            crate::ValueError::Other(FUTURE_CANCELLED_MSG.to_string()),
+            FUTURE_CANCELLED_MSG.to_string(),
+            None,
+            None,
+        )))
     }
 
     /// Mark this future's result as observed. Call when a consumer reads the

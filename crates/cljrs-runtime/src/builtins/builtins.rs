@@ -26,10 +26,10 @@ use bigdecimal::{BigDecimal, RoundingMode};
 use cljrs_gc::GcPtr;
 use cljrs_value::value::{PrintValue, SetValue};
 use cljrs_value::{
-    Arity, Atom, CljxCons, CljxPromise, ExceptionInfo, FutureState, Keyword, LazySeq, MapValue,
-    Namespace, NativeFn, ObjectArray, PersistentHashMap, PersistentHashSet, PersistentList,
-    PersistentQueue, PersistentVector, SharedAtom, SortedSet, Symbol, Thunk, TypeInstance, Value,
-    ValueError, ValueResult, Volatile, demote, promote,
+    Arity, Atom, CljxCons, CljxFuture, CljxPromise, ExceptionInfo, FutureState, Keyword, LazySeq,
+    MapValue, Namespace, NativeFn, ObjectArray, PersistentHashMap, PersistentHashSet,
+    PersistentList, PersistentQueue, PersistentVector, SharedAtom, SortedSet, Symbol, Thunk,
+    TypeInstance, Value, ValueError, ValueResult, Volatile, demote, promote,
 };
 use num_bigint::{BigInt, Sign, ToBigInt};
 use num_rational::Ratio;
@@ -1670,17 +1670,7 @@ pub fn register_all(globals: &Arc<GlobalEnv>, ns: &str) {
         ("eval", Arity::Fixed(1), builtin_eval_sentinel),
     ];
 
-    let docs: HashMap<&str, &str> = BUILTIN_DOCS.iter().copied().collect();
-    for (name, arity, func) in fns {
-        let nf = NativeFn::new(name, arity, func);
-        let var = globals.intern(ns, Arc::from(name), Value::NativeFunction(GcPtr::new(nf)));
-        if let Some(doc) = docs.get(name) {
-            var.get().set_meta(Value::Map(MapValue::empty().assoc(
-                Value::keyword(Keyword::parse("doc")),
-                Value::string((*doc).to_string()),
-            )));
-        }
-    }
+    intern_builtins(globals, ns, fns, BUILTIN_DOCS);
 
     // Math constants.
     globals.intern(
@@ -1691,9 +1681,79 @@ pub fn register_all(globals: &Arc<GlobalEnv>, ns: &str) {
     globals.intern(ns, Arc::from("Math/E"), Value::Double(std::f64::consts::E));
 }
 
+/// Intern `fns` into `ns`, attaching the `:doc` meta named in `docs`.
+fn intern_builtins(
+    globals: &Arc<GlobalEnv>,
+    ns: &str,
+    fns: Vec<(&str, Arity, fn(&[Value]) -> ValueResult<Value>)>,
+    docs: &[(&str, &str)],
+) {
+    let docs: HashMap<&str, &str> = docs.iter().copied().collect();
+    for (name, arity, func) in fns {
+        let nf = NativeFn::new(name, arity, func);
+        let var = globals.intern(ns, Arc::from(name), Value::NativeFunction(GcPtr::new(nf)));
+        if let Some(doc) = docs.get(name) {
+            var.get().set_meta(Value::Map(MapValue::empty().assoc(
+                Value::keyword(Keyword::parse("doc")),
+                Value::string((*doc).to_string()),
+            )));
+        }
+    }
+}
+
+/// The namespace experimental APIs live in.
+///
+/// Deliberately not referred into `user` and not part of `clojure.core`:
+/// everything here is reachable only by an explicit `require`, so
+/// `(when-var-exists future ...)` and similar feature probes see the same
+/// absence a JVM-less runtime would report.
+pub const EXPERIMENTAL_NS: &str = "cljrs.core.experimental";
+
+/// Doc meta for the experimental builtins, kept separate from `BUILTIN_DOCS`
+/// so each table can be checked against the namespace it is registered in.
+const EXPERIMENTAL_DOCS: &[(&str, &str)] = &[
+    (
+        "future-call",
+        "Runs a zero-arg fn as a task on this isolate's executor and returns a future. Read it with (await f) from an ^:async fn: (deref f) blocks the one thread the task needs in order to finish.",
+    ),
+    ("future?", "Returns true if x is a future."),
+    ("future-done?", "Returns true if the future has settled."),
+    (
+        "future-cancelled?",
+        "Returns true if the future was cancelled.",
+    ),
+    (
+        "future-cancel",
+        "Cancels a still-running future, so awaiting it raises. Returns false if it had already settled. The task is not interrupted; what is cancelled is the result.",
+    ),
+];
+
+/// Register the experimental native builtins into `ns` (see [`EXPERIMENTAL_NS`]).
+///
+/// The future family lives here rather than in `clojure.core` because it cannot
+/// honour `clojure.core/future`'s contract on this runtime — see the crate
+/// README's "Experimental namespace" section.
+pub fn register_experimental(globals: &Arc<GlobalEnv>, ns: &str) {
+    let fns: Vec<(&str, Arity, fn(&[Value]) -> ValueResult<Value>)> = vec![
+        // futures — the executor comes from the installed async runtime
+        ("future-call", Arity::Fixed(1), builtin_future_call),
+        ("future?", Arity::Fixed(1), builtin_future_q),
+        ("future-done?", Arity::Fixed(1), builtin_future_done_q),
+        (
+            "future-cancelled?",
+            Arity::Fixed(1),
+            builtin_future_cancelled_q,
+        ),
+        ("future-cancel", Arity::Fixed(1), builtin_future_cancel),
+    ];
+    intern_builtins(globals, ns, fns, EXPERIMENTAL_DOCS);
+}
+
 // Bootstrap Clojure source defining higher-order functions.
 pub const BOOTSTRAP_SOURCE: &str = include_str!("bootstrap.cljrs");
 pub const CLOJURE_TEST_SOURCE: &str = include_str!("clojure_test.cljrs");
+// Clojure source for the experimental namespace (see `EXPERIMENTAL_NS`).
+pub const EXPERIMENTAL_SOURCE: &str = include_str!("experimental.cljrs");
 
 // ── Helper: lazy value iterator ──────────────────────────────────────────────
 
@@ -6097,7 +6157,9 @@ fn builtin_deref(args: &[Value]) -> ValueResult<Value> {
                         f.get().mark_observed();
                         Err(ValueError::GasExhausted)
                     }
-                    FutureState::Cancelled => Err(ValueError::Other("future was cancelled".into())),
+                    FutureState::Cancelled => {
+                        Err(ValueError::Thrown(CljxFuture::cancelled_error()))
+                    }
                     FutureState::Running => {
                         let (guard, _) = f
                             .get()
@@ -6118,7 +6180,7 @@ fn builtin_deref(args: &[Value]) -> ValueResult<Value> {
                                 Err(ValueError::GasExhausted)
                             }
                             FutureState::Cancelled => {
-                                Err(ValueError::Other("future was cancelled".into()))
+                                Err(ValueError::Thrown(CljxFuture::cancelled_error()))
                             }
                             FutureState::Running => Ok(timeout_val),
                         }
@@ -6141,7 +6203,7 @@ fn builtin_deref(args: &[Value]) -> ValueResult<Value> {
                             return Err(ValueError::GasExhausted);
                         }
                         FutureState::Cancelled => {
-                            return Err(ValueError::Other("future was cancelled".into()));
+                            return Err(ValueError::Thrown(CljxFuture::cancelled_error()));
                         }
                         FutureState::Running => {
                             guard = f.get().cond.wait(guard).unwrap();
@@ -8088,52 +8150,6 @@ fn builtin_deliver(args: &[Value]) -> ValueResult<Value> {
     }
 }
 
-// These functions are kept for future use but are not currently registered.
-#[allow(dead_code)]
-fn builtin_future_done_q(args: &[Value]) -> ValueResult<Value> {
-    match &args[0] {
-        Value::Future(f) => Ok(Value::Bool(f.get().is_done())),
-        v => Err(ValueError::WrongType {
-            expected: "future",
-            got: v.type_name().to_string(),
-        }),
-    }
-}
-
-#[allow(dead_code)]
-fn builtin_future_cancelled_q(args: &[Value]) -> ValueResult<Value> {
-    match &args[0] {
-        Value::Future(f) => Ok(Value::Bool(f.get().is_cancelled())),
-        v => Err(ValueError::WrongType {
-            expected: "future",
-            got: v.type_name().to_string(),
-        }),
-    }
-}
-
-#[allow(dead_code)]
-fn builtin_future_cancel(args: &[Value]) -> ValueResult<Value> {
-    match &args[0] {
-        Value::Future(f) => {
-            let mut state = f.get().state.lock().unwrap();
-            if matches!(&*state, FutureState::Running) {
-                *state = FutureState::Cancelled;
-                f.get().cond.notify_all();
-            }
-            Ok(Value::Bool(true))
-        }
-        v => Err(ValueError::WrongType {
-            expected: "future",
-            got: v.type_name().to_string(),
-        }),
-    }
-}
-
-#[allow(dead_code)]
-fn builtin_future_call_star(_args: &[Value]) -> ValueResult<Value> {
-    Err(ValueError::Other("future is not yet implemented".into()))
-}
-
 #[allow(dead_code)]
 fn builtin_agent(_args: &[Value]) -> ValueResult<Value> {
     Err(ValueError::Other("agent is not yet implemented".into()))
@@ -8471,6 +8487,69 @@ fn builtin_with_meta(args: &[Value]) -> ValueResult<Value> {
     }
 }
 
+// ── futures ──────────────────────────────────────────────────────────────────
+
+/// `(future-call thunk)` — run a zero-arg fn as a task, returning a future.
+///
+/// The task runs on the installed async runtime's executor, which is this
+/// isolate's: cooperative, not parallel, since every Clojure value is `!Send`.
+/// Read the result with `(await f)`; `(deref f)` blocks the one thread the task
+/// needs in order to finish.
+fn builtin_future_call(args: &[Value]) -> ValueResult<Value> {
+    let thunk = match args {
+        [thunk] => thunk.clone(),
+        other => {
+            return Err(ValueError::ArityError {
+                name: "future-call".to_string(),
+                expected: "1".to_string(),
+                got: other.len(),
+            });
+        }
+    };
+    let (globals, ns) = crate::env::callback::capture_eval_context()
+        .ok_or_else(|| ValueError::Other("future called outside an eval context".into()))?;
+    let rt = globals.async_runtime().ok_or_else(|| {
+        ValueError::Other(
+            "future requires an async runtime (build with the `async` feature)".into(),
+        )
+    })?;
+    let call_env = crate::env::env::Env::new(globals, &ns);
+    Ok(rt.spawn_async_call(thunk, Vec::new(), call_env))
+}
+
+fn builtin_future_q(args: &[Value]) -> ValueResult<Value> {
+    Ok(Value::Bool(matches!(args.first(), Some(Value::Future(_)))))
+}
+
+fn as_future(args: &[Value]) -> ValueResult<GcPtr<cljrs_value::CljxFuture>> {
+    match args.first() {
+        Some(Value::Future(f)) => Ok(f.clone()),
+        other => Err(ValueError::WrongType {
+            expected: "future",
+            got: other.map_or_else(|| "nothing".to_string(), |v| v.type_name().to_string()),
+        }),
+    }
+}
+
+/// `(future-done? f)` — true once the task has settled, cancelled included.
+fn builtin_future_done_q(args: &[Value]) -> ValueResult<Value> {
+    Ok(Value::Bool(as_future(args)?.get().is_done()))
+}
+
+/// `(future-cancelled? f)`
+fn builtin_future_cancelled_q(args: &[Value]) -> ValueResult<Value> {
+    Ok(Value::Bool(as_future(args)?.get().is_cancelled()))
+}
+
+/// `(future-cancel f)` — mark a still-running future cancelled, so awaiting it
+/// raises instead of yielding a value. False if it had already settled.
+///
+/// The task is cooperative and is not interrupted; what is cancelled is the
+/// result, as for a JVM future already past its interruption point.
+fn builtin_future_cancel(args: &[Value]) -> ValueResult<Value> {
+    Ok(Value::Bool(as_future(args)?.get().cancel()))
+}
+
 /// Sentinel — `eval` is intercepted in `eval_call` because it needs env.
 fn builtin_eval_sentinel(_args: &[Value]) -> ValueResult<Value> {
     Err(ValueError::WrongType {
@@ -8748,6 +8827,39 @@ mod doc_tests {
                 "BUILTIN_DOCS has an entry for {name:?}, but no builtin is registered under that name"
             );
         }
+    }
+
+    /// Same invariant for the experimental table, checked against the
+    /// namespace those builtins are actually registered in.
+    #[test]
+    fn experimental_docs_names_are_all_registered() {
+        let globals = test_globals();
+        register_experimental(&globals, EXPERIMENTAL_NS);
+        for (name, _) in EXPERIMENTAL_DOCS {
+            assert!(
+                globals.lookup_var(EXPERIMENTAL_NS, name).is_some(),
+                "EXPERIMENTAL_DOCS has an entry for {name:?}, but no builtin is registered under that name"
+            );
+        }
+    }
+
+    /// The future family is deliberately absent from `clojure.core`: it cannot
+    /// honour that namespace's contract on a one-thread-per-isolate runtime, and
+    /// feature probes (`when-var-exists future`) must keep seeing nothing there.
+    #[test]
+    fn future_family_is_not_in_clojure_core() {
+        let globals = test_globals();
+        register_experimental(&globals, EXPERIMENTAL_NS);
+        for (name, _) in EXPERIMENTAL_DOCS {
+            assert!(
+                globals.lookup_var("clojure.core", name).is_none(),
+                "{name:?} is registered in clojure.core; it belongs in {EXPERIMENTAL_NS}"
+            );
+        }
+        assert!(
+            globals.lookup_var("clojure.core", "future").is_none(),
+            "clojure.core/future is defined; it belongs in {EXPERIMENTAL_NS}"
+        );
     }
 
     #[test]

@@ -1502,3 +1502,4 @@
   "Returns the immediate and indirect children of tag, or nil if it has none."
   ([tag] (descendants global-hierarchy tag))
   ([h tag] (not-empty (get (:descendants h) tag))))
+

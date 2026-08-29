@@ -17,7 +17,7 @@ use cljrs_reader::Form;
 use cljrs_reader::form::FormKind;
 use cljrs_value::error::ExceptionInfo;
 use cljrs_value::{
-    CljxFn, CljxFnArity, FutureState, Keyword, MapValue, MultiFn, Protocol, ProtocolFn,
+    CljxFn, CljxFnArity, CljxFuture, FutureState, Keyword, MapValue, MultiFn, Protocol, ProtocolFn,
     ProtocolMethod, ReferClojureFilter, TypeHint, TypeInstance, Value, ValueError,
 };
 
@@ -2471,7 +2471,7 @@ fn eval_await(args: &[Form], env: &mut Env) -> EvalResult {
                         return Err(EvalError::GasExhausted);
                     }
                     FutureState::Cancelled => {
-                        return Err(EvalError::Runtime("future was cancelled".into()));
+                        return Err(EvalError::Thrown(CljxFuture::cancelled_error()));
                     }
                     FutureState::Running => {
                         guard = f.get().cond.wait(guard).unwrap();

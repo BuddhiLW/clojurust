@@ -15,8 +15,8 @@ use cljrs_reader::form::FormKind;
 use cljrs_value::regex::Pattern;
 use cljrs_value::value::SetValue;
 use cljrs_value::{
-    FutureState, Keyword, MapValue, PersistentHashSet, PersistentList, PersistentVector, Symbol,
-    Value,
+    CljxFuture, FutureState, Keyword, MapValue, PersistentHashSet, PersistentList,
+    PersistentVector, Symbol, Value,
 };
 
 /// Evaluate a `Form` in the given `Env`.
@@ -372,7 +372,7 @@ pub fn deref_value(v: Value) -> EvalResult {
                         return Err(EvalError::GasExhausted);
                     }
                     FutureState::Cancelled => {
-                        return Err(EvalError::Runtime("future was cancelled".into()));
+                        return Err(EvalError::Thrown(CljxFuture::cancelled_error()));
                     }
                     FutureState::Running => {
                         guard = f.get().cond.wait(guard).unwrap();
@@ -1704,7 +1704,9 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "future/thread spawn not yet implemented (Phase A1 — GcPtr: !Send)"]
+    #[ignore = "clojure.core/future is undefined by design: @f deadlocks the one \
+                thread the task needs (GcPtr: !Send). cljrs.core.experimental/future \
+                is the cooperative stand-in, read with (await f)"]
     fn test_future() {
         let result = eval_str(
             r#"
@@ -2145,7 +2147,8 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "future/thread spawn not yet implemented (Phase A1 — GcPtr: !Send)"]
+    #[ignore = "clojure.core/future is undefined by design; the experimental \
+                stand-in does not convey dynamic bindings to its task"]
     fn test_binding_conveyance() {
         let (_, mut env) = make_env();
         eval_src("(def ^:dynamic *x* 10)", &mut env).unwrap();
