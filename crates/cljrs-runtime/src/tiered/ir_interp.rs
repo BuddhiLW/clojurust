@@ -1095,6 +1095,7 @@ fn dispatch_sentinel_by_name(
         }
         "alter-var-root" => crate::interp::apply::eval_alter_var_root(args, env),
         "vary-meta" => crate::interp::apply::eval_vary_meta(args, env),
+        "eval" => crate::interp::apply::eval_eval(args, env),
         "with-bindings*" => crate::interp::apply::eval_with_bindings_star(args, env),
         "send" | "send-off" => crate::interp::apply::eval_send_to_agent(args, env),
         _ => {
@@ -1114,6 +1115,7 @@ fn is_sentinel(name: &str) -> bool {
             | "make-delay"
             | "alter-var-root"
             | "vary-meta"
+            | "eval"
             | "with-bindings*"
             | "send"
             | "send-off"
@@ -1176,9 +1178,16 @@ fn dispatch_known_fn(known_fn: &KnownFn, args: Vec<Value>, env: &mut Env) -> Eva
         )),
 
         // ── Type predicates ─────────────────────────────────────────────
-        KnownFn::IsNil => Ok(Value::Bool(matches!(args.first(), Some(Value::Nil)))),
+        //
+        // Every one of these looks through a metadata wrapper, exactly as the
+        // tree-walker's `*?` builtins do — a promoted body must not answer
+        // `(symbol? ^{:a 1} 'x)` differently from an interpreted one.
+        KnownFn::IsNil => Ok(Value::Bool(matches!(
+            args.first().map(Value::unwrap_meta),
+            Some(Value::Nil)
+        ))),
         KnownFn::IsSeq => Ok(Value::Bool(matches!(
-            args.first(),
+            args.first().map(Value::unwrap_meta),
             Some(Value::List(_) | Value::Cons(_) | Value::LazySeq(_))
         ))),
         KnownFn::IsVector => Ok(Value::Bool(matches!(
@@ -1190,7 +1199,7 @@ fn dispatch_known_fn(known_fn: &KnownFn, args: Vec<Value>, env: &mut Env) -> Eva
             Some(Value::Map(_))
         ))),
         KnownFn::IsNumber => Ok(Value::Bool(matches!(
-            args.first(),
+            args.first().map(Value::unwrap_meta),
             Some(
                 Value::Long(_)
                     | Value::Double(_)
@@ -1199,11 +1208,26 @@ fn dispatch_known_fn(known_fn: &KnownFn, args: Vec<Value>, env: &mut Env) -> Eva
                     | Value::BigDecimal(_)
             )
         ))),
-        KnownFn::IsString => Ok(Value::Bool(matches!(args.first(), Some(Value::Str(_))))),
-        KnownFn::IsKeyword => Ok(Value::Bool(matches!(args.first(), Some(Value::Keyword(_))))),
-        KnownFn::IsSymbol => Ok(Value::Bool(matches!(args.first(), Some(Value::Symbol(_))))),
-        KnownFn::IsBool => Ok(Value::Bool(matches!(args.first(), Some(Value::Bool(_))))),
-        KnownFn::IsInt => Ok(Value::Bool(matches!(args.first(), Some(Value::Long(_))))),
+        KnownFn::IsString => Ok(Value::Bool(matches!(
+            args.first().map(Value::unwrap_meta),
+            Some(Value::Str(_))
+        ))),
+        KnownFn::IsKeyword => Ok(Value::Bool(matches!(
+            args.first().map(Value::unwrap_meta),
+            Some(Value::Keyword(_))
+        ))),
+        KnownFn::IsSymbol => Ok(Value::Bool(matches!(
+            args.first().map(Value::unwrap_meta),
+            Some(Value::Symbol(_))
+        ))),
+        KnownFn::IsBool => Ok(Value::Bool(matches!(
+            args.first().map(Value::unwrap_meta),
+            Some(Value::Bool(_))
+        ))),
+        KnownFn::IsInt => Ok(Value::Bool(matches!(
+            args.first().map(Value::unwrap_meta),
+            Some(Value::Long(_))
+        ))),
 
         // ── String ──────────────────────────────────────────────────────
         KnownFn::Str => {

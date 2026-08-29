@@ -134,6 +134,18 @@ the `LoadGlobal` name string, and lowering inside a versioned namespace
 (`"base@sha"`) rewrites base-qualified self-references (`base/x`) to the
 versioned namespace (see `split_sym` in `lower/anf.rs`).
 
+Reader metadata needs no dedicated instruction either.  `^m form` lowers to
+`meta` → `merge` → `with-meta` on `clojure.core`, through the ordinary
+`LoadGlobal` + `Call` path every backend already supports; merging rather than
+replacing is what keeps both layers of a stacked `^:a ^:b [1]` alive with the
+outer one winning.  The attach is emitted only when
+`Form::takes_runtime_meta` (in `cljrs-reader`) holds — a collection literal or
+a function — which is the same predicate the tree-walker consults, so `meta`
+cannot answer one way interpreted and another once promoted.  Everywhere else
+the annotation is a compile-time hint: it is dropped, and not evaluated, so
+`(f ^long n)` costs nothing.  `^:async (fn …)` keeps its own arm ahead of this
+and is consumed by `lower_fn`.
+
 Method interop needs no dedicated instruction either: `(.method target args…)`
 lowers to `CallDirect(dst, ".method", [target, args…])` — the leading dot in
 the name is the marker.  The IR interpreter routes these to the tree-walker's
