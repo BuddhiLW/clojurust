@@ -15,8 +15,8 @@ use cljrs_reader::form::FormKind;
 use cljrs_value::regex::Pattern;
 use cljrs_value::value::SetValue;
 use cljrs_value::{
-    FutureState, Keyword, MapValue, PersistentHashSet, PersistentList, PersistentVector, Symbol,
-    Value,
+    CljxFuture, FutureState, Keyword, MapValue, PersistentHashSet, PersistentList,
+    PersistentVector, Symbol, Value,
 };
 
 /// Evaluate a `Form` in the given `Env`.
@@ -142,9 +142,20 @@ pub fn eval(form: &Form, env: &mut Env) -> EvalResult {
                 Err(EvalError::Runtime("var requires a symbol".into()))
             }
         }
-        FormKind::Meta(_, form) => {
-            // Ignore metadata in Phase 4; just eval the annotated form.
-            eval(form, env)
+        FormKind::Meta(meta, form) => {
+            // `^m expr` evaluates `expr`; the annotation becomes runtime
+            // metadata only on a form that constructs an `IObj` (a collection
+            // literal or an `fn`). Everywhere else it is a compile-time hint,
+            // and — as on the JVM — is not evaluated at all.
+            //
+            // `lower::anf` applies the same rule, so a promoted or AOT-compiled
+            // body answers `meta` the same way an interpreted one does.
+            let value = eval(form, env)?;
+            if !form.takes_runtime_meta() {
+                return Ok(value);
+            }
+            let m = crate::builtins::form::expand_meta_annotation(meta, &mut |f| eval(f, env))?;
+            Ok(crate::builtins::form::attach_meta(value, m))
         }
 
         // ── Dispatch ──────────────────────────────────────────────────────
@@ -194,7 +205,7 @@ fn eval_list(forms: &[Form], env: &mut Env) -> EvalResult {
     };
 
     // Check for special form.
-    if let FormKind::Symbol(s) = &forms[0].kind
+    if let Some(s) = forms[0].as_symbol()
         && is_special_form(s)
     {
         return eval_special(s, &forms[1..], env);
@@ -361,7 +372,7 @@ pub fn deref_value(v: Value) -> EvalResult {
                         return Err(EvalError::GasExhausted);
                     }
                     FutureState::Cancelled => {
-                        return Err(EvalError::Runtime("future was cancelled".into()));
+                        return Err(EvalError::Thrown(CljxFuture::cancelled_error()));
                     }
                     FutureState::Running => {
                         guard = f.get().cond.wait(guard).unwrap();
@@ -1693,7 +1704,9 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "future/thread spawn not yet implemented (Phase A1 — GcPtr: !Send)"]
+    #[ignore = "clojure.core/future is undefined by design: @f deadlocks the one \
+                thread the task needs (GcPtr: !Send). cljrs.core.experimental/future \
+                is the cooperative stand-in, read with (await f)"]
     fn test_future() {
         let result = eval_str(
             r#"
@@ -2134,7 +2147,8 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "future/thread spawn not yet implemented (Phase A1 — GcPtr: !Send)"]
+    #[ignore = "clojure.core/future is undefined by design; the experimental \
+                stand-in does not convey dynamic bindings to its task"]
     fn test_binding_conveyance() {
         let (_, mut env) = make_env();
         eval_src("(def ^:dynamic *x* 10)", &mut env).unwrap();

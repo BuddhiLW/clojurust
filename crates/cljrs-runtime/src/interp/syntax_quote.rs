@@ -161,6 +161,19 @@ fn sq_form(
             sq_form(&expanded, env, gensyms)
         }
 
+        // `^m form`: syntax-quote is data-producing, so the annotation lands on
+        // the value exactly as it does inside `quote`. Both sides are processed
+        // recursively — falling through to `form_to_value` here would skip
+        // auto-gensym resolution, and `` `(let [^long y# 1] y#) `` would expand
+        // to an unresolvable `y__auto__`.
+        FormKind::Meta(meta, inner) => {
+            let value = sq_form(inner, env, gensyms)?;
+            let m = crate::builtins::form::expand_meta_annotation(meta, &mut |f| {
+                sq_form(f, env, gensyms)
+            })?;
+            Ok(crate::builtins::form::attach_meta(value, m))
+        }
+
         // Everything else: wrap as literal data.
         _other => form_to_value(form),
     }
