@@ -21,6 +21,141 @@ impl Form {
     pub fn heap_size(&self) -> usize {
         mem::size_of::<FormKind>() + self.kind.heap_size()
     }
+
+    /// The annotated form with every `^meta` wrapper removed.
+    ///
+    /// Returns `self` when the form carries no metadata. Stacked metadata
+    /// (`^:a ^:b x`) is peeled down to the innermost form.
+    pub fn unmeta(&self) -> &Form {
+        let mut form = self;
+        while let FormKind::Meta(_, inner) = &form.kind {
+            form = inner;
+        }
+        form
+    }
+
+    /// True when an evaluated-position `^meta` annotation on this form becomes
+    /// *runtime* metadata on the value it produces.
+    ///
+    /// Only a form that constructs an `IObj` qualifies — a collection literal
+    /// or a function. Every other form (a call, a symbol, `quote`, `if`, `do`)
+    /// takes the annotation as a compile-time hint and evaluates to an
+    /// unannotated value, so `(meta ^{:a 1} (list 1))` and `(meta ^{:a 1} x)`
+    /// are both `nil`.
+    ///
+    /// Every execution tier consults this one predicate: the tree-walker in
+    /// `interp::eval`, and IR lowering in `lower::anf` for the JIT and AOT
+    /// paths. A tier that disagreed would make `meta` depend on how hot the
+    /// code got.
+    ///
+    /// True when the value this form denotes *as data* can carry metadata.
+    ///
+    /// Inside `quote` every form is a literal, so whether an annotation lands
+    /// is a question about the form and needs no runtime test: `'^{:a 1} [1]`
+    /// carries it, `'^{:a 1} 42` cannot. Mirrors `supports_meta` in
+    /// `cljrs-runtime` over the values `form_to_value` produces — a reader
+    /// macro (`'x`, `@x`, `#'x`, `` `x ``) denotes a list, and `#(…)` denotes
+    /// the `fn*` list it expands to.
+    pub fn quoted_value_supports_meta(&self) -> bool {
+        match &self.kind {
+            FormKind::List(_)
+            | FormKind::Vector(_)
+            | FormKind::Map(_)
+            | FormKind::Set(_)
+            | FormKind::Symbol(_)
+            | FormKind::AutoSymbol(_)
+            | FormKind::AnonFn(_)
+            | FormKind::Quote(_)
+            | FormKind::SyntaxQuote(_)
+            | FormKind::Unquote(_)
+            | FormKind::UnquoteSplice(_)
+            | FormKind::Deref(_)
+            | FormKind::Var(_) => true,
+            FormKind::Meta(_, inner) => inner.quoted_value_supports_meta(),
+            _ => false,
+        }
+    }
+
+    /// Inside `quote` the rule does not apply: there the annotation is data and
+    /// lands on any value that can carry it.
+    pub fn takes_runtime_meta(&self) -> bool {
+        match &self.kind {
+            FormKind::Vector(_) | FormKind::Map(_) | FormKind::Set(_) | FormKind::AnonFn(_) => true,
+            // A list is a call, except when it *is* a function form.
+            FormKind::List(parts) => matches!(
+                parts.first().map(|f| &f.kind),
+                Some(FormKind::Symbol(s)) if s == "fn" || s == "fn*"
+            ),
+            // Metadata stacks: `^:a ^:b [1]` annotates the vector twice.
+            FormKind::Meta(_, inner) => inner.takes_runtime_meta(),
+            _ => false,
+        }
+    }
+
+    /// The `^meta` forms attached to this form, outermost first, together with
+    /// the annotated form itself.
+    pub fn peel_meta(&self) -> (Vec<&Form>, &Form) {
+        let mut metas = Vec::new();
+        let mut form = self;
+        while let FormKind::Meta(meta, inner) = &form.kind {
+            metas.push(meta.as_ref());
+            form = inner;
+        }
+        (metas, form)
+    }
+
+    // ── Structural views ──────────────────────────────────────────────────────
+    //
+    // Every accessor below reports the shape of [`Form::unmeta`], so an
+    // annotated form has the same structural shape as the form it annotates.
+
+    /// The symbol name, if this form is a symbol.
+    pub fn as_symbol(&self) -> Option<&str> {
+        match &self.unmeta().kind {
+            FormKind::Symbol(s) => Some(s),
+            _ => None,
+        }
+    }
+
+    /// The keyword name (without the leading `:`), if this form is a keyword.
+    pub fn as_keyword(&self) -> Option<&str> {
+        match &self.unmeta().kind {
+            FormKind::Keyword(k) => Some(k),
+            _ => None,
+        }
+    }
+
+    /// The string contents, if this form is a string literal.
+    pub fn as_string(&self) -> Option<&str> {
+        match &self.unmeta().kind {
+            FormKind::Str(s) => Some(s),
+            _ => None,
+        }
+    }
+
+    /// The elements, if this form is a list.
+    pub fn as_list(&self) -> Option<&[Form]> {
+        match &self.unmeta().kind {
+            FormKind::List(v) => Some(v),
+            _ => None,
+        }
+    }
+
+    /// The elements, if this form is a vector.
+    pub fn as_vector(&self) -> Option<&[Form]> {
+        match &self.unmeta().kind {
+            FormKind::Vector(v) => Some(v),
+            _ => None,
+        }
+    }
+
+    /// The flat key/value pairs, if this form is a map literal.
+    pub fn as_map(&self) -> Option<&[Form]> {
+        match &self.unmeta().kind {
+            FormKind::Map(v) => Some(v),
+            _ => None,
+        }
+    }
 }
 
 impl FormKind {

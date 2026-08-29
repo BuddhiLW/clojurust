@@ -139,6 +139,31 @@ impl Form {
     /// Total heap bytes owned by this form tree, excluding the Form struct itself.
     /// Used by GcSize implementations to accurately track memory pressure.
     pub fn heap_size(&self) -> usize
+
+    // ── Metadata ──
+    /// This form with every `^meta` wrapper removed (stacked metadata included).
+    pub fn unmeta(&self) -> &Form
+    /// The `^meta` forms attached here, outermost first, plus the annotated form.
+    pub fn peel_meta(&self) -> (Vec<&Form>, &Form)
+    /// True when an evaluated-position `^meta` annotation on this form becomes
+    /// runtime metadata on the value it produces — a collection literal or a
+    /// function. Every other form takes the annotation as a compile-time hint,
+    /// so `(meta ^{:a 1} (list 1))` is `nil`. Consulted by every execution
+    /// tier (`interp::eval` and `lower::anf`), which is what keeps `meta` from
+    /// depending on how hot the code got. Does not apply inside `quote`, where
+    /// the annotation is data.
+    pub fn takes_runtime_meta(&self) -> bool
+
+    // ── Structural views ──
+    // Each reports the shape of `unmeta()`, so `^m form` has the same shape as
+    // `form`. Special-form parsers ask these instead of matching `FormKind`
+    // directly, which is what keeps a `^hint` from changing how a form parses.
+    pub fn as_symbol(&self) -> Option<&str>
+    pub fn as_keyword(&self) -> Option<&str>
+    pub fn as_string(&self) -> Option<&str>
+    pub fn as_list(&self) -> Option<&[Form]>
+    pub fn as_vector(&self) -> Option<&[Form]>
+    pub fn as_map(&self) -> Option<&[Form]>
 }
 
 impl FormKind {
