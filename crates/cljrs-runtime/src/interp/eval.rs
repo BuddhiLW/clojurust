@@ -1270,6 +1270,73 @@ mod tests {
         );
     }
 
+    // letfn scope is MUTUAL, not sequential: every binding is visible to every
+    // other one regardless of order. These pin the three-pass construction in
+    // `eval_letfn` — a closure captures values rather than cells, so without the
+    // pass-3 back-patch a forward reference silently sees the nil placeholder
+    // pass 1 left behind.
+
+    #[test]
+    fn test_letfn_forward_reference() {
+        assert_eq!(
+            eval_str("(letfn [(f [n] (g n)) (g [n] (* n 2))] (f 21))").unwrap(),
+            long(42)
+        );
+    }
+
+    #[test]
+    fn test_letfn_mutual_recursion() {
+        // `my-even?` names `my-odd?` before it is built — the direction that was
+        // broken — and `my-odd?` names `my-even?` backwards.
+        let defs = "(letfn [(my-even? [n] (if (= n 0) true (my-odd? (dec n))))
+                            (my-odd? [n] (if (= n 0) false (my-even? (dec n))))]";
+        assert_eq!(
+            eval_str(&format!("{defs} (my-even? 10))")).unwrap(),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            eval_str(&format!("{defs} (my-odd? 10))")).unwrap(),
+            Value::Bool(false)
+        );
+    }
+
+    #[test]
+    fn test_letfn_three_way_mutual_recursion() {
+        let defs = "(letfn [(a [n] (if (= n 0) 1 (b (dec n))))
+                            (b [n] (if (= n 0) 2 (c (dec n))))
+                            (c [n] (if (= n 0) 3 (a (dec n))))]";
+        for (arg, want) in [(0, 1), (1, 2), (2, 3), (3, 1)] {
+            assert_eq!(
+                eval_str(&format!("{defs} (a {arg}))")).unwrap(),
+                long(want),
+                "(a {arg})"
+            );
+        }
+    }
+
+    #[test]
+    fn test_letfn_closes_over_outer_local() {
+        assert_eq!(
+            eval_str("(let [start 10] (letfn [(step [n] (+ n start))] (step 5)))").unwrap(),
+            long(15)
+        );
+    }
+
+    #[test]
+    fn test_letfn_shadows_enclosing_binding() {
+        // The letfn binding wins over the `let` of the same name, and siblings
+        // that name it see the fn, not the shadowed value.
+        assert_eq!(
+            eval_str("(let [f 1] (letfn [(g [] (f)) (f [] 7)] (g)))").unwrap(),
+            long(7)
+        );
+    }
+
+    #[test]
+    fn test_letfn_binding_name_must_be_a_symbol() {
+        assert!(eval_str("(letfn [(42 [n] n)] 1)").is_err());
+    }
+
     // ── Phase 5: namespace ops ────────────────────────────────────────────
 
     #[test]

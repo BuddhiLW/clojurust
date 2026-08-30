@@ -114,6 +114,8 @@ tests/
   core_shadows.rs                  — core_shadowed_names: what a namespace binds
                                      instead of clojure.core (issue #337)
   declare_macro.rs, doc.rs, gas_meter.rs, into_seq_target.rs, map_entry.rs,
+  defrecord_method_fields.rs       — defrecord fields in scope in an inline
+                                     protocol method body; params shadow them
   named_fn_identity.rs, ns_metadata.rs, partition_arities.rs, shared_atom.rs,
   symbolic_nan.rs, threading_macros.rs, auto_gensym.rs, auto_keyword_macro.rs,
   assoc_in_metadata.rs, empty_metadata.rs, into_metadata.rs, vec_metadata.rs,
