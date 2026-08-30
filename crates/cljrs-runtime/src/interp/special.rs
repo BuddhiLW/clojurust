@@ -1700,6 +1700,13 @@ fn eval_load_file(args: &[Form], env: &mut Env) -> EvalResult {
 
 fn eval_letfn(args: &[Form], env: &mut Env) -> EvalResult {
     // (letfn [(f [params] body...) ...] body...)
+    //
+    // Three passes, because a closure here captures VALUES, not cells:
+    // `eval_fn` snapshots `env.all_local_bindings()`, so a name bound after the
+    // closure was built is invisible to it forever. Binding each fn as it was
+    // built therefore gave letfn `let`-like sequential scope — a backward
+    // reference resolved, a forward one or a mutual pair raised "unbound
+    // symbol", which defeats the only reason letfn exists.
     let bindings = match args.first().and_then(|f| f.as_vector()) {
         Some(v) => expand_reader_conds_cow(v).into_owned(),
         None => return Err(EvalError::Runtime("letfn requires a binding vector".into())),
@@ -1707,14 +1714,33 @@ fn eval_letfn(args: &[Form], env: &mut Env) -> EvalResult {
 
     env.push_frame();
 
+    // Pass 1: bind every name to nil, so the pass-2 snapshot CONTAINS all of
+    // them. A capture list cannot grow after the fact; it can only be corrected.
     for binding in &bindings {
         if let Some(parts) = binding.as_list() {
             if parts.is_empty() {
                 continue;
             }
-            // parts[0] = name, parts[1] = params, parts[2..] = body
-            // Reuse eval_fn: it expects (optional-name params body...)
-            // We pass parts directly since parts[0] is the function name symbol.
+            let Some(name) = parts[0].as_symbol() else {
+                env.pop_frame();
+                return Err(EvalError::Runtime(
+                    "letfn binding name must be a symbol".into(),
+                ));
+            };
+            env.bind(Arc::from(name), Value::Nil);
+        }
+    }
+
+    // Pass 2: build the closures. Each captures the real value of any sibling
+    // already built and nil for the rest.
+    let mut built: Vec<(Arc<str>, Value)> = Vec::new();
+    for binding in &bindings {
+        if let Some(parts) = binding.as_list() {
+            if parts.is_empty() {
+                continue;
+            }
+            // parts[0] is the name, so eval_fn sees this as a NAMED fn and wires
+            // up its self-reference; pass 3 handles every other direction.
             let fn_val = match eval_fn(parts, env) {
                 Ok(v) => v,
                 Err(e) => {
@@ -1722,13 +1748,29 @@ fn eval_letfn(args: &[Form], env: &mut Env) -> EvalResult {
                     return Err(e);
                 }
             };
-            let Some(name) = parts[0].as_symbol() else {
-                env.pop_frame();
-                return Err(EvalError::Runtime(
-                    "letfn binding name must be a symbol".into(),
-                ));
+            let name: Arc<str> = match parts[0].as_symbol() {
+                Some(s) => Arc::from(s),
+                None => unreachable!("pass 1 rejected every non-symbol name"),
             };
-            env.bind(Arc::from(name), fn_val);
+            env.bind(Arc::clone(&name), fn_val.clone());
+            built.push((name, fn_val));
+        }
+    }
+
+    // Pass 3: replace the nil placeholders each closure captured with the
+    // sibling it actually names. This is what makes the scope MUTUAL rather
+    // than sequential, and it necessarily builds a reference cycle between
+    // co-recursive fns — which is inherent to letfn, not an artifact here.
+    for (_, fn_val) in &built {
+        if let Value::Fn(ptr) = fn_val {
+            let mut ptr = ptr.clone();
+            let f = ptr.get_mut();
+            for i in 0..f.closed_over_names.len() {
+                let captured = f.closed_over_names[i].clone();
+                if let Some((_, real)) = built.iter().find(|(n, _)| *n == captured) {
+                    f.closed_over_vals[i] = real.clone();
+                }
+            }
         }
     }
 
@@ -1934,7 +1976,7 @@ fn eval_extend_type(args: &[Form], env: &mut Env) -> EvalResult {
                     Some(s) => Arc::from(s),
                     None => continue,
                 };
-                let fn_val = build_impl_fn(parts, env)?;
+                let fn_val = build_impl_fn(parts, &[], env)?;
                 let mut impls = proto.get().impls.lock().unwrap();
                 impls
                     .entry(type_tag.clone())
@@ -1993,7 +2035,7 @@ fn eval_extend_protocol(args: &[Form], env: &mut Env) -> EvalResult {
                     Some(s) => Arc::from(s),
                     None => continue,
                 };
-                let fn_val = build_impl_fn(parts, env)?;
+                let fn_val = build_impl_fn(parts, &[], env)?;
                 let mut impls = proto_ptr.get().impls.lock().unwrap();
                 impls
                     .entry(type_tag.clone())
@@ -2013,7 +2055,64 @@ fn eval_extend_protocol(args: &[Form], env: &mut Env) -> EvalResult {
 /// `parts[0]` is the method name symbol (ignored here — caller handles it).
 /// `parts[1]` is the params vector.
 /// `parts[2..]` is the body.
-fn build_impl_fn(parts: &[Form], env: &mut Env) -> EvalResult<Value> {
+/// Bring a defrecord's FIELDS into scope in a method body, as
+/// `(let* [f (:f this) ...] body...)`.
+///
+/// The bare field symbol is the idiomatic form — `(mutable? [_] (valid-sha? sha))`
+/// — and it read as an unbound symbol, because a method impl is built as an
+/// ordinary fn whose only bindings are its own params. Clojure compiles the
+/// fields as instance fields of the generated class, so they are simply in
+/// scope.
+///
+/// A field whose name a PARAM already takes is skipped: the param shadows the
+/// field in Clojure, and binding it here would shadow the param instead.
+/// Returns None when there is nothing to bind, or when the first param is not
+/// a plain symbol (a destructured `this` has no name to read the fields from).
+fn synth_field_scope(params_form: &Form, fields: &[Arc<str>], body: &[Form]) -> Option<Vec<Form>> {
+    let param_forms = match &params_form.kind {
+        FormKind::Vector(v) => v,
+        _ => return None,
+    };
+    let this_name = match param_forms.first().map(|f| &f.kind) {
+        Some(FormKind::Symbol(s)) => s.clone(),
+        _ => return None,
+    };
+    let param_names: Vec<&str> = param_forms
+        .iter()
+        .filter_map(|f| match &f.kind {
+            FormKind::Symbol(s) => Some(s.as_str()),
+            _ => None,
+        })
+        .collect();
+
+    let span = params_form.span.clone();
+    let mut bindings: Vec<Form> = Vec::new();
+    for field in fields {
+        if param_names.contains(&field.as_ref()) {
+            continue;
+        }
+        bindings.push(Form::new(FormKind::Symbol(field.to_string()), span.clone()));
+        bindings.push(Form::new(
+            FormKind::List(vec![
+                Form::new(FormKind::Keyword(field.to_string()), span.clone()),
+                Form::new(FormKind::Symbol(this_name.clone()), span.clone()),
+            ]),
+            span.clone(),
+        ));
+    }
+    if bindings.is_empty() {
+        return None;
+    }
+
+    let mut let_forms = vec![
+        Form::new(FormKind::Symbol("let*".to_string()), span.clone()),
+        Form::new(FormKind::Vector(bindings), span.clone()),
+    ];
+    let_forms.extend_from_slice(body);
+    Some(vec![Form::new(FormKind::List(let_forms), span)])
+}
+
+fn build_impl_fn(parts: &[Form], fields: &[Arc<str>], env: &mut Env) -> EvalResult<Value> {
     if parts.len() < 2 {
         return Err(EvalError::Runtime(
             "protocol method impl requires params and body".into(),
@@ -2022,6 +2121,18 @@ fn build_impl_fn(parts: &[Form], env: &mut Env) -> EvalResult<Value> {
     // parts[1] should be the params vector.
     let params_form = &parts[1];
     let body = &parts[2..];
+    let scoped;
+    let body: &[Form] = if fields.is_empty() {
+        body
+    } else {
+        match synth_field_scope(params_form, fields, body) {
+            Some(v) => {
+                scoped = v;
+                &scoped
+            }
+            None => body,
+        }
+    };
     let arity = parse_arity(params_form, body)?;
     let (closed_over_names, closed_over_vals) = env.all_local_bindings();
     let fn_name: Option<Arc<str>> = parts[0].as_symbol().map(Arc::from);
@@ -2210,7 +2321,9 @@ fn eval_defrecord(args: &[Form], env: &mut Env) -> EvalResult {
         .collect::<EvalResult<_>>()?;
 
     // Register protocol implementations (same as extend-type inner logic).
-    register_impls_for_tag(&type_tag, &args[2..], env)?;
+    // The field names go with them: a defrecord method body may name its fields
+    // directly, which reify has no equivalent of.
+    register_impls_for_tag(&type_tag, &args[2..], &field_names, env)?;
 
     // Generate constructors in clojure.core.
     // ->TypeName: positional constructor
@@ -2336,8 +2449,8 @@ fn eval_reify(args: &[Form], env: &mut Env) -> EvalResult {
         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let type_tag: Arc<str> = Arc::from(format!("reify__{}", n));
 
-    // Register protocol implementations.
-    register_impls_for_tag(&type_tag, args, env)?;
+    // Register protocol implementations. reify has no fields.
+    register_impls_for_tag(&type_tag, args, &[], env)?;
 
     // Return an empty TypeInstance with the unique tag.
     Ok(Value::TypeInstance(GcPtr::new(TypeInstance {
@@ -2379,7 +2492,12 @@ fn resolve_protocol_sym(env: &Env, s: &str) -> Option<GcPtr<Protocol>> {
 
 /// Parse `Proto (method [params] body) ...` segments and register them under `type_tag`.
 /// Shared by `defrecord` and `reify`.
-fn register_impls_for_tag(type_tag: &Arc<str>, forms: &[Form], env: &mut Env) -> EvalResult<()> {
+fn register_impls_for_tag(
+    type_tag: &Arc<str>,
+    forms: &[Form],
+    fields: &[Arc<str>],
+    env: &mut Env,
+) -> EvalResult<()> {
     let mut current_proto: Option<GcPtr<cljrs_value::Protocol>> = None;
 
     for form in forms {
@@ -2409,7 +2527,7 @@ fn register_impls_for_tag(type_tag: &Arc<str>, forms: &[Form], env: &mut Env) ->
                     Some(s) => Arc::from(s),
                     None => continue,
                 };
-                let fn_val = build_impl_fn(parts, env)?;
+                let fn_val = build_impl_fn(parts, fields, env)?;
                 let mut impls = proto.get().impls.lock().unwrap();
                 impls
                     .entry(type_tag.clone())
