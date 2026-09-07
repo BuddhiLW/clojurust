@@ -196,7 +196,12 @@ fn extract_dependency(form: &Form, config_dir: &Path, name: &str) -> Result<Depe
             rust_crate_dir,
             rust_load_dylib,
         })),
-        (_, _, Some(root)) => Ok(Dependency::Local { root }),
+        (_, _, Some(root)) => Ok(Dependency::Local {
+            root,
+            rust_init,
+            rust_crate_dir,
+            rust_load_dylib,
+        }),
         _ => Err(format!(
             "dep {name}: must specify either :git/url + :git/sha or :local/root"
         )),
@@ -390,5 +395,91 @@ mod tests {
     fn no_main_key_is_none() {
         let cfg = parse(r#"{:paths ["src"]}"#).unwrap();
         assert!(cfg.main_ns.is_none());
+    }
+
+    // ── :local/root native deps ───────────────────────────────────────────
+
+    fn only_dep(cfg: &DepsConfig) -> &Dependency {
+        assert_eq!(cfg.deps.len(), 1, "expected exactly one dep");
+        &cfg.deps[0].1
+    }
+
+    #[test]
+    fn local_root_keeps_its_rust_keys() {
+        // The :rust/* keys were parsed but dropped for anything that was not
+        // a git dep, so a local native package could never be loaded.
+        let cfg = parse(
+            r#"{:deps {my.lib {:local/root "../my-lib"
+                               :rust/load :dylib
+                               :rust/init "my_lib::cljrs_init"
+                               :rust/crate "src/crates/thing"}}}"#,
+        )
+        .unwrap();
+        let Dependency::Local {
+            root,
+            rust_init,
+            rust_crate_dir,
+            rust_load_dylib,
+        } = only_dep(&cfg)
+        else {
+            panic!("expected a local dep");
+        };
+        assert_eq!(root, Path::new("/proj/../my-lib"));
+        assert!(rust_load_dylib);
+        assert_eq!(rust_init.as_deref(), Some("my_lib::cljrs_init"));
+        assert_eq!(rust_crate_dir.as_deref(), Some("src/crates/thing"));
+    }
+
+    #[test]
+    fn a_plain_local_root_declares_no_native_code() {
+        let cfg = parse(r#"{:deps {my.lib {:local/root "../my-lib"}}}"#).unwrap();
+        let Dependency::Local {
+            rust_load_dylib,
+            rust_init,
+            ..
+        } = only_dep(&cfg)
+        else {
+            panic!("expected a local dep");
+        };
+        assert!(!rust_load_dylib);
+        assert!(rust_init.is_none());
+    }
+
+    #[test]
+    fn a_git_dep_still_carries_its_rust_keys() {
+        let cfg = parse(
+            r#"{:deps {my.lib {:git/url "https://example.com/l.git"
+                               :git/sha "abc123"
+                               :rust/load :dylib
+                               :rust/init "my_lib::cljrs_init"}}}"#,
+        )
+        .unwrap();
+        let Dependency::Git(git) = only_dep(&cfg) else {
+            panic!("expected a git dep");
+        };
+        assert!(git.rust_load_dylib);
+        assert_eq!(git.rust_init.as_deref(), Some("my_lib::cljrs_init"));
+    }
+
+    #[test]
+    fn git_wins_when_a_dep_names_both_forms() {
+        // Both a pinned commit and a local root: the pin is the stronger
+        // claim, and this ordering is what the loader assumes.
+        let cfg = parse(
+            r#"{:deps {my.lib {:git/url "https://example.com/l.git"
+                               :git/sha "abc123"
+                               :local/root "../my-lib"}}}"#,
+        )
+        .unwrap();
+        assert!(matches!(only_dep(&cfg), Dependency::Git(_)));
+    }
+
+    #[test]
+    fn a_dep_with_neither_form_is_rejected() {
+        let err = parse(r#"{:deps {my.lib {:rust/load :dylib}}}"#).unwrap_err();
+        assert!(
+            err.contains(":local/root"),
+            "error should name the accepted forms: {err}"
+        );
     }
 }
