@@ -85,12 +85,15 @@ Implementation roadmap for a Rust-hosted Clojure dialect. Native file extension 
 - [x] Collection ops: `conj`, `assoc`, `dissoc`, `get`, `get-in`, `assoc-in`, `update`, `update-in`, `merge`, `into`, `empty`
 - [x] Seq ops: `first`, `rest`, `next`, `cons`, `seq`, `count`, `nth`, `last`, `butlast`, `reverse`, `concat`
 - [x] Higher-order: `map`, `filter`, `reduce`, `keep`, `remove`, `mapcat`, `take`, `drop`, `take-while`, `drop-while`, `partition`, `partition-all`, `group-by`, `sort`, `sort-by`
+  - [x] `mapv` over more than one collection. Only its two-argument arity existed, so `(mapv f xs ys)` was an arity error despite a docstring describing the multi-collection behaviour. Tests: `crates/cljrs-runtime/tests/mapv_arities.rs`
 - [x] Lazy sequences: `lazy-seq`, `range`, `repeat`, `iterate`, `cycle`, `repeatedly` (via `Thunk`/`LazySeq` + `Value::Cons`)
 - [x] String functions: `join`, `split`, `trim`, `upper-case`, `lower-case`, `replace`, `starts-with?`, `ends-with?`
 - [x] I/O: `print`, `println`, `prn`, `pr`, `pr-str`, `str`, `read-string`, `slurp`, `spit`
 - [x] Math: `Math/abs`, `Math/pow`, `Math/sqrt`, `Math/floor`, `Math/ceil`, `Math/round`, `Math/log`, `Math/log10`, `Math/exp`, `Math/sin`, `Math/cos`, `Math/tan`, `Math/asin`, `Math/acos`, `Math/atan`, `Math/atan2`, `Math/sinh`, `Math/cosh`, `Math/tanh`, `Math/hypot`, `Math/PI`, `Math/E`
 - [x] Miscellaneous: `apply`, `comp`, `partial`, `juxt`, `memoize`, `constantly`, `identity`, `not`, `complement`, `gensym`, `type`, `class`, `hash`
 - [x] Core macros: `when`, `when-not`, `if-let`, `when-let`, `if-not`, `cond`, `condp`, `case`, `and`, `or`, `->`, `->>`, `as->`, `doto`, `dotimes`, `doseq`, `for`
+  - [x] `for` as a real list comprehension: multiple binding pairs (rightmost fastest) and the `:let`/`:when`/`:while` modifiers, matching the grammar `doseq` beside it already implemented. It previously read only the **first** binding pair and dropped the rest, so `(for [x xs y ys] ...)` failed with "unbound symbol: y" and no modifier was supported. Tests: `crates/cljrs-runtime/tests/for_comprehension.rs`
+  - [ ] `for`'s `:while` compiles into a `take-while` over its own collection, so it has to follow its binding directly (any number of `:let` modifiers may sit in between). A `:while` after a `:when` in the same binding group is rejected at macroexpansion time rather than silently downgraded to a `:when`; supporting it needs a loop-based expansion like Clojure's chunked one
 - [x] Namespace ops: `in-ns`, `alias`, `refer` (basic); `ns` with `:require`/`:refer-clojure` (`:exclude`/`:only`/`:rename`)
 - [x] `require` — file-based namespace loading with `:as` alias and `:refer [...]`/`:refer :all`
 - [x] `load-file` — evaluate a source file by absolute path

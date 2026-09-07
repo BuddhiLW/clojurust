@@ -101,6 +101,19 @@ fn register_canvas(registry: &mut Registry) {
         ),
     );
 
+    // The colour vocabulary is defined once, in Rust, and this exposes it as a
+    // function so Clojure code can work in one normalized form instead of
+    // reimplementing the keyword/hex/vector rules.
+    registry.define(
+        "cljrs.raster/color",
+        wrap_fn1(
+            "cljrs.raster/color",
+            |spec: Value| -> Result<Vec<Value>, String> {
+                Ok(color::to_rgba_vec(color::parse(&spec)?.to_color_u8()))
+            },
+        ),
+    );
+
     registry.define(
         "cljrs.raster/canvas?",
         wrap_fn1("cljrs.raster/canvas?", |v: Value| -> Result<bool, String> {

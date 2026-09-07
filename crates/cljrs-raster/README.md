@@ -73,6 +73,7 @@ pub struct RasterPathBuilder;
 |---|---|---|---|
 | `canvas` | `(canvas w h)` | `Canvas` | A transparent `w`×`h` surface |
 | `canvas?` | `(canvas? v)` | `Boolean` | |
+| `color` | `(color spec)` | `[r g b a]` | Normalize any colour spelling to 0–255 integers |
 | `width` / `height` | `(width c)` | `Long` | |
 | `clone-canvas` | `(clone-canvas c)` | `Canvas` | An independent copy |
 | `clear!` | `(clear! c colour)` | `c` | Fill every pixel |
@@ -144,6 +145,14 @@ A vector is read as integer channels when **every** element is a `Long`, and as
 float channels as soon as one is a `Double`. So `[1 1 1]` is near-black and
 `[1.0 1.0 1.0]` is white — the same distinction Clojure draws between `1` and
 `1.0`.
+
+`(color spec)` exposes this vocabulary as a function, so Clojure code can
+normalize once and compute on the result rather than reimplementing the rules:
+
+```clojure
+(r/color :crimson)   ;=> [220 20 60 255]
+(r/color "#f80")     ;=> [255 136 0 255]
+```
 
 ## Options map
 
