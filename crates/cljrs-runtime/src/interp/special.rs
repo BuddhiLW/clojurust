@@ -2310,12 +2310,32 @@ fn eval_defmethod(args: &[Form], env: &mut Env) -> EvalResult {
     let (multi_name, _) = require_sym_meta(args, 0, "defmethod", env)?;
     let multi_name = multi_name.as_str();
 
-    let mf_ptr = match env.globals.lookup_in_ns(&env.current_ns, multi_name) {
+    // The multimethod may live in another namespace, which is the normal case
+    // for an open dispatch: one namespace owns the `defmulti`, others extend
+    // it. Resolve `alias/name` and `fully.qualified.ns/name` the way ordinary
+    // qualified symbols resolve (`eval_symbol`, `binding`), instead of looking
+    // only in the current ns — otherwise `(defmethod other/render :x ...)`
+    // reports that a perfectly good multimethod "is not a multimethod".
+    let parsed = cljrs_value::Symbol::parse(multi_name);
+    let owner_ns: Arc<str> = match parsed.namespace.as_deref() {
+        Some(ns_part) => env
+            .globals
+            .resolve_alias(&env.current_ns, ns_part)
+            .unwrap_or_else(|| Arc::from(ns_part)),
+        None => env.current_ns.clone(),
+    };
+
+    let mf_ptr = match env.globals.lookup_in_ns(&owner_ns, &parsed.name) {
         Some(Value::MultiFn(mf)) => mf,
-        _ => {
+        Some(other) => {
             return Err(EvalError::Runtime(format!(
-                "defmethod: {} is not a multimethod",
-                multi_name
+                "defmethod: {multi_name} is a {}, not a multimethod",
+                other.type_name()
+            )));
+        }
+        None => {
+            return Err(EvalError::Runtime(format!(
+                "defmethod: {multi_name} is not defined (no multimethod to extend)"
             )));
         }
     };
