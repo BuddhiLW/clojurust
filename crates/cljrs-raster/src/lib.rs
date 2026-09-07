@@ -23,13 +23,15 @@
 //! `doseq` that draws a canvas and writes `(r/rgba-bytes c)`. The two crates
 //! compose through that byte layout in Clojure, not through a Cargo edge.
 //!
-//! ## What this crate deliberately does not do
+//! ## Text arrives through SVG, not through a draw call
 //!
 //! `tiny_skia` is a port of a Skia subset and has **no text shaping or font
-//! rasterization**. There is no `draw-text!` here, and adding one means
-//! pulling in a font stack (`fontdue` / `cosmic-text`) — a separate decision
-//! with its own binary-size cost, not something to smuggle in behind a
-//! convenience function.
+//! rasterization**, so there is no `draw-text!` here. `render-svg` covers it
+//! instead: `resvg` brings a parser, a shaper and a system font database, and
+//! a `<text>` element is the supported way to put glyphs on a canvas.
+//!
+//! That also makes any SVG-producing tool a frame source for
+//! `cljrs.ffmpeg` — render each frame to SVG, rasterize, encode.
 
 use std::sync::Arc;
 
@@ -41,6 +43,7 @@ pub mod canvas;
 pub mod color;
 pub mod paint;
 pub mod path;
+pub mod svg;
 
 pub use canvas::{Canvas, as_canvas, canvas_rgba, canvas_size};
 pub use path::{RasterPath, RasterPathBuilder};
@@ -485,6 +488,47 @@ fn register_codec(registry: &mut Registry) {
         wrap_fn1(
             "cljrs.raster/rgba-bytes",
             |c: Value| -> Result<Value, String> { canvas::rgba_bytes(&c) },
+        ),
+    );
+
+    // ── SVG ──────────────────────────────────────────────────────────────────
+    //
+    // `(render-svg doc)` `(render-svg doc opts)`, where opts takes :width,
+    // :height, :scale, :background, :dpi, :font-family, :font-size and
+    // :resources-dir. Giving one of :width/:height scales the other to keep
+    // the aspect ratio.
+    registry.define(
+        "cljrs.raster/render-svg",
+        wrap_fn_variadic(
+            "cljrs.raster/render-svg",
+            1,
+            |a: &[Value]| -> Result<Value, String> { svg::render(&a[0], &opts_at(a, 1)) },
+        ),
+    );
+
+    registry.define(
+        "cljrs.raster/load-svg",
+        wrap_fn_variadic(
+            "cljrs.raster/load-svg",
+            1,
+            |a: &[Value]| -> Result<Value, String> {
+                match &a[0] {
+                    Value::Str(p) => svg::render_file(p.get(), &opts_at(a, 1)),
+                    other => Err(format!(
+                        "load-svg needs a path string, got {}",
+                        other.type_name()
+                    )),
+                }
+            },
+        ),
+    );
+
+    registry.define(
+        "cljrs.raster/svg-size",
+        wrap_fn_variadic(
+            "cljrs.raster/svg-size",
+            1,
+            |a: &[Value]| -> Result<Vec<Value>, String> { svg::size(&a[0], &opts_at(a, 1)) },
         ),
     );
 

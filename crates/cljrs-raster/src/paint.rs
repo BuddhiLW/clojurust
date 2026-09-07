@@ -7,7 +7,8 @@
 //! {:color      :steelblue          ; or "#4682b4" or [70 130 180]
 //!  :gradient   {:type :linear      ; :linear or :radial — wins over :color
 //!               :start [0 0] :end [100 0]
-//!               :radius 40         ; :radial only
+//!               :radius 40         ; :radial only, the outer radius
+//!               :start-radius 0    ; :radial only, non-zero for a ring or cone
 //!               :stops [[0.0 :white] [1.0 :navy]]
 //!               :spread :pad}      ; :pad | :reflect | :repeat
 //!  :anti-alias true
@@ -170,10 +171,18 @@ fn gradient(v: &Value) -> Result<Shader<'static>, String> {
         "linear" => LinearGradient::new(start, end, stops, spread, transform)
             .ok_or_else(|| "degenerate linear gradient (zero length or no stops)".to_string()),
         "radial" => {
+            // A two-point conical gradient: it runs from a circle at `:start`
+            // of `:start-radius` to one at `:end` of `:radius`. The ordinary
+            // radial fill is that with a zero start radius and both points the
+            // same, which is why `:start-radius` defaults to 0 and only a ring
+            // or cone needs to mention it.
             let radius = opt_f32(&m, "radius")?
                 .ok_or_else(|| "a :radial gradient needs :radius".to_string())?;
-            RadialGradient::new(start, end, radius, stops, spread, transform)
-                .ok_or_else(|| "degenerate radial gradient (radius must be > 0)".to_string())
+            let start_radius = opt_f32(&m, "start-radius")?.unwrap_or(0.0);
+            RadialGradient::new(start, start_radius, end, radius, stops, spread, transform)
+                .ok_or_else(|| {
+                    "degenerate radial gradient (radii must be >= 0, and not both zero)".to_string()
+                })
         }
         other => Err(format!("unknown gradient type :{other}")),
     }

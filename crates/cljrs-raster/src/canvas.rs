@@ -54,7 +54,9 @@ impl Trace for Canvas {
 }
 
 impl Canvas {
-    fn wrap(pixmap: Pixmap) -> Value {
+    /// Hand a freshly rendered pixmap to Clojure as a canvas. `svg` builds one
+    /// this way after rasterizing a document.
+    pub(crate) fn wrap(pixmap: Pixmap) -> Value {
         Value::NativeObject(gc_native_object(Canvas {
             inner: Mutex::new(pixmap),
         }))

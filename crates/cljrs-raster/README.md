@@ -32,6 +32,7 @@ holds that slot among the CLI's dependencies. Extensions register through
 | `src/color.rs` | Colour specs — named keywords, `#hex` strings, integer and float channel vectors |
 | `src/paint.rs` | Options maps → `Paint`, `Stroke`, `FillRule`, `Transform`; gradients and blend modes |
 | `src/path.rs` | The `PathBuilder` and `Path` native objects, plus one-shot path constructors |
+| `src/svg.rs` | SVG rasterization via resvg, and with it text: font database, sizing, `render-svg` |
 | `src/canvas.rs` | The `Canvas` native object: drawing, pixels, PNG and raw-RGBA codecs |
 | `test/cljrs/raster_test.cljrs` | `clojure.test` suite (35 tests, 65 assertions) |
 | `tests/clojure_tests.rs` | Rust harness that drives the Clojure suite |
@@ -125,6 +126,19 @@ on that builder throws rather than silently drawing nothing.
 | `rgba-bytes` | `(rgba-bytes c)` | `ByteArray` — straight RGBA, 4 bytes/pixel, row-major |
 | `from-rgba` | `(from-rgba w h bytes)` | `Canvas` |
 
+#### SVG
+
+| Symbol | Signature | Returns |
+|---|---|---|
+| `render-svg` | `(render-svg doc [opts])` | `Canvas` — `doc` is a document string or bytes |
+| `load-svg` | `(load-svg path [opts])` | `Canvas` — `:resources-dir` defaults to the file's directory |
+| `svg-size` | `(svg-size doc [opts])` | `[width height]` — the document's own size |
+
+Options: `:width`, `:height`, `:scale`, `:background`, `:dpi`, `:font-family`,
+`:font-size`, `:resources-dir`. Giving one of `:width`/`:height` scales the
+other to keep the aspect ratio; giving both is taken literally. The canvas is
+transparent behind the document unless `:background` says otherwise.
+
 Bytes are returned as `ByteArray` rather than `ByteBlob`: core's `alength`,
 `aget` and `vec` reach into the former and not the latter, and this matches what
 `cljrs.base64/decode` returns.
@@ -160,7 +174,8 @@ normalize once and compute on the result rather than reimplementing the rules:
 {:color      :steelblue
  :gradient   {:type :linear            ; :linear | :radial — wins over :color
               :start [0 0] :end [100 0]
-              :radius 40               ; :radial only
+              :radius 40               ; :radial only, the outer radius
+              :start-radius 0          ; :radial only, for a ring or cone
               :stops [[0.0 :white] [1.0 :navy]]
               :spread :pad}            ; :pad | :reflect | :repeat
  :anti-alias true
@@ -199,15 +214,30 @@ the matrix directly instead.
 (r/save-png! c "/tmp/out.png")
 ```
 
-## What this crate does not do
+## Text
 
 `tiny-skia` has **no text shaping or font rasterization**, so there is no
-`draw-text!`. Adding one means pulling in a font stack (`fontdue`,
-`cosmic-text`) with its own binary-size cost — a decision to make deliberately,
-not to smuggle in behind a convenience function.
+`draw-text!`. Text arrives through SVG instead: `resvg` brings a parser, a
+shaper and the system font database, and a `<text>` element is the supported
+way to put glyphs on a canvas.
 
-There is also no clipping-mask surface exposed yet (`tiny_skia::Mask` exists;
-every draw call currently passes `None`).
+```clojure
+(r/render-svg "<svg xmlns='http://www.w3.org/2000/svg' width='200' height='60'>
+                 <text x='10' y='40' font-size='28' fill='#4682b4'>hello</text>
+               </svg>")
+```
+
+The default family is chosen from what is actually installed (DejaVu Sans,
+Liberation Sans, Noto Sans, … in that order of preference). usvg's own default
+is "Times New Roman", which is absent from a stock Linux install, and the only
+symptom would be text silently rendering as nothing. `sans-serif`, `serif` and
+`monospace` resolve to the same choice, so a generic name is not a second way
+to get nothing. The database is scanned once per process.
+
+## What this crate does not do
+
+No clipping-mask surface yet (`tiny_skia::Mask` exists; every draw call
+currently passes `None`).
 
 ## Features
 

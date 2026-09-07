@@ -228,3 +228,73 @@
 
 (deftest decoding-junk-throws
   (is (thrown? Exception (r/decode-png [1 2 3 4]))))
+
+;; ── SVG ──────────────────────────────────────────────────────────────────────
+
+(def ^:private doc
+  "<svg xmlns='http://www.w3.org/2000/svg' width='40' height='20'>
+     <rect x='0' y='0' width='20' height='20' fill='#ff0000'/>
+   </svg>")
+
+(deftest svg-size-reports-the-documents-own-size
+  (is (= [40.0 20.0] (r/svg-size doc))))
+
+(deftest render-svg-uses-the-intrinsic-size-by-default
+  (let [c (r/render-svg doc)]
+    (is (r/canvas? c))
+    (is (= 40 (r/width c)))
+    (is (= 20 (r/height c)))))
+
+(deftest render-svg-draws-the-document
+  (let [c (r/render-svg doc)]
+    (is (= [255 0 0 255] (r/pixel c 10 10)) "inside the rect")
+    (is (= [0 0 0 0] (r/pixel c 30 10)) "outside it, and transparent by default")))
+
+(deftest a-background-fills-behind-the-document
+  (let [c (r/render-svg doc {:background :white})]
+    (is (= [255 0 0 255] (r/pixel c 10 10)))
+    (is (= [255 255 255 255] (r/pixel c 30 10)))))
+
+(deftest one-dimension-scales-the-other
+  (testing "keeping the aspect ratio is what \"render this 80 wide\" means"
+    (let [c (r/render-svg doc {:width 80})]
+      (is (= [80 40] [(r/width c) (r/height c)])))
+    (let [c (r/render-svg doc {:height 40})]
+      (is (= [80 40] [(r/width c) (r/height c)])))))
+
+(deftest both-dimensions-are-taken-literally
+  (let [c (r/render-svg doc {:width 100 :height 10})]
+    (is (= [100 10] [(r/width c) (r/height c)]))))
+
+(deftest scale-multiplies-the-intrinsic-size
+  (let [c (r/render-svg doc {:scale 3})]
+    (is (= [120 60] [(r/width c) (r/height c)]))))
+
+(deftest scaling-still-draws-in-the-right-place
+  (let [c (r/render-svg doc {:scale 4})]
+    (is (= [255 0 0 255] (r/pixel c 40 40)) "the rect scaled with the document")
+    (is (= [0 0 0 0] (r/pixel c 120 40)))))
+
+(deftest text-renders
+  (testing "the whole reason this exists: tiny-skia has no font stack, so a
+            <text> element is how glyphs reach a canvas"
+    (let [c (r/render-svg
+             "<svg xmlns='http://www.w3.org/2000/svg' width='200' height='50'>
+                <text x='5' y='35' font-size='30' fill='#ffffff'>iiii</text>
+              </svg>")
+          ;; Any non-transparent pixel means glyphs were rasterized. When the
+          ;; default font family resolves to nothing, resvg logs a warning and
+          ;; draws an empty canvas, which is exactly the failure this catches.
+          painted (count (filter (fn [[_ _ _ a]] (pos? a))
+                                 (for [x (range 200)]
+                                   (r/pixel c x 25))))]
+      (is (pos? painted) "no glyphs were rasterized"))))
+
+(deftest a-named-font-family-is-accepted
+  (is (r/canvas? (r/render-svg doc {:font-family "DejaVu Sans"}))))
+
+(deftest malformed-svg-throws
+  (is (thrown? Exception (r/render-svg "not an svg at all"))))
+
+(deftest loading-a-missing-svg-file-throws
+  (is (thrown? Exception (r/load-svg "/definitely/not/here.svg"))))
