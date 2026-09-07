@@ -2,8 +2,8 @@
 //!
 //! The compiler no longer names the optional extension packages itself, so a
 //! test that compiles a program using `clojure.core.async`, I/O, networking,
-//! charset codecs, or Base64 must supply them exactly as the CLI does.  These
-//! packages are dev-dependencies here for that reason.
+//! charset codecs, Base64, rasterization, or FFmpeg must supply them exactly as
+//! the CLI does.  These packages are dev-dependencies here for that reason.
 
 use std::path::PathBuf;
 
@@ -37,6 +37,16 @@ pub fn extension_set() -> ExtensionSet {
             "cljrs-base64",
             cljrs_base64::init,
             "cljrs_base64::init",
+        ))
+        .with(Extension::new(
+            "cljrs-raster",
+            cljrs_raster::init,
+            "cljrs_raster::init",
+        ))
+        .with(Extension::new(
+            "cljrs-ffmpeg",
+            cljrs_ffmpeg::init,
+            "cljrs_ffmpeg::init",
         ))
 }
 

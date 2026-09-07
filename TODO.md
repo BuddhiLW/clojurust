@@ -376,6 +376,18 @@ Pattern: `(map f (map g xs))`, lower to single loop.
 - [x] RAII resource management: `with-open` macro + `close` builtin for deterministic cleanup of `Resource` values
 - [ ] (Stretch) `#rust` typed sublanguage: functions annotated `#rust` receive Rust-typed arguments with lifetime bounds enforced at the interop boundary, bypassing `Value` boxing entirely for those call sites
 
+### Native integration libraries
+
+Real subsystems built on the interop layer, not just examples of it.
+
+- [x] `cljrs-raster` — 2D vector rasterization via `tiny-skia`: `Canvas`/`Path`/`PathBuilder` native objects, fills, strokes, gradients, blend modes, affine transforms, PNG encode/decode, straight-RGBA in and out (`cljrs.raster`)
+- [x] `cljrs-ffmpeg` — FFmpeg probing (`ffprobe` JSON → Clojure data), transcoding, frame extraction, and a `VideoWriter` `Resource` that pipes raw RGBA into a long-lived encoder (`cljrs.ffmpeg`)
+- [x] Cross-crate composition **in Clojure, not in Cargo**: the crates share the straight-RGBA byte layout, so rendering an animation is `(ff/write-frame! w (r/rgba-bytes c))` in a `doseq` — see `samples/raster_video.cljrs`. Neither depends on the other: an encoder that pulls in a rasterizer is a layering inversion, and the byte layout is the real contract
+- [ ] Text rendering: `tiny-skia` has no font stack, so `cljrs.raster` has no `draw-text!`. Needs a deliberate choice of `fontdue`/`cosmic-text` and its binary-size cost
+- [ ] Clipping masks: `tiny_skia::Mask` exists but every draw call currently passes `None`
+- [ ] Audio: `cljrs.ffmpeg` covers video streams only; an audio-frame writer and waveform probing are unbuilt
+- [ ] `count`/`seq` over `ByteArray` and `ByteBlob` — core does not reach into either, so byte values are inspectable only via `alength`/`aget`/`vec` (and `ByteBlob` not at all). This is why the media crates return `ByteArray`
+
 ---
 
 ## Phase 10 — JIT Compiler

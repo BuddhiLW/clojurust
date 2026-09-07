@@ -17,6 +17,8 @@
 //! | `net` | network transports and protocols (implies `async`) |
 //! | `charset` | charset codecs and stream adapters |
 //! | `base64` | Base64 codecs |
+//! | `raster` | 2D vector rasterization (`cljrs.raster`) |
+//! | `ffmpeg` | FFmpeg probing, transcoding and frame streaming (`cljrs.ffmpeg`) |
 //!
 //! An embedding application that links the compiler directly builds its own
 //! set the same way.
@@ -25,7 +27,9 @@
     feature = "async",
     feature = "net",
     feature = "charset",
-    feature = "base64"
+    feature = "base64",
+    feature = "raster",
+    feature = "ffmpeg"
 ))]
 use cljrs_compiler::extensions::Extension;
 use cljrs_compiler::extensions::ExtensionSet;
@@ -66,6 +70,18 @@ pub fn default_set() -> ExtensionSet {
         "cljrs-base64",
         cljrs_base64::init,
         "cljrs_base64::init",
+    ));
+    #[cfg(feature = "raster")]
+    set.push(Extension::new(
+        "cljrs-raster",
+        cljrs_raster::init,
+        "cljrs_raster::init",
+    ));
+    #[cfg(feature = "ffmpeg")]
+    set.push(Extension::new(
+        "cljrs-ffmpeg",
+        cljrs_ffmpeg::init,
+        "cljrs_ffmpeg::init",
     ));
 
     set

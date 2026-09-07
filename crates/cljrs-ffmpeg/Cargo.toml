@@ -1,0 +1,35 @@
+[package]
+name = "cljrs-ffmpeg"
+version = "0.1.0"
+edition = "2024"
+description = "FFmpeg media probing, transcoding and frame streaming for Clojurust"
+license.workspace = true
+repository.workspace = true
+
+# A plain rlib. This is an *extension* (statically linked into `cljrs`, like
+# `cljrs-net` and `cljrs-charset`), not a dynamically loaded *plugin* like
+# `cljrs-base64`. Plugins export an unmangled `cljrs_init`, and a link may hold
+# exactly one of those; since Cargo unifies features across a whole build, no
+# feature gate can keep two of them apart under `cargo build --workspace`.
+# Extensions register through `init`/`register` instead and compose freely.
+#
+# Note there is deliberately no dependency on `cljrs-raster`: the two crates
+# meet at the straight-RGBA byte layout, in Clojure, via `rgba-bytes`.
+
+[features]
+default = ["regex-full", "deps"]
+
+regex-full  = ["cljrs-value/regex-full", "cljrs-runtime/regex-full", "cljrs-interop/regex-full"]
+small-regex = ["cljrs-value/small-regex", "cljrs-runtime/small-regex", "cljrs-interop/small-regex"]
+deps = ["cljrs-runtime/deps", "cljrs-interop/deps"]
+[dependencies]
+cljrs-runtime = { workspace = true }
+cljrs-interop = { workspace = true }
+cljrs-gc      = { workspace = true }
+cljrs-value   = { workspace = true }
+serde_json    = "1"
+
+[dev-dependencies]
+cljrs-stdlib  = { workspace = true }
+cljrs-reader  = { workspace = true }
+tempfile      = "3"

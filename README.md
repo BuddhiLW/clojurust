@@ -121,6 +121,13 @@ See [`TODO.md`](TODO.md) for the full itemised roadmap.
 | [`cljrs-base64`](crates/cljrs-base64) | Base64 encode/decode exposed as Clojure native functions (interop example) | implemented |
 | [`cljrs-blake3`](crates/cljrs-blake3) | BLAKE3 hashing exposed as Clojure native functions (interop example) | implemented |
 
+### Media
+
+| Crate | Description | Status |
+|-------|-------------|--------|
+| [`cljrs-raster`](crates/cljrs-raster) | 2D vector rasterization (`tiny-skia`): paths, gradients, blend modes, PNG, raw RGBA | implemented |
+| [`cljrs-ffmpeg`](crates/cljrs-ffmpeg) | FFmpeg probing, transcoding and frame streaming; renders a canvas sequence straight into an encoder | implemented |
+
 ### Async, I/O & networking
 
 | Crate | Description | Status |
@@ -289,7 +296,8 @@ cljrs (binary+lib) --> cljrs-stdlib, cljrs-compiler, cljrs-lsp,
 ```
 
 The CLI is the only place that chooses optional extensions: `cljrs-compiler`
-does not depend on `cljrs-io`, `cljrs-net`, `cljrs-charset`, or `cljrs-base64`,
+does not depend on `cljrs-io`, `cljrs-net`, `cljrs-charset`, `cljrs-base64`,
+`cljrs-raster`, or `cljrs-ffmpeg`,
 and takes an `ExtensionSet` from its host instead (stage 4 of
 [`docs/crate-consolidation-plan.md`](docs/crate-consolidation-plan.md)).
 
@@ -320,6 +328,8 @@ crates/
   cljrs-io/              # async file I/O
   cljrs-net/             # TCP/UDP/Unix/TLS sockets
   cljrs-charset/         # charset encode/decode
+  cljrs-raster/          # 2D rasterization (tiny-skia)
+  cljrs-ffmpeg/          # FFmpeg probing, transcoding, frame streaming
   # project & tooling
   cljrs-project/         # cljrs.edn project config + git layer for versioned deps
   cljrs-lsp/             # LSP server

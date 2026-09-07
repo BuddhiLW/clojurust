@@ -558,6 +558,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "bytemuck"
+version = "1.25.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "95832e849adfb21180ccb6826a99da14e5d266ae5c2e668e1602cf234f153797"
+
+[[package]]
 name = "byteorder"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -745,6 +751,7 @@ dependencies = [
  "cljrs-base64",
  "cljrs-charset",
  "cljrs-compiler",
+ "cljrs-ffmpeg",
  "cljrs-gc",
  "cljrs-interop",
  "cljrs-io",
@@ -753,6 +760,7 @@ dependencies = [
  "cljrs-net",
  "cljrs-nrepl",
  "cljrs-project",
+ "cljrs-raster",
  "cljrs-reader",
  "cljrs-runtime",
  "cljrs-stdlib",
@@ -826,11 +834,13 @@ dependencies = [
  "cljrs-async",
  "cljrs-base64",
  "cljrs-charset",
+ "cljrs-ffmpeg",
  "cljrs-gc",
  "cljrs-io",
  "cljrs-ir",
  "cljrs-net",
  "cljrs-project",
+ "cljrs-raster",
  "cljrs-reader",
  "cljrs-runtime",
  "cljrs-stdlib",
@@ -859,6 +869,20 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
+]
+
+[[package]]
+name = "cljrs-ffmpeg"
+version = "0.1.0"
+dependencies = [
+ "cljrs-gc",
+ "cljrs-interop",
+ "cljrs-reader",
+ "cljrs-runtime",
+ "cljrs-stdlib",
+ "cljrs-value",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]
@@ -978,6 +1002,20 @@ dependencies = [
  "thiserror",
  "tokio",
  "tokio-util",
+]
+
+[[package]]
+name = "cljrs-raster"
+version = "0.1.0"
+dependencies = [
+ "cljrs-gc",
+ "cljrs-interop",
+ "cljrs-reader",
+ "cljrs-runtime",
+ "cljrs-stdlib",
+ "cljrs-value",
+ "tempfile",
+ "tiny-skia",
 ]
 
 [[package]]
@@ -2081,6 +2119,15 @@ name = "fastrand"
 version = "2.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9f1f227452a390804cdb637b74a86990f2a7d7ba4b7d5693aac9b4dd6defd8d6"
+
+[[package]]
+name = "fdeflate"
+version = "0.3.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1e6853b52649d4ac5c0bd02320cddc5ba956bdb407c4b75a2c6b75bf51500f8c"
+dependencies = [
+ "simd-adler32",
+]
 
 [[package]]
 name = "ff"
@@ -4660,6 +4707,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "19f132c84eca552bf34cab8ec81f1c1dcc229b811638f9d283dceabe58c5569e"
 
 [[package]]
+name = "png"
+version = "0.17.16"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "82151a2fc869e011c153adc57cf2789ccb8d9906ce52c0b39a6b5697749d7526"
+dependencies = [
+ "bitflags 1.3.2",
+ "crc32fast",
+ "fdeflate",
+ "flate2",
+ "miniz_oxide",
+]
+
+[[package]]
 name = "poly1305"
 version = "0.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6019,6 +6079,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
 
 [[package]]
+name = "strict-num"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6637bab7722d379c8b41ba849228d680cc12d0a45ba1fa2b48f2a30577a06731"
+
+[[package]]
 name = "strsim"
 version = "0.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6187,6 +6253,32 @@ name = "time-core"
 version = "0.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9e1c906769ad99c88eaa54e728060edef082f8e358ff32030cb7c7d315e81109"
+
+[[package]]
+name = "tiny-skia"
+version = "0.11.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "83d13394d44dae3207b52a326c0c85a8bf87f1541f23b0d143811088497b09ab"
+dependencies = [
+ "arrayref",
+ "arrayvec",
+ "bytemuck",
+ "cfg-if",
+ "log",
+ "png",
+ "tiny-skia-path",
+]
+
+[[package]]
+name = "tiny-skia-path"
+version = "0.11.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9c9e7fc0c2e86a30b117d0462aa261b72b7a99b7ebd7deb3a14ceda95c5bdc93"
+dependencies = [
+ "arrayref",
+ "bytemuck",
+ "strict-num",
+]
 
 [[package]]
 name = "tinystr"

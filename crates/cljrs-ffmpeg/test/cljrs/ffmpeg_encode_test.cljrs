@@ -1,0 +1,103 @@
+(ns cljrs.ffmpeg-encode-test
+  "Tests that actually run FFmpeg.
+
+  The Rust harness skips this whole namespace when `ffmpeg`/`ffprobe` are not
+  on the PATH, and says so — a machine without the binaries reports a skip, not
+  a pass.
+
+  Frames here are built out of plain byte vectors rather than drawn: this crate
+  does not depend on `cljrs-raster` (two unmangled `cljrs_init` symbols cannot
+  share a link), so the suite exercises the encoder alone. The canvas-to-video
+  pipeline is exercised where both namespaces really do coexist — the `cljrs`
+  binary — by `samples/raster_video.cljrs`.
+
+  Paths are relative on purpose: the harness runs with its working directory
+  set to a fresh temporary directory, so these files land there and vanish with
+  it."
+  (:require [clojure.test :refer [deftest is testing]]
+            [cljrs.ffmpeg :as ff]))
+
+(def ^:private w 16)
+(def ^:private h 12)
+
+(defn- frame
+  "A solid RGBA frame whose red channel tracks `i` — straight (un-premultiplied)
+  bytes, row-major, four per pixel."
+  [i n]
+  (let [red (int (* 255 (/ (double i) n)))]
+    (vec (mapcat (fn [_] [red 40 90 255]) (range (* w h))))))
+
+(defn- render!
+  "Render `n` frames into `path`, returning the close-writer! outcome."
+  [path n]
+  (let [wr (ff/video-writer path {:width w :height h :fps 10})]
+    (dotimes [i n] (ff/write-frame! wr (frame i n)))
+    (ff/close-writer! wr)))
+
+(deftest version-reports-ffmpeg
+  (is (ff/available?))
+  (is (re-find #"ffmpeg version" (ff/version))))
+
+(deftest a-rendered-clip-is-readable
+  (let [out "clip.mp4"
+        outcome (render! out 20)]
+    (testing "the encoder exited cleanly"
+      (is (= 0 (:exit outcome)))
+      (is (= 20 (:frames outcome)))
+      (is (= out (:path outcome))))
+    (testing "and ffprobe agrees with what we asked for"
+      (is (= [w h] (ff/dimensions out)))
+      (is (< 1.5 (ff/duration out) 2.5) "20 frames at 10fps is about two seconds")
+      (let [p (ff/probe out)]
+        (is (map? p))
+        (is (vector? (:streams p)))
+        (is (= "video" (:codec-type (first (:streams p)))))
+        (is (= w (:width (first (:streams p)))))))))
+
+(deftest a-writer-counts-frames-and-then-closes
+  (let [wr (ff/video-writer "count.mp4" {:width w :height h :fps 10})]
+    (is (ff/writer? wr))
+    (is (false? (ff/writer-closed? wr)))
+    (is (zero? (ff/frames-written wr)))
+    (ff/write-frame! wr (frame 0 1))
+    (is (= 1 (ff/frames-written wr)))
+    (ff/close-writer! wr)
+    (is (true? (ff/writer-closed? wr)))
+    (testing "closing twice reports the same outcome instead of hanging"
+      (is (= 0 (:exit (ff/close-writer! wr)))))
+    (testing "and writing to a closed writer is refused"
+      (is (thrown? Exception (ff/write-frame! wr (frame 0 1)))))))
+
+(deftest a-frame-of-the-wrong-size-is-refused
+  (let [wr (ff/video-writer "sized.mp4" {:width w :height h :fps 10})]
+    (testing "rawvideo has no framing, so a short write would shear every later frame"
+      (is (thrown? Exception (ff/write-frame! wr [1 2 3])))
+      (is (thrown? Exception (ff/write-frame! wr (vec (repeat 16 0))))))
+    ;; The refused writes must not have been counted.
+    (is (zero? (ff/frames-written wr)))
+    (ff/write-frame! wr (frame 0 1))
+    (ff/close-writer! wr)))
+
+(deftest extract-frame-writes-an-image
+  (render! "extract.mp4" 20)
+  (ff/extract-frame! "extract.mp4" "shot.png" {:time 0.5})
+  (is (= [w h] (ff/dimensions "shot.png"))))
+
+(deftest extract-frame-can-scale
+  (render! "scaled.mp4" 10)
+  (ff/extract-frame! "scaled.mp4" "small.png" {:time 0.2 :scale [8 6]})
+  (is (= [8 6] (ff/dimensions "small.png"))))
+
+(deftest transcode-rewrites-a-clip
+  (render! "src.mp4" 10)
+  (ff/transcode! "src.mp4" "dst.mp4" {:scale [8 6] :crf 30})
+  (is (= [8 6] (ff/dimensions "dst.mp4"))))
+
+(deftest run-is-the-escape-hatch
+  (let [{:keys [exit]} (ff/run ["-version"])]
+    (is (zero? exit))))
+
+(deftest a-failing-invocation-reports-non-zero
+  (let [{:keys [exit error]} (ff/run ["-i" "./no-such-input.mp4" "out.mp4"])]
+    (is (pos? exit))
+    (is (string? error))))
