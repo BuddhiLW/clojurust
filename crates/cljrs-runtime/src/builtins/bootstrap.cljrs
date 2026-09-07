@@ -378,8 +378,15 @@
 (defn mapv
   "Returns a vector consisting of the result of applying f to the set of
   first items of each coll, followed by applying f to the set of second
-  items, until any one coll is exhausted."
-  [f coll] (vec (map f coll)))
+  items, until any one coll is exhausted.
+
+  The docstring always described the multi-collection behaviour; only the
+  two-argument arity existed, so `(mapv f xs ys)` was an arity error. `map`
+  already carries every arity, so each one here is a `vec` over it."
+  ([f coll] (vec (map f coll)))
+  ([f c1 c2] (vec (map f c1 c2)))
+  ([f c1 c2 c3] (vec (map f c1 c2 c3)))
+  ([f c1 c2 c3 & colls] (vec (apply map f c1 c2 c3 colls))))
 
 (defn filterv
   "Returns a vector of the items in coll for which (pred item) returns
@@ -601,13 +608,71 @@
     (emit (seq bindings) nil)))
 
 (defmacro for
-  "List comprehension. binding => [name coll-expr]. Returns a lazy sequence
-  of the results of evaluating body for each name bound to successive
-  elements of coll-expr."
-  [binding & body]
-  (let [x (first binding)
-        coll (second binding)]
-    (list 'map (list 'fn (vector x) (cons 'do body)) coll)))
+  "bindings => binding-form coll-expr [modifier binding-form coll-expr]*
+
+  List comprehension. Takes a vector of one or more binding-form/collection-expr
+  pairs, each followed by zero or more modifiers, and yields a lazy sequence of
+  evaluations of body. Collections are iterated in a nested fashion, rightmost
+  fastest. Supports :let, :when and :while modifiers, like doseq.
+
+    (for [x (range 3) y (range 2)] [x y])
+    ;=> ([0 0] [0 1] [1 0] [1 1] [2 0] [2 1])
+
+    (for [x (range 10) :when (even? x) :let [y (* x x)]] y)
+    ;=> (0 4 16 36 64)
+
+  :when skips an element and keeps iterating; :while stops the loop it belongs
+  to. Because :while has to stop rather than skip, it is compiled into a
+  take-while over its own collection, which requires it to follow its binding
+  directly (any number of :let modifiers may sit in between). A :while placed
+  after a :when in the same binding group is rejected at macroexpansion time
+  rather than being silently downgraded to a :when."
+  [bindings & body]
+  (letfn [(emit [binds]
+            (if (seq binds)
+              (let [tag (first binds)]
+                (cond
+                  (= :let tag)
+                  (list 'let (second binds) (emit (next (next binds))))
+
+                  (= :when tag)
+                  ;; Skip this element, keep iterating: nil concatenates away.
+                  (list 'if (second binds) (emit (next (next binds))) nil)
+
+                  (= :while tag)
+                  (throw (ex-info
+                          (str "for: :while must follow its binding directly "
+                               "(only :let may come between)")
+                          {:modifier :while :bindings bindings}))
+
+                  :else
+                  (let [x tag
+                        coll (second binds)
+                        after (next (next binds))]
+                    ;; Gather the :let modifiers sitting between this binding
+                    ;; and a possible :while, so the :while test can see what
+                    ;; they bind.
+                    (loop [lets [] more after]
+                      (cond
+                        (= :let (first more))
+                        (recur (into lets (second more)) (next (next more)))
+
+                        (= :while (first more))
+                        (let [test (second more)
+                              test (if (seq lets) (list 'let lets test) test)
+                              rest-binds (next (next more))
+                              rest-binds (if (seq lets)
+                                           (cons :let (cons lets rest-binds))
+                                           rest-binds)]
+                          (list 'mapcat
+                                (list 'fn (vector x) (emit rest-binds))
+                                (list 'take-while (list 'fn (vector x) test) coll)))
+
+                        :else
+                        (list 'mapcat (list 'fn (vector x) (emit after)) coll))))))
+              ;; Innermost: one element per surviving binding combination.
+              (list 'list (cons 'do body))))]
+    (emit (seq bindings))))
 
 (defn second
   "Same as (first (rest x))."
