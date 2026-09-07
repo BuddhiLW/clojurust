@@ -2253,28 +2253,57 @@ fn build_impl_fn(
 
 // ── defmulti ──────────────────────────────────────────────────────────────────
 
-fn eval_defmulti(args: &[Form], env: &mut Env) -> EvalResult {
-    // (defmulti name dispatch-fn-form) or (defmulti name "doc" dispatch-fn :default val)
-    let (name, name_meta) = require_sym_meta(args, 0, "defmulti", env)?;
-    let name_arc: Arc<str> = Arc::from(name.as_str());
+/// The parsed head of a `defmulti` form.
+///
+/// `(defmulti name docstring? attr-map? dispatch-fn & options)` — the two
+/// optional parts sit between the name and the dispatch function, and each is
+/// only taken as such when a form still follows it, so the dispatch function
+/// is never mistaken for one of them.
+struct DefmultiHead<'a> {
+    docstring: Option<String>,
+    attr_map: Option<&'a Form>,
+    /// Index of the dispatch-fn form; `args[dispatch_idx + 1..]` are options.
+    dispatch_idx: usize,
+}
 
-    let rest_start = if args.len() > 2 && args[1].as_string().is_some() {
-        2
-    } else {
-        1
-    };
+/// Split a `defmulti`'s arguments into its head parts. Pure: reads shapes only.
+fn parse_defmulti_head<'a>(args: &'a [Form]) -> EvalResult<DefmultiHead<'a>> {
+    let mut i = 1;
+    let mut docstring = None;
+    let mut attr_map = None;
 
-    if args.len() <= rest_start {
+    if i + 1 < args.len()
+        && let Some(s) = args[i].as_string()
+    {
+        docstring = Some(s.to_string());
+        i += 1;
+    }
+    if i + 1 < args.len() && matches!(args[i].kind, FormKind::Map(_)) {
+        attr_map = Some(&args[i]);
+        i += 1;
+    }
+    if i >= args.len() {
         return Err(EvalError::Runtime(
             "defmulti requires a dispatch function".into(),
         ));
     }
+    Ok(DefmultiHead {
+        docstring,
+        attr_map,
+        dispatch_idx: i,
+    })
+}
 
-    let dispatch_fn = eval(&args[rest_start], env)?;
+fn eval_defmulti(args: &[Form], env: &mut Env) -> EvalResult {
+    let (name, name_meta) = require_sym_meta(args, 0, "defmulti", env)?;
+    let name_arc: Arc<str> = Arc::from(name.as_str());
+    let head = parse_defmulti_head(args)?;
+
+    let dispatch_fn = eval(&args[head.dispatch_idx], env)?;
 
     // Parse optional :default val.
     let mut default_dispatch = ":default".to_string();
-    let mut i = rest_start + 1;
+    let mut i = head.dispatch_idx + 1;
     while i + 1 < args.len() {
         if let FormKind::Keyword(k) = &args[i].kind
             && k == "default"
@@ -2285,11 +2314,20 @@ fn eval_defmulti(args: &[Form], env: &mut Env) -> EvalResult {
         i += 2;
     }
 
+    // Metadata sources, weakest first: the attr map, then `^` marks on the
+    // name, then the docstring.
+    let attr_meta = match head.attr_map {
+        Some(form) => Some(eval(form, env)?),
+        None => None,
+    };
+    let meta = merge_meta(attr_meta, name_meta);
+    let meta = merge_meta(meta, head.docstring.as_deref().map(doc_meta));
+
     let mfn = MultiFn::new(name_arc.clone(), dispatch_fn, default_dispatch);
     let var = env
         .globals
         .intern(&env.current_ns, name_arc, Value::MultiFn(GcPtr::new(mfn)));
-    if let Some(meta_val) = name_meta {
+    if let Some(meta_val) = meta {
         var.get().set_meta(meta_val);
     }
     Ok(Value::Var(var))
