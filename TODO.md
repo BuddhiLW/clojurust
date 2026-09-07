@@ -379,19 +379,22 @@ Pattern: `(map f (map g xs))`, lower to single loop.
 - [x] RAII resource management: `with-open` macro + `close` builtin for deterministic cleanup of `Resource` values
 - [ ] (Stretch) `#rust` typed sublanguage: functions annotated `#rust` receive Rust-typed arguments with lifetime bounds enforced at the interop boundary, bypassing `Value` boxing entirely for those call sites
 
-### Native integration libraries
+### Extensions live outside this repo
 
-Real subsystems built on the interop layer, not just examples of it.
+An extension that is not part of the language belongs in its own project,
+loaded through the `cljrs_init` plugin ABI. `cljrs-base64` and `cljrs-blake3`
+stay here as *examples of the interop layer*; anything that is a real
+application subsystem does not.
 
-- [x] `cljrs-raster` — 2D vector rasterization via `tiny-skia`: `Canvas`/`Path`/`PathBuilder` native objects, fills, strokes, gradients, blend modes, affine transforms, PNG encode/decode, straight-RGBA in and out (`cljrs.raster`)
-- [x] `cljrs-ffmpeg` — FFmpeg probing (`ffprobe` JSON → Clojure data), transcoding, frame extraction, and a `VideoWriter` `Resource` that pipes raw RGBA into a long-lived encoder (`cljrs.ffmpeg`)
-- [x] Cross-crate composition **in Clojure, not in Cargo**: the crates share the straight-RGBA byte layout, so rendering an animation is `(ff/write-frame! w (r/rgba-bytes c))` in a `doseq` — see `samples/raster_video.cljrs`. Neither depends on the other: an encoder that pulls in a rasterizer is a layering inversion, and the byte layout is the real contract
-- [x] Text rendering, through SVG rather than a draw call: `cljrs.raster/render-svg` (resvg) shapes and rasterizes `<text>` with the system fonts, so a canvas can carry glyphs without this crate growing a font stack of its own. The default family is picked from what is installed, since usvg's own default ("Times New Roman") is absent on a stock Linux box and text would silently render as nothing
-- [ ] A direct `draw-text!` still does not exist. It would need `fontdue`/`cosmic-text` and its own binary-size cost, and `render-svg` covers the cases that motivated it
+The first one out is media rasterization and encoding — `cljrs.raster` and
+`cljrs.ffmpeg` — which briefly lived here and now ships separately. What it
+exercised, and what it wants from this repo:
+
 - [ ] No directory listing in core (`file-seq`, `list-dir`), so a frame pipeline has to be handed its paths rather than globbing a directory. `slurp`/`spit`/`load-file` are the whole filesystem surface
-- [ ] Clipping masks: `tiny_skia::Mask` exists but every draw call currently passes `None`
-- [ ] Audio: `cljrs.ffmpeg` covers video streams only; an audio-frame writer and waveform probing are unbuilt
-- [ ] `count`/`seq` over `ByteArray` and `ByteBlob` — core does not reach into either, so byte values are inspectable only via `alength`/`aget`/`vec` (and `ByteBlob` not at all). This is why the media crates return `ByteArray`
+- [ ] `count`/`seq` over `ByteArray` and `ByteBlob` — core reaches into neither, so byte values are inspectable only via `alength`/`aget`/`vec`, and a `ByteBlob` not at all. That is why an extension returning bytes must return `ByteArray`
+- [ ] `System/getenv` and `System/getProperty` are unbound, so an extension has no way to read its own configuration from the environment
+- [ ] Loading two plugins at once is untested: `cljrs_init` is unmangled, so each must be its own dylib, and nothing yet checks that two `.so`s register cleanly into one runtime
+- [ ] **No supported way to load a third-party extension locally.** `cljrs::extensions::default_set` is fixed at compile time by this crate's own Cargo features, and `cljrs::session::setup_globals` has no hook for a host to add to it, so an extension outside this workspace can only arrive through `:rust/load :dylib`, which requires a `:git/url` and a pinned `:git/sha`. An extension being developed in a working tree cannot be loaded at all. Either the CLI needs a host-extension hook, or `:rust/load :dylib` needs to accept a `:local/root`
 
 ---
 

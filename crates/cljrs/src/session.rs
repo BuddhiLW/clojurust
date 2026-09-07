@@ -125,10 +125,6 @@ pub fn setup_globals(
     });
     #[cfg(feature = "base64")]
     cljrs_base64::init(&globals);
-    #[cfg(feature = "raster")]
-    cljrs_raster::init(&globals);
-    #[cfg(feature = "ffmpeg")]
-    cljrs_ffmpeg::init(&globals);
     globals
 }
 

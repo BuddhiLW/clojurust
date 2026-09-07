@@ -63,8 +63,6 @@ cljrs-io      = { workspace = true }
 cljrs-net     = { workspace = true }
 cljrs-charset = { workspace = true }
 cljrs-base64  = { workspace = true }
-cljrs-raster  = { workspace = true }
-cljrs-ffmpeg  = { workspace = true }
 tempfile = "3"
 wasmparser = "0.244"
 proptest = "1"

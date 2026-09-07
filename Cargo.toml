@@ -23,8 +23,6 @@ members = [
     "crates/cljrs-nrepl",
     "crates/cljrs-base64",
     "crates/cljrs-tx",
-    "crates/cljrs-raster",
-    "crates/cljrs-ffmpeg",
 ]
 resolver = "2"
 
@@ -60,8 +58,6 @@ cljrs-async        = { path = "crates/cljrs-async",        version = "0.1.0", de
 cljrs-io           = { path = "crates/cljrs-io",           version = "0.1.0", default-features = false }
 cljrs-net          = { path = "crates/cljrs-net",          version = "0.1.0", default-features = false }
 cljrs-charset      = { path = "crates/cljrs-charset",      version = "0.1.0", default-features = false }
-cljrs-raster       = { path = "crates/cljrs-raster",       version = "0.1.0", default-features = false }
-cljrs-ffmpeg       = { path = "crates/cljrs-ffmpeg",       version = "0.1.0", default-features = false }
 cljrs-lsp          = { path = "crates/cljrs-lsp",          version = "0.1.0" }
 cljrs-nrepl        = { path = "crates/cljrs-nrepl",        version = "0.1.0", default-features = false }
 cljrs-base64       = { path = "crates/cljrs-base64",       version = "0.1.0", default-features = false }
