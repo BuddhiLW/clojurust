@@ -17,8 +17,8 @@ use cljrs_reader::Form;
 use cljrs_reader::form::FormKind;
 use cljrs_value::error::ExceptionInfo;
 use cljrs_value::{
-    CljxFn, CljxFnArity, CljxFuture, FutureState, Keyword, MapValue, MultiFn, Protocol,
-    ProtocolMethod, ReferClojureFilter, TypeHint, Value, ValueError,
+    CljxFn, CljxFnArity, CljxFuture, FutureState, Keyword, MapValue, Protocol, ProtocolMethod,
+    ReferClojureFilter, TypeHint, Value, ValueError,
 };
 
 /// Dispatch to the right special-form handler.
@@ -50,8 +50,6 @@ pub fn eval_special(head: &str, args: &[Form], env: &mut Env) -> EvalResult {
         "in-ns" => eval_in_ns(args, env),
         "alias" => eval_alias(args, env),
         "protocol*" => eval_protocol_star(args, env),
-        "defmulti" => eval_defmulti(args, env),
-        "defmethod" => eval_defmethod(args, env),
         "deftype*" => eval_deftype_star(args, env),
         "load-file" => eval_load_file(args, env),
         "binding" => eval_binding(args, env),
@@ -2118,111 +2116,6 @@ fn build_impl_fn(
         Arc::clone(&env.current_ns),
     );
     Ok(Value::Fn(GcPtr::new(cljrs_fn)))
-}
-
-// ── defmulti ──────────────────────────────────────────────────────────────────
-
-fn eval_defmulti(args: &[Form], env: &mut Env) -> EvalResult {
-    // (defmulti name dispatch-fn-form) or (defmulti name "doc" dispatch-fn :default val)
-    let (name, name_meta) = require_sym_meta(args, 0, "defmulti", env)?;
-    let name_arc: Arc<str> = Arc::from(name.as_str());
-
-    let rest_start = if args.len() > 2 && args[1].as_string().is_some() {
-        2
-    } else {
-        1
-    };
-
-    if args.len() <= rest_start {
-        return Err(EvalError::Runtime(
-            "defmulti requires a dispatch function".into(),
-        ));
-    }
-
-    let dispatch_fn = eval(&args[rest_start], env)?;
-
-    // Parse optional :default val.
-    let mut default_dispatch = ":default".to_string();
-    let mut i = rest_start + 1;
-    while i + 1 < args.len() {
-        if let FormKind::Keyword(k) = &args[i].kind
-            && k == "default"
-        {
-            let dv = eval(&args[i + 1], env)?;
-            default_dispatch = format!("{}", dv);
-        }
-        i += 2;
-    }
-
-    let mfn = MultiFn::new(name_arc.clone(), dispatch_fn, default_dispatch);
-    let var = env
-        .globals
-        .intern(&env.current_ns, name_arc, Value::MultiFn(GcPtr::new(mfn)));
-    if let Some(meta_val) = name_meta {
-        var.get().set_meta(meta_val);
-    }
-    Ok(Value::Var(var))
-}
-
-// ── defmethod ─────────────────────────────────────────────────────────────────
-
-fn eval_defmethod(args: &[Form], env: &mut Env) -> EvalResult {
-    // (defmethod multi-name dispatch-val [params] body...)
-    if args.len() < 3 {
-        return Err(EvalError::Runtime(
-            "defmethod requires name, dispatch-val, params, and body".into(),
-        ));
-    }
-    // The name here RESOLVES an existing multimethod rather than defining one, so
-    // any metadata on it is inert — unwrapped so the form still reads, discarded
-    // because there is no new var to carry it.
-    let (multi_name, _) = require_sym_meta(args, 0, "defmethod", env)?;
-    let multi_name = multi_name.as_str();
-
-    let mf_ptr = match env.globals.lookup_in_ns(&env.current_ns, multi_name) {
-        Some(Value::MultiFn(mf)) => mf,
-        _ => {
-            return Err(EvalError::Runtime(format!(
-                "defmethod: {} is not a multimethod",
-                multi_name
-            )));
-        }
-    };
-
-    let dispatch_val = eval(&args[1], env)?;
-    let key = format!("{}", dispatch_val);
-
-    // Build CljxFn from ([params] body...).
-    let params_form = &args[2];
-    let body = &args[3..];
-    let arity = parse_arity(params_form, body)?;
-    let (closed_over_names, closed_over_vals) = env.all_local_bindings();
-    let fn_name = Some(Arc::from(multi_name));
-    let cljrs_fn = CljxFn::new(
-        fn_name,
-        vec![arity],
-        closed_over_names,
-        closed_over_vals,
-        false,
-        Arc::clone(&env.current_ns),
-    );
-    let fn_val = Value::Fn(GcPtr::new(cljrs_fn));
-
-    mf_ptr
-        .get()
-        .methods
-        .lock()
-        .unwrap()
-        .insert(key.clone(), fn_val);
-    mf_ptr
-        .get()
-        .dispatch_vals
-        .lock()
-        .unwrap()
-        .insert(key, dispatch_val);
-    mf_ptr.get().bump_method_generation();
-
-    Ok(Value::MultiFn(mf_ptr))
 }
 
 // ── binding ───────────────────────────────────────────────────────────────────

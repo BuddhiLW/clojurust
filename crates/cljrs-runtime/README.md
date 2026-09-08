@@ -1024,9 +1024,11 @@ conditional in ANY slot of an `ns` require spec, namespace included, so
 `[#?(:clj clojure.core :cljs cljs.core) :as core]` reads — an option selecting
 no branch is dropped, a namespace selecting none is an error.
 
-**The datatype and protocol family is Clojure, not Rust.** `deftype`,
-`defrecord`, `reify`, `defprotocol`, `extend-type` and `extend-protocol` are all
-macros in `bootstrap.cljrs`. What stays here is only what needs the interpreter:
+**The datatype, protocol and multimethod family is Clojure, not Rust.**
+`deftype`, `defrecord`, `reify`, `defprotocol`, `extend-type`,
+`extend-protocol`, `defmulti` and `defmethod` are all macros in
+`bootstrap.cljrs`. What stays here is only what needs the interpreter, and only
+two of the seven primitives actually do:
 
 | primitive | kind | why it is irreducible |
 |---|---|---|
@@ -1035,6 +1037,13 @@ macros in `bootstrap.cljrs`. What stays here is only what needs the interpreter:
 | `protocol-fn` | builtin fn | the dispatch `ProtocolFn` for one method, arity read back out of the protocol's own spec |
 | `extend` | builtin fn | writes `{method → fn}` into `Protocol.impls` under a type tag; Clojure's own signature |
 | `make-type-instance`, `make-type-instance-mut` | builtin fns | construct a `TypeInstance` (the latter with interior-mutable cells) |
+| `multi-fn` | builtin fn | mints a `MultiFn` with an optional default dispatch value |
+| `add-method` | builtin fn | writes one entry into `MultiFn.methods`, keyed exactly as `remove-method` reads it |
+
+Naming the target by SYMBOL in a macro expansion rather than by string in a Rust
+handler is not only shorter: `(defmethod other.ns/m ...)` and
+`(extend-type T other.ns/P ...)` resolve through the ordinary rules, aliases
+included, where a handler doing `lookup_in_ns(current_ns, "other.ns/m")` cannot.
 
 `deftype*` uses `parse_field_specs` (field name + mutability,
 metadata-transparent) and `register_impls_for_tag`. `synth_field_scope` wraps a

@@ -28,8 +28,6 @@ pub const SPECIAL_FORMS: &[&str] = &[
     "in-ns",
     "alias",
     "protocol*",
-    "defmulti",
-    "defmethod",
     "deftype*",
     "load-file",
     "binding",
