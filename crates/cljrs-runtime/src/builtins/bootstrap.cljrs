@@ -1150,6 +1150,50 @@
 (defn delay? [x] (= (type x) 'Delay))
 (defn promise? [x] (= (type x) 'Promise))
 
+;; ── protocol extension: extend-type/extend-protocol over the `extend` primitive
+;; The irreducible operation is `extend`: bind {method-name -> fn} into a
+;; protocol's impl table under a type tag. Both surface forms are the same
+;; regrouping of one flat spec list — they differ only in which side is the
+;; constant and which side repeats — so they are Clojure macros over that single
+;; primitive rather than two bespoke Rust special forms.
+
+(defn extend-spec-groups
+  "Split a flat extend spec list into ([head impls] ...). Each head is a symbol
+  and impls are the method forms that follow it, in source order."
+  [specs]
+  (loop [s (seq specs) head nil acc [] out []]
+    (cond
+      (nil? s)            (if head (conj out [head acc]) out)
+      (symbol? (first s)) (recur (next s) (first s) []
+                                 (if head (conj out [head acc]) out))
+      :else               (recur (next s) head (conj acc (first s)) out))))
+
+(defn extend-impl-map
+  "Collapse method forms ((m [a] ...) (m [a b] ...)) into
+  {:m (fn ([a] ...) ([a b] ...))} — one entry per method name, arities in
+  source order."
+  [impls]
+  (let [mname (fn [i] (name (first i)))
+        names (distinct (map mname impls))]
+    (zipmap (map keyword names)
+            (map (fn [n]
+                   (cons 'fn (map rest (filter (fn [i] (= n (mname i))) impls))))
+                 names))))
+
+(defmacro extend-type [tsym & specs]
+  (cons 'do
+        (map (fn [g]
+               (list 'extend (list 'quote tsym) (first g)
+                     (extend-impl-map (second g))))
+             (extend-spec-groups specs))))
+
+(defmacro extend-protocol [psym & specs]
+  (cons 'do
+        (map (fn [g]
+               (list 'extend (list 'quote (first g)) psym
+                     (extend-impl-map (second g))))
+             (extend-spec-groups specs))))
+
 ;; ── Phase 6 (built-in protocols): ICounted, ILookup, ISeqable ────────────────
 
 (defprotocol ICounted
