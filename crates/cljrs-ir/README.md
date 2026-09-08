@@ -152,12 +152,15 @@ the name is the marker.  The IR interpreter routes these to the tree-walker's
 `dispatch_method`; Cranelift/wasm codegen reject the unknown name, so
 interop-bearing functions decline JIT compilation instead of miscompiling to
 a nil call.  `(var sym)` lowers to `LoadVar` exactly like the `#'sym` reader
-form.  Interpreter-only special forms with no IR equivalent (`defprotocol`,
-`extend-type`, `extend-protocol`, `defmulti`, `defmethod`, `defrecord`,
-`deftype`, `reify`, `defn-`, bare `.`) are **rejected**
+form.  Interpreter-only forms with no IR equivalent (`defprotocol`,
+`protocol*`, `extend-type`, `extend-protocol`, `defmulti`, `defmethod`,
+`defrecord`, `deftype`, `deftype*`, `reify`, `defn-`, bare `.`) are **rejected**
 (`LowerError::UnsupportedForm`) so the function stays at tree-walk — lowering
 them as generic calls would resolve their clojure.core stub vars, which
-return nil and silently corrupt the promoted function.
+return nil and silently corrupt the promoted function.  The list holds the
+surface names as well as the `*` primitives they expand to: several of the
+surface forms are now macros in `bootstrap.cljrs`, and a primitive written
+directly must be rejected on its own account.
 
 `set!` lowers to `SetBang` only for a global var target.  A `deftype` mutable
 field write — `(set! (.-field inst) v)`, or the bare `(set! field v)` inside a

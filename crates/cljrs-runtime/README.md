@@ -537,10 +537,11 @@ collection.
 keywords, maps, sets, vars, protocol/multimethod dispatch). For a
 `Value::ProtocolFn` callee whose protocol has `extend_via_metadata` set (`(defprotocol
 Name :extend-via-metadata true ...)`), dispatch first checks the first arg's
-metadata for an entry keyed by the `ProtocolFn` itself (e.g. `(with-meta {}
-{my-method (fn [this] ...)})`) before falling back to the type-tag `impls`
-lookup — this lets a value implement a protocol without a matching
-`extend-type`/`extend-protocol`. Protocol dispatch helpers shared with the
+metadata for an entry keyed by the method's FULLY-QUALIFIED SYMBOL — `ns/method`,
+built from `Protocol.ns`, which is why `protocol*` has to be a special form —
+e.g. `` (with-meta {} {`my-method (fn [this] ...)}) ``, before falling back to
+the type-tag `impls` lookup. This lets a value implement a protocol without a
+matching `extend-type`/`extend-protocol`. Protocol dispatch helpers shared with the
 Phase 10.6 inline caches:
 
 - `type_tag_of(val: &Value) -> Arc<str>` — canonical protocol dispatch tag of a value
@@ -1023,17 +1024,26 @@ conditional in ANY slot of an `ns` require spec, namespace included, so
 `[#?(:clj clojure.core :cljs cljs.core) :as core]` reads — an option selecting
 no branch is dropped, a namespace selecting none is an error.
 
-`deftype` and `defrecord` share `parse_field_specs` (field name + mutability,
-metadata-transparent), `build_positional_ctor` (`->Name`, routed to the
-`make-type-instance-mut` builtin when the type declares mutable fields) and
-`intern_type_symbol` (so `(instance? Name x)` resolves); only `defrecord` also
-gets `build_map_ctor`. `synth_field_scope` wraps a method body in a `let*`
-binding each field a param does not shadow — a mutable field through
-`(.-field this)` (the live cell) and an immutable one through `(:field this)` —
-plus a hidden `__deftype_self__` handle when any field is mutable, which is how
-`eval_set_bang` finds the instance whose cell a bare `(set! field v)` updates.
-`resolve_protocol_sym` resolves a protocol named in an impl position
-(`extend-type`, `extend-protocol`, `reify`/`defrecord`/`deftype`) through the
+**The datatype and protocol family is Clojure, not Rust.** `deftype`,
+`defrecord`, `reify`, `defprotocol`, `extend-type` and `extend-protocol` are all
+macros in `bootstrap.cljrs`. What stays here is only what needs the interpreter:
+
+| primitive | kind | why it is irreducible |
+|---|---|---|
+| `deftype*` | special form | mints a type tag and registers method impls with the fields in scope; returns the tag |
+| `protocol*` | special form | mints a `Protocol` in the CURRENT namespace — `Protocol.ns` qualifies the method symbol that extend-via-metadata dispatch looks up |
+| `protocol-fn` | builtin fn | the dispatch `ProtocolFn` for one method, arity read back out of the protocol's own spec |
+| `extend` | builtin fn | writes `{method → fn}` into `Protocol.impls` under a type tag; Clojure's own signature |
+| `make-type-instance`, `make-type-instance-mut` | builtin fns | construct a `TypeInstance` (the latter with interior-mutable cells) |
+
+`deftype*` uses `parse_field_specs` (field name + mutability,
+metadata-transparent) and `register_impls_for_tag`. `synth_field_scope` wraps a
+method body in a `let*` binding each field a param does not shadow — a mutable
+field through `(.-field this)` (the live cell) and an immutable one through
+`(:field this)` — plus a hidden `__deftype_self__` handle when any field is
+mutable, which is how `eval_set_bang` finds the instance whose cell a bare
+`(set! field v)` updates. `resolve_protocol_sym` resolves a protocol named in an
+impl position (`deftype*`, and so `reify`/`defrecord`/`deftype`) through the
 current ns's `:require :as` aliases and through its own namespace when
 qualified — not as a literal intern of the current ns.
 
