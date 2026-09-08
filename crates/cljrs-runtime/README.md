@@ -118,6 +118,10 @@ tests/
                                      protocol method body; params shadow them
   deftype_types.rs                 — deftype: positional ctor, `.-field`, protocol
                                      impls, and mutable fields written with `set!`
+  ns_part_resolution.rs            — one namespace-resolution rule: an alias and
+                                     a full namespace name agree for symbols,
+                                     `var`, macros, syntax-quote, `binding`
+                                     and protocol names
   qualified_protocol_impl.rs       — a qualified protocol name in an impl position
                                      (defrecord/deftype/reify/extend-*) resolves
                                      through its own namespace

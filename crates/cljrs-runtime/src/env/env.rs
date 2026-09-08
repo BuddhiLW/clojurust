@@ -1031,6 +1031,27 @@ impl Env {
         }
     }
 
+    /// The namespace a qualified symbol's `ns` part names, here.
+    ///
+    /// `ns_part` may be a `:require … :as` alias or a namespace name; an alias
+    /// wins, and anything else is taken literally. This is what makes
+    /// `(m/f x)` and `(my.lib/f x)` mean the same thing after
+    /// `(:require [my.lib :as m])`.
+    pub fn resolve_ns_part(&self, ns_part: &str) -> Arc<str> {
+        self.globals
+            .resolve_alias(&self.current_ns, ns_part)
+            .unwrap_or_else(|| Arc::from(ns_part))
+    }
+
+    /// The namespace a symbol belongs to: [`Self::resolve_ns_part`] when it
+    /// carries one, and the current namespace when it does not.
+    pub fn resolve_ns_or_current(&self, ns_part: Option<&str>) -> Arc<str> {
+        match ns_part {
+            Some(ns_part) => self.resolve_ns_part(ns_part),
+            None => self.current_ns.clone(),
+        }
+    }
+
     /// Create an Env for evaluating source at a specific commit.
     pub fn new_versioned(globals: Arc<GlobalEnv>, ns: &str, commit: &str) -> Self {
         Self {
