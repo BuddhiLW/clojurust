@@ -27,7 +27,7 @@ pub const SPECIAL_FORMS: &[&str] = &[
     "letfn",
     "in-ns",
     "alias",
-    "defprotocol",
+    "protocol*",
     "defmulti",
     "defmethod",
     "deftype*",

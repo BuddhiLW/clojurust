@@ -1358,11 +1358,13 @@ fn needs_interpreter(form: &cljrs_reader::Form) -> bool {
                         | "ns"
                         | "require"
                         | "defprotocol"
+                        | "protocol*"
                         | "extend-type"
                         | "extend-protocol"
                         | "defmulti"
                         | "defmethod"
                         | "defrecord"
+                        | "deftype*"
                 );
             }
             false

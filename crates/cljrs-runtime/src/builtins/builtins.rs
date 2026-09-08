@@ -28,8 +28,8 @@ use cljrs_value::value::{PrintValue, SetValue};
 use cljrs_value::{
     Arity, Atom, CljxCons, CljxFuture, CljxPromise, ExceptionInfo, FutureState, Keyword, LazySeq,
     MapValue, Namespace, NativeFn, ObjectArray, PersistentHashMap, PersistentHashSet,
-    PersistentList, PersistentQueue, PersistentVector, SharedAtom, SortedSet, Symbol, Thunk,
-    TypeInstance, Value, ValueError, ValueResult, Volatile, demote, promote,
+    PersistentList, PersistentQueue, PersistentVector, ProtocolFn, SharedAtom, SortedSet, Symbol,
+    Thunk, TypeInstance, Value, ValueError, ValueResult, Volatile, demote, promote,
 };
 use num_bigint::{BigInt, Sign, ToBigInt};
 use num_rational::Ratio;
@@ -1442,7 +1442,7 @@ pub fn register_all(globals: &Arc<GlobalEnv>, ns: &str) {
         ("letfn", Arity::Variadic { min: 1 }, builtin_stub_nil),
         ("in-ns", Arity::Fixed(1), builtin_stub_nil),
         ("alias", Arity::Fixed(2), builtin_stub_nil),
-        ("defprotocol", Arity::Variadic { min: 1 }, builtin_stub_nil),
+        ("protocol*", Arity::Variadic { min: 2 }, builtin_stub_nil),
         ("defmulti", Arity::Variadic { min: 1 }, builtin_stub_nil),
         ("defmethod", Arity::Variadic { min: 2 }, builtin_stub_nil),
         ("defrecord", Arity::Variadic { min: 2 }, builtin_stub_nil),
@@ -1546,6 +1546,7 @@ pub fn register_all(globals: &Arc<GlobalEnv>, ns: &str) {
         ("methods", Arity::Fixed(1), builtin_methods),
         ("prefers", Arity::Fixed(1), builtin_prefers),
         // Protocols
+        ("protocol-fn", Arity::Fixed(2), builtin_protocol_fn),
         ("extend", Arity::Variadic { min: 1 }, builtin_extend),
         // Records / reify
         (
@@ -8261,6 +8262,53 @@ fn builtin_make_delay_sentinel(_args: &[Value]) -> ValueResult<Value> {
     Err(ValueError::Other(
         "make-delay must be invoked through the evaluator".into(),
     ))
+}
+
+// ── Protocols ────────────────────────────────────────────────────────────────
+
+/// `(protocol-fn proto "method-name")` — the dispatch fn for one of `proto`'s
+/// methods.
+///
+/// Arity comes from the method spec the protocol already holds rather than from
+/// a second argument: the arity is stated once, in `protocol*`'s spec vector,
+/// and every projection of it reads that one definition.
+fn builtin_protocol_fn(args: &[Value]) -> ValueResult<Value> {
+    let Value::Protocol(proto) = args[0].unwrap_meta() else {
+        return Err(ValueError::WrongType {
+            expected: "protocol",
+            got: args[0].type_name().to_string(),
+        });
+    };
+    let wanted: Arc<str> = match args[1].unwrap_meta() {
+        Value::Str(s) => Arc::from(s.get().as_str()),
+        Value::Symbol(s) => Arc::from(s.get().name.as_ref()),
+        Value::Keyword(k) => Arc::from(k.get().name.as_ref()),
+        v => {
+            return Err(ValueError::WrongType {
+                expected: "method name",
+                got: v.type_name().to_string(),
+            });
+        }
+    };
+    let method = proto
+        .get()
+        .methods
+        .iter()
+        .find(|m| m.name == wanted)
+        .ok_or_else(|| {
+            ValueError::Other(format!(
+                "protocol {} has no method {}",
+                proto.get().name,
+                wanted
+            ))
+        })?
+        .clone();
+    Ok(Value::ProtocolFn(GcPtr::new(ProtocolFn {
+        protocol: proto.clone(),
+        method_name: method.name,
+        min_arity: method.min_arity,
+        variadic: method.variadic,
+    })))
 }
 
 // ── Protocol extension ───────────────────────────────────────────────────────

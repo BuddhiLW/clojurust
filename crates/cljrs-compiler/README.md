@@ -464,8 +464,9 @@ pub enum OpacityVerdict { Clean, Tolerated, Rejected }
 ### Source-embedding audit (`--require-fully-compiled`)
 
 Only plain `defn` bodies reach machine code. Forms that `needs_interpreter`
-reports - `ns`, `require`, `defmacro`, `defonce`, `defprotocol`, `defrecord`,
-`defmulti`, `defmethod`, `extend-type`, `extend-protocol` - are written to the
+reports - `ns`, `require`, `defmacro`, `defonce`, `defprotocol`, `protocol*`,
+`defrecord`, `deftype*`, `defmulti`, `defmethod`, `extend-type`,
+`extend-protocol` - are written to the
 harness as `.cljrs` files and pulled in with `include_str!`, method bodies
 included, even when the enclosing namespace compiles successfully. A namespace
 that fails lowering or codegen falls back to source the same way, and pinned

@@ -17,7 +17,7 @@ use cljrs_reader::Form;
 use cljrs_reader::form::FormKind;
 use cljrs_value::error::ExceptionInfo;
 use cljrs_value::{
-    CljxFn, CljxFnArity, CljxFuture, FutureState, Keyword, MapValue, MultiFn, Protocol, ProtocolFn,
+    CljxFn, CljxFnArity, CljxFuture, FutureState, Keyword, MapValue, MultiFn, Protocol,
     ProtocolMethod, ReferClojureFilter, TypeHint, Value, ValueError,
 };
 
@@ -49,7 +49,7 @@ pub fn eval_special(head: &str, args: &[Form], env: &mut Env) -> EvalResult {
         "letfn" => eval_letfn(args, env),
         "in-ns" => eval_in_ns(args, env),
         "alias" => eval_alias(args, env),
-        "defprotocol" => eval_defprotocol(args, env),
+        "protocol*" => eval_protocol_star(args, env),
         "defmulti" => eval_defmulti(args, env),
         "defmethod" => eval_defmethod(args, env),
         "deftype*" => eval_deftype_star(args, env),
@@ -1913,99 +1913,87 @@ fn extract_ns_name(v: &Value) -> EvalResult<String> {
     }
 }
 
-// ── defprotocol ───────────────────────────────────────────────────────────────
+// ── protocol* ─────────────────────────────────────────────────────────────────
 
-fn eval_defprotocol(args: &[Form], env: &mut Env) -> EvalResult {
-    // (defprotocol Name "doc?" (method [this & args] "doc?") ...)
-    let (name, name_meta) = require_sym_meta(args, 0, "defprotocol", env)?;
-    let proto_name: Arc<str> = Arc::from(name.as_str());
-
-    // Skip optional docstring.
-    let methods_start = if args.len() > 1 && args[1].as_string().is_some() {
-        2
-    } else {
-        1
+/// Read a `{:name "m" :min-arity n :variadic b}` map into a `ProtocolMethod`.
+fn protocol_method_of(spec: &Value) -> EvalResult<ProtocolMethod> {
+    let Value::Map(m) = spec.unwrap_meta() else {
+        return Err(EvalError::Runtime(format!(
+            "protocol* method spec must be a map, got {}",
+            spec.type_name()
+        )));
     };
-
-    let mut methods: Vec<ProtocolMethod> = Vec::new();
-    let mut extend_via_metadata = false;
-
-    let rest = &args[methods_start..];
-    let mut i = 0;
-    while i < rest.len() {
-        // Protocol options are flat `:keyword value` pairs interspersed
-        // among the method signatures, e.g. `:extend-via-metadata true`.
-        if let Some(kw) = rest[i].as_keyword() {
-            if kw == "extend-via-metadata" {
-                extend_via_metadata = matches!(
-                    rest.get(i + 1).map(|f| &f.unmeta().kind),
-                    Some(FormKind::Bool(true))
-                );
-            }
-            i += 2;
-            continue;
+    let field = |k: &str| m.get(&Value::keyword(Keyword::simple(k)));
+    let name: Arc<str> = match field("name") {
+        Some(Value::Str(s)) => Arc::from(s.get().as_str()),
+        Some(Value::Symbol(s)) => Arc::from(s.get().name.as_ref()),
+        Some(Value::Keyword(k)) => Arc::from(k.get().name.as_ref()),
+        _ => {
+            return Err(EvalError::Runtime(
+                "protocol* method spec needs a :name".into(),
+            ));
         }
-        let form = &rest[i];
-        i += 1;
-        // Each method spec is (method-name [params...] "doc"?)
-        let parts = match form.as_list() {
-            Some(parts) => parts,
-            None => continue, // skip unknown forms
-        };
-        if parts.is_empty() {
-            continue;
-        }
-        let method_name: Arc<str> = match parts[0].as_symbol() {
-            Some(s) => Arc::from(s),
-            None => continue,
-        };
-        // Find the parameter vector (first vector in parts).
-        let (min_arity, variadic) = match parts.iter().find_map(|f| f.as_vector()) {
-            Some(param_forms) => {
-                let is_amp = |p: &Form| p.as_symbol() == Some("&");
-                let variadic = param_forms.iter().any(is_amp);
-                let fixed = param_forms.iter().filter(|p| !is_amp(p)).count();
-                (fixed, variadic)
-            }
-            None => (1, false),
-        };
-        methods.push(ProtocolMethod {
-            name: method_name,
-            min_arity,
-            variadic,
-        });
-    }
-
-    let ns: Arc<str> = env.current_ns.clone();
-    let proto = Protocol::new(proto_name.clone(), ns, methods.clone(), extend_via_metadata);
-    let proto_ptr = GcPtr::new(proto);
-
-    // Intern the protocol itself.
-    let proto_var = env.globals.intern(
-        &env.current_ns,
-        proto_name.clone(),
-        Value::Protocol(proto_ptr.clone()),
+    };
+    let min_arity = match field("min-arity") {
+        Some(Value::Long(n)) if n >= 0 => n as usize,
+        _ => 1,
+    };
+    let variadic = !matches!(
+        field("variadic"),
+        None | Some(Value::Nil) | Some(Value::Bool(false))
     );
-    if let Some(meta_val) = name_meta {
-        proto_var.get().set_meta(meta_val);
-    }
+    Ok(ProtocolMethod {
+        name,
+        min_arity,
+        variadic,
+    })
+}
 
-    // Create and intern a ProtocolFn for each method.
-    for method in &methods {
-        let pf = ProtocolFn {
-            protocol: proto_ptr.clone(),
-            method_name: method.name.clone(),
-            min_arity: method.min_arity,
-            variadic: method.variadic,
-        };
-        env.globals.intern(
-            &env.current_ns,
-            method.name.clone(),
-            Value::ProtocolFn(GcPtr::new(pf)),
-        );
+/// `(protocol* Name method-specs extend-via-metadata?)` — mint a protocol.
+///
+/// `method-specs` evaluates to a sequence of `{:name :min-arity :variadic}`
+/// maps. The protocol is created in the CURRENT namespace, which is the whole
+/// reason this stays a special form: `Protocol.ns` is what qualifies a method
+/// name for extend-via-metadata dispatch, and a builtin fn cannot see the
+/// environment. The protocol is returned, not interned — `defprotocol` is the
+/// Clojure macro that `def`s it along with a dispatch fn per method.
+fn eval_protocol_star(args: &[Form], env: &mut Env) -> EvalResult {
+    if args.len() < 2 {
+        return Err(EvalError::Runtime(
+            "protocol* requires a name and method specs".into(),
+        ));
     }
-
-    Ok(Value::Var(proto_var))
+    // Name metadata belongs on the var `defprotocol` binds, not here.
+    let (name, _) = require_sym_meta(args, 0, "protocol*", env)?;
+    let specs = crate::interp::eval::eval(&args[1], env)?;
+    let specs: Vec<Value> = match specs.unwrap_meta() {
+        Value::Vector(v) => v.get().iter().cloned().collect(),
+        Value::Nil => Vec::new(),
+        v => {
+            return Err(EvalError::Runtime(format!(
+                "protocol* method specs must be a vector, got {}",
+                v.type_name()
+            )));
+        }
+    };
+    let methods = specs
+        .iter()
+        .map(protocol_method_of)
+        .collect::<EvalResult<Vec<_>>>()?;
+    let extend_via_metadata = match args.get(2) {
+        Some(f) => !matches!(
+            crate::interp::eval::eval(f, env)?,
+            Value::Nil | Value::Bool(false)
+        ),
+        None => false,
+    };
+    let proto = Protocol::new(
+        Arc::from(name.as_str()),
+        env.current_ns.clone(),
+        methods,
+        extend_via_metadata,
+    );
+    Ok(Value::Protocol(GcPtr::new(proto)))
 }
 
 /// Build a `CljxFn` from the tail of a method-impl list: `(name [params] body...)`.
