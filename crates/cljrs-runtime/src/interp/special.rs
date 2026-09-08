@@ -7,6 +7,7 @@ use crate::builtins::form::{
     expand_pairs, expand_reader_conds, expand_reader_conds_cow, form_to_value, resolve_auto_forms,
     select_reader_cond,
 };
+use crate::env::env::GlobalEnv;
 use crate::env::env::{Env, RequireRefer, RequireSpec};
 use crate::env::error::{EvalError, EvalResult};
 use crate::env::loader::load_ns;
@@ -2317,6 +2318,15 @@ fn eval_defmethod(args: &[Form], env: &mut Env) -> EvalResult {
     // only in the current ns — otherwise `(defmethod other/render :x ...)`
     // reports that a perfectly good multimethod "is not a multimethod".
     let parsed = cljrs_value::Symbol::parse(multi_name);
+    // A pinned name (`mylib/render@abc1234`) refers to an immutable past
+    // version, which is not a thing a method can be installed into. `parse`
+    // splits the suffix off into `version`, so without this guard the pin is
+    // dropped and HEAD is extended instead.
+    if parsed.version.is_some() {
+        return Err(EvalError::Runtime(format!(
+            "defmethod: {multi_name} is versioned; extend the multimethod at HEAD"
+        )));
+    }
     let owner_ns: Arc<str> = match parsed.namespace.as_deref() {
         Some(ns_part) => env
             .globals
@@ -2324,12 +2334,24 @@ fn eval_defmethod(args: &[Form], env: &mut Env) -> EvalResult {
             .unwrap_or_else(|| Arc::from(ns_part)),
         None => env.current_ns.clone(),
     };
+    // Reaching into another namespace respects privacy the way `eval_symbol`
+    // does: refusing to extend a private multimethod from outside is what
+    // `^:private` on a `defmulti` is for.
+    if owner_ns.as_ref() != env.current_ns.as_ref()
+        && let Some(var) = env.globals.lookup_var(&owner_ns, &parsed.name)
+        && GlobalEnv::var_is_private(var.get())
+    {
+        return Err(EvalError::Runtime(format!(
+            "defmethod: var {owner_ns}/{} is not public",
+            parsed.name
+        )));
+    }
 
     let mf_ptr = match env.globals.lookup_in_ns(&owner_ns, &parsed.name) {
         Some(Value::MultiFn(mf)) => mf,
         Some(other) => {
             return Err(EvalError::Runtime(format!(
-                "defmethod: {multi_name} is a {}, not a multimethod",
+                "defmethod: {multi_name} is bound to a {}, not a multimethod",
                 other.type_name()
             )));
         }

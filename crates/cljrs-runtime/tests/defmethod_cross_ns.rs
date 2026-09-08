@@ -150,3 +150,80 @@ fn extending_something_undefined_says_that_instead() {
     let err = eval_in(&mut env, "(defmethod nope/area :a [_] 1)").expect_err("no such multimethod");
     assert!(err.contains("not defined"), "unhelpful error: {err}");
 }
+
+#[test]
+fn a_multimethod_reached_through_refer_needs_no_qualification() {
+    // The one path where the unqualified branch does real work rather than
+    // just preserving same-ns behaviour: `:refer` puts the name in the
+    // current namespace, so a bare `defmethod` has to find it there.
+    let extender = r#"
+(ns shapes.referred (:require [shapes.core :refer [area]]))
+(defmethod area :triangle [t] (:base t))
+"#;
+    let (_dir, _g, mut env) = env_with_sources(&[
+        ("shapes/core.cljrs", OWNER),
+        ("shapes/referred.cljrs", extender),
+    ]);
+    eval_in(&mut env, "(require 'shapes.referred)").expect("require the extending ns");
+    let v = eval_in(
+        &mut env,
+        "(do (require '[shapes.core :as c]) (c/area {:kind :triangle :base 9}))",
+    )
+    .expect("dispatch");
+    assert_eq!(v, Value::Long(9));
+}
+
+#[test]
+fn a_private_multimethod_cannot_be_extended_from_another_namespace() {
+    // `^:private` is refused here for the same reason `eval_symbol` refuses
+    // it: the owner did not publish this name. Before the cross-ns fix this
+    // failed for the wrong reason ("is not a multimethod"), so widening the
+    // lookup without the check would have quietly opened a hole.
+    let owner = r#"
+(ns shapes.hidden)
+(defmulti ^:private secret :kind)
+(defmethod secret :default [_] :owner-only)
+"#;
+    let extender = r#"
+(ns shapes.intruder (:require [shapes.hidden :as h]))
+(defmethod h/secret :x [_] :extended)
+"#;
+    let (_dir, _g, mut env) = env_with_sources(&[
+        ("shapes/hidden.cljrs", owner),
+        ("shapes/intruder.cljrs", extender),
+    ]);
+    let err = eval_in(&mut env, "(require 'shapes.intruder)")
+        .expect_err("a private multimethod is not extensible from outside");
+    assert!(err.contains("not public"), "unhelpful error: {err}");
+}
+
+#[test]
+fn a_private_multimethod_is_still_extensible_by_its_owner() {
+    // Privacy is about the boundary, not about the var: the owning namespace
+    // extends its own multimethod normally.
+    let owner = r#"
+(ns shapes.own)
+(defmulti ^:private secret :kind)
+(defmethod secret :x [_] :extended)
+(def result (secret {:kind :x}))
+"#;
+    let (_dir, _g, mut env) = env_with_sources(&[("shapes/own.cljrs", owner)]);
+    eval_in(&mut env, "(require 'shapes.own)").expect("own-ns defmethod");
+    assert_eq!(
+        eval_in(&mut env, "shapes.own/result").expect("result"),
+        Value::keyword(cljrs_value::Keyword::simple("extended"))
+    );
+}
+
+#[test]
+fn a_versioned_name_is_refused_rather_than_silently_unpinned() {
+    // `Symbol::parse` splits `@hash` into `version`; reading only `name` would
+    // extend HEAD while the caller believes they pinned a commit.
+    let (_dir, _g, mut env) = env_with_sources(&[]);
+    let err = eval_in(
+        &mut env,
+        "(do (defmulti f :k) (defmethod f@abc1234 :a [_] 1))",
+    )
+    .expect_err("a versioned defmethod target should be refused");
+    assert!(err.contains("versioned"), "unhelpful error: {err}");
+}
