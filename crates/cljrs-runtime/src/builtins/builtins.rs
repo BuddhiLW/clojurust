@@ -27,7 +27,7 @@ use cljrs_gc::GcPtr;
 use cljrs_value::value::{PrintValue, SetValue};
 use cljrs_value::{
     Arity, Atom, CljxCons, CljxFuture, CljxPromise, ExceptionInfo, FutureState, Keyword, LazySeq,
-    MapValue, Namespace, NativeFn, ObjectArray, PersistentHashMap, PersistentHashSet,
+    MapValue, MultiFn, Namespace, NativeFn, ObjectArray, PersistentHashMap, PersistentHashSet,
     PersistentList, PersistentQueue, PersistentVector, ProtocolFn, SharedAtom, SortedSet, Symbol,
     Thunk, TypeInstance, Value, ValueError, ValueResult, Volatile, demote, promote,
 };
@@ -1443,8 +1443,6 @@ pub fn register_all(globals: &Arc<GlobalEnv>, ns: &str) {
         ("in-ns", Arity::Fixed(1), builtin_stub_nil),
         ("alias", Arity::Fixed(2), builtin_stub_nil),
         ("protocol*", Arity::Variadic { min: 2 }, builtin_stub_nil),
-        ("defmulti", Arity::Variadic { min: 1 }, builtin_stub_nil),
-        ("defmethod", Arity::Variadic { min: 2 }, builtin_stub_nil),
         ("defrecord", Arity::Variadic { min: 2 }, builtin_stub_nil),
         ("reify", Arity::Variadic { min: 0 }, builtin_stub_nil),
         ("load-file", Arity::Fixed(1), builtin_stub_nil),
@@ -1541,6 +1539,8 @@ pub fn register_all(globals: &Arc<GlobalEnv>, ns: &str) {
         // Protocols & Multimethods
         ("satisfies?", Arity::Fixed(2), builtin_satisfies_q),
         ("extends?", Arity::Fixed(2), builtin_extends_q),
+        ("multi-fn", Arity::Variadic { min: 2 }, builtin_multi_fn),
+        ("add-method", Arity::Fixed(3), builtin_add_method),
         ("prefer-method", Arity::Fixed(3), builtin_prefer_method),
         ("remove-method", Arity::Fixed(2), builtin_remove_method),
         ("methods", Arity::Fixed(1), builtin_methods),
@@ -8262,6 +8262,65 @@ fn builtin_make_delay_sentinel(_args: &[Value]) -> ValueResult<Value> {
     Err(ValueError::Other(
         "make-delay must be invoked through the evaluator".into(),
     ))
+}
+
+// ── Multimethods ─────────────────────────────────────────────────────────────
+
+/// `(multi-fn name dispatch-fn)` / `(multi-fn name dispatch-fn default-val)` —
+/// mint a multimethod with no methods registered.
+///
+/// `defmulti` is the Clojure macro that `def`s the result. The default dispatch
+/// value is stored the way every other dispatch key is, as its printed form.
+fn builtin_multi_fn(args: &[Value]) -> ValueResult<Value> {
+    let name: Arc<str> = match args[0].unwrap_meta() {
+        Value::Str(s) => Arc::from(s.get().as_str()),
+        Value::Symbol(s) => Arc::from(s.get().name.as_ref()),
+        v => {
+            return Err(ValueError::WrongType {
+                expected: "name symbol or string",
+                got: v.type_name().to_string(),
+            });
+        }
+    };
+    let default_dispatch = match args.get(2) {
+        Some(v) => format!("{v}"),
+        None => ":default".to_string(),
+    };
+    Ok(Value::MultiFn(GcPtr::new(MultiFn::new(
+        name,
+        args[1].clone(),
+        default_dispatch,
+    ))))
+}
+
+/// `(add-method multifn dispatch-val f)` — register `f` under `dispatch-val`.
+///
+/// The inverse of `remove-method`, and keyed identically: the printed form of
+/// the dispatch value, with the value itself kept alongside for `isa?` lookups.
+/// Returns the multimethod.
+fn builtin_add_method(args: &[Value]) -> ValueResult<Value> {
+    let mf = match args[0].unwrap_meta() {
+        Value::MultiFn(m) => m.clone(),
+        v => {
+            return Err(ValueError::WrongType {
+                expected: "multimethod",
+                got: v.type_name().to_string(),
+            });
+        }
+    };
+    let key = format!("{}", args[1]);
+    mf.get()
+        .methods
+        .lock()
+        .unwrap()
+        .insert(key.clone(), args[2].clone());
+    mf.get()
+        .dispatch_vals
+        .lock()
+        .unwrap()
+        .insert(key, args[1].clone());
+    mf.get().bump_method_generation();
+    Ok(Value::MultiFn(mf))
 }
 
 // ── Protocols ────────────────────────────────────────────────────────────────

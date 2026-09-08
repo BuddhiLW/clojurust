@@ -1235,6 +1235,34 @@
 (defn delay? [x] (= (type x) 'Delay))
 (defn promise? [x] (= (type x) 'Promise))
 
+;; ── multimethods: defmulti/defmethod over multi-fn and add-method ────────────
+;; Neither surface form needs the interpreter. `multi-fn` mints a MultiFn and
+;; `def` binds it; `add-method` writes one entry into the method table, keyed
+;; the same way `remove-method` reads it. Naming the multimethod by SYMBOL in
+;; the expansion is what makes `(defmethod other.ns/m ...)` work: the symbol
+;; resolves through the ordinary rules, aliases included, where the old special
+;; form looked the whole string up as an intern of the current namespace.
+
+(defmacro defmulti [mname & body]
+  ;; (defmulti name "doc"? dispatch-fn :default val?)
+  (let [tail     (if (and (string? (first body)) (next body)) (next body) body)
+        dispatch (first tail)
+        ;; A one-element vector marks PRESENCE, so `:default nil` still counts.
+        default  (loop [o (next tail)]
+                   (cond
+                     (nil? o)               nil
+                     (= (first o) :default) [(second o)]
+                     :else                  (recur (next (next o)))))
+        nsym     (list 'quote (symbol (name mname)))]
+    (list 'def mname
+          (if default
+            (list 'multi-fn nsym dispatch (first default))
+            (list 'multi-fn nsym dispatch)))))
+
+(defmacro defmethod [mname dispatch-val params & body]
+  (list 'add-method mname dispatch-val
+        (cons 'fn (cons (symbol (name mname)) (cons params body)))))
+
 ;; ── protocols: defprotocol as a macro over the protocol* primitive ───────────
 ;; `protocol*` mints the protocol object in the CURRENT namespace, and that is
 ;; the one part a Clojure macro cannot do for itself: `Protocol.ns` is what
