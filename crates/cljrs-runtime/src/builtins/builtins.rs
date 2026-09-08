@@ -1443,12 +1443,6 @@ pub fn register_all(globals: &Arc<GlobalEnv>, ns: &str) {
         ("in-ns", Arity::Fixed(1), builtin_stub_nil),
         ("alias", Arity::Fixed(2), builtin_stub_nil),
         ("defprotocol", Arity::Variadic { min: 1 }, builtin_stub_nil),
-        ("extend-type", Arity::Variadic { min: 1 }, builtin_stub_nil),
-        (
-            "extend-protocol",
-            Arity::Variadic { min: 1 },
-            builtin_stub_nil,
-        ),
         ("defmulti", Arity::Variadic { min: 1 }, builtin_stub_nil),
         ("defmethod", Arity::Variadic { min: 2 }, builtin_stub_nil),
         ("defrecord", Arity::Variadic { min: 2 }, builtin_stub_nil),
@@ -1551,6 +1545,8 @@ pub fn register_all(globals: &Arc<GlobalEnv>, ns: &str) {
         ("remove-method", Arity::Fixed(2), builtin_remove_method),
         ("methods", Arity::Fixed(1), builtin_methods),
         ("prefers", Arity::Fixed(1), builtin_prefers),
+        // Protocols
+        ("extend", Arity::Variadic { min: 1 }, builtin_extend),
         // Records / reify
         (
             "make-type-instance",
@@ -8265,6 +8261,73 @@ fn builtin_make_delay_sentinel(_args: &[Value]) -> ValueResult<Value> {
     Err(ValueError::Other(
         "make-delay must be invoked through the evaluator".into(),
     ))
+}
+
+// ── Protocol extension ───────────────────────────────────────────────────────
+
+/// `(extend type-tag proto method-map & more-proto+method-map)` — register
+/// protocol implementations for a type tag.
+///
+/// `type-tag` is a symbol or string naming the type; each `method-map` maps a
+/// method name (keyword, symbol or string) to the function implementing it.
+/// A later registration for the same type and method replaces the earlier one.
+/// Returns nil.
+fn builtin_extend(args: &[Value]) -> ValueResult<Value> {
+    let type_tag: Arc<str> = match args[0].unwrap_meta() {
+        Value::Symbol(s) => Arc::from(s.get().name.as_ref()),
+        Value::Str(s) => Arc::from(s.get().as_str()),
+        v => {
+            return Err(ValueError::WrongType {
+                expected: "type symbol or string",
+                got: v.type_name().to_string(),
+            });
+        }
+    };
+    let pairs = &args[1..];
+    if !pairs.len().is_multiple_of(2) {
+        return Err(ValueError::ArityError {
+            name: "extend".to_string(),
+            expected: "a type tag followed by protocol/method-map pairs".to_string(),
+            got: args.len(),
+        });
+    }
+    for pair in pairs.chunks(2) {
+        let Value::Protocol(proto) = pair[0].unwrap_meta() else {
+            return Err(ValueError::WrongType {
+                expected: "protocol",
+                got: pair[0].type_name().to_string(),
+            });
+        };
+        let methods = match pair[1].unwrap_meta() {
+            Value::Map(m) => m.clone(),
+            Value::Nil => MapValue::empty(),
+            v => {
+                return Err(ValueError::WrongType {
+                    expected: "method map",
+                    got: v.type_name().to_string(),
+                });
+            }
+        };
+        let proto = proto.get();
+        let mut impls = proto.impls.lock().unwrap();
+        let table = impls.entry(type_tag.clone()).or_default();
+        for (k, f) in methods.iter() {
+            let method_name: Arc<str> = match k.unwrap_meta() {
+                Value::Keyword(kw) => Arc::from(kw.get().name.as_ref()),
+                Value::Symbol(s) => Arc::from(s.get().name.as_ref()),
+                Value::Str(s) => Arc::from(s.get().as_str()),
+                v => {
+                    return Err(ValueError::WrongType {
+                        expected: "method name",
+                        got: v.type_name().to_string(),
+                    });
+                }
+            };
+            table.insert(method_name, f.clone());
+        }
+    }
+    cljrs_value::bump_protocol_generation();
+    Ok(Value::Nil)
 }
 
 // ── Records / reify ──────────────────────────────────────────────────────────

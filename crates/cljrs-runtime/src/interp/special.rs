@@ -50,8 +50,6 @@ pub fn eval_special(head: &str, args: &[Form], env: &mut Env) -> EvalResult {
         "in-ns" => eval_in_ns(args, env),
         "alias" => eval_alias(args, env),
         "defprotocol" => eval_defprotocol(args, env),
-        "extend-type" => eval_extend_type(args, env),
-        "extend-protocol" => eval_extend_protocol(args, env),
         "defmulti" => eval_defmulti(args, env),
         "defmethod" => eval_defmethod(args, env),
         "deftype*" => eval_deftype_star(args, env),
@@ -2008,121 +2006,6 @@ fn eval_defprotocol(args: &[Form], env: &mut Env) -> EvalResult {
     }
 
     Ok(Value::Var(proto_var))
-}
-
-// ── extend-type ───────────────────────────────────────────────────────────────
-
-fn eval_extend_type(args: &[Form], env: &mut Env) -> EvalResult {
-    // (extend-type TypeSym Proto1 (m [this] body) ... Proto2 ...)
-    if args.is_empty() {
-        return Err(EvalError::Runtime(
-            "extend-type requires a type symbol".into(),
-        ));
-    }
-    let Some(type_sym) = args[0].as_symbol() else {
-        return Err(EvalError::Runtime(
-            "extend-type: first arg must be a type symbol".into(),
-        ));
-    };
-    let type_tag = crate::interp::apply::resolve_type_tag(type_sym);
-
-    let mut current_proto: Option<GcPtr<Protocol>> = None;
-
-    for form in &args[1..] {
-        match &form.unmeta().kind {
-            FormKind::Symbol(s) => match resolve_protocol_sym(env, s) {
-                Some(p) => current_proto = Some(p),
-                None => {
-                    return Err(EvalError::Runtime(format!(
-                        "extend-type: {} is not a protocol",
-                        s
-                    )));
-                }
-            },
-            FormKind::List(parts) => {
-                // (method-name [params] body...)
-                let proto = current_proto.as_ref().ok_or_else(|| {
-                    EvalError::Runtime("extend-type: method before protocol name".into())
-                })?;
-                if parts.is_empty() {
-                    continue;
-                }
-                let method_name: Arc<str> = match parts[0].as_symbol() {
-                    Some(s) => Arc::from(s),
-                    None => continue,
-                };
-                let fn_val = build_impl_fn(parts, &[], &[], env)?;
-                let mut impls = proto.get().impls.lock().unwrap();
-                impls
-                    .entry(type_tag.clone())
-                    .or_default()
-                    .insert(method_name, fn_val);
-                drop(impls);
-                cljrs_value::bump_protocol_generation();
-            }
-            _ => {}
-        }
-    }
-
-    Ok(Value::Nil)
-}
-
-// ── extend-protocol ───────────────────────────────────────────────────────────
-
-fn eval_extend_protocol(args: &[Form], env: &mut Env) -> EvalResult {
-    // (extend-protocol Proto Type1 (m [this] body) ... Type2 ...)
-    if args.is_empty() {
-        return Err(EvalError::Runtime(
-            "extend-protocol requires a protocol".into(),
-        ));
-    }
-    let Some(proto_sym) = args[0].as_symbol() else {
-        return Err(EvalError::Runtime(
-            "extend-protocol: first arg must be a protocol symbol".into(),
-        ));
-    };
-    let proto_ptr = match resolve_protocol_sym(env, proto_sym) {
-        Some(p) => p,
-        None => {
-            return Err(EvalError::Runtime(format!(
-                "extend-protocol: {} is not a protocol",
-                proto_sym
-            )));
-        }
-    };
-
-    let mut current_type: Option<Arc<str>> = None;
-
-    for form in &args[1..] {
-        match &form.unmeta().kind {
-            FormKind::Symbol(s) => {
-                current_type = Some(crate::interp::apply::resolve_type_tag(s));
-            }
-            FormKind::List(parts) => {
-                let type_tag = current_type.as_ref().ok_or_else(|| {
-                    EvalError::Runtime("extend-protocol: method before type name".into())
-                })?;
-                if parts.is_empty() {
-                    continue;
-                }
-                let method_name: Arc<str> = match parts[0].as_symbol() {
-                    Some(s) => Arc::from(s),
-                    None => continue,
-                };
-                let fn_val = build_impl_fn(parts, &[], &[], env)?;
-                let mut impls = proto_ptr.get().impls.lock().unwrap();
-                impls
-                    .entry(type_tag.clone())
-                    .or_default()
-                    .insert(method_name, fn_val);
-                drop(impls);
-                cljrs_value::bump_protocol_generation();
-            }
-            _ => {}
-        }
-    }
-
-    Ok(Value::Nil)
 }
 
 /// Build a `CljxFn` from the tail of a method-impl list: `(name [params] body...)`.
