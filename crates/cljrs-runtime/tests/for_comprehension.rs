@@ -213,3 +213,81 @@ fn a_multi_form_body_runs_in_order_and_yields_the_last() {
         "[0 10]"
     );
 }
+
+// ── Review findings (#377) ───────────────────────────────────────────────────
+
+#[test]
+fn a_binding_may_be_named_after_a_core_function() {
+    // The expansion emits `list`, `mapcat`, `take-while` and `map` into the
+    // same scope as the user's bindings, so an unqualified emission is callable
+    // only until someone binds that name.
+    assert_eq!(shows("(for [list [1 2]] list)"), "(1 2)");
+    assert_eq!(shows("(for [x [1 2] :let [list x]] list)"), "(1 2)");
+    assert_eq!(shows("(for [mapcat [[1] [2]] x mapcat] x)"), "(1 2)");
+    assert_eq!(shows("(for [map [[1] [2]] x map] x)"), "(1 2)");
+    assert_eq!(
+        shows("(for [take-while [[1] [2]] x take-while] x)"),
+        "(1 2)"
+    );
+    assert_eq!(shows("(for [some? [1 2] :while (< some? 2)] some?)"), "(1)");
+}
+
+#[test]
+fn a_let_init_runs_once_per_element_under_while() {
+    // The :let inits used to be folded into the take-while predicate AND
+    // re-emitted into the body, so anything side-effecting ran twice.
+    let src = r#"(let [n (atom 0)]
+                   [(vec (for [x (range 4)
+                               :let [y (do (swap! n inc) x)]
+                               :while (< y 3)]
+                           y))
+                    @n])"#;
+    assert_eq!(shows(src), "[[0 1 2] 4]");
+}
+
+#[test]
+fn a_while_still_stops_while_an_inner_when_only_skips() {
+    // Both compile to "produce nothing for this element"; only :while may end
+    // the loop. The frame representation has to keep them distinguishable.
+    assert_eq!(
+        shows("(for [x (range 6) :while (< x 4) y [x] :when (even? y)] y)"),
+        "(0 2)"
+    );
+    assert_eq!(
+        shows("(for [x (range 6) :while (< x 4) :let [y (* x 10)]] y)"),
+        "(0 10 20 30)"
+    );
+}
+
+#[test]
+fn a_malformed_binding_vector_is_rejected() {
+    // Both used to yield an empty seq: `(second binds)` was nil and mapcat over
+    // nil is empty, so a dropped collection expression reported nothing at all.
+    for src in [
+        "(for [x [1 2] y] x)",
+        "(for [x [1 2] :when] x)",
+        "(for [x] x)",
+    ] {
+        let err = eval_fresh(src).expect_err("should reject a malformed binding vector");
+        assert!(
+            err.contains("even number of forms"),
+            "unhelpful error for {src}: {err}"
+        );
+    }
+}
+
+#[test]
+fn the_innermost_simple_binding_is_one_to_one_and_lazy() {
+    // The innermost binding with no modifiers now expands through `map` rather
+    // than `mapcat` plus a per-element `list` — a per-element allocation, and
+    // the pinned arity-2 `map` fast path in the IR interpreter and in codegen.
+    // There is no `macroexpand` in this runtime to assert the shape with, so
+    // pin the two properties the substitution has to preserve.
+    assert_eq!(shows("(count (for [x (range 5)] x))"), "5");
+    assert_eq!(shows("(for [x (range 3)] (inc x))"), "(1 2 3)");
+
+    let src = r#"(let [n (atom 0)]
+                   [(vec (take 2 (for [x (range 100)] (do (swap! n inc) x))))
+                    @n])"#;
+    assert_eq!(shows(src), "[[0 1] 2]", "the body must stay lazy");
+}

@@ -378,11 +378,7 @@
 (defn mapv
   "Returns a vector consisting of the result of applying f to the set of
   first items of each coll, followed by applying f to the set of second
-  items, until any one coll is exhausted.
-
-  The docstring always described the multi-collection behaviour; only the
-  two-argument arity existed, so `(mapv f xs ys)` was an arity error. `map`
-  already carries every arity, so each one here is a `vec` over it."
+  items, until any one coll is exhausted."
   ([f coll] (vec (map f coll)))
   ([f c1 c2] (vec (map f c1 c2)))
   ([f c1 c2 c3] (vec (map f c1 c2 c3)))
@@ -622,56 +618,80 @@
     ;=> (0 4 16 36 64)
 
   :when skips an element and keeps iterating; :while stops the loop it belongs
-  to. Because :while has to stop rather than skip, it is compiled into a
-  take-while over its own collection, which requires it to follow its binding
-  directly (any number of :let modifiers may sit in between). A :while placed
-  after a :when in the same binding group is rejected at macroexpansion time
-  rather than being silently downgraded to a :when."
+  to. A :while must follow its binding directly, and a binding takes at most
+  one :while; any number of :let modifiers may sit in between.
+
+  The emitted symbols are namespace-qualified, so a binding may be named after
+  a core function without breaking the expansion."
   [bindings & body]
   (letfn [(emit [binds]
             (if (seq binds)
-              (let [tag (first binds)]
-                (cond
-                  (= :let tag)
-                  (list 'let (second binds) (emit (next (next binds))))
+              (if (next binds)
+                (let [tag (first binds)]
+                  (cond
+                    (= :let tag)
+                    (list 'let (second binds) (emit (next (next binds))))
 
-                  (= :when tag)
-                  ;; Skip this element, keep iterating: nil concatenates away.
-                  (list 'if (second binds) (emit (next (next binds))) nil)
+                    (= :when tag)
+                    ;; Skip this element, keep iterating: nil concatenates away.
+                    (list 'if (second binds) (emit (next (next binds))) nil)
 
-                  (= :while tag)
-                  (throw (ex-info
-                          (str "for: :while must follow its binding directly "
-                               "(only :let may come between)")
-                          {:modifier :while :bindings bindings}))
+                    (= :while tag)
+                    (throw (ex-info
+                            (str "for: a :while must follow its binding directly "
+                                 "(only :let may come between) and a binding takes "
+                                 "at most one :while")
+                            {:modifier :while :bindings bindings}))
 
-                  :else
-                  (let [x tag
-                        coll (second binds)
-                        after (next (next binds))]
-                    ;; Gather the :let modifiers sitting between this binding
-                    ;; and a possible :while, so the :while test can see what
-                    ;; they bind.
-                    (loop [lets [] more after]
-                      (cond
-                        (= :let (first more))
-                        (recur (into lets (second more)) (next (next more)))
+                    :else
+                    (let [x tag
+                          coll (second binds)
+                          after (next (next binds))]
+                      ;; Gather the :let modifiers sitting between this binding
+                      ;; and a possible :while, so the :while test can see what
+                      ;; they bind.
+                      (loop [lets [] more after]
+                        (cond
+                          (= :let (first more))
+                          (recur (into lets (second more)) (next (next more)))
 
-                        (= :while (first more))
-                        (let [test (second more)
-                              test (if (seq lets) (list 'let lets test) test)
-                              rest-binds (next (next more))
-                              rest-binds (if (seq lets)
-                                           (cons :let (cons lets rest-binds))
-                                           rest-binds)]
-                          (list 'mapcat
-                                (list 'fn (vector x) (emit rest-binds))
-                                (list 'take-while (list 'fn (vector x) test) coll)))
+                          (= :while (first more))
+                          ;; One frame per element, so a :let init runs exactly
+                          ;; once and both the test and the body read it from
+                          ;; the same scope. A frame is [contribution] while the
+                          ;; test holds and nil once it fails, and that is the
+                          ;; difference that lets :while stop the loop while an
+                          ;; inner :when — whose contribution is an empty seq,
+                          ;; not nil — only skips.
+                          (list 'clojure.core/mapcat 'clojure.core/first
+                                (list 'clojure.core/take-while 'clojure.core/some?
+                                      (list 'clojure.core/map
+                                            (list 'fn (vector x)
+                                                  (list 'let lets
+                                                        (list 'if (second more)
+                                                              (vector (emit (next (next more))))
+                                                              nil)))
+                                            coll)))
 
-                        :else
-                        (list 'mapcat (list 'fn (vector x) (emit after)) coll))))))
+                          (seq after)
+                          (list 'clojure.core/mapcat
+                                (list 'fn (vector x) (emit after))
+                                coll)
+
+                          :else
+                          ;; Innermost binding with no modifiers: exactly one
+                          ;; element per element, which is what map is. Routing
+                          ;; it through mapcat costs a per-element list and
+                          ;; gives up the pinned arity-2 map fast path in the
+                          ;; IR interpreter and in codegen.
+                          (list 'clojure.core/map
+                                (list 'fn (vector x) (cons 'do body))
+                                coll))))))
+                (throw (ex-info
+                        "for requires an even number of forms in the binding vector"
+                        {:bindings bindings})))
               ;; Innermost: one element per surviving binding combination.
-              (list 'list (cons 'do body))))]
+              (list 'clojure.core/list (cons 'do body))))]
     (emit (seq bindings))))
 
 (defn second
