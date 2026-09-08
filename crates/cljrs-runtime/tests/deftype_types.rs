@@ -259,3 +259,25 @@ fn set_bang_on_a_dynamic_var_is_unaffected() {
         "3"
     );
 }
+
+/// A mutable field survives `deftype` being a macro.
+///
+/// `deftype` expands to `deftype*`, so the field vector now round-trips
+/// through a macro, and metadata that reaches a form that way is QUOTED — it
+/// is already a value, and re-analysing it would resolve its contents as code.
+/// The field parser read only bare keyword/map metadata, so
+/// `^:unsynchronized-mutable` was silently dropped: the field became
+/// immutable, and the method read nil instead of the constructor argument.
+#[test]
+fn a_source_written_mutable_field_still_works() {
+    let src = r#"
+(defprotocol Counter (bump [c]) (peek-n [c]))
+(deftype Box [^:unsynchronized-mutable n]
+  Counter
+  (bump [_] (set! n (inc n)) n)
+  (peek-n [_] n))
+(let [b (->Box 7)]
+  (pr-str [(peek-n b) (bump b) (peek-n b)]))
+"#;
+    assert_eq!(eval_pr(src), "[7 8 8]");
+}

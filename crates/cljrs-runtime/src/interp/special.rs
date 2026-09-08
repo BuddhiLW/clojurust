@@ -18,7 +18,7 @@ use cljrs_reader::form::FormKind;
 use cljrs_value::error::ExceptionInfo;
 use cljrs_value::{
     CljxFn, CljxFnArity, CljxFuture, FutureState, Keyword, MapValue, MultiFn, Protocol, ProtocolFn,
-    ProtocolMethod, ReferClojureFilter, TypeHint, TypeInstance, Value, ValueError,
+    ProtocolMethod, ReferClojureFilter, TypeHint, Value, ValueError,
 };
 
 /// Dispatch to the right special-form handler.
@@ -54,9 +54,7 @@ pub fn eval_special(head: &str, args: &[Form], env: &mut Env) -> EvalResult {
         "extend-protocol" => eval_extend_protocol(args, env),
         "defmulti" => eval_defmulti(args, env),
         "defmethod" => eval_defmethod(args, env),
-        "defrecord" => eval_defrecord(args, env),
-        "deftype" => eval_deftype(args, env),
-        "reify" => eval_reify(args, env),
+        "deftype*" => eval_deftype_star(args, env),
         "load-file" => eval_load_file(args, env),
         "binding" => eval_binding(args, env),
         "with-out-str" => eval_with_out_str(args, env),
@@ -2511,6 +2509,12 @@ fn meta_form_is_mutable(meta: &Form) -> bool {
                     None | Some(FormKind::Bool(false)) | Some(FormKind::Nil)
                 )
         }),
+        // Metadata that reached this form through a macro is QUOTED: it is
+        // already a value, and re-analysing it would resolve its contents as
+        // code (see `value_to_form`). A field vector written in source arrives
+        // unquoted; one a macro emitted arrives quoted. Both describe the same
+        // field, so both have to be read.
+        FormKind::Quote(inner) => meta_form_is_mutable(inner),
         _ => false,
     }
 }
@@ -2545,176 +2549,26 @@ fn parse_field_specs(form: &Form, ctx: &str) -> EvalResult<Vec<(Arc<str>, bool)>
         .collect()
 }
 
-/// Intern `->TypeName`, the positional constructor, in the current namespace.
-/// For an all-immutable type the body is
-/// `(make-type-instance "T" {:f1 f1 …})`; when `mutable_names` is non-empty the
-/// mutable fields are split into a second map and the body becomes
-/// `(make-type-instance-mut "T" {imm…} {mut…})`. Shared by `deftype` and
-/// `defrecord` (which always passes an empty `mutable_names`).
-fn build_positional_ctor(
-    type_name: &str,
-    type_tag: &Arc<str>,
-    field_names: &[Arc<str>],
-    mutable_names: &[Arc<str>],
-    env: &mut Env,
-) {
-    use cljrs_reader::form::FormKind as FK;
-    let ns = env.current_ns.clone();
-    let globals = env.globals.clone();
-    let dummy_span =
-        cljrs_types::span::Span::new(std::sync::Arc::new("<deftype>".into()), 0, 0, 1, 1);
-    let make_form = |kind: FK| Form {
-        kind,
-        span: dummy_span.clone(),
-    };
-    let is_mut = |name: &str| mutable_names.iter().any(|m| m.as_ref() == name);
-    let mut imm_kv: Vec<Form> = Vec::new();
-    let mut mut_kv: Vec<Form> = Vec::new();
-    for f in field_names {
-        let target = if is_mut(f) { &mut mut_kv } else { &mut imm_kv };
-        target.push(make_form(FK::Keyword(f.as_ref().to_string())));
-        target.push(make_form(FK::Symbol(f.as_ref().to_string())));
-    }
-    let ctor_call = if mutable_names.is_empty() {
-        vec![
-            make_form(FK::Symbol("make-type-instance".into())),
-            make_form(FK::Str(type_tag.as_ref().to_string())),
-            make_form(FK::Map(imm_kv)),
-        ]
-    } else {
-        vec![
-            make_form(FK::Symbol("make-type-instance-mut".into())),
-            make_form(FK::Str(type_tag.as_ref().to_string())),
-            make_form(FK::Map(imm_kv)),
-            make_form(FK::Map(mut_kv)),
-        ]
-    };
-    let body = vec![make_form(FK::List(ctor_call))];
-    let arity = CljxFnArity {
-        params: field_names.to_vec(),
-        rest_param: None,
-        body,
-        destructure_params: vec![],
-        destructure_rest: None,
-        ir_arity_id: crate::interp::arity::fresh_arity_id(),
-        param_hints: vec![],
-        rest_hint: None,
-    };
-    let fn_name: Arc<str> = Arc::from(format!("->{}", type_name));
-    let ctor = CljxFn::new(
-        Some(fn_name.clone()),
-        vec![arity],
-        vec![],
-        vec![],
-        false,
-        Arc::clone(&ns),
-    );
-    globals.intern(&ns, fn_name, Value::Fn(GcPtr::new(ctor)));
-}
+// ── deftype* (defrecord / deftype are bootstrap macros over it) ─────────────────
 
-/// Intern `map->TypeName`, the map constructor — `defrecord` only, as `deftype`
-/// has no map constructor in Clojure.
-fn build_map_ctor(type_name: &str, type_tag: &Arc<str>, env: &mut Env) {
-    use cljrs_reader::form::FormKind as FK;
-    let ns = env.current_ns.clone();
-    let globals = env.globals.clone();
-    let dummy_span =
-        cljrs_types::span::Span::new(std::sync::Arc::new("<defrecord>".into()), 0, 0, 1, 1);
-    let make_form = |kind: FK| Form {
-        kind,
-        span: dummy_span.clone(),
-    };
-    let m_sym: Arc<str> = Arc::from("m__");
-    let body = vec![make_form(FK::List(vec![
-        make_form(FK::Symbol("make-type-instance".into())),
-        make_form(FK::Str(type_tag.as_ref().to_string())),
-        make_form(FK::Symbol(m_sym.as_ref().to_string())),
-    ]))];
-    let arity = CljxFnArity {
-        params: vec![m_sym],
-        rest_param: None,
-        body,
-        destructure_params: vec![],
-        destructure_rest: None,
-        ir_arity_id: crate::interp::arity::fresh_arity_id(),
-        param_hints: vec![],
-        rest_hint: None,
-    };
-    let fn_name: Arc<str> = Arc::from(format!("map->{}", type_name));
-    let ctor = CljxFn::new(
-        Some(fn_name.clone()),
-        vec![arity],
-        vec![],
-        vec![],
-        false,
-        Arc::clone(&ns),
-    );
-    globals.intern(&ns, fn_name, Value::Fn(GcPtr::new(ctor)));
-}
-
-/// Intern the type NAME as a Symbol value so `(instance? TypeName x)` and other
-/// name references resolve to the type tag.
-fn intern_type_symbol(type_name: &str, env: &mut Env) {
-    let ns = env.current_ns.clone();
-    let globals = env.globals.clone();
-    let type_sym = cljrs_value::Symbol::simple(type_name.to_string());
-    globals.intern(
-        &ns,
-        Arc::from(type_name),
-        Value::Symbol(GcPtr::new(type_sym)),
-    );
-}
-
-// ── defrecord ─────────────────────────────────────────────────────────────────
-
-fn eval_defrecord(args: &[Form], env: &mut Env) -> EvalResult {
-    // (defrecord TypeName [field1 field2 ...] Proto1 (method [this] body) ...)
+/// The irreducible datatype primitive: mint a type tag and register method impls
+/// against it, with the fields in scope in each body and mutable fields backed by
+/// live cells. It does NOT synthesise constructors or intern the type symbol —
+/// that sugar lives in the `deftype` bootstrap macro (`->T`, `(def T 'T)`), which
+/// is what makes deftype a particular case of a Clojure macro over this form.
+fn eval_deftype_star(args: &[Form], env: &mut Env) -> EvalResult {
+    // (deftype* TypeName [field ...] Proto (method [this] body) ...)
     if args.len() < 2 {
         return Err(EvalError::Runtime(
-            "defrecord requires a name and field vector".into(),
-        ));
-    }
-    // Record metadata belongs to the generated type, which has no var to hold it
-    // here; unwrapped so the form reads, and deliberately not silently applied
-    // somewhere it would not belong.
-    let (type_name, _) = require_sym_meta(args, 0, "defrecord", env)?;
-    let type_tag: Arc<str> = Arc::from(type_name.as_str());
-
-    // Parse field names from the vector, peeling any per-field metadata.
-    // (A defrecord field is always immutable, so the mutability flag is dropped.)
-    let field_names: Vec<Arc<str>> = parse_field_specs(&args[1], "defrecord")?
-        .into_iter()
-        .map(|(n, _)| n)
-        .collect();
-
-    // Register protocol implementations (same as extend-type inner logic).
-    // The field names go with them: a defrecord method body may name its fields
-    // directly, which reify has no equivalent of.
-    register_impls_for_tag(&type_tag, &args[2..], &field_names, &[], env)?;
-
-    // Generate constructors in the current namespace: the positional `->T` and
-    // the map `map->T`; then intern the type name so `(instance? T x)` resolves.
-    build_positional_ctor(&type_name, &type_tag, &field_names, &[], env);
-    build_map_ctor(&type_name, &type_tag, env);
-    intern_type_symbol(&type_name, env);
-    Ok(Value::Nil)
-}
-
-// ── deftype ──────────────────────────────────────────────────────────────────
-
-fn eval_deftype(args: &[Form], env: &mut Env) -> EvalResult {
-    // (deftype TypeName [field ...] Proto (method [this] body) ...)
-    if args.len() < 2 {
-        return Err(EvalError::Runtime(
-            "deftype requires a name and field vector".into(),
+            "deftype* requires a name and field vector".into(),
         ));
     }
     // Type metadata (e.g. ^:private) has no var to hold it; unwrapped so the
     // name reads, and deliberately not applied anywhere it would not belong.
-    let (type_name, _) = require_sym_meta(args, 0, "deftype", env)?;
+    let (type_name, _) = require_sym_meta(args, 0, "deftype*", env)?;
     let type_tag: Arc<str> = Arc::from(type_name.as_str());
 
-    let specs = parse_field_specs(&args[1], "deftype")?;
+    let specs = parse_field_specs(&args[1], "deftype*")?;
     let field_names: Vec<Arc<str>> = specs.iter().map(|(n, _)| n.clone()).collect();
     let mutable_names: Vec<Arc<str>> = specs
         .iter()
@@ -2726,32 +2580,10 @@ fn eval_deftype(args: &[Form], env: &mut Env) -> EvalResult {
     // each body — same machinery as defrecord/reify. Mutable fields read
     // through the live cell and are writable with `set!`.
     register_impls_for_tag(&type_tag, &args[2..], &field_names, &mutable_names, env)?;
-
-    // deftype gets a positional `->T` constructor and its type symbol, but no
-    // `map->T` (Clojure reserves that for defrecord).
-    build_positional_ctor(&type_name, &type_tag, &field_names, &mutable_names, env);
-    intern_type_symbol(&type_name, env);
-    Ok(Value::Nil)
-}
-
-// ── reify ─────────────────────────────────────────────────────────────────────
-
-fn eval_reify(args: &[Form], env: &mut Env) -> EvalResult {
-    // (reify Proto1 (method [this] body) ...)
-    // Generate a unique type tag for this instance.
-    let n = crate::builtins::builtins::GENSYM_COUNTER
-        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let type_tag: Arc<str> = Arc::from(format!("reify__{}", n));
-
-    // Register protocol implementations. reify has no fields.
-    register_impls_for_tag(&type_tag, args, &[], &[], env)?;
-
-    // Return an empty TypeInstance with the unique tag.
-    Ok(Value::TypeInstance(GcPtr::new(TypeInstance {
-        type_tag,
-        fields: MapValue::empty(),
-        mutable: None,
-    })))
+    // Return the minted tag so a caller (e.g. the `reify` macro) can feed it
+    // straight to `make-type-instance` — a single dataflow source for the tag,
+    // rather than a second textual reference that a gensym could desync.
+    Ok(Value::string(type_name))
 }
 
 // ── register_impls_for_tag ────────────────────────────────────────────────────
