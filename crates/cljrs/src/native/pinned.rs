@@ -496,16 +496,27 @@ fn cargo_build(plan: &WrapperPlan) -> Result<(), String> {
 
 /// Write the generated wrapper crate (Cargo.toml, build.rs, src/lib.rs).
 ///
-/// The wrapper depends on the dep by PATH, so Cargo reads the real package
-/// name from its own Cargo.toml; `crate_name` only has to match the lib name
-/// the `extern crate` ident resolves to.
+/// The dependency is declared under the Rust identifier the `:rust/init` path
+/// uses, renamed to the package's real name — those differ whenever a package
+/// name contains `-`, which Rust identifiers cannot.
 fn write_wrapper_crate(
     wrapper_dir: &Path,
     crate_dir: &Path,
     dep: &NativeDep,
 ) -> Result<(), String> {
-    let crate_name = dep.crate_name();
     let pkg_ident = dep.pkg_ident();
+    let manifest = std::fs::read_to_string(crate_dir.join("Cargo.toml"))
+        .map_err(|e| format!("reading {}: {e}", crate_dir.join("Cargo.toml").display()))?;
+    let package_name = package_name_of(&manifest).ok_or_else(|| {
+        format!(
+            "no [package] name in {}",
+            crate_dir.join("Cargo.toml").display()
+        )
+    })?;
+    let dep_line = format!(
+        r#"{pkg_ident} = {{ path = "{}", package = "{package_name}" }}"#,
+        crate_dir.display()
+    );
     std::fs::create_dir_all(wrapper_dir.join("src")).map_err(|e| e.to_string())?;
 
     // Pin cljrs-interop exactly like the AOT harness pins runtime crates:
@@ -532,13 +543,12 @@ crate-type = ["cdylib"]
 
 [dependencies]
 {interop_dep}
-{crate_name} = {{ path = "{crate_dir}" }}
+{dep_line}
 
 [profile.release]
 panic = "unwind"
 "#,
         version = env!("CARGO_PKG_VERSION"),
-        crate_dir = crate_dir.display(),
     );
     std::fs::write(wrapper_dir.join("Cargo.toml"), cargo_toml).map_err(|e| e.to_string())?;
 
@@ -599,6 +609,35 @@ pub unsafe extern "C" fn cljrs_dylib_init(registry: *mut cljrs_interop::Registry
     );
     std::fs::write(wrapper_dir.join("src/lib.rs"), lib_rs).map_err(|e| e.to_string())?;
     Ok(())
+}
+
+/// The `[package] name` declared in a Cargo manifest.
+///
+/// Only that one key is read, so the full TOML grammar is not needed: track
+/// which table each line belongs to and take `name` from `[package]`.
+fn package_name_of(manifest: &str) -> Option<String> {
+    let mut in_package = false;
+    for line in manifest.lines() {
+        let line = line.split('#').next().unwrap_or(line).trim();
+        if line.starts_with('[') {
+            in_package = line == "[package]";
+            continue;
+        }
+        if !in_package {
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        if key.trim() != "name" {
+            continue;
+        }
+        let value = value.trim().trim_matches(['"', '\''].as_slice());
+        if !value.is_empty() {
+            return Some(value.to_string());
+        }
+    }
+    None
 }
 
 /// The built artifact path for a wrapper crate dir (host-profile build).
@@ -690,4 +729,63 @@ fn stable_hash(s: &str) -> String {
     let mut h = DefaultHasher::new();
     s.hash(&mut h);
     format!("{:016x}", h.finish())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::package_name_of;
+
+    #[test]
+    fn reads_the_package_name() {
+        let manifest = r#"
+[package]
+name = "cljrs-raster"
+version = "0.1.0"
+"#;
+        assert_eq!(package_name_of(manifest).as_deref(), Some("cljrs-raster"));
+    }
+
+    #[test]
+    fn ignores_a_name_in_another_table() {
+        // `[lib] name` and a dependency's `package` key are both `name`-ish
+        // and both wrong; only `[package]` decides.
+        let manifest = r#"
+[lib]
+name = "wrong_lib_name"
+
+[package]
+name = "right-one"
+
+[dependencies.serde]
+name = "also-wrong"
+"#;
+        assert_eq!(package_name_of(manifest).as_deref(), Some("right-one"));
+    }
+
+    #[test]
+    fn tolerates_comments_and_spacing() {
+        let manifest = r#"
+# leading comment
+[package]   # the package table
+   name   =   'spaced-out'   # trailing comment
+"#;
+        assert_eq!(package_name_of(manifest).as_deref(), Some("spaced-out"));
+    }
+
+    #[test]
+    fn a_manifest_without_a_package_name_yields_none() {
+        assert_eq!(package_name_of("[workspace]\nmembers = []\n"), None);
+        assert_eq!(package_name_of(""), None);
+    }
+
+    #[test]
+    fn a_workspace_inherited_version_does_not_confuse_it() {
+        let manifest = r#"
+[package]
+name = "cljrs-ffmpeg"
+version.workspace = true
+edition.workspace = true
+"#;
+        assert_eq!(package_name_of(manifest).as_deref(), Some("cljrs-ffmpeg"));
+    }
 }
