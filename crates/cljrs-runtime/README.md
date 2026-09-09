@@ -145,6 +145,16 @@ tests/
                                      eager IR lowering: the lowerer must decline
                                      a `set!` on a local (own binary — it flips
                                      the process-wide eager-lowering switch)
+  dispatch_family_expansion.rs     — the bootstrap macros and
+                                     `cljrs_ir::lower::DISPATCH_FAMILY` pinned
+                                     against each other: every primitive a
+                                     surface datatype form expands THROUGH must
+                                     be a family member
+  datatype_in_fn_tiered.rs         — `deftype`/`defrecord`/`reify` inside a
+                                     function body under forced eager lowering:
+                                     lowering sees the EXPANDED body, so the
+                                     name it must decline on is `deftype*` (own
+                                     binary — forced eager lowering)
   destructure_or_default_eager.rs  — `:or` destructuring defaults are evaluated
                                      eagerly (`(get m :k default)`), identically
                                      in the tree-walker and the IR tier (own
@@ -1052,6 +1062,15 @@ two of the seven primitives actually do:
 | `make-type-instance`, `make-type-instance-mut` | builtin fns | construct a `TypeInstance` (the latter with interior-mutable cells) |
 | `multi-fn` | builtin fn | mints a `MultiFn` with an optional default dispatch value |
 | `add-method` | builtin fn | writes one entry into `MultiFn.methods`, keyed exactly as `remove-method` reads it |
+
+Because the family is now macro-backed, the two passes that must route it away
+from compiled code — `cljrs-ir`'s ANF lowerer and `cljrs-compiler`'s
+interpreted preamble — read it on the EXPANDED form. Membership is therefore
+stated once, in `cljrs_ir::lower::DISPATCH_FAMILY`, and holds both the surface
+names and the `*` primitives they expand to. `builtins.rs` no longer registers
+`deftype`, `defrecord` or `reify` as `builtin_stub_nil`: the bootstrap
+`defmacro`s bind those vars, so `(resolve 'deftype)` finds a macro. The stubs
+that remain are for special forms with no Clojure definition.
 
 Naming the target by SYMBOL in a macro expansion rather than by string in a Rust
 handler is not only shorter: `(defmethod other.ns/m ...)` and
