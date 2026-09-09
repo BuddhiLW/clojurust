@@ -1,24 +1,30 @@
-//! One namespace-resolution rule, shared by every construct that needs it.
+//! One alias-resolution rule, shared by every construct that needs it.
 //!
 //! `alias/name` and `fully.qualified.ns/name` must mean the same thing to a
-//! symbol, a `var` form, a macro call, a syntax-quote, a `binding` target, a
-//! protocol name and a `defmethod` target. The rule had been open-coded at
-//! each of those sites, so "the same thing" was a coincidence maintained by
-//! hand rather than a property — and a site added later (or a rule extended
-//! later, as privacy and version pins were) simply missed whichever copies
-//! nobody remembered.
+//! symbol, a `var` form, a macro call, a syntax-quote, a `binding` target and
+//! a protocol name. That lookup had been open-coded at each of those sites,
+//! so "the same thing" was a coincidence maintained by hand rather than a
+//! property, and a site added later simply started from whichever copy got
+//! pasted.
 //!
-//! These pin the agreement itself: every construct below goes through
-//! `Env::resolve_ns_part` / `Env::resolve_ns_or_current`.
+//! What the seam covers is exactly that lookup: an alias wins, anything else
+//! is literal, an absent ns part means the current namespace. It is NOT the
+//! whole of `eval_symbol`'s rule — the privacy check and versioned-symbol
+//! routing sit after the alias call there and still exist only there. Those
+//! are a separate divergence, and moving them is a behaviour change at every
+//! other site rather than a refactor.
+//!
+//! Each test below drives one construct through the seam. The two unqualified
+//! cases are the `None` arm; the six agreement cases are the alias arm, and
+//! each fails when the arm it names is stubbed out.
 
 use std::path::PathBuf;
-use std::sync::Arc;
 
 use cljrs_reader::Parser;
-use cljrs_runtime::env::env::{Env, GlobalEnv};
+use cljrs_runtime::env::env::Env;
 use cljrs_value::Value;
 
-fn env_with_sources(files: &[(&str, &str)]) -> (tempfile::TempDir, Arc<GlobalEnv>, Env) {
+fn env_with_sources(files: &[(&str, &str)]) -> (tempfile::TempDir, Env) {
     let dir = tempfile::tempdir().expect("tempdir");
     for (rel, src) in files {
         let path = dir.path().join(rel);
@@ -31,8 +37,8 @@ fn env_with_sources(files: &[(&str, &str)]) -> (tempfile::TempDir, Arc<GlobalEnv
         .build()
         .expect("runtime")
         .into_globals();
-    let env = Env::new(globals.clone(), "user");
-    (dir, globals, env)
+    let env = Env::new(globals, "user");
+    (dir, env)
 }
 
 fn eval_in(env: &mut Env, src: &str) -> Result<Value, String> {
@@ -52,14 +58,12 @@ const LIB: &str = r#"
 (def ^:dynamic *knob* :default-knob)
 (defmacro twice [x] (list 'clojure.core/+ x x))
 (defprotocol Shaped (area [s]))
-(defmulti describe :kind)
-(defmethod describe :default [_] :unknown)
 "#;
 
 /// Evaluate `expr` twice — through an alias and through the full name — and
 /// require the two to agree. `{ns}` is replaced by each spelling in turn.
 fn agrees(expr_template: &str) -> Value {
-    let (_dir, _g, mut env) = env_with_sources(&[("some/lib.cljrs", LIB)]);
+    let (_dir, mut env) = env_with_sources(&[("some/lib.cljrs", LIB)]);
     eval_in(&mut env, "(require '[some.lib :as l])").expect("require with an alias");
 
     let via_alias = eval_in(&mut env, &expr_template.replace("{ns}", "l"))
@@ -116,8 +120,8 @@ fn a_protocol_name_resolves_the_same_either_way() {
 #[test]
 fn an_unknown_namespace_part_is_taken_literally() {
     // The fallback the seam has to preserve: a ns part that is not a known
-    // alias names a namespace directly, whether or not it is loaded yet.
-    let (_dir, _g, mut env) = env_with_sources(&[("some/lib.cljrs", LIB)]);
+    // alias names a namespace directly.
+    let (_dir, mut env) = env_with_sources(&[("some/lib.cljrs", LIB)]);
     eval_in(&mut env, "(require 'some.lib)").expect("require without an alias");
     assert_eq!(
         eval_in(&mut env, "some.lib/value").expect("full name with no alias in scope"),
@@ -127,9 +131,13 @@ fn an_unknown_namespace_part_is_taken_literally() {
 
 #[test]
 fn an_unqualified_name_means_the_current_namespace() {
-    let (_dir, _g, mut env) = env_with_sources(&[]);
+    // `eval_symbol` answers a bare symbol from `lookup_in_ns(current_ns, ..)`
+    // before it reaches the qualified branch, so `here` alone would pin a
+    // different code path than the one named here. A `var` form has no such
+    // short-circuit: it goes through `resolve_ns_or_current` with `None`.
+    let (_dir, mut env) = env_with_sources(&[]);
     assert_eq!(
-        eval_in(&mut env, "(do (def here 7) here)").expect("current-ns lookup"),
+        eval_in(&mut env, "(do (def here 7) @(var here))").expect("current-ns lookup"),
         Value::Long(7)
     );
 }
