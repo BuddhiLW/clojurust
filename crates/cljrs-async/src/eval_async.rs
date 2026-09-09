@@ -222,9 +222,12 @@ pub async fn eval_async(form: &Form, env: &mut Env) -> EvalResult {
             // inside catch bodies) cooperate with the executor instead of taking
             // the blocking sync path.
             "try" => return eval_try_async(&forms[1..], env).await,
+            // `recur` transfers control rather than producing a value, but its
+            // ARGUMENTS are ordinary expressions that may await, so they need
+            // the yielding path too.
+            "recur" => return eval_recur_async(&forms[1..], env).await,
             // Other special forms (binding/…) don't yield yet: run them
-            // synchronously. A `recur` that targets the enclosing async fn
-            // surfaces as `EvalError::Recur` and is caught by `run_async_fn`.
+            // synchronously.
             other if is_special_form(other) => return eval(&expanded, env),
             _ => {}
         }
@@ -460,6 +463,26 @@ async fn eval_loop_async(args: &[Form], env: &mut Env) -> EvalResult {
             Err(e) => return Err(e),
         }
     }
+}
+
+/// `(recur args…)` — evaluate the arguments on the yielding path, then signal
+/// the enclosing `loop`/fn trampoline with [`EvalError::Recur`].
+///
+/// Mirrors the synchronous `eval_recur`, and exists for the same reason
+/// [`eval_loop_async`] does. `recur` reads like a special form the sync
+/// evaluator could own, because it produces no value of its own. Its arguments
+/// are ordinary expressions, though, and the sync `await` parks on a `Condvar`
+/// — on the executor's own thread — so an `await` in a recur argument
+/// deadlocked the very loop that was driving it. Both recur targets are
+/// affected: a `loop*` header ([`eval_loop_async`]) and the enclosing `^:async`
+/// fn (`run_async_fn`).
+async fn eval_recur_async(args: &[Form], env: &mut Env) -> EvalResult {
+    let mut vals: Vec<Value> = Vec::with_capacity(args.len());
+    for a in args {
+        let _vals_root = cljrs_runtime::env::gc_roots::root_values(&vals);
+        vals.push(Box::pin(eval_async(a, env)).await?);
+    }
+    Err(EvalError::Recur(vals))
 }
 
 /// A function call whose arguments may contain `await`s. Arguments are
