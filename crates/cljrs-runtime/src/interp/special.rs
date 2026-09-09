@@ -7,8 +7,7 @@ use crate::builtins::form::{
     expand_pairs, expand_reader_conds, expand_reader_conds_cow, form_to_value, resolve_auto_forms,
     select_reader_cond,
 };
-use crate::env::env::GlobalEnv;
-use crate::env::env::{Env, RequireRefer, RequireSpec};
+use crate::env::env::{Env, GlobalEnv, RequireRefer, RequireSpec};
 use crate::env::error::{EvalError, EvalResult};
 use crate::env::loader::load_ns;
 use crate::interp::destructure::bind_pattern;
@@ -2334,6 +2333,20 @@ fn eval_defmethod(args: &[Form], env: &mut Env) -> EvalResult {
             .unwrap_or_else(|| Arc::from(ns_part)),
         None => env.current_ns.clone(),
     };
+    // A pin can also live in the NAMESPACE half. `(require '[mylib@abc1234 :as
+    // v1])` registers the namespace under its literal versioned name, so the
+    // alias resolves straight to it and `parsed.version` is None; the guard
+    // above never sees it. Gated on the boundary like the privacy check below,
+    // so a versioned namespace's own source can still extend its own
+    // multimethods while it loads.
+    if owner_ns.as_ref() != env.current_ns.as_ref()
+        && cljrs_value::symbol::split_version(&owner_ns).1.is_some()
+    {
+        return Err(EvalError::Runtime(format!(
+            "defmethod: {multi_name} resolves to the versioned namespace {owner_ns}; \
+             extend the multimethod at HEAD"
+        )));
+    }
     // Reaching into another namespace respects privacy the way `eval_symbol`
     // does: refusing to extend a private multimethod from outside is what
     // `^:private` on a `defmulti` is for.

@@ -227,3 +227,53 @@ fn a_versioned_name_is_refused_rather_than_silently_unpinned() {
     .expect_err("a versioned defmethod target should be refused");
     assert!(err.contains("versioned"), "unhelpful error: {err}");
 }
+
+#[test]
+fn a_pin_carried_in_the_namespace_half_is_refused_too() {
+    // `(require '[mylib@abc1234 :as v1])` registers the namespace under its
+    // literal versioned name and points the alias straight at it, so by the
+    // time the owner ns is known the pin is inside it and `Symbol::parse` saw
+    // no `@` at all. The state below is what that require leaves behind.
+    let (_dir, globals, mut env) = env_with_sources(&[]);
+
+    let mut pinned = Env::new(globals.clone(), "mylib@abc1234");
+    eval_in(
+        &mut pinned,
+        "(defmulti render :kind) (defmethod render :default [_] :from-the-pin)",
+    )
+    .expect("defmulti in the versioned namespace");
+    globals.add_alias("user", "v1", "mylib@abc1234");
+
+    let err = eval_in(&mut env, "(defmethod v1/render :x [_] :extended)")
+        .expect_err("extending a pinned multimethod should be refused");
+    assert!(
+        err.contains("versioned namespace"),
+        "unhelpful error: {err}"
+    );
+
+    // And the pinned multimethod is untouched: the refusal happens before the
+    // method table is reached.
+    assert_eq!(
+        eval_in(&mut env, "(v1/render {:kind :x})").expect("dispatch through the pin"),
+        Value::keyword(cljrs_value::Keyword::simple("from-the-pin"))
+    );
+}
+
+#[test]
+fn a_versioned_namespace_can_still_extend_its_own_multimethods() {
+    // The guard is about the boundary. While `mylib@abc1234` loads, its own
+    // `defmethod`s must install normally -- `Env::new_versioned` sets
+    // `current_ns` to the versioned name, so an unguarded check would break
+    // exactly the loading path the pin exists to serve.
+    let (_dir, globals, _env) = env_with_sources(&[]);
+    let mut pinned = Env::new(globals.clone(), "mylib@abc1234");
+    eval_in(
+        &mut pinned,
+        "(defmulti render :kind) (defmethod render :x [_] :own-method)",
+    )
+    .expect("a versioned namespace extending itself");
+    assert_eq!(
+        eval_in(&mut pinned, "(render {:kind :x})").expect("dispatch"),
+        Value::keyword(cljrs_value::Keyword::simple("own-method"))
+    );
+}
