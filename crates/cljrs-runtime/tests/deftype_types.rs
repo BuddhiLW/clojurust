@@ -281,3 +281,25 @@ fn a_source_written_mutable_field_still_works() {
 "#;
     assert_eq!(eval_pr(src), "[7 8 8]");
 }
+
+// ── Arity diagnostics ────────────────────────────────────────────────────────
+
+#[test]
+fn a_deftype_missing_its_field_vector_reports_the_arity_the_caller_wrote() {
+    // `deftype` is a macro, so its params carry the implicit `&form`/`&env`.
+    // Those are not part of the call the user typed and must not be counted.
+    let err = eval_err("(deftype Bad)");
+    assert!(
+        err.contains(r#"expected: "2+""#) && err.contains("got: 1"),
+        "arity error must be stated in the caller's terms, got: {err}"
+    );
+}
+
+#[test]
+fn an_ordinary_fn_arity_error_is_unchanged() {
+    let err = eval_err("(defn f [a b] a) (f 1)");
+    assert!(
+        err.contains(r#"expected: "2""#) && err.contains("got: 1"),
+        "non-macro arity reporting must be untouched, got: {err}"
+    );
+}
