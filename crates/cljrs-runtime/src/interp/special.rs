@@ -2272,7 +2272,7 @@ fn parse_defmulti_head<'a>(args: &'a [Form]) -> EvalResult<DefmultiHead<'a>> {
     let mut docstring = None;
     let mut attr_map = None;
 
-    if i + 1 < args.len()
+    if i < args.len()
         && let Some(s) = args[i].as_string()
     {
         docstring = Some(s.to_string());
@@ -2314,13 +2314,15 @@ fn eval_defmulti(args: &[Form], env: &mut Env) -> EvalResult {
         i += 2;
     }
 
-    // Metadata sources, weakest first: the attr map, then `^` marks on the
-    // name, then the docstring.
+    // Metadata sources, weakest first: `^` marks on the name, then the attr
+    // map, then the docstring.  Clojure builds the same order in
+    // `clojure.core/defmulti` -- `(conj (meta mm-name) m)` puts the attr map,
+    // docstring already merged into it, on top of the name's metadata.
     let attr_meta = match head.attr_map {
         Some(form) => Some(eval(form, env)?),
         None => None,
     };
-    let meta = merge_meta(attr_meta, name_meta);
+    let meta = merge_meta(name_meta, attr_meta);
     let meta = merge_meta(meta, head.docstring.as_deref().map(doc_meta));
 
     let mfn = MultiFn::new(name_arc.clone(), dispatch_fn, default_dispatch);

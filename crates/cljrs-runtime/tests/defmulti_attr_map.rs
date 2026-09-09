@@ -30,8 +30,8 @@ fn eval_fresh(src: &str) -> Result<Value, String> {
     let forms = parser.parse_all().map_err(|e| format!("parse: {e:?}"))?;
     let mut result = Value::Nil;
     for form in forms {
-        result =
-            cljrs_runtime::interp::eval::eval(&form, &mut env).map_err(|e| format!("eval: {e:?}"))?;
+        result = cljrs_runtime::interp::eval::eval(&form, &mut env)
+            .map_err(|e| format!("eval: {e:?}"))?;
     }
     Ok(result)
 }
@@ -131,5 +131,32 @@ fn a_map_is_still_usable_as_the_dispatch_function() {
 #[test]
 fn a_defmulti_with_no_dispatch_function_is_rejected() {
     let err = eval_fresh("(defmulti area)").expect_err("should require a dispatch function");
+    assert!(err.contains("dispatch function"), "unhelpful error: {err}");
+}
+
+#[test]
+fn the_attr_map_beats_metadata_on_the_name() {
+    // Precedence, not merely presence. Clojure's `(conj (meta mm-name) m)`
+    // puts the attr map on top of the name's `^` marks, so a key present in
+    // both takes the attr map's value.
+    let src = r#"(defmulti ^{:added "name"} area {:added "attr"} :kind)
+                 (:added (meta (var area)))"#;
+    assert_eq!(value_of(src), text("attr"));
+}
+
+#[test]
+fn the_docstring_beats_a_doc_key_in_the_attr_map() {
+    let src = r#"(defmulti area "from the docstring" {:doc "from the attr map"} :kind)
+                 (:doc (meta (var area)))"#;
+    assert_eq!(value_of(src), text("from the docstring"));
+}
+
+#[test]
+fn a_trailing_string_is_a_docstring_not_a_dispatch_function() {
+    // A string is never callable, so taking it as the dispatch fn only defers
+    // the error to the first call, pointing at the wrong thing. Clojure reads
+    // a leading string as the docstring unconditionally.
+    let err = eval_fresh(r#"(defmulti area "Area.")"#)
+        .expect_err("a lone docstring leaves no dispatch function");
     assert!(err.contains("dispatch function"), "unhelpful error: {err}");
 }

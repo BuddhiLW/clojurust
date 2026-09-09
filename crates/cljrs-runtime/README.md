@@ -121,6 +121,11 @@ tests/
   qualified_protocol_impl.rs       — a qualified protocol name in an impl position
                                      (defrecord/deftype/reify/extend-*) resolves
                                      through its own namespace
+  defmulti_attr_map.rs             — `defmulti`'s four head shapes (docstring
+                                     and/or attr map before the dispatch fn),
+                                     and the metadata precedence between them:
+                                     docstring beats attr map beats `^` marks
+                                     on the name
   named_fn_identity.rs, ns_metadata.rs, partition_arities.rs, shared_atom.rs,
   symbolic_nan.rs, threading_macros.rs, auto_gensym.rs, auto_keyword_macro.rs,
   assoc_in_metadata.rs, empty_metadata.rs, into_metadata.rs, vec_metadata.rs,
