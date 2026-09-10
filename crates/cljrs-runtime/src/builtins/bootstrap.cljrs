@@ -809,11 +809,6 @@
 
 ;; meta and vary-meta are native builtins (see builtins.rs)
 
-(defn seqable?
-  "Returns true if seq can be called on x."
-  [x]
-  (or (nil? x) (seq? x) (vector? x) (map? x) (set? x) (string? x) (array? x)))
-
 (defn nthrest [coll n]
   (when-not (number? n) (throw (str "n must be a number, got: " (type n))))
   (if (nil? coll)
