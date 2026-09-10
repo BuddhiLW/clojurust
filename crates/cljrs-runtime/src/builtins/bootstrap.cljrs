@@ -1284,95 +1284,51 @@
               (list 'multi-fn nsym dispatch (first default))
               (list 'multi-fn nsym dispatch))))))
 
-(defn var-owner-ns
-  "The namespace a resolved var belongs to, as a string.
+(defn defmethod-pin
+  "The version pin on a `defmethod` target, or nil.
 
-  A var prints as `#'owner.ns/name`, so the owner is what sits between the
-  reader macro and the trailing name. Read positionally rather than by searching
-  for a separator: an owner may itself carry an `@version` pin, and a pin is
-  exactly what the callers below are trying to see."
-  [v nm]
-  (let [s (str v)]
-    (subs s 2 (- (count s) (count nm) 1))))
-
-(defn versioned-name?
-  "Whether `s` carries an `@version` pin. `name` drops a version wherever it
-  appears, so a name that survives the round trip unchanged carried none. Core
-  only: clojure.string need not be loaded in the caller's namespace."
-  [s]
-  (not= s (name (symbol s))))
-
-(defn multi-named
-  "The multimethod `sym` names, or a refusal that says which thing is wrong.
-
-  `defmethod` resolves its own target instead of emitting the symbol and letting
-  ordinary evaluation resolve it, because by the time `add-method` runs the only
-  thing left is a value: it cannot tell a missing require from a name that meant
-  something else, and it cannot see a pin at all. Resolving here also puts every
-  refusal in one place, in the order that makes the message useful.
-
-  `v` and `bare-v` are resolved by the EXPANSION, not here. This function lives
-  in clojure.core, and a Clojure fn body runs with `current_ns` set to the
-  namespace that defined it, so any resolution done inside would ask
-  clojure.core rather than the namespace the `defmethod` was written in."
-  [sym v bare-v]
-  (let [nm (name sym)]
-    (when (nil? v)
-      (throw (ex-info (str "defmethod: " sym " is not defined")
-                      {:target (str sym)})))
-    (let [owner (var-owner-ns v nm)
-          ;; Whether this reference stays inside the namespace that owns the
-          ;; var, asked WITHOUT `*ns*`: the bare name resolving to the very same
-          ;; var means we are in that namespace (or it was referred to us
-          ;; deliberately). `*ns*` cannot answer it, because loading a versioned
-          ;; namespace sets `current_ns` to the pinned name while `*ns*` still
-          ;; names the caller, which is exactly the case both guards below care
-          ;; about.
-          own?  (= v bare-v)]
-      ;; The owner did not publish this name. Checked before the pin so a
-      ;; private multimethod in a pinned namespace reports the reason its own
-      ;; author would recognise.
-      (when (and (:private (meta v)) (not own?))
-        (throw (ex-info (str "defmethod: " sym " is not public")
-                        {:target (str sym) :owner owner})))
-      ;; A pin is a promise that what is behind it does not change, so a pinned
-      ;; multimethod is refused rather than silently unpinned. Its own
-      ;; namespace still extends it normally while it loads, which is the path
-      ;; the pin exists to serve.
-      (when (and (versioned-name? owner) (not own?))
-        (throw (ex-info (str "defmethod cannot extend a multimethod owned by "
-                             "the versioned namespace " owner)
-                        {:namespace owner})))
-      (let [m (deref v)]
-        (if (multi-fn? m)
-          m
-          (throw (ex-info (str "defmethod: " sym " is not a multimethod")
-                          {:target (str sym) :type (type m)})))))))
+  Two spellings, and only one of them is visible as an `@`. `f@abc1234` keeps
+  the version in a field of its own that `name` does not report, so the symbol
+  prints longer than `ns/name` rebuilds it. `v1/render` carries no `@` at all:
+  the require registered the namespace under its literal versioned name and
+  pointed the alias straight at it, so the pin sits in the namespace the alias
+  resolves to."
+  [sym]
+  (let [bare  (if (namespace sym)
+                (str (namespace sym) "/" (name sym))
+                (name sym))
+        owner (when-let [a (namespace sym)]
+                (when-let [n (get (ns-aliases *ns*) (symbol a))]
+                  (str (ns-name n))))]
+    (cond
+      ;; `name` drops a version wherever it appears, so a name that survives
+      ;; the round trip unchanged carried no pin. Core only: this runs during
+      ;; macroexpansion in whatever namespace the caller is in, which need not
+      ;; have clojure.string loaded.
+      (not= (str sym) bare)                     [:name (str sym)]
+      (and owner (not= owner (name (symbol owner)))) [:namespace owner]
+      :else                                     nil)))
 
 (defmacro defmethod [mname dispatch-val params & body]
-  ;; The one check that cannot wait for resolution: `f@abc1234` resolves to `f`,
-  ;; because the version lives in a field of its own that `name` does not
-  ;; report, so the pin is gone by the time a var comes back. It is still
-  ;; visible here, where the symbol is syntax, as a printed form longer than
-  ;; `ns/name` rebuilds.
-  (let [written (str mname)
-        bare    (if (namespace mname)
-                  (str (namespace mname) "/" (name mname))
-                  (name mname))]
-    (if (not= written bare)
-      (throw (ex-info (str "defmethod cannot extend the versioned name " written)
-                      {:target written}))
-      ;; Both resolutions happen HERE, in the expansion, so they ask the
-      ;; namespace this `defmethod` was written in. `resolve-here` rather than
-      ;; `resolve` for the same reason: loading a versioned namespace sets
-      ;; `current_ns` to its pinned name while `*ns*`, which `resolve` is
-      ;; defined against, still names the caller.
-      (list 'add-method
-            (list 'multi-named
-                  (list 'quote mname)
-                  (list 'resolve-here (list 'quote mname))
-                  (list 'resolve-here (list 'quote (symbol (name mname)))))
-            dispatch-val
+  ;; A pin is a promise that the thing behind it does not change. Extending a
+  ;; pinned multimethod would break that promise for every other holder of the
+  ;; same pin, so it is refused rather than silently unpinned. The refusal is
+  ;; here, before `add-method`, which is handed the resolved MultiFn and can no
+  ;; longer tell how it was named.
+  (let [pin (defmethod-pin mname)]
+    (cond
+      (= (first pin) :name)
+      (throw (ex-info (str "defmethod cannot extend the versioned name "
+                           (second pin))
+                      {:target (second pin)}))
+
+      (= (first pin) :namespace)
+      (throw (ex-info (str "defmethod cannot extend a multimethod owned by the "
+                           "versioned namespace " (second pin))
+                      {:namespace (second pin)}))
+
+      :else
+      (list 'add-method mname dispatch-val
             (cons 'fn (cons (symbol (name mname)) (cons params body)))))))
 
 ;; ── protocols: defprotocol as a macro over the protocol* primitive ───────────

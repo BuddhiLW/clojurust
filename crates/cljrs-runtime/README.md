@@ -70,7 +70,6 @@ src/
     transients.rs       — transient collection builtins
     array_list.rs       — java.util.ArrayList-alike interop shim
     bitops.rs           — bit-and / bit-or / bit-shift-* and friends
-    multi.rs            — multi-fn?, the predicate defmethod needs from Clojure
     new.rs              — (new Type ...) construction dispatch
     records.rs          — make-record-instance (the defrecord constructor) and record?
     regex.rs            — re-pattern / re-find / re-seq / re-matches

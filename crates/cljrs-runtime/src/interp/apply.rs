@@ -10,7 +10,7 @@ use cljrs_value::{
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::env::env::{Env, GlobalEnv};
+use crate::env::env::Env;
 use crate::env::error::{EvalError, EvalResult, value_error_to_eval_error};
 use crate::interp::destructure::value_to_seq_vec;
 use crate::interp::eval::eval;
@@ -211,7 +211,6 @@ pub fn is_form_intercepted(name: &str) -> bool {
             | "alter-meta!"
             | "ns-resolve"
             | "resolve"
-            | "resolve-here"
             | "intern"
             | "bound-fn*"
     )
@@ -274,7 +273,6 @@ pub fn eval_call(func_form: &Form, arg_forms: &[Form], env: &mut Env) -> EvalRes
             "alter-meta!" => return handle_alter_meta(arg_forms, env),
             "ns-resolve" => return handle_ns_resolve(arg_forms, env),
             "resolve" => return handle_resolve(arg_forms, env),
-            "resolve-here" => return handle_resolve_here(arg_forms, env),
             "intern" => return handle_intern(arg_forms, env),
             "bound-fn*" => return handle_bound_fn_star(arg_forms, env),
             _ => {}
@@ -1914,64 +1912,6 @@ fn handle_resolve(arg_forms: &[Form], env: &mut Env) -> EvalResult {
         }
     };
     Ok(match env.globals.lookup_var_in_ns(&resolve_ns, &sym_name) {
-        Some(var_ptr) => Value::Var(var_ptr),
-        None => Value::Nil,
-    })
-}
-
-/// `resolve-here`: `resolve`, but relative to `env.current_ns` rather than to
-/// `*ns*`.
-///
-/// The two agree wherever a namespace was entered the ordinary way, and part
-/// company exactly where it matters: loading a versioned namespace sets
-/// `current_ns` to its literal pinned name while `*ns*` still names the caller.
-/// A form whose target must resolve the way an ordinary symbol in that source
-/// file resolves therefore cannot use `resolve`, which is defined in terms of
-/// the dynamic var on purpose. `defmethod` is such a form: it names a
-/// multimethod in the source it appears in.
-fn handle_resolve_here(arg_forms: &[Form], env: &mut Env) -> EvalResult {
-    if arg_forms.len() != 1 {
-        return Err(EvalError::Arity {
-            name: "resolve-here".into(),
-            expected: "1".into(),
-            got: arg_forms.len(),
-        });
-    }
-    let here = env.current_ns.clone();
-    let sym_arg = eval(&arg_forms[0], env)?;
-    eval_resolve_here(&sym_arg, &here, &env.globals)
-}
-
-/// The value half of `resolve-here`, shared with the IR interpreter.
-///
-/// `here` is passed rather than read off an `Env`, because the two callers know
-/// it differently: the tree-walker has `env.current_ns`, and the IR interpreter
-/// has the namespace the lowered function was defined in. Both are "the
-/// namespace this call was written in", which is the whole point of the form.
-pub fn eval_resolve_here(sym_arg: &Value, here: &Arc<str>, globals: &Arc<GlobalEnv>) -> EvalResult {
-    let sym_name = match sym_arg {
-        Value::Symbol(s) => {
-            let sym = s.get();
-            if let Some(ns) = &sym.namespace {
-                let full_ns = globals.resolve_ns_part_in(here, ns.as_ref());
-                return Ok(
-                    match globals.lookup_var_in_ns(&full_ns, sym.name.as_ref()) {
-                        Some(var_ptr) => Value::Var(var_ptr),
-                        None => Value::Nil,
-                    },
-                );
-            }
-            sym.name.as_ref().to_string()
-        }
-        Value::Str(s) => s.get().clone(),
-        other => {
-            return Err(EvalError::Runtime(format!(
-                "resolve-here: arg must be symbol or string, got {}",
-                other.type_name()
-            )));
-        }
-    };
-    Ok(match globals.lookup_var_in_ns(here, &sym_name) {
         Some(var_ptr) => Value::Var(var_ptr),
         None => Value::Nil,
     })

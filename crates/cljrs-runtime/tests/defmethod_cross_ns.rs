@@ -237,13 +237,6 @@ fn a_pin_carried_in_the_namespace_half_is_refused_too() {
     let (_dir, globals, mut env) = env_with_sources(&[]);
 
     let mut pinned = Env::new(globals.clone(), "mylib@abc1234");
-    // `require` registers the namespace and refers core into it; `Env::new`
-    // only names one, and `refer_core` on a namespace that was never registered
-    // returns silently. That gap was invisible while defmulti was a special
-    // form, because a special form is ambient. It is a clojure.core macro now,
-    // visible only where core was actually referred.
-    globals.get_or_create_ns("mylib@abc1234");
-    globals.refer_core("mylib@abc1234");
     eval_in(
         &mut pinned,
         "(defmulti render :kind) (defmethod render :default [_] :from-the-pin)",
@@ -274,13 +267,6 @@ fn a_versioned_namespace_can_still_extend_its_own_multimethods() {
     // exactly the loading path the pin exists to serve.
     let (_dir, globals, _env) = env_with_sources(&[]);
     let mut pinned = Env::new(globals.clone(), "mylib@abc1234");
-    // `require` registers the namespace and refers core into it; `Env::new`
-    // only names one, and `refer_core` on a namespace that was never registered
-    // returns silently. That gap was invisible while defmulti was a special
-    // form, because a special form is ambient. It is a clojure.core macro now,
-    // visible only where core was actually referred.
-    globals.get_or_create_ns("mylib@abc1234");
-    globals.refer_core("mylib@abc1234");
     eval_in(
         &mut pinned,
         "(defmulti render :kind) (defmethod render :x [_] :own-method)",

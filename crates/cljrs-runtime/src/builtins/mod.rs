@@ -9,7 +9,6 @@ mod bitops;
 #[allow(clippy::module_inception)]
 pub mod builtins;
 pub mod form;
-mod multi;
 mod new;
 mod records;
 mod regex;
