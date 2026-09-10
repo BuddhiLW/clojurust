@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use cljrs_gc::GcPtr;
-use cljrs_value::value::TypeInstance;
+use cljrs_value::value::{DatatypeKind, TypeInstance};
 use cljrs_value::{MapValue, Value, ValueError, ValueResult};
 
 /// The type tag of a string or symbol.
@@ -37,7 +37,7 @@ pub fn make_record_instance(args: &[Value]) -> ValueResult<Value> {
         fields: fields_of(&args[1])?,
         // Mutable fields are deftype-only.
         mutable: None,
-        record: true,
+        kind: DatatypeKind::Record,
     })))
 }
 
@@ -47,7 +47,7 @@ pub fn make_record_instance(args: &[Value]) -> ValueResult<Value> {
 /// on the JVM, where the metadata wrapper is not part of the type.
 pub fn record_q(args: &[Value]) -> ValueResult<Value> {
     Ok(Value::Bool(match args[0].unwrap_meta() {
-        Value::TypeInstance(ti) => ti.get().record,
+        Value::TypeInstance(ti) => ti.get().kind.is_record(),
         _ => false,
     }))
 }

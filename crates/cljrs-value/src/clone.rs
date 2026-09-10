@@ -55,6 +55,7 @@ use crate::collections::{PersistentHashSet, PersistentVector, SortedMap, SortedS
 use crate::error::ValueError;
 use crate::shared::{SharedAtom, SharedValue};
 use crate::types::DelayState;
+use crate::value::DatatypeKind;
 use crate::{Keyword, MapValue, PersistentList, PersistentQueue, SetValue, Symbol, Value};
 use cljrs_gc::GcPtr;
 
@@ -142,7 +143,7 @@ pub enum SerializedValue {
     TypeInstance {
         type_tag: Arc<str>,
         fields: Vec<(SerializedValue, SerializedValue)>,
-        record: bool,
+        kind: DatatypeKind,
     },
 
     // Errors
@@ -418,7 +419,7 @@ pub fn serialize(v: &Value) -> Result<SerializedValue, CloneError> {
             Ok(SerializedValue::TypeInstance {
                 type_tag: ti.type_tag.clone(),
                 fields,
-                record: ti.record,
+                kind: ti.kind,
             })
         }
 
@@ -688,7 +689,7 @@ pub fn deserialize(sv: SerializedValue) -> Value {
         SerializedValue::TypeInstance {
             type_tag,
             fields,
-            record,
+            kind,
         } => {
             use crate::value::TypeInstance;
             let pairs: Vec<(Value, Value)> = fields
@@ -699,7 +700,7 @@ pub fn deserialize(sv: SerializedValue) -> Value {
                 type_tag,
                 fields: MapValue::from_pairs(pairs),
                 mutable: None,
-                record,
+                kind,
             }))
         }
 

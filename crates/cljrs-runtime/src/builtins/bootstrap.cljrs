@@ -1858,5 +1858,5 @@
 ;; one anonymous type per form, a fresh instance each time the form evaluates).
 ;; The impl fns capture locals because deftype* registers them at the call site.
 (defmacro reify [& impls]
-  `(make-type-instance (deftype* ~(gensym "reify__") [] ~@impls) {}))
+  `(make-reify-instance (deftype* ~(gensym "reify__") [] ~@impls) {}))
 

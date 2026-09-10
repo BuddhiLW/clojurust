@@ -1391,14 +1391,49 @@ impl cljrs_gc::Trace for MapValue {
 
 // ── TypeInstance ──────────────────────────────────────────────────────────────
 
+/// Which datatype form produced a [`TypeInstance`].
+///
+/// A closed set of exactly three: `defrecord`, `deftype`, `reify`. It is an
+/// enum rather than a `record: bool` because the three answer *different*
+/// questions and no two of them group: `record?` is true only for `Record`,
+/// while `with-meta` is accepted by `Record` and `Reify` and refused by `Type`
+/// (a JVM `deftype` does not implement `IObj`). A boolean can express two
+/// members of a three-member set, so it always loses one distinction, and
+/// which one it loses depends on who wrote the boolean.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DatatypeKind {
+    /// `defrecord`: a map-like value with named fields.
+    Record,
+    /// `deftype`: a bare type, possibly with mutable fields.
+    Type,
+    /// `reify`: an anonymous instance of one or more protocols.
+    Reify,
+}
+
+impl DatatypeKind {
+    /// Whether `record?` answers true.
+    pub fn is_record(self) -> bool {
+        matches!(self, DatatypeKind::Record)
+    }
+
+    /// Whether `with-meta` may attach metadata to such an instance.
+    ///
+    /// `deftype` is the one that refuses, matching the JVM, where the generated
+    /// class implements neither `IObj` nor `IMeta`.
+    pub fn carries_meta(self) -> bool {
+        !matches!(self, DatatypeKind::Type)
+    }
+}
+
 /// A `defrecord`, `deftype` or `reify` instance.  `type_tag` identifies the
-/// concrete type; `fields` holds the key/value pairs (keyword → value).
+/// concrete type; `fields` holds the key/value pairs (keyword → value), and
+/// `kind` says which of the three forms produced it.
 #[derive(Clone, Debug)]
 pub struct TypeInstance {
     pub type_tag: Arc<str>,
     pub fields: MapValue,
-    /// True only for a `defrecord` instance; `deftype` and `reify` are false.
-    pub record: bool,
+    /// Which of the three datatype forms produced this instance.
+    pub kind: DatatypeKind,
     /// Mutable `deftype` fields (`^:unsynchronized-mutable` /
     /// `^:volatile-mutable`), held in an interior-mutable cell — an `Atom` over
     /// a keyword→value map — so `set!` can update them in place. `None` for

@@ -45,3 +45,28 @@
   (testing "the wrapper is not part of the type"
     (is (record? (with-meta (->Point 1 2) {:k 1})))
     (is (not (record? (with-meta {:x 1} {:k 1}))))))
+
+;; ── which datatype forms carry metadata ─────────────────────────────────────
+;;
+;; Three forms, and metadata splits them 2-1 rather than the way `record?`
+;; does: `defrecord` and `reify` accept it, `deftype` refuses. On the JVM the
+;; refusal is a ClassCastException, because a `deftype` class implements
+;; neither IObj nor IMeta; cljrs raises its own wrong-type error. Both are
+;; `Exception`, which is all these assertions need.
+;;
+;; The 2-1 split is the point. Any runtime that decides this from a single
+;; "is it a record" flag gets `reify` wrong in whichever direction it picked.
+
+(deftest a-record-carries-metadata
+  (is (= {:k 1} (meta (with-meta (->Point 1 2) {:k 1})))))
+
+(deftest a-reify-carries-metadata
+  (let [r (reify Described (describe [_] :r))]
+    (is (= {:k 1} (meta (with-meta r {:k 1}))))
+    (testing "and still answers its protocol through the wrapper"
+      (is (= :r (describe (with-meta r {:k 1})))))))
+
+(deftest a-deftype-refuses-metadata
+  (testing "clojure.core's deftype implements no metadata interface, so a
+            dialect that accepted this would let code compile that cannot port"
+    (is (thrown? Exception (with-meta (->Pair 1 2) {:k 1})))))

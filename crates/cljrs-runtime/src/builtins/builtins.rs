@@ -24,7 +24,7 @@ use crate::builtins::util::numeric_as_i64;
 use crate::env::env::GlobalEnv;
 use bigdecimal::{BigDecimal, RoundingMode};
 use cljrs_gc::GcPtr;
-use cljrs_value::value::{PrintValue, SetValue};
+use cljrs_value::value::{DatatypeKind, PrintValue, SetValue};
 use cljrs_value::{
     Arity, Atom, CljxCons, CljxFuture, CljxPromise, ExceptionInfo, FutureState, Keyword, LazySeq,
     MapValue, MultiFn, Namespace, NativeFn, ObjectArray, PersistentHashMap, PersistentHashSet,
@@ -1561,6 +1561,11 @@ pub fn register_all(globals: &Arc<GlobalEnv>, ns: &str) {
             "make-type-instance-mut",
             Arity::Fixed(3),
             builtin_make_type_instance_mut,
+        ),
+        (
+            "make-reify-instance",
+            Arity::Fixed(2),
+            builtin_make_reify_instance,
         ),
         (
             "make-record-instance",
@@ -3659,7 +3664,7 @@ fn builtin_assoc(args: &[Value]) -> ValueResult<Value> {
             type_tag: ti.get().type_tag.clone(),
             fields,
             mutable: ti.get().mutable.clone(),
-            record: ti.get().record,
+            kind: ti.get().kind,
         }))));
     }
     let mut result = match coll {
@@ -5629,7 +5634,7 @@ fn assoc_in_impl(m: Value, keys: &[Value], val: Value) -> ValueResult<Value> {
             type_tag: ti.get().type_tag.clone(),
             fields: ti.get().fields.assoc(k.clone(), updated),
             mutable: ti.get().mutable.clone(),
-            record: ti.get().record,
+            kind: ti.get().kind,
         })),
         _ => Value::Map(MapValue::empty().assoc(k.clone(), updated)),
     };
@@ -8513,8 +8518,28 @@ fn builtin_make_type_instance(args: &[Value]) -> ValueResult<Value> {
         type_tag,
         fields,
         mutable: None,
-        // deftype and reify only; defrecord uses make-record-instance.
-        record: false,
+        // `deftype` only; `defrecord` uses make-record-instance and `reify`
+        // uses make-reify-instance, because the three differ in what they accept.
+        kind: DatatypeKind::Type,
+    })))
+}
+
+/// `(make-reify-instance type-tag fields-map)` -> a `reify` instance.
+///
+/// Identical in shape to `make-type-instance`; the difference is the KIND it
+/// records, which is what lets `with-meta` accept a `reify` and refuse a
+/// `deftype`. One builtin per datatype form, so the caller states which it
+/// meant instead of the runtime guessing from the gensym'd type tag.
+fn builtin_make_reify_instance(args: &[Value]) -> ValueResult<Value> {
+    let Value::TypeInstance(ti) = builtin_make_type_instance(args)? else {
+        unreachable!("make-type-instance returns a TypeInstance")
+    };
+    let inst = ti.get();
+    Ok(Value::TypeInstance(GcPtr::new(TypeInstance {
+        type_tag: inst.type_tag.clone(),
+        fields: inst.fields.clone(),
+        mutable: None,
+        kind: DatatypeKind::Reify,
     })))
 }
 
@@ -8559,7 +8584,7 @@ fn builtin_make_type_instance_mut(args: &[Value]) -> ValueResult<Value> {
         type_tag,
         fields,
         mutable: Some(cell),
-        record: false,
+        kind: DatatypeKind::Type,
     })))
 }
 
@@ -8806,6 +8831,17 @@ fn builtin_with_meta(args: &[Value]) -> ValueResult<Value> {
             ns.get().set_meta(args[1].clone());
             Ok(args[0].clone())
         }
+        // A `deftype` instance carries no metadata, here as on the JVM, where
+        // the generated class implements neither `IObj` nor `IMeta`. `reify`
+        // and `defrecord` both do, so the refusal is per datatype form and not
+        // "everything that is not a record".
+        Value::TypeInstance(ti) if !ti.get().kind.carries_meta() => Err(ValueError::WrongType {
+            expected: "value accepting metadata",
+            got: format!(
+                "{} instance (deftype does not carry metadata)",
+                ti.get().type_tag
+            ),
+        }),
         // `(with-meta x nil)` clears metadata; storing a nil-meta wrapper would
         // leave a value that is no longer `identical?` to itself after a clone.
         _ if matches!(args[1], Value::Nil) => Ok(args[0].unwrap_meta().clone()),
