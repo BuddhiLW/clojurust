@@ -1,12 +1,18 @@
 name: CI
 
 on:
+  # `staging` is this fork's integration trunk: our unmerged work is merged
+  # there, topic branches are cut from there, and upstream PRs and local
+  # releases are taken from it. That only means anything if it is verified,
+  # and a merge is exactly where two independently green branches stop being
+  # green, so staging is gated on the same job as main rather than a lighter
+  # one.
   pull_request:
-    branches: [main]
+    branches: [main, staging]
   # Releases are cut nightly rather than per-merge, so main is verified here on
   # every push to catch a broken merge before the nightly tries to publish it.
   push:
-    branches: [main]
+    branches: [main, staging]
 
 env:
   CARGO_TERM_COLOR: always
