@@ -46,6 +46,14 @@ jobs:
       - name: Clojure Tests
         run: cargo run -p cljrs compile -o test-suite --test ./clojure-test-suite/test && CLJRS_GC_STATS=- ./test-suite
 
+      # Both legs: they fail differently, and the AOT one cannot be gated from
+      # cargo. Rationale in memory 20260910030000-cljrs-selfhosted-ci.
+      - name: cljrs self-hosted tests (interpreter)
+        run: cargo run -p cljrs test --src-path ./tests/cljrs
+
+      - name: cljrs self-hosted tests (AOT compile and run)
+        run: cargo run -p cljrs compile -o cljrs-tests --test ./tests/cljrs && CLJRS_GC_STATS=- ./cljrs-tests
+
   wasm:
     name: WASM build
     runs-on: ubuntu-latest

@@ -63,6 +63,12 @@ tests/
                       (`(defn text [text] ...)`, plus rest, multi-arity and
                       hot-loop forms) must shadow it, and tree-walk and eager
                       IR must agree (PR #353)
+  self_hosted.rs    — the cargo gate over `tests/cljrs`, the cljrs-owned
+                      clojure.test tree: drives the built binary through
+                      `CARGO_BIN_EXE_cljrs` so a plain `cargo test` fails when
+                      a language-level assertion breaks. Interpreter leg only —
+                      the AOT leg shells out to cargo itself, so CI runs it
+                      separately. See `tests/cljrs/README.md`
 ```
 
 ---
