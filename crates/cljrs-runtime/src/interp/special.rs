@@ -892,10 +892,14 @@ fn eval_set_bang(args: &[Form], env: &mut Env) -> EvalResult {
                 return Ok(v);
             }
             let parsed = cljrs_value::Symbol::parse(sym);
-            let ns = parsed.namespace.as_deref().unwrap_or(&env.current_ns);
+            // The namespace part is resolved, not read literally: after
+            // `(:require [my.lib :as m])`, `(set! m/*v* x)` names the same var
+            // as `(set! my.lib/*v* x)`. Same call `eval_var` and `eval_binding`
+            // make; this was the one target site reading the part as written.
+            let ns = env.resolve_ns_or_current(parsed.namespace.as_deref());
             let var = env
                 .globals
-                .lookup_var_in_ns(ns, &parsed.name)
+                .lookup_var_in_ns(&ns, &parsed.name)
                 .ok_or_else(|| EvalError::UnboundSymbol(sym.clone()))?;
             // Prefer updating the thread-local binding if one exists.
             if !crate::env::dynamics::set_thread_local(&var, val.clone()) {

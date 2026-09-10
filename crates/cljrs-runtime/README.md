@@ -1160,6 +1160,14 @@ impl position (`deftype*`, and so `reify`/`defrecord`/`deftype`) through the
 current ns's `:require :as` aliases and through its own namespace when
 qualified — not as a literal intern of the current ns.
 
+Every handler that takes a namespace part from a user-written symbol resolves it
+with `Env::resolve_ns_or_current`, never by using the part as written:
+`eval_var`, `eval_binding` and `eval_set_bang` all do, so `(set! m/*v* x)` after
+`(:require [my.lib :as m])` names the same var as `(set! my.lib/*v* x)`. An
+unaliased part is still taken literally, so an unknown namespace reports the
+symbol the way the user wrote it. `set!` was the last site reading the part
+verbatim; `tests/set_bang_alias.rs` pins it.
+
 ---
 
 ## Module `tiered`
