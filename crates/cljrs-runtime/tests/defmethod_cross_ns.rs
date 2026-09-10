@@ -35,6 +35,29 @@ fn env_with_sources(files: &[(&str, &str)]) -> (tempfile::TempDir, Arc<GlobalEnv
     (dir, globals, env)
 }
 
+/// The state `env::versioned` leaves behind for a pinned namespace: the
+/// namespace exists, `clojure.core` is pre-referred, and `*ns*` names it.
+///
+/// A bare `Env::new` does none of the three. That stopped being survivable
+/// once `defmulti` and `defmethod` became `clojure.core` macros: a macro is an
+/// interned var, visible only where core was referred, and both read `*ns*`
+/// during expansion. A special form needed neither.
+fn versioned_env(globals: &Arc<GlobalEnv>, ns: &str) -> Env {
+    globals.get_or_create_ns(ns);
+    globals.refer_core(ns);
+    set_current_ns(globals, ns);
+    Env::new(globals.clone(), ns)
+}
+
+/// Point `*ns*` at `ns`. It is one var per runtime, so a test that sets up a
+/// namespace and then evaluates somewhere else has to put it back.
+fn set_current_ns(globals: &Arc<GlobalEnv>, ns: &str) {
+    let ns_ptr = globals.get_or_create_ns(ns);
+    if let Some(var) = globals.lookup_var("clojure.core", "*ns*") {
+        var.get().bind(Value::Namespace(ns_ptr));
+    }
+}
+
 fn eval_in(env: &mut Env, src: &str) -> Result<Value, String> {
     let mut parser = Parser::new(src.to_string(), "<test>".to_string());
     let forms = parser.parse_all().map_err(|e| format!("parse: {e:?}"))?;
@@ -253,12 +276,15 @@ fn a_pin_carried_in_the_namespace_half_is_refused_too() {
     // no `@` at all. The state below is what that require leaves behind.
     let (_dir, globals, mut env) = env_with_sources(&[]);
 
-    let mut pinned = Env::new(globals.clone(), "mylib@abc1234");
+    let mut pinned = versioned_env(&globals, "mylib@abc1234");
     eval_in(
         &mut pinned,
         "(defmulti render :kind) (defmethod render :default [_] :from-the-pin)",
     )
     .expect("defmulti in the versioned namespace");
+    // Back to the caller's namespace: the alias below is registered on `user`,
+    // and `defmethod` reads `*ns*` to resolve it.
+    set_current_ns(&globals, "user");
     globals.add_alias("user", "v1", "mylib@abc1234");
 
     let err = eval_in(&mut env, "(defmethod v1/render :x [_] :extended)")
@@ -283,7 +309,7 @@ fn a_versioned_namespace_can_still_extend_its_own_multimethods() {
     // `current_ns` to the versioned name, so an unguarded check would break
     // exactly the loading path the pin exists to serve.
     let (_dir, globals, _env) = env_with_sources(&[]);
-    let mut pinned = Env::new(globals.clone(), "mylib@abc1234");
+    let mut pinned = versioned_env(&globals, "mylib@abc1234");
     eval_in(
         &mut pinned,
         "(defmulti render :kind) (defmethod render :x [_] :own-method)",
