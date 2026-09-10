@@ -220,6 +220,9 @@ pub fn register(globals: &Arc<cljrs_runtime::env::env::GlobalEnv>, ns: &str) {
                 builtin_delete_file
             ),
             ("make-parents", Arity::Fixed(1), builtin_make_parents),
+            ("exists?", Arity::Fixed(1), builtin_exists_q),
+            ("directory?", Arity::Fixed(1), builtin_directory_q),
+            ("regular-file?", Arity::Fixed(1), builtin_regular_file_q),
         ]
     );
 }
@@ -383,11 +386,54 @@ fn builtin_delete_file(args: &[Value]) -> ValueResult<Value> {
         }
     };
     let silently = args.len() >= 2 && args[1] != Value::Nil && args[1] != Value::Bool(false);
-    match std::fs::remove_file(&path) {
+    // `File.delete` on the JVM removes an empty directory as readily as a file,
+    // and `clojure.java.io/delete-file` inherits that; a non-empty directory
+    // is refused on both sides.
+    let removed = if std::path::Path::new(&path).is_dir() {
+        std::fs::remove_dir(&path)
+    } else {
+        std::fs::remove_file(&path)
+    };
+    match removed {
         Ok(()) => Ok(Value::Bool(true)),
         Err(_) if silently => Ok(Value::Bool(false)),
         Err(e) => Err(ValueError::Other(format!("cannot delete {path}: {e}"))),
     }
+}
+
+/// The path argument every file predicate takes: a string, as `file` returns.
+fn path_arg(v: &Value) -> ValueResult<String> {
+    match v {
+        Value::Str(s) => Ok(s.get().clone()),
+        v => Err(ValueError::WrongType {
+            expected: "string",
+            got: v.type_name().to_string(),
+        }),
+    }
+}
+
+// The three predicates answer from metadata alone and never open the file.
+// Before them the only way to ask "is it there" was `slurp` inside a `try`,
+// which reads the whole file to produce a boolean and cannot tell an absent
+// file from an unreadable one. A dangling symlink reads as absent, as
+// `File.exists` reports it on the JVM.
+
+fn builtin_exists_q(args: &[Value]) -> ValueResult<Value> {
+    Ok(Value::Bool(
+        std::path::Path::new(&path_arg(&args[0])?).exists(),
+    ))
+}
+
+fn builtin_directory_q(args: &[Value]) -> ValueResult<Value> {
+    Ok(Value::Bool(
+        std::path::Path::new(&path_arg(&args[0])?).is_dir(),
+    ))
+}
+
+fn builtin_regular_file_q(args: &[Value]) -> ValueResult<Value> {
+    Ok(Value::Bool(
+        std::path::Path::new(&path_arg(&args[0])?).is_file(),
+    ))
 }
 
 fn builtin_make_parents(args: &[Value]) -> ValueResult<Value> {
