@@ -1,16 +1,5 @@
-//! The cargo gate over `tests/cljrs`, the cljrs-owned clojure.test tree.
-//!
-//! That tree is the language-surface half of this project's tests: what
-//! `deftype`, `defmulti`, protocol impl positions and reader metadata *mean*,
-//! written in the language rather than as Rust string literals asserting on
-//! the printed form of a value. CI drives it directly, but a contributor
-//! running a plain `cargo test` would otherwise never see it — so this test
-//! shells out to the built binary via `CARGO_BIN_EXE_cljrs` and fails the Rust
-//! suite when a language-level assertion breaks.
-//!
-//! Only the interpreter leg runs here. The AOT leg (`cljrs compile --test`)
-//! invokes `cargo` to build a harness crate, which is not something a test
-//! already running under cargo should do; CI runs that leg separately.
+//! Runs `tests/cljrs`, the cljrs-owned clojure.test tree, under the built
+//! binary. Interpreter leg only: the AOT leg invokes cargo itself.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -47,17 +36,14 @@ fn the_self_hosted_tree_passes_under_the_interpreter() {
         tree.display()
     );
 
-    // A tree that discovered nothing also exits 0. Assert it actually ran
-    // something, so a rename that orphans the whole tree is a failure and not
-    // a silent pass.
+    // A tree that discovered nothing also exits 0.
     assert!(
         stdout.contains("All tests passed."),
         "expected a passing summary\n--- stdout ---\n{stdout}"
     );
 
-    // The per-namespace lines legitimately include "Ran 0 tests" — a fixture
-    // namespace carries definitions and no `deftest`. The count that matters
-    // is the run-wide summary, "Ran N tests containing M assertions across …".
+    // Per-namespace lines may say "Ran 0 tests" (a fixture ns); the run-wide
+    // summary is the count that matters.
     let ran = stdout
         .lines()
         .find(|l| l.contains("assertions across"))

@@ -1,12 +1,6 @@
 (ns cljrs.lang-test.protocol-impl
-  "A protocol named in an *impl position* may be qualified, and must resolve
-  through its own namespace.
-
-  Every impl site used to look the protocol up by passing the whole symbol
-  string to the current namespace, so a cross-namespace impl failed with
-  \"mp/IThing is not a protocol\" even with the protocol loaded. The five sites
-  below are the five that had to be fixed separately, which is why each one is
-  asserted separately here."
+  "A protocol named in an impl position may be qualified, and resolves through
+  its own namespace. Each of the five impl sites is asserted separately."
   (:require [clojure.test :refer [deftest is testing]]
             [cljrs.lang-test.fixture.proto :as mp]))
 

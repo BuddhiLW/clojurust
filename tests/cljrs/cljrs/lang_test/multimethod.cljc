@@ -1,19 +1,9 @@
 (ns cljrs.lang-test.multimethod
-  "`defmulti` / `defmethod` dispatch as a *language* surface.
+  "`defmulti` / `defmethod` dispatch: hierarchy, specificity, preference, the
+  method table, and the shape of the `defmulti` head.
 
-  Written here rather than as Rust string literals for a concrete reason: the
-  assertion that started this tree was
-  `assert_eq!(eval_pr(\"… (sort (map str (keys (methods area))))\"), \"()\")`,
-  which is wrong — an emptied method table prints `nil`, not `()`. The check
-  that actually says what is meant is `(is (= 0 (count (methods area))))`, and
-  it is only writable from inside the language.
-
-  The error *texts* — extending a non-multimethod, extending an undefined name,
-  the ambiguity report's wording — stay in Rust
-  (`hierarchy_dispatch.rs`, `defmethod_cross_ns.rs`): they are host payloads.
-
-  Every test derives inside its own keyword namespace, because `derive` with no
-  explicit hierarchy mutates the global one and the tests share a runtime."
+  Each test derives in its own keyword namespace: `derive` without an explicit
+  hierarchy mutates the global one, and the tests share a runtime."
   (:require [clojure.test :refer [deftest is testing]]))
 
 ;; ── Inheritance-driven dispatch ──────────────────────────────────────────────
@@ -91,9 +81,7 @@
     (is (= 2 (count (methods table-of))))
     (is (contains? (methods table-of) ::rect))))
 
-;; Its own multimethod, not `table-of`: `remove-method` mutates the var, so two
-;; tests sharing one table are order-dependent — and clojure.test gives no
-;; order guarantee to lean on.
+;; Its own table: `remove-method` mutates the var, and test order is not fixed.
 (defmulti emptied-of identity)
 (defmethod emptied-of ::rect [_] :rect)
 (defmethod emptied-of ::square [_] :square)
@@ -129,14 +117,8 @@
 
 ;; ── The defmulti head ────────────────────────────────────────────────────────
 ;;
-;; `(defmulti name docstring? attr-map? dispatch-fn & options)`. These shapes
-;; exist to catch a specific failure mode rather than for completeness: when a
-;; special form is hoisted out of Rust into a bootstrap macro, the macro is a
-;; SECOND implementation, and whatever the Rust one did that its author did not
-;; know about is lost silently — no diff shows it. That happened here once
-;; already, when the defmulti hoist dropped the attr-map arity and both
-;; precedence rules. On the JVM leg these assertions are free: real Clojure
-;; already implements the full head, so it answers as the oracle.
+;; `(defmulti name docstring? attr-map? dispatch-fn & options)`. The JVM leg is
+;; the oracle for the whole head.
 
 (defmulti doc-of "the docstring" identity)
 
@@ -162,9 +144,7 @@
     (is (= :dispatched (doc-of :x)))))
 
 (deftest a-defmulti-with-no-dispatch-function
-  ;; DIVERGENCE. cljrs refuses the form outright; Clojure accepts it at
-  ;; definition time and only fails when the multimethod is called. The strict
-  ;; reading is deliberate here — recorded, not silently relied upon.
+  ;; DIVERGENCE: the JVM accepts the form and fails only at the call.
   (testing "cljrs rejects the form, the JVM defers to the call"
     #?(:rust (is (thrown? Exception (eval (read-string "(defmulti no-dispatch)"))))
        :clj (is (var? (eval (read-string "(defmulti no-dispatch)"))))))) 

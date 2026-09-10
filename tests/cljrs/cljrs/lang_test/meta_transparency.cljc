@@ -1,16 +1,6 @@
 (ns cljrs.lang-test.meta-transparency
-  "Property oracle: for every special form, evaluating `^meta F` agrees with
-  evaluating `F`.
-
-  Reader metadata is advisory for structural dispatch — a hint in front of a
-  params vector, a field vector, a binding vector, a name symbol or an arity
-  clause must not change how the form is parsed. Stated as a property rather
-  than as a table of expected values, so a new annotation site costs one
-  template.
-
-  The three strata are kept apart on purpose: `annotations` and the templates
-  are data, `render` is a calculation over strings, and `value-of` is the only
-  thing here that runs anything."
+  "Property oracle: for every special form, `^meta F` evaluates to what `F`
+  evaluates to. A new annotation site costs one template."
   (:require [clojure.test :refer [deftest is testing]]
             [clojure.string :as str]))
 

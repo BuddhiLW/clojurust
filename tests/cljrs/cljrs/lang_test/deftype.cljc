@@ -1,12 +1,6 @@
 (ns cljrs.lang-test.deftype
-  "`deftype` as a *language* surface: the positional constructor, field access,
-  protocol method bodies, and mutable fields.
-
-  The host half of the same feature stays in Rust
-  (`crates/cljrs-runtime/tests/deftype_types.rs`): an assertion written here
-  cannot see which `EvalError` variant came back, and
-  `deftype_mutable_tiered.rs` pins the same scripts with IR lowering forced on,
-  which is a tier property, not a language one."
+  "`deftype`: the positional constructor, field access, protocol method bodies,
+  and mutable fields."
   (:require [clojure.test :refer [deftest is testing]]))
 
 ;; ── The type itself ──────────────────────────────────────────────────────────
@@ -105,11 +99,7 @@
 (deftype Box [^:unsynchronized-mutable v])
 
 (deftest set-bang-on-an-explicit-field-target
-  ;; DIVERGENCE. On the JVM a `^:unsynchronized-mutable` field is private to
-  ;; the methods of its own type: `(set! (.-v inst) v)` from outside raises
-  ;; `IllegalArgumentException: No matching field found`. cljrs allows the
-  ;; external write. Recorded in both directions rather than asserted in one,
-  ;; so the day cljrs tightens this the `:rust` branch fails and names it.
+  ;; DIVERGENCE: the JVM refuses an external write to a mutable field.
   (testing "(set! (.-field inst) v) from outside a method body"
     (let [b (->Box :old)]
       #?(:rust (do (set! (.-v b) :new)
@@ -117,9 +107,7 @@
          :clj (is (thrown? IllegalArgumentException (set! (.-v b) :new)))))))
 
 (deftest mutating-one-instance-does-not-touch-another
-  ;; Same divergence as above: only cljrs can perform the external write, so
-  ;; only cljrs can ask whether it stayed on one instance. On the JVM the
-  ;; per-instance question is answered through a method instead.
+  ;; Same divergence: the JVM asks the question through a method instead.
   (testing "the mutable cell is per-instance, not per-type"
     #?(:rust (let [a (->Box 1)
                    b (->Box 1)]
