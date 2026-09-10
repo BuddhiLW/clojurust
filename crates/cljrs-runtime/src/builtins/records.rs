@@ -42,8 +42,11 @@ pub fn make_record_instance(args: &[Value]) -> ValueResult<Value> {
 }
 
 /// `(record? x)` -> true only for a `defrecord` instance.
+///
+/// Reads through metadata: `(record? (with-meta r {:k 1}))` is true, as it is
+/// on the JVM, where the metadata wrapper is not part of the type.
 pub fn record_q(args: &[Value]) -> ValueResult<Value> {
-    Ok(Value::Bool(match &args[0] {
+    Ok(Value::Bool(match args[0].unwrap_meta() {
         Value::TypeInstance(ti) => ti.get().record,
         _ => false,
     }))

@@ -40,3 +40,8 @@
     (is (= 1 (:x p)))
     (is (= 9 (:x (assoc p :x 9))))
     (is (instance? Point p))))
+
+(deftest metadata-does-not-change-what-a-record-is
+  (testing "the wrapper is not part of the type"
+    (is (record? (with-meta (->Point 1 2) {:k 1})))
+    (is (not (record? (with-meta {:x 1} {:k 1}))))))
