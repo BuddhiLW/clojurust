@@ -1150,6 +1150,20 @@ handler is not only shorter: `(defmethod other.ns/m ...)` and
 `(extend-type T other.ns/P ...)` resolve through the ordinary rules, aliases
 included, where a handler doing `lookup_in_ns(current_ns, "other.ns/m")` cannot.
 
+Putting the target in evaluation position does cost one thing, and `defmethod`
+pays it back deliberately. The two ways a target can be wrong — no such var, and
+the wrong kind of var — fail at two different sites once the name is evaluated,
+and neither site knows it was serving a `defmethod`. So the missing-var case is
+diagnosed in the macro, where the target is still a symbol: `(nil? (resolve
+mname))` reports "not defined; require the namespace that defines it". The
+wrong-kind case can only be seen after evaluation, so `add-method` states what
+the value is *not* ("not a multimethod, got long") rather than naming a target
+it was never given. The two messages point at different repairs — a missing
+`:require` versus a name that is a `def` — which is what
+`defmethod_cross_ns.rs` pins. `resolve` reports a private var just as the JVM
+does, so extending one across namespaces still fails on the access rule and is
+not mistaken for a missing var.
+
 `deftype*` uses `parse_field_specs` (field name + mutability,
 metadata-transparent) and `register_impls_for_tag`. `synth_field_scope` wraps a
 method body in a `let*` binding each field a param does not shadow — a mutable

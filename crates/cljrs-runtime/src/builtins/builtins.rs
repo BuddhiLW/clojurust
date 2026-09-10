@@ -8353,11 +8353,15 @@ fn builtin_multi_fn(args: &[Value]) -> ValueResult<Value> {
 fn builtin_add_method(args: &[Value]) -> ValueResult<Value> {
     let mf = match args[0].unwrap_meta() {
         Value::MultiFn(m) => m.clone(),
+        // `defmethod` is the only caller that reaches here with the wrong kind
+        // of value, and by then the name it was given has been evaluated away.
+        // Say what the value is NOT, so the message still tells "the wrong kind
+        // of var" apart from "no such var" without knowing which name it was.
         v => {
-            return Err(ValueError::WrongType {
-                expected: "multimethod",
-                got: v.type_name().to_string(),
-            });
+            return Err(ValueError::Other(format!(
+                "add-method: not a multimethod, got {}",
+                v.type_name()
+            )));
         }
     };
     let key = format!("{}", args[1]);
