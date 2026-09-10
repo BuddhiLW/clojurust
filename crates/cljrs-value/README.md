@@ -533,6 +533,7 @@ pub struct TypeInstance {
     pub type_tag: Arc<str>,                        // type name, or a gensym for reify
     pub fields: MapValue,                          // keyword → value (immutable fields)
     pub mutable: Option<GcPtr<crate::types::Atom>>, // keyword → value, deftype only
+    pub record: bool,                              // defrecord only; deftype/reify are false
 }
 ```
 
@@ -540,6 +541,9 @@ Used by `defrecord` (named type_tag, generates `->Name`/`map->Name` constructors
 `deftype` (named type_tag, `->Name` only), and `reify` (gensym'd type_tag, no
 constructors).  Supports keyword field access `(:field rec)`, `get`, `assoc`
 (returns new TypeInstance), and `count`.
+
+`record` is what `record?` reads, so it is true only for `defrecord`.  `assoc`
+and the structured-clone boundary both carry it through.
 
 `mutable` holds a `deftype`'s `^:unsynchronized-mutable` / `^:volatile-mutable`
 fields in one interior-mutable cell — an `Atom` over a keyword→value map — so

@@ -332,7 +332,11 @@ const BUILTIN_DOCS: &[(&str, &str)] = &[
     ("array?", "Returns true if x is a native array."),
     (
         "record?",
-        "Returns true if x is an instance of a defrecord/deftype.",
+        "Returns true if x is a defrecord instance (false for deftype/reify).",
+    ),
+    (
+        "make-record-instance",
+        "Low-level defrecord constructor: (make-record-instance type-tag fields).",
     ),
     ("atom?", "Returns true if x is an atom."),
     (
@@ -1558,7 +1562,16 @@ pub fn register_all(globals: &Arc<GlobalEnv>, ns: &str) {
             Arity::Fixed(3),
             builtin_make_type_instance_mut,
         ),
-        ("record?", Arity::Fixed(1), builtin_record_q),
+        (
+            "make-record-instance",
+            Arity::Fixed(2),
+            crate::builtins::records::make_record_instance,
+        ),
+        (
+            "record?",
+            Arity::Fixed(1),
+            crate::builtins::records::record_q,
+        ),
         ("instance?", Arity::Fixed(2), builtin_instance_q),
         // Native objects (Phase 9 interop)
         ("native-object?", Arity::Fixed(1), builtin_native_object_q),
@@ -3646,6 +3659,7 @@ fn builtin_assoc(args: &[Value]) -> ValueResult<Value> {
             type_tag: ti.get().type_tag.clone(),
             fields,
             mutable: ti.get().mutable.clone(),
+            record: ti.get().record,
         }))));
     }
     let mut result = match coll {
@@ -5615,6 +5629,7 @@ fn assoc_in_impl(m: Value, keys: &[Value], val: Value) -> ValueResult<Value> {
             type_tag: ti.get().type_tag.clone(),
             fields: ti.get().fields.assoc(k.clone(), updated),
             mutable: ti.get().mutable.clone(),
+            record: ti.get().record,
         })),
         _ => Value::Map(MapValue::empty().assoc(k.clone(), updated)),
     };
@@ -8498,6 +8513,8 @@ fn builtin_make_type_instance(args: &[Value]) -> ValueResult<Value> {
         type_tag,
         fields,
         mutable: None,
+        // deftype and reify only; defrecord uses make-record-instance.
+        record: false,
     })))
 }
 
@@ -8542,12 +8559,8 @@ fn builtin_make_type_instance_mut(args: &[Value]) -> ValueResult<Value> {
         type_tag,
         fields,
         mutable: Some(cell),
+        record: false,
     })))
-}
-
-/// `(record? x)` — true if x is a TypeInstance.
-fn builtin_record_q(args: &[Value]) -> ValueResult<Value> {
-    Ok(Value::Bool(matches!(args[0], Value::TypeInstance(_))))
 }
 
 /// `(instance? TypeName x)` — true if x is a TypeInstance with the given type tag.

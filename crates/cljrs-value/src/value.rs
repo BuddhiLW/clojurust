@@ -1391,12 +1391,14 @@ impl cljrs_gc::Trace for MapValue {
 
 // ── TypeInstance ──────────────────────────────────────────────────────────────
 
-/// A record or reify instance.  `type_tag` identifies the concrete type;
-/// `fields` holds the key/value pairs (keyword → value).
+/// A `defrecord`, `deftype` or `reify` instance.  `type_tag` identifies the
+/// concrete type; `fields` holds the key/value pairs (keyword → value).
 #[derive(Clone, Debug)]
 pub struct TypeInstance {
     pub type_tag: Arc<str>,
     pub fields: MapValue,
+    /// True only for a `defrecord` instance; `deftype` and `reify` are false.
+    pub record: bool,
     /// Mutable `deftype` fields (`^:unsynchronized-mutable` /
     /// `^:volatile-mutable`), held in an interior-mutable cell — an `Atom` over
     /// a keyword→value map — so `set!` can update them in place. `None` for

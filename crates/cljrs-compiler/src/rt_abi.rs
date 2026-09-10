@@ -1824,6 +1824,7 @@ pub unsafe extern "C" fn rt_assoc(
                     type_tag: ti.get().type_tag.clone(),
                     fields,
                     mutable: ti.get().mutable.clone(),
+                    record: ti.get().record,
                 })),
                 meta,
             ))
