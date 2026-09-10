@@ -1572,6 +1572,11 @@ pub fn register_all(globals: &Arc<GlobalEnv>, ns: &str) {
             Arity::Fixed(1),
             crate::builtins::records::record_q,
         ),
+        (
+            "multi-fn?",
+            Arity::Fixed(1),
+            crate::builtins::multi::multi_fn_q,
+        ),
         ("instance?", Arity::Fixed(2), builtin_instance_q),
         // Native objects (Phase 9 interop)
         ("native-object?", Arity::Fixed(1), builtin_native_object_q),
@@ -1619,6 +1624,7 @@ pub fn register_all(globals: &Arc<GlobalEnv>, ns: &str) {
         ),
         ("ns-resolve", Arity::Fixed(2), builtin_ns_resolve_sentinel),
         ("resolve", Arity::Fixed(1), builtin_resolve_sentinel),
+        ("resolve-here", Arity::Fixed(1), builtin_resolve_sentinel),
         // uuids
         ("uuid?", Arity::Fixed(1), builtin_uuid_q),
         ("parse-uuid", Arity::Fixed(1), builtin_parse_uuid),
