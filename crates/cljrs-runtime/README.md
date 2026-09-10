@@ -672,7 +672,9 @@ and `rest` return a lazy tail unforced for `LazySeq`/`Cons` and use the O(1)
 `PersistentList::rest`, and everything else in `rest` now goes through the
 shared walker. `nth` is deliberately narrower than `is_seqable` — a map and a
 set are seqable and `nth` refuses them, as on the JVM — so it lists the
-sequential types itself.
+sequential types itself. A queue and the nine array kinds share one arm there,
+`nth_walked`, which walks the value and states the bounds rule once: out of
+range without a default is an error, with a default it is the default.
 
 ### Static members of JVM class names
 

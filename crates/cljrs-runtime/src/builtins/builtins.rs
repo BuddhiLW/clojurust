@@ -4356,26 +4356,42 @@ fn builtin_nth(args: &[Value]) -> ValueResult<Value> {
             .or(default)
             .unwrap_or(Value::Nil)),
         // A queue is Sequential but not Indexed, so the JVM reaches the element
-        // by walking. Deliberately NOT `is_seqable` here: a map and a set are
-        // seqable and `nth` refuses them, which is the whole distinction this
-        // arm has to preserve.
-        Value::Queue(q) => {
-            let items: Vec<Value> = q.get().iter().cloned().collect();
-            if idx >= items.len() && default.is_none() {
-                Err(ValueError::IndexOutOfBounds {
-                    idx,
-                    count: items.len(),
-                })
-            } else {
-                Ok(items.into_iter().nth(idx).or(default).unwrap_or(Value::Nil))
-            }
-        }
+        // by walking; an array is Indexed, and the JVM indexes it directly.
+        // Both are answered here by walking, because neither is a hot path
+        // and one walk keeps the bounds rule in one place. Deliberately NOT
+        // `is_seqable`: a map and a set are seqable and `nth` refuses them,
+        // which is the whole distinction this list has to preserve.
+        coll @ (Value::Queue(_)
+        | Value::ObjectArray(_)
+        | Value::IntArray(_)
+        | Value::LongArray(_)
+        | Value::ShortArray(_)
+        | Value::ByteArray(_)
+        | Value::FloatArray(_)
+        | Value::DoubleArray(_)
+        | Value::BooleanArray(_)
+        | Value::CharArray(_)) => nth_walked(value_to_seq(coll)?, idx, default),
         Value::Nil => Ok(default.unwrap_or(Value::Nil)),
         v => Err(ValueError::WrongType {
             expected: "sequential",
             got: v.type_name().to_string(),
         }),
     }
+}
+
+/// `nth` over a collection that has already been walked into a vector.
+///
+/// Out of range without a default is an error, as it is for a vector; with a
+/// default it is the default. Shared by the sequential-but-not-indexed types
+/// (a queue) and by the array kinds, so the bounds rule is stated once.
+fn nth_walked(items: Vec<Value>, idx: usize, default: Option<Value>) -> ValueResult<Value> {
+    if idx >= items.len() && default.is_none() {
+        return Err(ValueError::IndexOutOfBounds {
+            idx,
+            count: items.len(),
+        });
+    }
+    Ok(items.into_iter().nth(idx).or(default).unwrap_or(Value::Nil))
 }
 
 fn builtin_last(args: &[Value]) -> ValueResult<Value> {
