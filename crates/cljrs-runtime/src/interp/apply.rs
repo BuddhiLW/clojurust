@@ -173,47 +173,105 @@ impl Thunk for ClosureThunk {
     }
 }
 
-/// Native fns that [`eval_call`] intercepts at the form level, because they
-/// need unevaluated forms or the environment.
+/// A native fn implemented on already-evaluated arguments.
 ///
-/// The `match` in [`eval_call`] must have an arm for every name here; other
-/// evaluators (the async tree-walker, the IR interpreter) consult this
-/// predicate to decide when to hand a call back to the synchronous path.
+/// `volatile!` and `agent` do not read the environment; they are adapted to
+/// this shape at the table rather than given a second signature.
+pub type InterceptedFn = fn(Vec<Value>, &mut Env) -> EvalResult;
+
+/// THE definition of which natives the evaluators intercept, and of what each
+/// one does.
+///
+/// These need the *environment*, not just their argument values, so their
+/// entries in the builtin table are sentinel stubs that error when invoked
+/// directly. Every consumer is a projection of this one function:
+/// [`is_form_intercepted`] asks whether it answers, [`dispatch_intercepted`]
+/// calls what it answers with. There is no second list to keep in step, which
+/// is the whole point — the IR interpreter used to carry one, twenty names
+/// short, and `(resolve 'map)` inside a function threw once the function got
+/// hot.
+pub fn intercepted_native(name: &str) -> Option<InterceptedFn> {
+    Some(match name {
+        "apply" => eval_apply,
+        "atom" => eval_atom,
+        "reset!" => eval_reset_bang,
+        "swap!" => eval_swap_bang,
+        "volatile!" => |args, _env| eval_volatile(args),
+        "vreset!" => |args, _env| eval_vreset_bang(args),
+        "agent" => |args, _env| eval_agent(args),
+        "make-lazy-seq" => eval_make_lazy_seq,
+        "make-delay" => eval_make_delay,
+        "vswap!" => eval_vswap_bang,
+        "send" | "send-off" => eval_send_to_agent,
+        "with-bindings*" => eval_with_bindings_star,
+        "alter-var-root" => eval_alter_var_root,
+        "vary-meta" => eval_vary_meta,
+        "eval" => eval_eval,
+        "find-ns" | "the-ns" => eval_find_ns,
+        "ns-interns" | "ns-publics" => eval_ns_interns,
+        "ns-refers" => eval_ns_refers,
+        "ns-map" => eval_ns_map,
+        "all-ns" => eval_all_ns,
+        "create-ns" => eval_create_ns,
+        "ns-aliases" => eval_ns_aliases,
+        "remove-ns" => eval_remove_ns,
+        "alter-meta!" => eval_alter_meta,
+        "ns-resolve" => eval_ns_resolve,
+        "resolve" => eval_resolve,
+        "intern" => eval_intern,
+        "bound-fn*" => eval_bound_fn_star,
+        _ => return None,
+    })
+}
+
+/// Whether [`eval_call`] intercepts this native rather than calling it.
+///
+/// A projection of [`intercepted_native`]: it cannot disagree with what
+/// actually gets dispatched. The async tree-walker and the IR interpreter both
+/// read this to decide when a call belongs on the synchronous path.
 pub fn is_form_intercepted(name: &str) -> bool {
-    matches!(
-        name,
-        "apply"
-            | "atom"
-            | "reset!"
-            | "swap!"
-            | "volatile!"
-            | "vreset!"
-            | "agent"
-            | "make-lazy-seq"
-            | "make-delay"
-            | "vswap!"
-            | "send"
-            | "send-off"
-            | "with-bindings*"
-            | "alter-var-root"
-            | "vary-meta"
-            | "eval"
-            | "find-ns"
-            | "the-ns"
-            | "ns-interns"
-            | "ns-publics"
-            | "ns-refers"
-            | "ns-map"
-            | "all-ns"
-            | "create-ns"
-            | "ns-aliases"
-            | "remove-ns"
-            | "alter-meta!"
-            | "ns-resolve"
-            | "resolve"
-            | "intern"
-            | "bound-fn*"
-    )
+    intercepted_native(name).is_some()
+}
+
+/// Run an intercepted native on already-evaluated arguments.
+///
+/// `None` means the name is not intercepted — the same answer
+/// [`is_form_intercepted`] gives, from the same place.
+pub fn dispatch_intercepted(name: &str, args: Vec<Value>, env: &mut Env) -> Option<EvalResult> {
+    intercepted_native(name).map(|f| f(args, env))
+}
+
+/// Names whose *argument evaluation* must allocate in the static arena under
+/// the `no-gc` feature, because the container being built outlives every
+/// scratch region.
+#[cfg(feature = "no-gc")]
+const STATIC_ARENA_ARGS: &[&str] = &[
+    "atom",
+    "volatile!",
+    "reset!",
+    "vreset!",
+    "vswap!",
+    "swap!",
+    "alter-var-root",
+    "intern",
+];
+
+/// Evaluate argument forms left to right, rooting the partial results so an
+/// earlier value survives a GC triggered by a later `eval`.
+fn eval_args(name: &str, arg_forms: &[Form], env: &mut Env) -> EvalResult<Vec<Value>> {
+    #[cfg(feature = "no-gc")]
+    let _static_ctx = STATIC_ARENA_ARGS
+        .contains(&name)
+        .then(cljrs_gc::alloc_ctx::StaticCtxGuard::new);
+    #[cfg(not(feature = "no-gc"))]
+    let _ = name;
+
+    let mut args: Vec<Value> = Vec::with_capacity(arg_forms.len());
+    for f in arg_forms {
+        let _root = crate::env::gc_roots::root_values(&args);
+        args.push(eval(f, env)?);
+    }
+    Ok(args)
 }
 
 /// Evaluate a call expression `(func-form arg1 arg2 ...)`.
@@ -243,39 +301,20 @@ pub fn eval_call(func_form: &Form, arg_forms: &[Form], env: &mut Env) -> EvalRes
         return eval(&expanded, env);
     }
 
-    // Special case: `apply` native fn — spread last arg.
+    // Intercepted natives (`apply`, `swap!`, the ns-* family, …) need the
+    // environment, so they are dispatched here on evaluated arguments rather
+    // than through the builtin table, whose entries for them are sentinels.
     if let Value::NativeFunction(nf) = &callee {
-        crate::env::policy::check_native(&nf.get().name)?;
-        match nf.get().name.as_ref() {
-            "apply" => return handle_apply_call(arg_forms, env),
-            "atom" => return handle_atom_call(arg_forms, env),
-            "reset!" => return handle_reset_bang(arg_forms, env),
-            "swap!" => return handle_swap_call(arg_forms, env),
-            "volatile!" => return handle_volatile(arg_forms, env),
-            "vreset!" => return handle_vreset(arg_forms, env),
-            "agent" => return handle_agent_call(arg_forms, env),
-            "make-lazy-seq" => return handle_make_lazy_seq(arg_forms, env),
-            "make-delay" => return handle_make_delay(arg_forms, env),
-            "vswap!" => return handle_vswap(arg_forms, env),
-            "send" | "send-off" => return handle_send(arg_forms, env),
-            "with-bindings*" => return handle_with_bindings(arg_forms, env),
-            "alter-var-root" => return handle_alter_var_root(arg_forms, env),
-            "vary-meta" => return handle_vary_meta(arg_forms, env),
-            "eval" => return handle_eval(arg_forms, env),
-            "find-ns" | "the-ns" => return handle_find_ns(arg_forms, env),
-            "ns-interns" | "ns-publics" => return handle_ns_interns(arg_forms, env),
-            "ns-refers" => return handle_ns_refers(arg_forms, env),
-            "ns-map" => return handle_ns_map(arg_forms, env),
-            "all-ns" => return handle_all_ns(arg_forms, env),
-            "create-ns" => return handle_create_ns(arg_forms, env),
-            "ns-aliases" => return handle_ns_aliases(arg_forms, env),
-            "remove-ns" => return handle_remove_ns(arg_forms, env),
-            "alter-meta!" => return handle_alter_meta(arg_forms, env),
-            "ns-resolve" => return handle_ns_resolve(arg_forms, env),
-            "resolve" => return handle_resolve(arg_forms, env),
-            "intern" => return handle_intern(arg_forms, env),
-            "bound-fn*" => return handle_bound_fn_star(arg_forms, env),
-            _ => {}
+        let name = nf.get().name.clone();
+        crate::env::policy::check_native(&name)?;
+        if is_form_intercepted(&name) {
+            let args = eval_args(&name, arg_forms, env)?;
+            let _args_root = crate::env::gc_roots::root_values(&args);
+            return dispatch_intercepted(&name, args, env).unwrap_or_else(|| {
+                Err(EvalError::Runtime(format!(
+                    "internal: {name} is intercepted but has no dispatch arm"
+                )))
+            });
         }
     }
 
@@ -850,258 +889,13 @@ fn macro_apply(
     crate::interp::macros::value_to_form(&expanded_val, dummy_span)
 }
 
-/// Handle `(apply f arg1 ... last-coll)` — spread the last arg.
-fn handle_apply_call(arg_forms: &[Form], env: &mut Env) -> EvalResult {
-    let mut evaled: Vec<Value> = Vec::with_capacity(arg_forms.len());
-    for f in arg_forms {
-        let _root = crate::env::gc_roots::root_values(&evaled);
-        evaled.push(eval(f, env)?);
-    }
-
-    if evaled.len() < 2 {
-        return Err(EvalError::Arity {
-            name: "apply".into(),
-            expected: "2+".into(),
-            got: evaled.len(),
-        });
-    }
-
-    let f = evaled.remove(0);
-    let last = evaled.pop().unwrap();
-    // Root f, last, and remaining evaled args during spread (which may realize lazy seqs).
-    let _f_root = crate::env::gc_roots::root_value(&f);
-    let _last_root = crate::env::gc_roots::root_value(&last);
-    let _evaled_root = crate::env::gc_roots::root_values(&evaled);
-    // Spread last arg.
-    let spread = value_to_seq_vec(&last);
-    evaled.extend(spread);
-    crate::env::apply::apply_value(&f, evaled, env)
-}
-
-/// Handle `(make-lazy-seq f)` — wraps a zero-arg fn in a lazy sequence.
-pub fn handle_make_lazy_seq(arg_forms: &[Form], env: &mut Env) -> EvalResult {
-    if arg_forms.len() != 1 {
-        return Err(EvalError::Arity {
-            name: "make-lazy-seq".into(),
-            expected: "1".into(),
-            got: arg_forms.len(),
-        });
-    }
-    let f_val = eval(&arg_forms[0], env)?;
-    let f = match f_val {
-        Value::Fn(f) => f.get().clone(),
-        other => {
-            return Err(EvalError::Runtime(format!(
-                "make-lazy-seq requires a fn, got {}",
-                other.type_name()
-            )));
-        }
-    };
-    let thunk = ClosureThunk {
-        f,
-        globals: env.globals.clone(),
-        ns: env.current_ns.clone(),
-    };
-    Ok(Value::LazySeq(GcPtr::new(LazySeq::new(Box::new(thunk)))))
-}
-
-/// Handle `(make-delay f)` — wraps a zero-arg fn in a Delay.
-fn handle_make_delay(arg_forms: &[Form], env: &mut Env) -> EvalResult {
-    if arg_forms.len() != 1 {
-        return Err(EvalError::Arity {
-            name: "make-delay".into(),
-            expected: "1".into(),
-            got: arg_forms.len(),
-        });
-    }
-    let f_val = eval(&arg_forms[0], env)?;
-    let f = match f_val {
-        Value::Fn(f) => f.get().clone(),
-        other => {
-            return Err(EvalError::Runtime(format!(
-                "make-delay requires a fn, got {}",
-                other.type_name()
-            )));
-        }
-    };
-    let thunk = ClosureThunk {
-        f,
-        globals: env.globals.clone(),
-        ns: env.current_ns.clone(),
-    };
-    Ok(Value::Delay(GcPtr::new(Delay::new(Box::new(thunk)))))
-}
-
-/// Handle `(vswap! vol f & args)` — apply f to current volatile value and store.
-fn handle_vswap(arg_forms: &[Form], env: &mut Env) -> EvalResult {
-    if arg_forms.len() < 2 {
-        return Err(EvalError::Arity {
-            name: "vswap!".into(),
-            expected: "2+".into(),
-            got: arg_forms.len(),
-        });
-    }
-    let vol_val = eval(&arg_forms[0], env)?;
-    let f = eval(&arg_forms[1], env)?;
-    let extra: Vec<Value> = arg_forms[2..]
-        .iter()
-        .map(|a| eval(a, env))
-        .collect::<EvalResult<_>>()?;
-
-    match vol_val {
-        Value::Volatile(v) => {
-            let cur = v.get().deref();
-            let mut call_args = vec![cur];
-            call_args.extend(extra);
-            // Under no-gc: the value written into the volatile must live in the
-            // StaticArena since the volatile outlives all scratch regions.
-            #[cfg(feature = "no-gc")]
-            let _static_ctx = cljrs_gc::alloc_ctx::StaticCtxGuard::new();
-            let new_val = crate::env::apply::apply_value(&f, call_args, env)?;
-            v.get().reset(new_val.clone());
-            Ok(new_val)
-        }
-        other => Err(EvalError::Runtime(format!(
-            "vswap!: expected volatile, got {}",
-            other.type_name()
-        ))),
-    }
-}
-
 // ── volatile! ────────────────────────────────────────────────────────────────
-
-/// Handle `(volatile! init-val)`.
-fn handle_volatile(arg_forms: &[Form], env: &mut Env) -> EvalResult {
-    if arg_forms.is_empty() {
-        return Err(EvalError::Arity {
-            name: "volatile!".into(),
-            expected: "1".into(),
-            got: 0,
-        });
-    }
-    // Under no-gc: volatile initial value must live in the StaticArena since
-    // the Volatile container outlives all scratch regions.
-    #[cfg(feature = "no-gc")]
-    let _static_ctx = cljrs_gc::alloc_ctx::StaticCtxGuard::new();
-    let initial = eval(&arg_forms[0], env)?;
-    Ok(Value::Volatile(GcPtr::new(Volatile::new(initial))))
-}
 
 // ── vreset! ──────────────────────────────────────────────────────────────────
 
-/// Handle `(vreset! vol new-val)`.
-fn handle_vreset(arg_forms: &[Form], env: &mut Env) -> EvalResult {
-    if arg_forms.len() < 2 {
-        return Err(EvalError::Arity {
-            name: "vreset!".into(),
-            expected: "2".into(),
-            got: arg_forms.len(),
-        });
-    }
-    let vol_val = eval(&arg_forms[0], env)?;
-    // Under no-gc: the new value written into the volatile must live in the
-    // StaticArena since the volatile outlives all scratch regions.
-    #[cfg(feature = "no-gc")]
-    let _static_ctx = cljrs_gc::alloc_ctx::StaticCtxGuard::new();
-    let new_val = eval(&arg_forms[1], env)?;
-    match &vol_val {
-        Value::Volatile(v) => {
-            v.get().reset(new_val.clone());
-            Ok(new_val)
-        }
-        other => Err(EvalError::Runtime(format!(
-            "vreset!: expected volatile, got {}",
-            other.type_name()
-        ))),
-    }
-}
-
 // ── agent ────────────────────────────────────────────────────────────────────
 
-/// Handle `(agent init-val & opts)`.
-fn handle_agent_call(_arg_forms: &[Form], _env: &mut Env) -> EvalResult {
-    Err(EvalError::Runtime("agent is not yet implemented".into()))
-}
-
-/// Handle `(send agent f & extra)` / `(send-off agent f & extra)`.
-fn handle_send(_arg_forms: &[Form], _env: &mut Env) -> EvalResult {
-    Err(EvalError::Runtime(
-        "send/send-off: agents are not yet implemented".into(),
-    ))
-}
-
 // ── atom ──────────────────────────────────────────────────────────────────────
-
-/// Handle `(swap! atom f & args)`.
-fn handle_atom_call(arg_forms: &[Form], env: &mut Env) -> EvalResult {
-    if arg_forms.is_empty() {
-        return Err(EvalError::Arity {
-            name: "atom".into(),
-            expected: "1+".into(),
-            got: 0,
-        });
-    }
-    // Under no-gc: atom initial value must live in the StaticArena since the
-    // Atom container outlives all scratch regions.
-    #[cfg(feature = "no-gc")]
-    let _static_ctx = cljrs_gc::alloc_ctx::StaticCtxGuard::new();
-    let initial = eval(&arg_forms[0], env)?;
-
-    // Evaluate and parse keyword options; unknown keys / nil keys are ignored.
-    let options: Vec<Value> = arg_forms[1..]
-        .iter()
-        .map(|f| eval(f, env))
-        .collect::<EvalResult<_>>()?;
-
-    let mut meta_opt: Option<Value> = None;
-    let mut validator_opt: Option<Value> = None;
-    let mut i = 0;
-    while i + 1 < options.len() {
-        match &options[i] {
-            Value::Keyword(k) if k.get().name.as_ref() == "meta" => {
-                meta_opt = Some(options[i + 1].clone());
-                i += 2;
-            }
-            Value::Keyword(k) if k.get().name.as_ref() == "validator" => {
-                let vf = options[i + 1].clone();
-                validator_opt = if vf == Value::Nil { None } else { Some(vf) };
-                i += 2;
-            }
-            _ => {
-                i += 2;
-            }
-        }
-    }
-
-    // Validate :meta must be nil or a map.
-    if let Some(ref m) = meta_opt
-        && !matches!(m, Value::Nil | Value::Map(_))
-    {
-        return Err(EvalError::Thrown(Value::string(
-            "Atom metadata must be a map or nil".to_string(),
-        )));
-    }
-
-    // Check validator on the initial value.
-    if let Some(ref vf) = validator_opt {
-        let result = crate::env::apply::apply_value(vf, vec![initial.clone()], env)?;
-        if result == Value::Nil || result == Value::Bool(false) {
-            return Err(EvalError::Thrown(Value::string(
-                "Invalid initial value for atom".to_string(),
-            )));
-        }
-    }
-
-    let atom = GcPtr::new(Atom::new(initial));
-    if let Some(m) = meta_opt {
-        atom.get()
-            .set_meta(if m == Value::Nil { None } else { Some(m) });
-    }
-    if let Some(vf) = validator_opt {
-        atom.get().set_validator(Some(vf));
-    }
-    Ok(Value::Atom(atom))
-}
 
 // ── shared-atom (Phase B3, two-tier ADR) ──────────────────────────────────────
 //
@@ -1148,40 +942,6 @@ fn shared_atom_swap(
 
 // ── reset! ────────────────────────────────────────────────────────────────────
 
-fn handle_reset_bang(arg_forms: &[Form], env: &mut Env) -> EvalResult {
-    if arg_forms.len() < 2 {
-        return Err(EvalError::Arity {
-            name: "reset!".into(),
-            expected: "2".into(),
-            got: arg_forms.len(),
-        });
-    }
-    let atom_val = eval(&arg_forms[0], env)?;
-    // Under no-gc: the new value written into the atom must live in the
-    // StaticArena since the atom outlives all scratch regions.
-    #[cfg(feature = "no-gc")]
-    let _static_ctx = cljrs_gc::alloc_ctx::StaticCtxGuard::new();
-    let new_val = eval(&arg_forms[1], env)?;
-
-    let atom = match &atom_val {
-        Value::Atom(a) => a.clone(),
-        Value::SharedAtom(sa) => return shared_atom_reset(sa, new_val),
-        v => {
-            return Err(EvalError::Runtime(format!(
-                "reset! requires an atom, got {}",
-                v.type_name()
-            )));
-        }
-    };
-
-    validate_atom_value(&atom, &new_val, env)?;
-    let old_val = atom.get().deref();
-    atom.get().reset(new_val.clone());
-    fire_watches(&atom.get().watches, &atom_val, &old_val, &new_val, env);
-    check_watch_error()?;
-    Ok(new_val)
-}
-
 /// Call the atom's validator (if any) on `new_val`. Throws if invalid.
 fn validate_atom_value(atom: &GcPtr<Atom>, new_val: &Value, env: &mut Env) -> EvalResult<()> {
     if let Some(vf) = atom.get().get_validator() {
@@ -1197,168 +957,13 @@ fn validate_atom_value(atom: &GcPtr<Atom>, new_val: &Value, env: &mut Env) -> Ev
 
 // ── swap! ─────────────────────────────────────────────────────────────────────
 
-fn handle_swap_call(arg_forms: &[Form], env: &mut Env) -> EvalResult {
-    let mut evaled: Vec<Value> = arg_forms
-        .iter()
-        .map(|f| eval(f, env))
-        .collect::<EvalResult<_>>()?;
-
-    if evaled.len() < 2 {
-        return Err(EvalError::Arity {
-            name: "swap!".into(),
-            expected: "2+".into(),
-            got: evaled.len(),
-        });
-    }
-
-    let atom_val = evaled.remove(0);
-    let f = evaled.remove(0);
-
-    let atom = match &atom_val {
-        Value::Atom(a) => a.clone(),
-        Value::SharedAtom(sa) => return shared_atom_swap(sa, &f, evaled, env),
-        v => {
-            return Err(EvalError::Runtime(format!(
-                "swap! requires an atom, got {}",
-                v.type_name()
-            )));
-        }
-    };
-
-    let old_val = atom.get().deref();
-    let mut args = vec![old_val.clone()];
-    args.extend(evaled);
-    // Under no-gc: the value written into the atom must live in the StaticArena
-    // since the atom outlives all scratch regions.
-    #[cfg(feature = "no-gc")]
-    let _static_ctx = cljrs_gc::alloc_ctx::StaticCtxGuard::new();
-    let new_val = crate::env::apply::apply_value(&f, args, env)?;
-    validate_atom_value(&atom, &new_val, env)?;
-    atom.get().reset(new_val.clone());
-    fire_watches(&atom.get().watches, &atom_val, &old_val, &new_val, env);
-    check_watch_error()?;
-    Ok(new_val)
-}
-
 // ── with-bindings* ────────────────────────────────────────────────────────────
-
-/// `(with-bindings* {#'var val ...} fn)` — push a binding frame, call fn with
-/// no args, pop the frame, return the result.
-fn handle_with_bindings(arg_forms: &[Form], env: &mut Env) -> EvalResult {
-    if arg_forms.len() < 2 {
-        return Err(EvalError::Arity {
-            name: "with-bindings*".into(),
-            expected: "2".into(),
-            got: arg_forms.len(),
-        });
-    }
-    let map_val = eval(&arg_forms[0], env)?;
-    let func_val = eval(&arg_forms[1], env)?;
-
-    let mut frame: HashMap<usize, Value> = HashMap::new();
-    if let Value::Map(m) = &map_val {
-        m.for_each(|k, v| {
-            if let Value::Var(vp) = k {
-                frame.insert(crate::env::dynamics::var_key_of(vp), v.clone());
-            }
-            // non-Var keys silently ignored
-        });
-    } else {
-        return Err(EvalError::Runtime(
-            "with-bindings*: first arg must be a map".into(),
-        ));
-    }
-
-    let _guard = crate::env::dynamics::push_frame(frame);
-    crate::env::apply::apply_value(&func_val, vec![], env)
-}
 
 // ── alter-var-root ────────────────────────────────────────────────────────────
 
-/// `(alter-var-root #'v f & args)` — atomically apply `f` to the root value.
-fn handle_alter_var_root(arg_forms: &[Form], env: &mut Env) -> EvalResult {
-    if arg_forms.len() < 2 {
-        return Err(EvalError::Arity {
-            name: "alter-var-root".into(),
-            expected: "2+".into(),
-            got: arg_forms.len(),
-        });
-    }
-    let var_val = eval(&arg_forms[0], env)?;
-    let f = eval(&arg_forms[1], env)?;
-    let extra: Vec<Value> = arg_forms[2..]
-        .iter()
-        .map(|form| eval(form, env))
-        .collect::<EvalResult<_>>()?;
-
-    let vp = match &var_val {
-        Value::Var(vp) => vp.clone(),
-        v => {
-            return Err(EvalError::Runtime(format!(
-                "alter-var-root: expected var, got {}",
-                v.type_name()
-            )));
-        }
-    };
-    let old_val = vp.get().deref().unwrap_or(Value::Nil);
-    let mut call_args = vec![old_val.clone()];
-    call_args.extend(extra);
-    // Under no-gc: the new Var root value must live in the StaticArena since
-    // Vars outlive all scratch regions.
-    #[cfg(feature = "no-gc")]
-    let _static_ctx = cljrs_gc::alloc_ctx::StaticCtxGuard::new();
-    let new_val = crate::env::apply::apply_value(&f, call_args, env)?;
-    vp.get().bind(new_val.clone());
-    fire_watches(&vp.get().watches, &var_val, &old_val, &new_val, env);
-    check_watch_error()?;
-    Ok(new_val)
-}
-
 // ── vary-meta ────────────────────────────────────────────────────────────────
 
-/// `(vary-meta obj f & args)` — apply `f` to obj's metadata, store result as new meta.
-fn handle_vary_meta(arg_forms: &[Form], env: &mut Env) -> EvalResult {
-    if arg_forms.len() < 2 {
-        return Err(EvalError::Arity {
-            name: "vary-meta".into(),
-            expected: "2+".into(),
-            got: arg_forms.len(),
-        });
-    }
-    let obj = eval(&arg_forms[0], env)?;
-    let f = eval(&arg_forms[1], env)?;
-    let extra: Vec<Value> = arg_forms[2..]
-        .iter()
-        .map(|form| eval(form, env))
-        .collect::<EvalResult<_>>()?;
-
-    let current_meta = match &obj {
-        Value::Var(vp) => vp.get().get_meta().unwrap_or(Value::Nil),
-        _ => Value::Nil,
-    };
-    let mut call_args = vec![current_meta];
-    call_args.extend(extra);
-    let new_meta = crate::env::apply::apply_value(&f, call_args, env)?;
-    if let Value::Var(vp) = &obj {
-        vp.get().set_meta(new_meta);
-    }
-    Ok(obj)
-}
-
 // ── eval ─────────────────────────────────────────────────────────────────────
-
-/// `(eval form)` — evaluate a form *value*.
-fn handle_eval(arg_forms: &[Form], env: &mut Env) -> EvalResult {
-    let [arg] = arg_forms else {
-        return Err(EvalError::Arity {
-            name: "eval".into(),
-            expected: "1".into(),
-            got: arg_forms.len(),
-        });
-    };
-    let value = eval(arg, env)?;
-    eval_eval(vec![value], env)
-}
 
 /// Execute `eval` with an already-evaluated arg: `[form-value]`.
 ///
@@ -1659,63 +1264,181 @@ fn the_ns(v: &Value, env: &Env) -> Result<GcPtr<cljrs_value::Namespace>, EvalErr
     }
 }
 
-/// `(ns-interns ns)` / `(ns-publics ns)` — map of unqualified Symbol → Var
-/// for all interned vars. Accepts a namespace, symbol, or string (via `the-ns`).
-fn handle_ns_interns(arg_forms: &[Form], env: &mut Env) -> EvalResult {
-    if arg_forms.is_empty() {
+/// Get the namespace name from `*ns*` (dynamic var), falling back to `env.current_ns`.
+/// This is important for `resolve` inside macros, where `env.current_ns` is the
+/// macro's defining namespace but `*ns*` is the caller's namespace.
+fn resolve_current_ns(env: &Env) -> Arc<str> {
+    if let Some(var) = env.globals.lookup_var("clojure.core", "*ns*") {
+        let val = crate::env::dynamics::deref_var(&var);
+        if let Some(Value::Namespace(ns_ptr)) = val {
+            return ns_ptr.get().name.clone();
+        }
+    }
+    env.current_ns.clone()
+}
+
+// ── bound-fn* ────────────────────────────────────────────────────────────────
+
+// ── value-level intercepted natives ──────────────────────────────────────────
+//
+// One implementation per intercepted name, taking already-evaluated arguments.
+// `dispatch_intercepted` is the only table that names them, so the tree-walker
+// and the tier-1 IR interpreter cannot drift apart.
+
+/// `(apply f & args coll)` — spread the last argument.
+pub fn eval_apply(mut args: Vec<Value>, env: &mut Env) -> EvalResult {
+    if args.len() < 2 {
         return Err(EvalError::Arity {
-            name: "ns-interns".into(),
-            expected: "1".into(),
-            got: 0,
+            name: "apply".into(),
+            expected: "2+".into(),
+            got: args.len(),
         });
     }
-    let arg = eval(&arg_forms[0], env)?;
-    let ns = the_ns(&arg, env)?;
+    let f = args.remove(0);
+    let last = args.pop().unwrap();
+    // Root f, last and the fixed args during the spread, which may realize a
+    // lazy seq and therefore run arbitrary Clojure code.
+    let _f_root = crate::env::gc_roots::root_value(&f);
+    let _last_root = crate::env::gc_roots::root_value(&last);
+    let _args_root = crate::env::gc_roots::root_values(&args);
+    args.extend(value_to_seq_vec(&last));
+    crate::env::apply::apply_value(&f, args, env)
+}
+
+/// `(atom init & {:keys [meta validator]})`.
+pub fn eval_atom(args: Vec<Value>, env: &mut Env) -> EvalResult {
+    let Some((initial, options)) = args.split_first() else {
+        return Err(EvalError::Arity {
+            name: "atom".into(),
+            expected: "1+".into(),
+            got: 0,
+        });
+    };
+    let initial = initial.clone();
+
+    // Parse keyword options; unknown keys / nil keys are ignored.
+    let mut meta_opt: Option<Value> = None;
+    let mut validator_opt: Option<Value> = None;
+    let mut i = 0;
+    while i + 1 < options.len() {
+        match &options[i] {
+            Value::Keyword(k) if k.get().name.as_ref() == "meta" => {
+                meta_opt = Some(options[i + 1].clone());
+            }
+            Value::Keyword(k) if k.get().name.as_ref() == "validator" => {
+                let vf = options[i + 1].clone();
+                validator_opt = if vf == Value::Nil { None } else { Some(vf) };
+            }
+            _ => {}
+        }
+        i += 2;
+    }
+
+    // `:meta` must be nil or a map.
+    if let Some(ref m) = meta_opt
+        && !matches!(m, Value::Nil | Value::Map(_))
+    {
+        return Err(EvalError::Thrown(Value::string(
+            "Atom metadata must be a map or nil".to_string(),
+        )));
+    }
+
+    // The validator sees the initial value before the atom exists.
+    if let Some(ref vf) = validator_opt {
+        let result = crate::env::apply::apply_value(vf, vec![initial.clone()], env)?;
+        if result == Value::Nil || result == Value::Bool(false) {
+            return Err(EvalError::Thrown(Value::string(
+                "Invalid initial value for atom".to_string(),
+            )));
+        }
+    }
+
+    // Under no-gc: the container outlives every scratch region.
+    #[cfg(feature = "no-gc")]
+    let _static_ctx = cljrs_gc::alloc_ctx::StaticCtxGuard::new();
+    let atom = GcPtr::new(Atom::new(initial));
+    if let Some(m) = meta_opt {
+        atom.get()
+            .set_meta(if m == Value::Nil { None } else { Some(m) });
+    }
+    if let Some(vf) = validator_opt {
+        atom.get().set_validator(Some(vf));
+    }
+    Ok(Value::Atom(atom))
+}
+
+/// `(agent init & opts)` — not implemented yet.
+pub fn eval_agent(_args: Vec<Value>) -> EvalResult {
+    Err(EvalError::Runtime("agent is not yet implemented".into()))
+}
+
+/// Pull the single zero-arg fn argument out of a `make-delay` / `make-lazy-seq` call.
+fn thunk_arg(name: &str, args: Vec<Value>, env: &Env) -> EvalResult<ClosureThunk> {
+    let [f_val] = args.as_slice() else {
+        return Err(EvalError::Arity {
+            name: name.into(),
+            expected: "1".into(),
+            got: args.len(),
+        });
+    };
+    match f_val {
+        Value::Fn(f) => Ok(ClosureThunk {
+            f: f.get().clone(),
+            globals: env.globals.clone(),
+            ns: env.current_ns.clone(),
+        }),
+        other => Err(EvalError::Runtime(format!(
+            "{name} requires a fn, got {}",
+            other.type_name()
+        ))),
+    }
+}
+
+/// `(make-lazy-seq f)` — wrap a zero-arg fn in a lazy sequence.
+pub fn eval_make_lazy_seq(args: Vec<Value>, env: &mut Env) -> EvalResult {
+    let thunk = thunk_arg("make-lazy-seq", args, env)?;
+    Ok(Value::LazySeq(GcPtr::new(LazySeq::new(Box::new(thunk)))))
+}
+
+/// `(make-delay f)` — wrap a zero-arg fn in a Delay.
+pub fn eval_make_delay(args: Vec<Value>, env: &mut Env) -> EvalResult {
+    let thunk = thunk_arg("make-delay", args, env)?;
+    Ok(Value::Delay(GcPtr::new(Delay::new(Box::new(thunk)))))
+}
+
+/// The single namespace argument shared by the `ns-*` family.
+fn ns_arg(name: &str, args: &[Value]) -> EvalResult<Value> {
+    args.first().cloned().ok_or(EvalError::Arity {
+        name: name.into(),
+        expected: "1".into(),
+        got: 0,
+    })
+}
+
+/// `(ns-interns ns)` / `(ns-publics ns)` — map of Symbol → Var for interned vars.
+pub fn eval_ns_interns(args: Vec<Value>, env: &mut Env) -> EvalResult {
+    let ns = the_ns(&ns_arg("ns-interns", &args)?, env)?;
     crate::builtins::builtins::builtin_ns_interns(&[Value::Namespace(ns)])
         .map_err(crate::env::error::value_error_to_eval_error)
 }
 
 /// `(ns-refers ns)` — map of Symbol → Var for all referred vars.
-fn handle_ns_refers(arg_forms: &[Form], env: &mut Env) -> EvalResult {
-    if arg_forms.is_empty() {
-        return Err(EvalError::Arity {
-            name: "ns-refers".into(),
-            expected: "1".into(),
-            got: 0,
-        });
-    }
-    let arg = eval(&arg_forms[0], env)?;
-    let ns = the_ns(&arg, env)?;
+pub fn eval_ns_refers(args: Vec<Value>, env: &mut Env) -> EvalResult {
+    let ns = the_ns(&ns_arg("ns-refers", &args)?, env)?;
     crate::builtins::builtins::builtin_ns_refers(&[Value::Namespace(ns)])
         .map_err(crate::env::error::value_error_to_eval_error)
 }
 
 /// `(ns-map ns)` — map of Symbol → Var for all visible names (interns + refers).
-fn handle_ns_map(arg_forms: &[Form], env: &mut Env) -> EvalResult {
-    if arg_forms.is_empty() {
-        return Err(EvalError::Arity {
-            name: "ns-map".into(),
-            expected: "1".into(),
-            got: 0,
-        });
-    }
-    let arg = eval(&arg_forms[0], env)?;
-    let ns = the_ns(&arg, env)?;
+pub fn eval_ns_map(args: Vec<Value>, env: &mut Env) -> EvalResult {
+    let ns = the_ns(&ns_arg("ns-map", &args)?, env)?;
     crate::builtins::builtins::builtin_ns_map(&[Value::Namespace(ns)])
         .map_err(crate::env::error::value_error_to_eval_error)
 }
 
-/// `(find-ns sym)` / `(the-ns sym)` — look up a namespace by name; nil if not found.
-fn handle_find_ns(arg_forms: &[Form], env: &mut Env) -> EvalResult {
-    if arg_forms.is_empty() {
-        return Err(EvalError::Arity {
-            name: "find-ns".into(),
-            expected: "1".into(),
-            got: 0,
-        });
-    }
-    let arg = eval(&arg_forms[0], env)?;
-    let name = ns_name_from_val(&arg)?;
+/// `(find-ns sym)` / `(the-ns sym)` — look up a namespace by name; nil if absent.
+pub fn eval_find_ns(args: Vec<Value>, env: &mut Env) -> EvalResult {
+    let name = ns_name_from_val(&ns_arg("find-ns", &args)?)?;
     let map = env.globals.namespaces.read().unwrap();
     match map.get(name.as_str()) {
         Some(ns) => Ok(Value::Namespace(ns.clone())),
@@ -1723,11 +1446,8 @@ fn handle_find_ns(arg_forms: &[Form], env: &mut Env) -> EvalResult {
     }
 }
 
-/// `(all-ns)` — lazy sequence of all live namespaces.
-fn handle_all_ns(arg_forms: &[Form], env: &mut Env) -> EvalResult {
-    if !arg_forms.is_empty() {
-        let _ = eval(&arg_forms[0], env)?; // tolerate extra args
-    }
+/// `(all-ns)` — sequence of all live namespaces.
+pub fn eval_all_ns(_args: Vec<Value>, env: &mut Env) -> EvalResult {
     let map = env.globals.namespaces.read().unwrap();
     let items: Vec<Value> = map
         .values()
@@ -1739,61 +1459,39 @@ fn handle_all_ns(arg_forms: &[Form], env: &mut Env) -> EvalResult {
     )))
 }
 
-/// `(create-ns sym)` — create (or return existing) namespace, return it.
-fn handle_create_ns(arg_forms: &[Form], env: &mut Env) -> EvalResult {
-    if arg_forms.is_empty() {
-        return Err(EvalError::Arity {
-            name: "create-ns".into(),
-            expected: "1".into(),
-            got: 0,
-        });
-    }
-    let arg = eval(&arg_forms[0], env)?;
-    let name = ns_name_from_val(&arg)?;
+/// `(create-ns sym)` — create (or return existing) namespace.
+pub fn eval_create_ns(args: Vec<Value>, env: &mut Env) -> EvalResult {
+    let name = ns_name_from_val(&ns_arg("create-ns", &args)?)?;
     let ns = env.globals.get_or_create_ns(&name);
     Ok(Value::Namespace(ns))
 }
 
 /// `(ns-aliases ns)` — map of Symbol → Namespace for all aliases in ns.
-fn handle_ns_aliases(arg_forms: &[Form], env: &mut Env) -> EvalResult {
-    if arg_forms.is_empty() {
-        return Err(EvalError::Arity {
-            name: "ns-aliases".into(),
-            expected: "1".into(),
-            got: 0,
-        });
-    }
-    let ns_val = eval(&arg_forms[0], env)?;
-    let ns_name = ns_name_from_val(&ns_val)?;
-    let map = env.globals.namespaces.read().unwrap();
-    let ns = match map.get(ns_name.as_str()) {
-        Some(ns) => ns.clone(),
-        None => return Ok(Value::Map(cljrs_value::MapValue::empty())),
+pub fn eval_ns_aliases(args: Vec<Value>, env: &mut Env) -> EvalResult {
+    let ns_name = ns_name_from_val(&ns_arg("ns-aliases", &args)?)?;
+    let aliases = {
+        let map = env.globals.namespaces.read().unwrap();
+        match map.get(ns_name.as_str()) {
+            Some(ns) => ns.get().aliases.lock().unwrap().clone(),
+            None => return Ok(Value::Map(cljrs_value::MapValue::empty())),
+        }
     };
-    let aliases = ns.get().aliases.lock().unwrap().clone();
-    drop(map);
     let mut m = cljrs_value::MapValue::empty();
     for (alias, full_ns_name) in &aliases {
         let sym = Value::symbol(cljrs_value::Symbol::simple(alias.clone()));
         let nsmap = env.globals.namespaces.read().unwrap();
         if let Some(target_ns) = nsmap.get(full_ns_name.as_ref()) {
-            m = m.assoc(sym, Value::Namespace(target_ns.clone()));
+            let target = Value::Namespace(target_ns.clone());
+            drop(nsmap);
+            m = m.assoc(sym, target);
         }
     }
     Ok(Value::Map(m))
 }
 
-/// `(remove-ns sym)` — remove a namespace (returns nil; used sparingly in tests).
-fn handle_remove_ns(arg_forms: &[Form], env: &mut Env) -> EvalResult {
-    if arg_forms.is_empty() {
-        return Err(EvalError::Arity {
-            name: "remove-ns".into(),
-            expected: "1".into(),
-            got: 0,
-        });
-    }
-    let arg = eval(&arg_forms[0], env)?;
-    let name = ns_name_from_val(&arg)?;
+/// `(remove-ns sym)` — remove a namespace.
+pub fn eval_remove_ns(args: Vec<Value>, env: &mut Env) -> EvalResult {
+    let name = ns_name_from_val(&ns_arg("remove-ns", &args)?)?;
     env.globals
         .namespaces
         .write()
@@ -1802,22 +1500,17 @@ fn handle_remove_ns(arg_forms: &[Form], env: &mut Env) -> EvalResult {
     Ok(Value::Nil)
 }
 
-/// `(alter-meta! ref f & args)` — apply f to ref's current meta + args, store and return new meta.
-fn handle_alter_meta(arg_forms: &[Form], env: &mut Env) -> EvalResult {
-    if arg_forms.len() < 2 {
+/// `(alter-meta! ref f & args)` — apply f to ref's meta + args; store and return it.
+pub fn eval_alter_meta(mut args: Vec<Value>, env: &mut Env) -> EvalResult {
+    if args.len() < 2 {
         return Err(EvalError::Arity {
             name: "alter-meta!".into(),
             expected: "2+".into(),
-            got: arg_forms.len(),
+            got: args.len(),
         });
     }
-    let obj = eval(&arg_forms[0], env)?;
-    let f = eval(&arg_forms[1], env)?;
-    let extra: Vec<Value> = arg_forms[2..]
-        .iter()
-        .map(|form| eval(form, env))
-        .collect::<EvalResult<_>>()?;
-
+    let obj = args.remove(0);
+    let f = args.remove(0);
     let current_meta = match &obj {
         Value::Var(vp) => vp
             .get()
@@ -1826,7 +1519,7 @@ fn handle_alter_meta(arg_forms: &[Form], env: &mut Env) -> EvalResult {
         _ => Value::Map(cljrs_value::MapValue::empty()),
     };
     let mut call_args = vec![current_meta];
-    call_args.extend(extra);
+    call_args.extend(args);
     let new_meta = crate::env::apply::apply_value(&f, call_args, env)?;
     if let Value::Var(vp) = &obj {
         vp.get().set_meta(new_meta.clone());
@@ -1834,19 +1527,17 @@ fn handle_alter_meta(arg_forms: &[Form], env: &mut Env) -> EvalResult {
     Ok(new_meta)
 }
 
-/// `(ns-resolve ns sym)` — return the Var for sym in ns, or nil if not found.
-fn handle_ns_resolve(arg_forms: &[Form], env: &mut Env) -> EvalResult {
-    if arg_forms.len() < 2 {
+/// `(ns-resolve ns sym)` — the Var for sym in ns, or nil.
+pub fn eval_ns_resolve(args: Vec<Value>, env: &mut Env) -> EvalResult {
+    let [ns_arg, sym_arg, ..] = args.as_slice() else {
         return Err(EvalError::Arity {
             name: "ns-resolve".into(),
             expected: "2".into(),
-            got: arg_forms.len(),
+            got: args.len(),
         });
-    }
-    let ns_arg = eval(&arg_forms[0], env)?;
-    let sym_arg = eval(&arg_forms[1], env)?;
-    let ns_name = ns_name_from_val(&ns_arg)?;
-    let sym_name = match &sym_arg {
+    };
+    let ns_name = ns_name_from_val(ns_arg)?;
+    let sym_name = match sym_arg {
         Value::Symbol(s) => s.get().name.as_ref().to_string(),
         Value::Str(s) => s.get().clone(),
         other => {
@@ -1862,37 +1553,22 @@ fn handle_ns_resolve(arg_forms: &[Form], env: &mut Env) -> EvalResult {
     }
 }
 
-/// Get the namespace name from `*ns*` (dynamic var), falling back to `env.current_ns`.
-/// This is important for `resolve` inside macros, where `env.current_ns` is the
-/// macro's defining namespace but `*ns*` is the caller's namespace.
-fn resolve_current_ns(env: &Env) -> Arc<str> {
-    if let Some(var) = env.globals.lookup_var("clojure.core", "*ns*") {
-        let val = crate::env::dynamics::deref_var(&var);
-        if let Some(Value::Namespace(ns_ptr)) = val {
-            return ns_ptr.get().name.clone();
-        }
-    }
-    env.current_ns.clone()
-}
-
-/// `(resolve sym)` — return the Var for sym in the current namespace, or nil.
-fn handle_resolve(arg_forms: &[Form], env: &mut Env) -> EvalResult {
-    if arg_forms.len() != 1 {
+/// `(resolve sym)` — the Var for sym in `*ns*`, or nil.
+pub fn eval_resolve(args: Vec<Value>, env: &mut Env) -> EvalResult {
+    let [sym_arg] = args.as_slice() else {
         return Err(EvalError::Arity {
             name: "resolve".into(),
             expected: "1".into(),
-            got: arg_forms.len(),
+            got: args.len(),
         });
-    }
+    };
     let resolve_ns = resolve_current_ns(env);
-    let sym_arg = eval(&arg_forms[0], env)?;
-    let sym_name = match &sym_arg {
+    let sym_name = match sym_arg {
         Value::Symbol(s) => {
             let sym = s.get();
-            // If qualified (ns/name), use the given ns; otherwise current ns.
+            // A qualified symbol resolves relative to `*ns*`, not to
+            // `env.current_ns` — `resolve` is defined on the dynamic var.
             if let Some(ns) = &sym.namespace {
-                // Relative to `*ns*`, not to `env.current_ns` — `resolve` is
-                // defined in terms of the dynamic var.
                 let full_ns = env.globals.resolve_ns_part_in(&resolve_ns, ns.as_ref());
                 return Ok(
                     match env.globals.lookup_var_in_ns(&full_ns, sym.name.as_ref()) {
@@ -1917,12 +1593,12 @@ fn handle_resolve(arg_forms: &[Form], env: &mut Env) -> EvalResult {
     })
 }
 
-fn handle_intern(arg_forms: &[Form], env: &mut Env) -> EvalResult {
-    if arg_forms.len() < 2 || arg_forms.len() > 3 {
+/// `(intern ns sym)` / `(intern ns sym val)`.
+pub fn eval_intern(args: Vec<Value>, env: &mut Env) -> EvalResult {
+    if args.len() < 2 || args.len() > 3 {
         return Err(EvalError::Runtime("intern expects 2 or 3 arguments".into()));
     }
-    let ns_val = eval(&arg_forms[0], env)?;
-    let ns_name: Arc<str> = match &ns_val {
+    let ns_name: Arc<str> = match &args[0] {
         Value::Symbol(s) => s.get().name.clone(),
         Value::Namespace(ns) => ns.get().name.clone(),
         other => {
@@ -1932,7 +1608,7 @@ fn handle_intern(arg_forms: &[Form], env: &mut Env) -> EvalResult {
             )));
         }
     };
-    let var_name: Arc<str> = match eval(&arg_forms[1], env)? {
+    let var_name: Arc<str> = match &args[1] {
         Value::Symbol(s) => s.get().name.clone(),
         other => {
             return Err(EvalError::Runtime(format!(
@@ -1941,64 +1617,50 @@ fn handle_intern(arg_forms: &[Form], env: &mut Env) -> EvalResult {
             )));
         }
     };
-    // Namespace must already exist (Clojure throws if it doesn't)
+    // The namespace must already exist (Clojure throws otherwise).
     let ns = {
         let map = env.globals.namespaces.read().unwrap();
         map.get(ns_name.as_ref()).cloned()
     };
     let ns = ns.ok_or_else(|| EvalError::Runtime(format!("No namespace: {ns_name} found")))?;
-    let var = if arg_forms.len() == 3 {
-        // Under no-gc: interned Var values live in the StaticArena since they
-        // are namespace-scoped and outlive all scratch regions.
-        #[cfg(feature = "no-gc")]
-        let _static_ctx = cljrs_gc::alloc_ctx::StaticCtxGuard::new();
-        let val = eval(&arg_forms[2], env)?;
-        let mut interns = ns.get().interns.lock().unwrap();
-        if let Some(var) = interns.get(&var_name) {
-            var.get().bind(val);
-            var.clone()
-        } else {
-            let var =
-                cljrs_gc::GcPtr::new(cljrs_value::Var::new(ns_name.clone(), var_name.clone()));
-            var.get().bind(val);
-            interns.insert(var_name, var.clone());
-            var
-        }
-    } else {
-        let mut interns = ns.get().interns.lock().unwrap();
-        if let Some(var) = interns.get(&var_name) {
-            var.clone()
-        } else {
+
+    // Under no-gc: interned Vars are namespace-scoped and outlive every
+    // scratch region.
+    #[cfg(feature = "no-gc")]
+    let _static_ctx = cljrs_gc::alloc_ctx::StaticCtxGuard::new();
+    let mut interns = ns.get().interns.lock().unwrap();
+    let var = match interns.get(&var_name) {
+        Some(var) => var.clone(),
+        None => {
             let var =
                 cljrs_gc::GcPtr::new(cljrs_value::Var::new(ns_name.clone(), var_name.clone()));
             interns.insert(var_name, var.clone());
             var
         }
     };
+    if let Some(val) = args.get(2) {
+        var.get().bind(val.clone());
+    }
     Ok(Value::Var(var))
 }
 
-// ── bound-fn* ────────────────────────────────────────────────────────────────
-
-/// `(bound-fn* f)` — capture current dynamic bindings and wrap `f` so that
-/// when the wrapper is called, those bindings are installed.
-fn handle_bound_fn_star(arg_forms: &[Form], env: &mut Env) -> EvalResult {
-    if arg_forms.len() != 1 {
+/// `(bound-fn* f)` — capture the current dynamic bindings around `f`.
+pub fn eval_bound_fn_star(args: Vec<Value>, _env: &mut Env) -> EvalResult {
+    let [f] = args.as_slice() else {
         return Err(EvalError::Arity {
             name: "bound-fn*".into(),
             expected: "1".into(),
-            got: arg_forms.len(),
+            got: args.len(),
         });
-    }
-    let f = eval(&arg_forms[0], env)?;
-    // Merge all binding frames into a single flat frame (bottom-up so inner wins)
+    };
+    // Merge every binding frame into one flat frame, bottom-up so inner wins.
     let frames = crate::env::dynamics::capture_current();
     let mut merged = std::collections::HashMap::new();
     for frame in &frames {
         merged.extend(frame.iter().map(|(k, v)| (*k, v.clone())));
     }
     Ok(Value::BoundFn(cljrs_gc::GcPtr::new(cljrs_value::BoundFn {
-        wrapped: f,
+        wrapped: f.clone(),
         captured_bindings: merged,
     })))
 }

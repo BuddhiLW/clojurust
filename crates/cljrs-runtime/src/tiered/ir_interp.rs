@@ -1089,11 +1089,12 @@ fn clone_ir_function(f: &IrFunction) -> IrFunction {
 
 /// Dispatch a generic callee value, intercepting sentinel `NativeFunction`s.
 ///
-/// Several clojure.core entries (volatile!, vswap!, make-delay, etc.) are
-/// sentinel stubs that unconditionally error when called normally — the real
-/// work happens in `eval_call`'s special-form dispatch, which the IR
-/// interpreter bypasses.  We intercept those by name here so that IR code
-/// calling them works correctly.
+/// Several clojure.core entries (volatile!, vswap!, the whole ns-* family, …)
+/// are sentinel stubs that unconditionally error when called normally — the
+/// real work needs the environment, so it lives in
+/// [`crate::interp::apply::dispatch_intercepted`], which the tree-walker also
+/// calls.  Routing through that one table is what keeps the two dispatch paths
+/// from drifting: a name intercepted there is intercepted here.
 fn dispatch_or_sentinel(
     callee: Value,
     args: Vec<Value>,
@@ -1132,46 +1133,21 @@ fn dispatch_sentinel_by_name(
         };
         return crate::interp::apply::dispatch_method(method, target, rest);
     }
-    match name {
-        "volatile!" => crate::interp::apply::eval_volatile(args),
-        "reset!" => crate::interp::apply::eval_reset_bang(args, env),
-        "vreset!" => crate::interp::apply::eval_vreset_bang(args),
-        "vswap!" => crate::interp::apply::eval_vswap_bang(args, env),
-        "make-delay" => {
-            let f = args.into_iter().next().ok_or_else(|| EvalError::Arity {
-                name: "make-delay".into(),
-                expected: "1".into(),
-                got: 0,
-            })?;
-            crate::interp::apply::make_delay_from_fn(&f, globals.clone(), ns.clone())
-        }
-        "alter-var-root" => crate::interp::apply::eval_alter_var_root(args, env),
-        "vary-meta" => crate::interp::apply::eval_vary_meta(args, env),
-        "eval" => crate::interp::apply::eval_eval(args, env),
-        "with-bindings*" => crate::interp::apply::eval_with_bindings_star(args, env),
-        "send" | "send-off" => crate::interp::apply::eval_send_to_agent(args, env),
-        _ => {
-            let callee = load_global_value(globals, ns, name, ns)?;
-            apply_value(&callee, args, env)
-        }
+    if is_sentinel(name) {
+        return crate::interp::apply::dispatch_intercepted(name, args, env).unwrap_or_else(|| {
+            Err(EvalError::Runtime(format!(
+                "internal: {name} is intercepted but has no dispatch arm"
+            )))
+        });
     }
+    let callee = load_global_value(globals, ns, name, ns)?;
+    apply_value(&callee, args, env)
 }
 
+/// A name the tree-walker intercepts is a name the IR interpreter must
+/// intercept too: both read one enumeration.
 fn is_sentinel(name: &str) -> bool {
-    matches!(
-        name,
-        "volatile!"
-            | "reset!"
-            | "vreset!"
-            | "vswap!"
-            | "make-delay"
-            | "alter-var-root"
-            | "vary-meta"
-            | "eval"
-            | "with-bindings*"
-            | "send"
-            | "send-off"
-    )
+    crate::interp::apply::is_form_intercepted(name)
 }
 
 // ── KnownFn dispatch ────────────────────────────────────────────────────────

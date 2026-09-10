@@ -1002,29 +1002,48 @@ the keyword shorthand `^:async` or an explicit `{:async true}` map.  `fn`/`defn`
 use it to set `CljxFn::is_async`, which `env::apply::dispatch_if_async`
 checks at call time to route through the async runtime.
 
-### Which natives need form-level interception
+### Which natives are intercepted, and by whom
 
-`is_form_intercepted(name) -> bool` is the canonical list of natives that
-`eval_call` intercepts because they need unevaluated forms or the environment.
-The async tree-walker (`cljrs-async`) and the IR interpreter consult it instead
-of keeping their own copies; the `match` in `eval_call` must have an arm for
-every name it reports.
+```rust
+pub type InterceptedFn = fn(Vec<Value>, &mut Env) -> EvalResult;
+pub fn intercepted_native(name: &str) -> Option<InterceptedFn>;
+pub fn is_form_intercepted(name: &str) -> bool;
+pub fn dispatch_intercepted(name: &str, args: Vec<Value>, env: &mut Env) -> Option<EvalResult>;
+```
 
-### Special handlers in `apply.rs`
+`intercepted_native` is the **one** definition of both which natives the
+evaluators intercept and what each one does.  These need the environment rather
+than only their argument values (`apply`, `atom`, `swap!`, `eval`, `resolve`,
+`intern`, `bound-fn*`, the whole `ns-*` family, …), so each is registered in the
+builtin table as a *sentinel* stub that errors when invoked directly — a path
+that forgets to intercept fails loudly instead of quietly.
 
-Each handler evaluates its key expressions under the correct allocation context:
+The other two are **projections** of it and cannot disagree with it:
+`is_form_intercepted` asks whether it answers, `dispatch_intercepted` calls what
+it answers with, on **already-evaluated** arguments.  There is deliberately no
+list of names beside the dispatch arms; that arrangement is what broke.
+Every caller reads the same one:
 
-| Handler | Static-sink guard coverage |
+| Caller | How it reaches the table |
 |---|---|
-| `handle_atom_call` | initial value |
-| `handle_reset_bang` | new value |
-| `handle_swap_call` | function return value |
-| `handle_volatile` | initial value |
-| `handle_vreset` | new value |
-| `handle_vswap` | function return value |
-| `handle_agent_call` | initial value |
-| `handle_alter_var_root` | function return value |
-| `handle_intern` | value expression (3-arg form) |
+| `eval_call` (tree-walker) | evaluates the arg forms, then calls `dispatch_intercepted` |
+| `tiered::ir_interp::dispatch_sentinel_by_name` | already has values; calls it directly |
+| `cljrs-async`'s `eval_call_async` | uses `is_form_intercepted` to hand the call back to the synchronous path |
+
+This used to be two independent lists, and the IR interpreter's was the shorter
+one: a function calling `(resolve 'map)` worked while it was tree-walked and
+threw "resolve sentinel should not be called directly" once it was IR-promoted.
+
+One copy survives, because it cannot be deleted: `builtins.rs` must register a
+name for it to exist as a var at all, and it carries real per-name information
+there (arity, docstring).  Its *set membership* is still a copy, so
+`every_sentinel_builtin_is_intercepted` in `tests/intercepted_natives_tiered.rs`
+reads that table out of the source and asserts every sentinel-registered name is
+intercepted.
+
+Under the `no-gc` feature, `STATIC_ARENA_ARGS` names the subset whose *argument
+evaluation* must allocate in the static arena, because the container being built
+(atom, volatile, Var root, interned Var) outlives every scratch region.
 
 ### Parameter binding: `bind_fn_params` vs `bind_fn_params_positional`
 
@@ -1043,23 +1062,42 @@ anyway would evaluate each `:or` default twice per call — destructuring defaul
 are eager, so a side-effecting one would fire once here and once in the prologue
 (issue #363).
 
-### Value-level special form helpers (IR interpreter API)
+### Value-level intercepted natives
 
-The IR interpreter receives already-evaluated `Vec<Value>` arguments rather than
-`&[Form]` AST nodes.  These public functions mirror the `handle_*` form-level
-handlers but accept pre-evaluated args, allowing the IR interpreter to
-implement sentinel operations without hitting the stub errors registered in
-`clojure.core`:
+There is exactly one implementation of each intercepted native, and it takes
+already-evaluated `Vec<Value>` arguments; the tree-walker evaluates the arg
+forms first (`eval_args`) and then joins the same path.  `dispatch_intercepted`
+is the only table that names these, so a behaviour added to an arm is a
+behaviour both dispatch paths gain:
 
 | Function | Operation |
 |---|---|
+| `eval_apply(args, env)` | `apply` — spread the last argument |
+| `eval_atom(args, env)` | `atom` — with `:meta` / `:validator` options |
+| `eval_reset_bang(args, env)` | `reset!` — validator, watches, shared atoms |
 | `eval_swap_bang(args, env)` | `swap!` — apply f to atom, store result |
 | `eval_volatile(args)` | `volatile!` — create a new volatile |
 | `eval_vreset_bang(args)` | `vreset!` — reset volatile value |
 | `eval_vswap_bang(args, env)` | `vswap!` — apply f to volatile value, store result |
-| `make_delay_from_fn(f, globals, ns)` | `make-delay` — wrap zero-arg fn in a `Delay` |
+| `eval_agent(args)` | `agent` — not implemented yet |
+| `eval_make_lazy_seq(args, env)` | `make-lazy-seq` — wrap zero-arg fn in a `LazySeq` |
+| `eval_make_delay(args, env)` | `make-delay` — wrap zero-arg fn in a `Delay` |
+| `make_delay_from_fn(f, globals, ns)` | `Delay` from an explicit globals/ns pair |
 | `eval_alter_var_root(args, env)` | `alter-var-root` — apply f to var root, store result |
 | `eval_vary_meta(args, env)` | `vary-meta` — apply f to obj metadata |
+| `eval_find_ns(args, env)` | `find-ns` / `the-ns` |
+| `eval_ns_interns(args, env)` | `ns-interns` / `ns-publics` |
+| `eval_ns_refers(args, env)` | `ns-refers` |
+| `eval_ns_map(args, env)` | `ns-map` |
+| `eval_all_ns(args, env)` | `all-ns` |
+| `eval_create_ns(args, env)` | `create-ns` |
+| `eval_ns_aliases(args, env)` | `ns-aliases` |
+| `eval_remove_ns(args, env)` | `remove-ns` |
+| `eval_alter_meta(args, env)` | `alter-meta!` |
+| `eval_ns_resolve(args, env)` | `ns-resolve` |
+| `eval_resolve(args, env)` | `resolve` — relative to `*ns*`, not `env.current_ns` |
+| `eval_intern(args, env)` | `intern` — 2- and 3-arg forms |
+| `eval_bound_fn_star(args, env)` | `bound-fn*` — capture the dynamic frames |
 | `eval_eval(args, env)` | `eval` — convert a form value back to a `Form` and evaluate it at top level of the current namespace (vars visible, caller's locals not) |
 | `eval_with_bindings_star(args, env)` | `with-bindings*` — push binding frame, call f |
 | `eval_send_to_agent(args, env)` | `send` / `send-off` — dispatch action to agent |
@@ -1462,26 +1500,34 @@ unwind with the interpreter frame.
 ### Special-form coverage in the IR interpreter
 
 Several `clojure.core` entries are sentinel stubs that error unconditionally
-when called through the normal function-call path — the real logic lives in
-`eval_call`'s special-form dispatch.  `ir_interp.rs` handles all of them
-without going through the stubs:
+when called through the normal function-call path — the real logic needs the
+environment.  `ir_interp.rs` must handle **every** one of them, and it does so
+by reading the same enumeration the tree-walker reads: `is_sentinel` forwards to
+`interp::apply::is_form_intercepted`, and `dispatch_sentinel_by_name` forwards to
+`interp::apply::dispatch_intercepted`.  Nothing is listed twice, so nothing can
+drift; before that, the IR interpreter's private list was 20 names short and
+`(resolve 'map)` inside a function threw once the function got hot.
 
 | Operation | How handled in IR |
 |---|---|
-| `swap!` (`KnownFn::AtomSwap`) | `interp::apply::eval_swap_bang` |
+| every name in `INTERCEPTED_NATIVES` | `dispatch_sentinel_by_name` → `interp::apply::dispatch_intercepted` |
+| `swap!` (`KnownFn::AtomSwap`) | `interp::apply::eval_swap_bang` (the lowered fast path; the sentinel path handles `swap!` used as a value) |
 | `with-bindings*` (`KnownFn::WithBindings`) | `interp::apply::eval_with_bindings_star` |
-| `volatile!` | `dispatch_sentinel_by_name` → `eval_volatile` |
-| `vreset!` | `dispatch_sentinel_by_name` → `eval_vreset_bang` |
-| `vswap!` | `dispatch_sentinel_by_name` → `eval_vswap_bang` |
-| `make-delay` | `dispatch_sentinel_by_name` → `make_delay_from_fn` |
-| `alter-var-root` | `dispatch_sentinel_by_name` → `eval_alter_var_root` |
-| `vary-meta` | `dispatch_sentinel_by_name` → `eval_vary_meta` |
-| `send` / `send-off` | `dispatch_sentinel_by_name` → `eval_send_to_agent` |
+| `lazy-seq` (`KnownFn::LazySeq`) | `interp::apply::make_lazy_seq_from_fn` |
 | `with-out-str` (`KnownFn::WithOutStr`) | native: `push_output_capture` → apply body thunk → `pop_output_capture` (the clojure.core var is a nil stub and must never be called) |
 | `(.method target args…)` interop | `dispatch_sentinel_by_name` intercepts dot-prefixed `CallDirect` names → `interp::apply::dispatch_method` |
 
 Both `Inst::Call` (where the callee register holds a sentinel `NativeFunction`)
 and `Inst::CallDirect` (where the callee is named directly) are intercepted.
+`CallDirect` also carries ordinary names, so its non-intercepted path stays
+`load_global_value` + `apply_value`.
+
+The regression guard is `tests/intercepted_natives_tiered.rs`.  It is its own
+test binary because `tiered::force_eager_lowering()` is process-wide; eager
+lowering is what turns "call it 200 times until it promotes" into "call it
+once", so a tiered regression is cheap to pin.  Any test about behaviour *after*
+promotion belongs there — a test that builds `ExecutionMode::TreeWalk`, as most
+of `crates/*/tests` does, cannot see this class of bug at all.
 
 `load_global_value` additionally mirrors `eval_symbol`'s whole-symbol lookup:
 when `(ns, name)` resolution fails, it retries `"{ns}/{name}"` in the defining
