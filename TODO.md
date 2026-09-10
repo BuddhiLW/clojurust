@@ -379,6 +379,23 @@ Pattern: `(map f (map g xs))`, lower to single loop.
 - [x] RAII resource management: `with-open` macro + `close` builtin for deterministic cleanup of `Resource` values
 - [ ] (Stretch) `#rust` typed sublanguage: functions annotated `#rust` receive Rust-typed arguments with lifetime bounds enforced at the interop boundary, bypassing `Value` boxing entirely for those call sites
 
+### Extensions live outside this repo
+
+An extension that is not part of the language belongs in its own project,
+loaded through the `cljrs_init` plugin ABI. `cljrs-base64` and `cljrs-blake3`
+stay here as *examples of the interop layer*; anything that is a real
+application subsystem does not.
+
+The first one out is media rasterization and encoding — `cljrs.raster` and
+`cljrs.ffmpeg` — which briefly lived here and now ships separately. What it
+exercised, and what it wants from this repo:
+
+- [ ] No directory listing in core (`file-seq`, `list-dir`), so a frame pipeline has to be handed its paths rather than globbing a directory. `slurp`/`spit`/`load-file` are the whole filesystem surface
+- [ ] `count`/`seq` over `ByteArray` and `ByteBlob` — core reaches into neither, so byte values are inspectable only via `alength`/`aget`/`vec`, and a `ByteBlob` not at all. That is why an extension returning bytes must return `ByteArray`
+- [ ] `System/getenv` and `System/getProperty` are unbound, so an extension has no way to read its own configuration from the environment
+- [ ] Loading two plugins at once is untested: `cljrs_init` is unmangled, so each must be its own dylib, and nothing yet checks that two `.so`s register cleanly into one runtime
+- [ ] **No supported way to load a third-party extension locally.** `cljrs::extensions::default_set` is fixed at compile time by this crate's own Cargo features, and `cljrs::session::setup_globals` has no hook for a host to add to it, so an extension outside this workspace can only arrive through `:rust/load :dylib`, which requires a `:git/url` and a pinned `:git/sha`. An extension being developed in a working tree cannot be loaded at all. Either the CLI needs a host-extension hook, or `:rust/load :dylib` needs to accept a `:local/root`
+
 ---
 
 ## Phase 10 — JIT Compiler

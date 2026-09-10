@@ -121,6 +121,11 @@ See [`TODO.md`](TODO.md) for the full itemised roadmap.
 | [`cljrs-base64`](crates/cljrs-base64) | Base64 encode/decode exposed as Clojure native functions (interop example) | implemented |
 | [`cljrs-blake3`](crates/cljrs-blake3) | BLAKE3 hashing exposed as Clojure native functions (interop example) | implemented |
 
+`cljrs-base64` and `cljrs-blake3` are here as *examples of the interop layer*.
+An extension that is a real application subsystem belongs in its own project
+and is loaded through the `cljrs_init` plugin ABI, not linked into this
+workspace.
+
 ### Async, I/O & networking
 
 | Crate | Description | Status |
