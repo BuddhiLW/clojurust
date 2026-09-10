@@ -1302,6 +1302,12 @@
                            "versioned namespace " (second pin))
                       {:namespace (second pin)}))
 
+      ;; No `resolve` check on the target here, deliberately. It would read the
+      ;; namespace off `*ns*`, and the expansion resolves the symbol against the
+      ;; namespace the form was WRITTEN in, which is not the same thing: inside
+      ;; a `deftest` body `*ns*` is `user`, so a check would call every target
+      ;; undefined. Letting the emitted symbol resolve is what keeps the alias,
+      ;; refer and privacy rules in one place.
       :else
       (list 'add-method mname dispatch-val
             (cons 'fn (cons (symbol (name mname)) (cons params body)))))))

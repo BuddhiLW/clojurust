@@ -144,11 +144,28 @@ fn extending_something_that_is_not_a_multimethod_says_so() {
 
 #[test]
 fn extending_something_undefined_says_that_instead() {
-    // Distinguishable from the above: "not defined" points at a missing
-    // require, "not a multimethod" points at the wrong kind of var.
+    // Distinguishable from the above: "unbound symbol" names the symbol that
+    // did not resolve and points at a missing require, "not a multimethod"
+    // points at the wrong kind of var.
+    //
+    // The wording is the resolver's, not defmethod's, and that is the design.
+    // The target sits in evaluation position so that aliases, `:refer` and the
+    // privacy rule all apply to it; the price is that by the time it fails,
+    // the failure belongs to symbol resolution. Diagnosing it in the macro
+    // instead would mean resolving the name a second way -- and the only tool
+    // for that, `resolve`, reads `*ns*`, which is `user` inside a `deftest`
+    // body, so it would call every target undefined.
     let (_dir, _g, mut env) = env_with_sources(&[]);
     let err = eval_in(&mut env, "(defmethod nope/area :a [_] 1)").expect_err("no such multimethod");
-    assert!(err.contains("not defined"), "unhelpful error: {err}");
+    // `eval_in` stringifies with Debug, so the variant is visible here — and
+    // the variant is the distinction: `UnboundSymbol` for a name that did not
+    // resolve, `Other` carrying "not a multimethod" for one that resolved to
+    // the wrong thing. A caller branches on exactly that.
+    assert!(err.starts_with("UnboundSymbol"), "unhelpful error: {err}");
+    assert!(
+        err.contains("nope/area"),
+        "error does not name the target: {err}"
+    );
 }
 
 #[test]
