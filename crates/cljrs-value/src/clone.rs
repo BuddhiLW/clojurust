@@ -142,6 +142,7 @@ pub enum SerializedValue {
     TypeInstance {
         type_tag: Arc<str>,
         fields: Vec<(SerializedValue, SerializedValue)>,
+        record: bool,
     },
 
     // Errors
@@ -417,6 +418,7 @@ pub fn serialize(v: &Value) -> Result<SerializedValue, CloneError> {
             Ok(SerializedValue::TypeInstance {
                 type_tag: ti.type_tag.clone(),
                 fields,
+                record: ti.record,
             })
         }
 
@@ -683,7 +685,11 @@ pub fn deserialize(sv: SerializedValue) -> Value {
             }))
         }
 
-        SerializedValue::TypeInstance { type_tag, fields } => {
+        SerializedValue::TypeInstance {
+            type_tag,
+            fields,
+            record,
+        } => {
             use crate::value::TypeInstance;
             let pairs: Vec<(Value, Value)> = fields
                 .into_iter()
@@ -693,6 +699,7 @@ pub fn deserialize(sv: SerializedValue) -> Value {
                 type_tag,
                 fields: MapValue::from_pairs(pairs),
                 mutable: None,
+                record,
             }))
         }
 

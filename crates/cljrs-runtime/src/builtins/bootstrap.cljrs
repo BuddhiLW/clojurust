@@ -1805,8 +1805,8 @@
         fmap  (zipmap (map kw fields) (map bare fields))]
     `(do
        (deftype* ~tsym ~plain ~@impls)
-       (defn ~pos [~@plain] (make-type-instance ~tname ~fmap))
-       (defn ~mapc [m#] (make-type-instance ~tname m#))
+       (defn ~pos [~@plain] (make-record-instance ~tname ~fmap))
+       (defn ~mapc [m#] (make-record-instance ~tname m#))
        (def ~tsym (quote ~tsym))
        ~tsym)))
 

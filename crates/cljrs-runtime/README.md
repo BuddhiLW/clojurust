@@ -71,6 +71,7 @@ src/
     array_list.rs       — java.util.ArrayList-alike interop shim
     bitops.rs           — bit-and / bit-or / bit-shift-* and friends
     new.rs              — (new Type ...) construction dispatch
+    records.rs          — make-record-instance (the defrecord constructor) and record?
     regex.rs            — re-pattern / re-find / re-seq / re-matches
     taps.rs             — add-tap / tap> builtins over env::taps
     time.rs             — clock and duration builtins

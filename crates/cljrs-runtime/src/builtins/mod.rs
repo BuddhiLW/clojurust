@@ -10,6 +10,7 @@ mod bitops;
 pub mod builtins;
 pub mod form;
 mod new;
+mod records;
 mod regex;
 pub mod special;
 mod taps;
