@@ -1327,6 +1327,12 @@
                            "versioned namespace " (second pin))
                       {:namespace (second pin)}))
 
+      ;; No `resolve` check on the target here, deliberately. It would read the
+      ;; namespace off `*ns*`, and the expansion resolves the symbol against the
+      ;; namespace the form was WRITTEN in, which is not the same thing: inside
+      ;; a `deftest` body `*ns*` is `user`, so a check would call every target
+      ;; undefined. Letting the emitted symbol resolve is what keeps the alias,
+      ;; refer and privacy rules in one place.
       :else
       (list 'add-method mname dispatch-val
             (cons 'fn (cons (symbol (name mname)) (cons params body)))))))
@@ -1342,7 +1348,11 @@
 (defn protocol-method-spec
   "Read a (method-name [params] \"doc\"?) form into
   {:name \"method-name\" :min-arity n :variadic bool}. The arity comes from the
-  FIRST parameter vector; a spec carrying none counts as one fixed argument."
+  FIRST parameter vector; a spec carrying none counts as one fixed argument.
+
+  These maps are spliced into the emitted `protocol*` form as literals, so they
+  must hold nothing that would be read as code: a raw `[this]` there evaluates
+  `this`."
   [form]
   (let [amp?   (fn [p] (= p '&))
         params (first (filter vector? form))]
@@ -1350,20 +1360,44 @@
      :min-arity (if params (count (remove amp? params)) 1)
      :variadic  (boolean (some amp? params))}))
 
+(defn protocol-method-meta
+  "The var metadata a method form carries: `:arglists` (every parameter vector)
+  and a trailing `:doc`.
+
+  Kept apart from `protocol-method-spec` on purpose. Dispatch needs the spec and
+  nothing else, while this is only what `doc` reports."
+  [form]
+  (let [arglists (apply list (filter vector? form))
+        tail     (last form)
+        ;; Var metadata is data, not code: it is stored as written. The
+        ;; `protocol*` argument list is the opposite and IS evaluated, which is
+        ;; why the arglists live here and never in a method spec.
+        base     (if (seq arglists) {:arglists arglists} {})]
+    (if (string? tail)
+      (assoc base :doc tail)
+      base)))
+
 (defn protocol-body
-  "Split a defprotocol body (everything after the name) into [opts specs]. A
-  leading docstring is dropped, flat :keyword value pairs collect into opts, and
-  every remaining list is read as a method spec."
+  "Split a defprotocol body (everything after the name) into
+  [opts specs method-forms]. A leading docstring lands in opts under :doc, flat
+  :keyword value pairs collect into opts, and every remaining list is read as a
+  method spec. The raw forms come back alongside the specs, in the same order,
+  because the var metadata is read from them and must not travel inside a spec."
   [body]
-  (loop [b (seq (if (string? (first body)) (rest body) body)) opts {} specs []]
-    (cond
-      (nil? b)             [opts specs]
-      (keyword? (first b)) (recur (next (next b))
-                                  (assoc opts (first b) (second b))
-                                  specs)
-      (seq? (first b))     (recur (next b) opts
-                                  (conj specs (protocol-method-spec (first b))))
-      :else                (recur (next b) opts specs))))
+  (let [docstring (when (string? (first body)) (first body))]
+    (loop [b (seq (if docstring (rest body) body))
+           opts (if docstring {:doc docstring} {})
+           specs []
+           forms []]
+      (cond
+        (nil? b)             [opts specs forms]
+        (keyword? (first b)) (recur (next (next b))
+                                    (assoc opts (first b) (second b))
+                                    specs forms)
+        (seq? (first b))     (recur (next b) opts
+                                    (conj specs (protocol-method-spec (first b)))
+                                    (conj forms (first b)))
+        :else                (recur (next b) opts specs forms)))))
 
 (defmacro defprotocol [psym & body]
   ;; `bare` drops any annotation on the name before it is REFERRED to: the
@@ -1372,16 +1406,24 @@
   (let [parts (protocol-body body)
         opts  (first parts)
         specs (second parts)
-        bare  (symbol (name psym))]
+        forms (nth parts 2)
+        bare  (symbol (name psym))
+        ;; The protocol docstring belongs on the var, which is where `doc`
+        ;; looks for it. Metadata rides on the name symbol because that is what
+        ;; `def` binds, the same trick `defmulti` uses above.
+        named (if (:doc opts)
+                (with-meta bare (assoc (or (meta psym) {}) :doc (:doc opts)))
+                psym)]
     (cons 'do
           (concat
-            [(list 'def psym
+            [(list 'def named
                    (list 'protocol* bare specs
                          (boolean (:extend-via-metadata opts))))]
-            (map (fn [s]
-                   (list 'def (symbol (:name s))
+            (map (fn [s f]
+                   (list 'def (with-meta (symbol (:name s))
+                                (protocol-method-meta f))
                          (list 'protocol-fn bare (:name s))))
-                 specs)
+                 specs forms)
             [(list 'var bare)]))))
 
 ;; ── protocol extension: extend-type/extend-protocol over the `extend` primitive
@@ -1402,6 +1444,21 @@
                                  (if head (conj out [head acc]) out))
       :else               (recur (next s) head (conj acc (first s)) out))))
 
+(defn extend-impl-arities
+  "The `fn` arity forms one impl contributes.
+
+  A method is written either flat, `(m [a] body)`, or already grouped,
+  `(m ([a] body) ([a b] body))` — both are legal in `extend-type` and
+  `extend-protocol`, and the grouped shape is the only way to give one method
+  several arities at a single call site. The first element of the tail decides:
+  a vector means the tail IS one arity, anything else means the tail is already
+  a sequence of them."
+  [impl]
+  (let [tail (rest impl)]
+    (if (vector? (first tail))
+      (list tail)
+      tail)))
+
 (defn extend-impl-map
   "Collapse method forms ((m [a] ...) (m [a b] ...)) into
   {:m (fn ([a] ...) ([a b] ...))} — one entry per method name, arities in
@@ -1411,7 +1468,8 @@
         names (distinct (map mname impls))]
     (zipmap (map keyword names)
             (map (fn [n]
-                   (cons 'fn (map rest (filter (fn [i] (= n (mname i))) impls))))
+                   (cons 'fn (mapcat extend-impl-arities
+                                     (filter (fn [i] (= n (mname i))) impls))))
                  names))))
 
 (defmacro extend-type [tsym & specs]
@@ -1858,5 +1916,5 @@
 ;; one anonymous type per form, a fresh instance each time the form evaluates).
 ;; The impl fns capture locals because deftype* registers them at the call site.
 (defmacro reify [& impls]
-  `(make-type-instance (deftype* ~(gensym "reify__") [] ~@impls) {}))
+  `(make-reify-instance (deftype* ~(gensym "reify__") [] ~@impls) {}))
 

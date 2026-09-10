@@ -41,6 +41,7 @@ Recorded divergences:
 | `cljrs/lang_test/deftype.cljc` | Positional constructor, field access, protocol method bodies, mutable fields and `set!` |
 | `cljrs/lang_test/record_predicate.cljc` | `record?` over defrecord, deftype, reify, maps and `assoc` |
 | `cljrs/lang_test/protocol_impl.cljc` | A qualified protocol in an impl position, across the five impl sites |
+| `cljrs/lang_test/protocol_head.cljc` | `defprotocol` docstrings and `:arglists`; grouped multi-arity bodies in `extend-type` / `extend-protocol` |
 | `cljrs/lang_test/multimethod.cljc` | Hierarchy dispatch, specificity, `prefer-method`, the method table, the `defmulti` head |
 | `cljrs/lang_test/meta_transparency.cljc` | Property oracle: `^meta F` evaluates to what `F` evaluates to |
 | `cljrs/lang_test/fixture/proto.cljc` | A protocol in a namespace of its own; no tests |

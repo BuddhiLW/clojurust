@@ -533,7 +533,14 @@ pub struct TypeInstance {
     pub type_tag: Arc<str>,                        // type name, or a gensym for reify
     pub fields: MapValue,                          // keyword → value (immutable fields)
     pub mutable: Option<GcPtr<crate::types::Atom>>, // keyword → value, deftype only
-    pub record: bool,                              // defrecord only; deftype/reify are false
+    pub kind: DatatypeKind,                        // Record | Type | Reify
+}
+
+pub enum DatatypeKind { Record, Type, Reify }
+
+impl DatatypeKind {
+    pub fn is_record(self) -> bool;    // what `record?` reads
+    pub fn carries_meta(self) -> bool; // false for Type only
 }
 ```
 
@@ -542,8 +549,25 @@ Used by `defrecord` (named type_tag, generates `->Name`/`map->Name` constructors
 constructors).  Supports keyword field access `(:field rec)`, `get`, `assoc`
 (returns new TypeInstance), and `count`.
 
-`record` is what `record?` reads, so it is true only for `defrecord`.  `assoc`
-and the structured-clone boundary both carry it through.
+`kind` says which of the three forms produced the instance.  It is an enum and
+not a `record: bool` because the three answer *different* questions and no two
+of them group the same way:
+
+| Question | `Record` | `Type` | `Reify` |
+|---|---|---|---|
+| `record?` | yes | no | no |
+| `with-meta` accepted | yes | **no** | yes |
+
+A boolean can express two members of a three-member set, so it always loses one
+distinction — and which one it loses depends on who wrote the boolean.  Here it
+was `reify`: deciding metadata from "is it a record" refuses `reify`, which both
+the JVM and cljrs accept.  `assoc` and the structured-clone boundary carry
+`kind` through.
+
+The metadata rule matches the JVM, where a `deftype` class implements neither
+`IObj` nor `IMeta`.  Pinned on both legs of the differential corpus in
+`tests/cljrs/cljrs/lang_test/record_predicate.cljc`, with no reader conditional
+— the two runtimes agree.
 
 `mutable` holds a `deftype`'s `^:unsynchronized-mutable` / `^:volatile-mutable`
 fields in one interior-mutable cell — an `Atom` over a keyword→value map — so
