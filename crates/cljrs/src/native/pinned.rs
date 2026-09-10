@@ -8,7 +8,7 @@
 //!   versioned (`mylib/f@<sha>`) resolution; its artifact is cached forever.
 //! - `:local/root` — a working tree, built as it currently stands. Serves
 //!   `require` only (there is no commit to resolve `@<sha>` against), and is
-//!   rebuilt on every load because the tree changes underfoot.
+//!   versioned by a digest of the tree, so an edit is a different build.
 //!
 //! By default, a pinned symbol (`mylib/f@<sha>`) that resolves to a native
 //! (Rust-backed) function falls back to the **current binary's**
@@ -103,15 +103,18 @@ fn load_pinned(globals: &Arc<GlobalEnv>, base_ns: &str, commit: &str) -> EvalRes
     let Some(config) = config else {
         return Ok(false);
     };
-    let Some(dep) = find_dylib_dep(&config, base_ns) else {
+    let Some(decl) = find_dylib_dep(&config, base_ns) else {
         return Ok(false);
     };
-    let dep = dep.map_err(|e| EvalError::Runtime(format!("pinned native {base_ns}: {e}")))?;
     // A working tree has no commit, so it cannot answer for `ns/f@sha`.
-    // Decline and let the versioned resolver fall back as it would have.
-    if !dep.is_pinned() {
+    // Declined *before* validation: a misconfigured local dep must leave
+    // versioned resolution exactly as it was, not turn it into an error.
+    if !decl.is_pinned() {
         return Ok(false);
     }
+    let dep = decl
+        .validate()
+        .map_err(|e| EvalError::Runtime(format!("pinned native {base_ns}: {e}")))?;
 
     let versioned_ns = format!("{base_ns}@{commit}");
     if globals.is_loaded(&versioned_ns) {
@@ -146,10 +149,12 @@ fn load_require(globals: &Arc<GlobalEnv>, ns: &str) -> EvalResult<bool> {
     let Some(config) = config else {
         return Ok(false);
     };
-    let Some(dep) = find_dylib_dep(&config, ns) else {
+    let Some(decl) = find_dylib_dep(&config, ns) else {
         return Ok(false);
     };
-    let dep = dep.map_err(|e| EvalError::Runtime(format!("native dep {ns}: {e}")))?;
+    let dep = decl
+        .validate()
+        .map_err(|e| EvalError::Runtime(format!("native dep {ns}: {e}")))?;
 
     // Already brought in (e.g. an earlier require of a sibling namespace
     // provided by the same dylib loaded the whole package).
@@ -203,10 +208,43 @@ struct SourceVersion {
     key: String,
 }
 
+/// A `:rust/load :dylib` dependency as `cljrs.edn` declares it, before
+/// validation.
+///
+/// The source alone settles which resolution paths the dep can serve, so that
+/// question is answerable here; only actually building it needs `:rust/init`.
+#[derive(Debug, Clone)]
+struct DylibDecl {
+    source: NativeSource,
+    init_fn: Option<Arc<str>>,
+    crate_subdir: Option<Arc<str>>,
+}
+
+impl DylibDecl {
+    /// Whether this dep names an immutable commit, and so can serve versioned
+    /// (`ns/f@sha`) resolution.
+    fn is_pinned(&self) -> bool {
+        self.source.commit().is_some()
+    }
+
+    /// Into a loadable dep, or `Err` when the dep opted into `:dylib` without
+    /// naming the `:rust/init` function that would load it.
+    fn validate(self) -> Result<NativeDep, String> {
+        let init_fn = self
+            .init_fn
+            .ok_or("dep has :rust/load :dylib but no :rust/init function")?;
+        Ok(NativeDep {
+            source: self.source,
+            init_fn,
+            crate_subdir: self.crate_subdir,
+        })
+    }
+}
+
 /// A dependency that opts into loading its Rust code as a cdylib.
 ///
-/// Constructing one is the validation step: a `NativeDep` always names an
-/// init function, so no later stage has to handle its absence.
+/// Validation happens in [`DylibDecl::validate`]: a `NativeDep` always names
+/// an init function, so no later stage has to handle its absence.
 #[derive(Debug, Clone)]
 struct NativeDep {
     source: NativeSource,
@@ -215,35 +253,12 @@ struct NativeDep {
 }
 
 impl NativeDep {
-    /// Build a dep from a declaration, or `Err` when it opted into `:dylib`
-    /// without naming the `:rust/init` function that would load it.
-    fn new(
-        source: NativeSource,
-        rust_init: Option<Arc<str>>,
-        crate_subdir: Option<Arc<str>>,
-    ) -> Result<Self, String> {
-        let init_fn = rust_init.ok_or("dep has :rust/load :dylib but no :rust/init function")?;
-        Ok(NativeDep {
-            source,
-            init_fn,
-            crate_subdir,
-        })
-    }
-
-    /// Whether this dep names an immutable commit, and so can serve versioned
-    /// (`ns/f@sha`) resolution.
-    fn is_pinned(&self) -> bool {
-        self.source.commit().is_some()
-    }
-
-    /// The Cargo package name, as the init path's first segment spells it.
-    fn crate_name(&self) -> &str {
+    /// The `extern crate` identifier the `:rust/init` path names: its first
+    /// segment.  A Rust identifier, *not* the Cargo package name, which comes
+    /// from [`package_name_of`]; the two differ whenever the package name
+    /// contains `-`, which an identifier cannot.
+    fn pkg_ident(&self) -> &str {
         self.init_fn.split("::").next().unwrap_or(&self.init_fn)
-    }
-
-    /// The `extern crate` identifier for [`Self::crate_name`].
-    fn pkg_ident(&self) -> String {
-        self.crate_name().replace('-', "_")
     }
 
     /// The init path with its crate segment stripped (`a::b::c` -> `b::c`).
@@ -263,28 +278,28 @@ impl NativeDep {
     }
 }
 
-/// Read the `:rust/*` keys of a `:deps` entry as a native dep, or `None` when
-/// the entry did not opt into `:rust/load :dylib`.
-fn as_native_dep(dep: &Dependency) -> Option<Result<NativeDep, String>> {
+/// Read the `:rust/*` keys of a `:deps` entry as a dylib declaration, or
+/// `None` when the entry did not opt into `:rust/load :dylib`.
+fn as_dylib_decl(dep: &Dependency) -> Option<DylibDecl> {
     match dep {
-        Dependency::Git(git) if git.rust_load_dylib => Some(NativeDep::new(
-            NativeSource::Pinned {
+        Dependency::Git(git) if git.rust_load_dylib => Some(DylibDecl {
+            source: NativeSource::Pinned {
                 url: git.url.clone(),
                 sha: git.sha.clone(),
             },
-            git.rust_init.clone(),
-            git.rust_crate_dir.clone(),
-        )),
+            init_fn: git.rust_init.clone(),
+            crate_subdir: git.rust_crate_dir.clone(),
+        }),
         Dependency::Local {
             root,
             rust_init,
             rust_crate_dir,
             rust_load_dylib: true,
-        } => Some(NativeDep::new(
-            NativeSource::WorkingTree(root.clone()),
-            rust_init.clone(),
-            rust_crate_dir.clone(),
-        )),
+        } => Some(DylibDecl {
+            source: NativeSource::WorkingTree(root.clone()),
+            init_fn: rust_init.clone(),
+            crate_subdir: rust_crate_dir.clone(),
+        }),
         _ => None,
     }
 }
@@ -298,16 +313,13 @@ fn covers_namespace(dep_name: &str, ns: &str) -> bool {
             .is_some_and(|rest| rest.starts_with('.'))
 }
 
-/// Find the `:rust/load :dylib` dep covering `base_ns`.
-fn find_dylib_dep(
-    config: &cljrs_project::config::DepsConfig,
-    base_ns: &str,
-) -> Option<Result<NativeDep, String>> {
+/// Find the `:rust/load :dylib` declaration covering `base_ns`.
+fn find_dylib_dep(config: &cljrs_project::config::DepsConfig, base_ns: &str) -> Option<DylibDecl> {
     config
         .deps
         .iter()
         .filter(|(name, _)| covers_namespace(name, base_ns))
-        .find_map(|(_, dep)| as_native_dep(dep))
+        .find_map(|(_, dep)| as_dylib_decl(dep))
 }
 
 // ── Wrapper build ─────────────────────────────────────────────────────────────
@@ -316,9 +328,22 @@ fn find_dylib_dep(
 struct WrapperPlan {
     /// The dep's own crate, already on disk.
     crate_dir: PathBuf,
-    /// The generated wrapper crate's directory.
+    /// The generated wrapper crate's directory.  Deliberately *not* keyed by
+    /// version: cargo tracks the dep's own sources itself, so one wrapper
+    /// crate and one target directory per `(dep crate, ABI)` makes an edit
+    /// cost an incremental rebuild instead of a fresh one, and leaves one
+    /// target directory on disk instead of one per edit.
     wrapper_dir: PathBuf,
-    /// The cdylib `cargo` will produce inside `wrapper_dir`.
+    /// The cargo target directory for `wrapper_dir`, set explicitly so the
+    /// artifact path below is predictable whatever the ambient
+    /// `CARGO_TARGET_DIR` says.
+    target_dir: PathBuf,
+    /// The cdylib cargo produces inside [`Self::target_dir`].
+    build_output: PathBuf,
+    /// The version-unique path the cdylib is published to and `dlopen`ed
+    /// from.  A rebuilt library reusing the path an already-loaded one
+    /// occupies would not be picked up, so this cannot be the shared
+    /// [`Self::build_output`].
     artifact: PathBuf,
     /// Cache identity, for log lines.
     label: String,
@@ -340,7 +365,7 @@ fn build_wrapper(dep: &NativeDep, commit_override: Option<&str>) -> Result<PathB
         ));
     }
 
-    let version = resolve_version(&dep.source, &crate_dir, commit_override)?;
+    let version = version_of(dep, &source_root, commit_override)?;
     let plan = plan_wrapper(dep, crate_dir, &version);
     if plan.artifact.exists() {
         return Ok(plan.artifact);
@@ -349,26 +374,55 @@ fn build_wrapper(dep: &NativeDep, commit_override: Option<&str>) -> Result<PathB
     write_wrapper_crate(&plan.wrapper_dir, &plan.crate_dir, dep)?;
     cargo_build(&plan)?;
 
-    if !plan.artifact.exists() {
+    if !plan.build_output.exists() {
         return Err(format!(
             "built wrapper not found at {}",
-            plan.artifact.display()
+            plan.build_output.display()
         ));
     }
+    publish_artifact(&plan)?;
     Ok(plan.artifact)
 }
 
-/// Identify what is about to be built.
+/// Copy the freshly built cdylib to its version-unique path.
+///
+/// `dlopen` keys on the path, so a rebuilt library has to arrive somewhere the
+/// previous one never occupied; the shared build directory cannot provide
+/// that, and the copy is what buys it back.
+fn publish_artifact(plan: &WrapperPlan) -> Result<(), String> {
+    let dir = plan
+        .artifact
+        .parent()
+        .ok_or("wrapper artifact path has no parent directory")?;
+    std::fs::create_dir_all(dir).map_err(|e| format!("creating {}: {e}", dir.display()))?;
+    std::fs::copy(&plan.build_output, &plan.artifact).map_err(|e| {
+        format!(
+            "copying {} to {}: {e}",
+            plan.build_output.display(),
+            plan.artifact.display()
+        )
+    })?;
+    Ok(())
+}
+
+/// Identify what is about to be built, given the dep's materialized
+/// `source_root`.
 ///
 /// A pinned dep is named by its commit. A working tree is named by a digest of
-/// its source files, so an edited tree is a different version — which is what
-/// gets it rebuilt, and gets the result its own path to be loaded from.
-fn resolve_version(
-    source: &NativeSource,
-    crate_dir: &Path,
+/// its source files, so an edited tree is a different version, which is what
+/// gets it rebuilt and gets the result its own path to be loaded from.
+///
+/// The digest covers the whole `source_root`, not just the crate `:rust/crate`
+/// names: a crate in a multi-crate tree normally has path dependencies on its
+/// siblings, so an edit outside it still changes what gets built.  The cost is
+/// a spurious rebuild when something the build ignores changes; the
+/// alternative is loading a stale library, silently.
+fn version_of(
+    dep: &NativeDep,
+    source_root: &Path,
     commit_override: Option<&str>,
 ) -> Result<SourceVersion, String> {
-    match source {
+    match &dep.source {
         NativeSource::Pinned { url, sha } => {
             let commit = commit_override.unwrap_or(sha.as_ref());
             Ok(SourceVersion {
@@ -376,11 +430,11 @@ fn resolve_version(
                 key: format!("{url}|{commit}"),
             })
         }
-        NativeSource::WorkingTree(root) => {
-            let digest = digest_source_tree(crate_dir)?;
+        NativeSource::WorkingTree(_) => {
+            let digest = digest_source_tree(source_root)?;
             Ok(SourceVersion {
                 slug: format!("@local-{digest}"),
-                key: format!("{}|{digest}", root.display()),
+                key: format!("{}|{digest}", source_root.display()),
             })
         }
     }
@@ -411,11 +465,12 @@ fn digest_source_tree(dir: &Path) -> Result<String, String> {
                 continue;
             }
             let rel = path.strip_prefix(dir).unwrap_or(&path);
-            let bytes = std::fs::read(&path).map_err(|e| format!("reading {}: {e}", path.display()))?;
+            let bytes =
+                std::fs::read(&path).map_err(|e| format!("reading {}: {e}", path.display()))?;
             acc.push_str(&format!(
                 "{}|{}\n",
                 rel.display(),
-                stable_hash(&String::from_utf8_lossy(&bytes))
+                stable_hash_bytes(&bytes)
             ));
         }
     }
@@ -458,17 +513,56 @@ fn materialize_source(
 
 /// Derive every path the build needs. Pure: the source is already resolved.
 fn plan_wrapper(dep: &NativeDep, crate_dir: PathBuf, version: &SourceVersion) -> WrapperPlan {
+    let abi = abi_fingerprint();
     let label = format!("{}{}", dep.pkg_ident(), version.slug);
-    let fp_hash = stable_hash(&format!("{}|{}", abi_fingerprint(), version.key));
+    let fp_hash = stable_hash(&format!("{abi}|{}", version.key));
+    let build_hash = stable_hash(&format!("{abi}|{}", crate_dir.display()));
     let wrapper_dir = dylib_cache_root()
+        .join("build")
+        .join(format!("{}-{build_hash}", dep.pkg_ident()));
+    let target_dir = wrapper_dir.join("target");
+    let lib_file = wrapper_lib_filename();
+    let build_output = target_dir.join(host_profile()).join(&lib_file);
+    let artifact = dylib_cache_root()
         .join(&label)
-        .join(format!("fp-{fp_hash}"));
-    let artifact = wrapper_artifact_path(&wrapper_dir);
+        .join(format!("fp-{fp_hash}"))
+        .join(&lib_file);
     WrapperPlan {
         crate_dir,
         wrapper_dir,
+        target_dir,
+        build_output,
         artifact,
         label,
+    }
+}
+
+/// Whether a wrapper build may reach the network to resolve dependencies.
+///
+/// Cargo resolves the *dependency's own* crates here, not just the
+/// `cljrs-interop` pin, so online is the default: an extension that pulls an
+/// uncached crates.io crate has to be buildable.  `CLJRS_DYLIB_OFFLINE`
+/// selects `--offline` for a machine that already has everything vendored.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NetworkPolicy {
+    Online,
+    Offline,
+}
+
+impl NetworkPolicy {
+    /// Read the policy from a `CLJRS_DYLIB_OFFLINE` value.  Unset, empty and
+    /// `0` mean online; anything else opts into `--offline`.
+    fn from_env_value(value: Option<&str>) -> NetworkPolicy {
+        match value {
+            None => NetworkPolicy::Online,
+            Some(v) if v.is_empty() || v == "0" => NetworkPolicy::Online,
+            Some(_) => NetworkPolicy::Offline,
+        }
+    }
+
+    /// The policy this process runs under.
+    fn from_env() -> NetworkPolicy {
+        NetworkPolicy::from_env_value(std::env::var("CLJRS_DYLIB_OFFLINE").ok().as_deref())
     }
 }
 
@@ -476,11 +570,13 @@ fn plan_wrapper(dep: &NativeDep, crate_dir: PathBuf, version: &SourceVersion) ->
 /// (see [`abi_fingerprint`]).
 fn cargo_build(plan: &WrapperPlan) -> Result<(), String> {
     let mut cmd = std::process::Command::new("cargo");
-    cmd.arg("build").current_dir(&plan.wrapper_dir);
+    cmd.arg("build")
+        .current_dir(&plan.wrapper_dir)
+        .env("CARGO_TARGET_DIR", &plan.target_dir);
     if host_profile() == "release" {
         cmd.arg("--release");
     }
-    if find_workspace_root().is_some() {
+    if NetworkPolicy::from_env() == NetworkPolicy::Offline {
         cmd.arg("--offline");
     }
     eprintln!("[cljrs] building native package {}…", plan.label);
@@ -514,8 +610,9 @@ fn write_wrapper_crate(
         )
     })?;
     let dep_line = format!(
-        r#"{pkg_ident} = {{ path = "{}", package = "{package_name}" }}"#,
-        crate_dir.display()
+        "{pkg_ident} = {{ path = {}, package = {} }}",
+        toml_basic_string(&crate_dir.display().to_string()),
+        toml_basic_string(&package_name),
     );
     std::fs::create_dir_all(wrapper_dir.join("src")).map_err(|e| e.to_string())?;
 
@@ -524,8 +621,8 @@ fn write_wrapper_crate(
     // otherwise.  The handshake catches any residual mismatch.
     let interop_dep = match find_workspace_root() {
         Some(root) => format!(
-            "cljrs-interop = {{ path = \"{}\" }}",
-            root.join("crates/cljrs-interop").display()
+            "cljrs-interop = {{ path = {} }}",
+            toml_basic_string(&root.join("crates/cljrs-interop").display().to_string())
         ),
         None => format!("cljrs-interop = \"={}\"", env!("CARGO_PKG_VERSION")),
     };
@@ -611,6 +708,27 @@ pub unsafe extern "C" fn cljrs_dylib_init(registry: *mut cljrs_interop::Registry
     Ok(())
 }
 
+/// `s` rendered as a TOML basic string, quotes included.
+///
+/// The generated manifest carries filesystem paths: a Windows separator is an
+/// invalid escape inside a basic string, and a `"` would close it early.
+fn toml_basic_string(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str(r"\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            _ => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
 /// The `[package] name` declared in a Cargo manifest.
 ///
 /// Only that one key is read, so the full TOML grammar is not needed: track
@@ -640,8 +758,8 @@ fn package_name_of(manifest: &str) -> Option<String> {
     None
 }
 
-/// The built artifact path for a wrapper crate dir (host-profile build).
-fn wrapper_artifact_path(wrapper_dir: &Path) -> PathBuf {
+/// The cdylib file name cargo produces for the generated wrapper crate.
+fn wrapper_lib_filename() -> String {
     let stem = "cljrs_pinned_wrapper";
     #[cfg(target_os = "macos")]
     let file = format!("lib{stem}.dylib");
@@ -649,7 +767,7 @@ fn wrapper_artifact_path(wrapper_dir: &Path) -> PathBuf {
     let file = format!("{stem}.dll");
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     let file = format!("lib{stem}.so");
-    wrapper_dir.join("target").join(host_profile()).join(file)
+    file
 }
 
 // ── Loading ───────────────────────────────────────────────────────────────────
@@ -725,15 +843,24 @@ fn find_workspace_root() -> Option<PathBuf> {
 
 /// Short stable hex hash for cache directory names.
 fn stable_hash(s: &str) -> String {
-    use std::hash::{DefaultHasher, Hash as _, Hasher as _};
+    stable_hash_bytes(s.as_bytes())
+}
+
+/// [`stable_hash`] over raw bytes.
+///
+/// File contents are hashed as they lie: a lossy UTF-8 conversion maps every
+/// invalid byte to one replacement character, which would digest two files
+/// that differ only in invalid UTF-8 identically.
+fn stable_hash_bytes(bytes: &[u8]) -> String {
+    use std::hash::{DefaultHasher, Hasher as _};
     let mut h = DefaultHasher::new();
-    s.hash(&mut h);
+    h.write(bytes);
     format!("{:016x}", h.finish())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::package_name_of;
+    use super::*;
 
     #[test]
     fn reads_the_package_name() {
@@ -787,5 +914,192 @@ version.workspace = true
 edition.workspace = true
 "#;
         assert_eq!(package_name_of(manifest).as_deref(), Some("cljrs-ffmpeg"));
+    }
+
+    /// A working-tree dep is versioned by a digest of its whole root, not of
+    /// the crate `:rust/crate` selects: the crate being built normally has
+    /// path dependencies on its siblings, so an edit to one of those changes
+    /// what cargo would produce.  Digesting the crate directory alone leaves
+    /// the version unchanged, and `build_wrapper` then returns the cached
+    /// artifact without ever asking cargo to rebuild.
+    #[test]
+    fn a_working_tree_version_covers_the_whole_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        std::fs::create_dir_all(root.join("crates/thing/src")).unwrap();
+        std::fs::create_dir_all(root.join("crates/sibling/src")).unwrap();
+        std::fs::write(
+            root.join("crates/thing/Cargo.toml"),
+            "[package]\nname = \"thing\"\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("crates/thing/src/lib.rs"), "pub fn f() {}\n").unwrap();
+        std::fs::write(
+            root.join("crates/sibling/src/lib.rs"),
+            "pub const N: i64 = 1;\n",
+        )
+        .unwrap();
+
+        let dep = NativeDep {
+            source: NativeSource::WorkingTree(root.to_path_buf()),
+            init_fn: Arc::from("thing::cljrs_init"),
+            crate_subdir: Some(Arc::from("crates/thing")),
+        };
+
+        let before = version_of(&dep, root, None).unwrap();
+        // The edit is outside `:rust/crate`.
+        std::fs::write(
+            root.join("crates/sibling/src/lib.rs"),
+            "pub const N: i64 = 2;\n",
+        )
+        .unwrap();
+        let after = version_of(&dep, root, None).unwrap();
+
+        assert_ne!(
+            before.slug, after.slug,
+            "an edit to a sibling crate must produce a different version"
+        );
+        assert_ne!(before.key, after.key);
+    }
+
+    /// A pinned dep is named by its commit, never by a digest: its checkout is
+    /// immutable, and `commit_override` is what the versioned resolver asks
+    /// for.
+    #[test]
+    fn a_pinned_version_is_the_commit() {
+        let dep = NativeDep {
+            source: NativeSource::Pinned {
+                url: Arc::from("https://example.invalid/lib"),
+                sha: Arc::from("aaaa"),
+            },
+            init_fn: Arc::from("lib::cljrs_init"),
+            crate_subdir: None,
+        };
+        assert_eq!(
+            version_of(&dep, Path::new("/nonexistent"), None)
+                .unwrap()
+                .slug,
+            "@aaaa"
+        );
+        assert_eq!(
+            version_of(&dep, Path::new("/nonexistent"), Some("bbbb"))
+                .unwrap()
+                .slug,
+            "@bbbb"
+        );
+    }
+
+    /// Two files differing only in invalid UTF-8 must not digest identically:
+    /// `String::from_utf8_lossy` collapses every invalid byte onto the same
+    /// replacement character, so the bytes have to be hashed as they lie.
+    #[test]
+    fn a_digest_distinguishes_invalid_utf8() {
+        let a = tempfile::tempdir().unwrap();
+        let b = tempfile::tempdir().unwrap();
+        std::fs::write(a.path().join("x.bin"), [0xffu8]).unwrap();
+        std::fs::write(b.path().join("x.bin"), [0xfeu8]).unwrap();
+        assert_ne!(
+            digest_source_tree(a.path()).unwrap(),
+            digest_source_tree(b.path()).unwrap()
+        );
+    }
+
+    /// The `:rust/init` path's first segment is a Rust identifier, which is
+    /// what the generated wrapper's `extern crate` reference needs; the Cargo
+    /// package name it renames is `package_name_of`'s job.
+    #[test]
+    fn the_package_identifier_is_the_init_paths_first_segment() {
+        let dep = NativeDep {
+            source: NativeSource::WorkingTree(PathBuf::from("/x")),
+            init_fn: Arc::from("my_lib::deep::cljrs_init"),
+            crate_subdir: None,
+        };
+        assert_eq!(dep.pkg_ident(), "my_lib");
+        assert_eq!(dep.init_tail(), "deep::cljrs_init");
+    }
+
+    /// A `:local/root` dep declines versioned resolution before validation, so
+    /// a missing `:rust/init` cannot turn a fallback into an error.
+    #[test]
+    fn a_working_tree_declaration_is_not_pinned() {
+        let local = DylibDecl {
+            source: NativeSource::WorkingTree(PathBuf::from("/x")),
+            init_fn: None,
+            crate_subdir: None,
+        };
+        assert!(!local.is_pinned());
+        assert!(local.validate().is_err());
+
+        let pinned = DylibDecl {
+            source: NativeSource::Pinned {
+                url: Arc::from("u"),
+                sha: Arc::from("s"),
+            },
+            init_fn: None,
+            crate_subdir: None,
+        };
+        assert!(pinned.is_pinned());
+    }
+
+    /// Paths reach the generated manifest as TOML basic strings: a Windows
+    /// separator is an invalid escape there and a quote would close the string.
+    #[test]
+    fn a_basic_string_escapes_backslashes_and_quotes() {
+        assert_eq!(
+            toml_basic_string(r"C:\src\my crate"),
+            r#""C:\\src\\my crate""#
+        );
+        assert_eq!(toml_basic_string(r#"a"b"#), r#""a\"b""#);
+        assert_eq!(toml_basic_string("plain/path"), r#""plain/path""#);
+    }
+
+    /// `--offline` is a policy the operator sets, not a fact derived from
+    /// whether a cljrs checkout happens to be around: the flag constrains the
+    /// dependency's own resolution, which that checkout says nothing about.
+    #[test]
+    fn the_network_policy_comes_from_its_own_setting() {
+        assert_eq!(NetworkPolicy::from_env_value(None), NetworkPolicy::Online);
+        assert_eq!(
+            NetworkPolicy::from_env_value(Some("")),
+            NetworkPolicy::Online
+        );
+        assert_eq!(
+            NetworkPolicy::from_env_value(Some("0")),
+            NetworkPolicy::Online
+        );
+        assert_eq!(
+            NetworkPolicy::from_env_value(Some("1")),
+            NetworkPolicy::Offline
+        );
+    }
+
+    /// The built cdylib is published to a version-unique path: `dlopen` keys
+    /// on the path, so a rebuild landing where a loaded library already sits
+    /// would not be picked up.  The build directory it comes from is shared
+    /// across versions, which is what keeps rebuilds incremental.
+    #[test]
+    fn the_artifact_path_is_version_unique_but_the_build_dir_is_not() {
+        let dep = NativeDep {
+            source: NativeSource::WorkingTree(PathBuf::from("/x")),
+            init_fn: Arc::from("thing::cljrs_init"),
+            crate_subdir: None,
+        };
+        let crate_dir = PathBuf::from("/x");
+        let v1 = SourceVersion {
+            slug: "@local-1111".into(),
+            key: "/x|1111".into(),
+        };
+        let v2 = SourceVersion {
+            slug: "@local-2222".into(),
+            key: "/x|2222".into(),
+        };
+        let a = plan_wrapper(&dep, crate_dir.clone(), &v1);
+        let b = plan_wrapper(&dep, crate_dir, &v2);
+
+        assert_ne!(a.artifact, b.artifact);
+        assert_eq!(a.wrapper_dir, b.wrapper_dir);
+        assert_eq!(a.target_dir, b.target_dir);
+        assert_eq!(a.build_output, b.build_output);
+        assert!(!a.artifact.starts_with(&a.target_dir));
     }
 }

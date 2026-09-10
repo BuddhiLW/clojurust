@@ -184,7 +184,9 @@ which builds the working tree as it currently stands — no commit, no push:
 
 Edit the crate and the next `require` rebuilds it: a local dependency is
 versioned by a digest of its source files, so a changed tree is a different
-build. This is the loop for writing an extension; pin it with `:git/sha`
+build. The digest covers the whole `:local/root`, not just the `:rust/crate`
+subdirectory, so editing a sibling crate the extension depends on also
+rebuilds. This is the loop for writing an extension; pin it with `:git/sha`
 to ship it.
 
 Two limits apply to a local native dependency, both following from its having
@@ -195,6 +197,13 @@ no commit:
 - It is **not reproducible**. Two machines with different working trees get
   different builds, silently. Only `:git/sha` makes a build repeatable.
 
-Builds are cached under `~/.cljrs/cache/dylib/` per crate, version, compiler
+Builds are cached under `~/.cljrs/cache/dylibs/` per crate, version, compiler
 and cljrs version, and are guarded by an ABI handshake: a wrapper built by a
 different `rustc`, profile, or cljrs version is refused rather than loaded.
+The generated wrapper crate and its cargo target directory are shared by every
+version of one dependency, so an edit costs an incremental rebuild; only the
+built library is copied out to a per-version path, which is what makes a
+rebuilt library load instead of the one already open.
+
+Set `CLJRS_DYLIB_OFFLINE=1` to build wrappers with `cargo --offline`, for a
+machine whose cargo cache already holds everything the dependency needs.

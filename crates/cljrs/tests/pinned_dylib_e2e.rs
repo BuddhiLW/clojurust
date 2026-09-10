@@ -8,17 +8,58 @@
 //! CLJRS_DYLIB_E2E=1 cargo test -p cljrs --test pinned_dylib_e2e
 //! ```
 //!
-//! Fixture: a git repository holding a tiny native crate (`pinlib`) whose
-//! `cljrs_init` defines `pinlib/build-tag`.  Commit v1 returns 1; HEAD
-//! returns 2.  The host also registers its own (HEAD) implementation
-//! returning 99.  Resolving `pinlib/build-tag@<sha1>` must load the dylib
-//! built from commit v1 and return 1, leaving the host's binding untouched.
+//! Fixtures, all built around a tiny native crate (`pinlib`) whose
+//! `cljrs_init` defines `pinlib/build-tag`:
+//!
+//! - a git repository where commit v1 returns 1 and HEAD returns 2, for the
+//!   pinned (`@<sha>`) and plain-`require` paths;
+//! - a single-crate working tree, for `:local/root`;
+//! - a two-crate working tree where the tag comes from a *sibling* crate the
+//!   dylib crate depends on by path, for `:local/root` + `:rust/crate`.
+//!
+//! Every test in this binary sets `HOME` and `CLJRS_WORKSPACE_ROOT` for the
+//! whole process, so they are serialized on [`ENV_LOCK`] (see [`TestEnv`]).
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use cljrs_value::Value;
+
+/// Serializes the tests in this binary.
+///
+/// Each of them points `HOME` at a private cache directory and pins
+/// `CLJRS_WORKSPACE_ROOT`, and `std::env::set_var` is undefined behaviour
+/// while any other thread may be reading the environment: libtest runs these
+/// tests on parallel threads, and a `Command` spawn reads the environment.
+static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+/// The process environment for one test: holds [`ENV_LOCK`] for the test's
+/// whole body, points `HOME` at a private cache directory (so the dylib and
+/// git caches are hermetic) and pins the workspace the wrapper's
+/// `cljrs-interop` is taken from.
+struct TestEnv {
+    _guard: MutexGuard<'static, ()>,
+    _home: tempfile::TempDir,
+}
+
+impl TestEnv {
+    fn new(ws_root: &Path) -> TestEnv {
+        let guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        // SAFETY: `ENV_LOCK` is held for the rest of the test, and every test
+        // in this binary takes it before touching the environment or spawning
+        // a process, so no other thread reads or writes it concurrently.
+        unsafe {
+            std::env::set_var("HOME", home.path());
+            std::env::set_var("CLJRS_WORKSPACE_ROOT", ws_root);
+        }
+        TestEnv {
+            _guard: guard,
+            _home: home,
+        }
+    }
+}
 
 fn git_ok(dir: &Path, args: &[&str]) {
     let out = Command::new("git")
@@ -122,15 +163,8 @@ fn pinned_native_dylib_end_to_end() {
     }
 
     let ws_root = workspace_root();
+    let _env = TestEnv::new(&ws_root);
     let (repo, sha_v1) = make_pinlib_repo(&ws_root);
-
-    // Hermetic dylib/git caches + a pinned workspace for the wrapper deps.
-    let cache_home = tempfile::tempdir().unwrap();
-    // SAFETY: single gated test in this binary; no concurrent env readers.
-    unsafe {
-        std::env::set_var("HOME", cache_home.path());
-        std::env::set_var("CLJRS_WORKSPACE_ROOT", &ws_root);
-    }
 
     let _mutator = cljrs_gc::register_mutator();
     let globals = cljrs_runtime::Runtime::builder()
@@ -224,15 +258,8 @@ fn native_dep_loaded_by_plain_require() {
     }
 
     let ws_root = workspace_root();
+    let _env = TestEnv::new(&ws_root);
     let (repo, sha_v1) = make_pinlib_repo(&ws_root);
-
-    // Hermetic dylib/git caches + a pinned workspace for the wrapper deps.
-    let cache_home = tempfile::tempdir().unwrap();
-    // SAFETY: single gated test invocation; no concurrent env readers.
-    unsafe {
-        std::env::set_var("HOME", cache_home.path());
-        std::env::set_var("CLJRS_WORKSPACE_ROOT", &ws_root);
-    }
 
     let _mutator = cljrs_gc::register_mutator();
     let globals = cljrs_runtime::Runtime::builder()
@@ -314,8 +341,12 @@ cljrs-interop = {{ path = "{}" }}
     std::fs::write(root.join("src/lib.rs"), pinlib_source(tag)).unwrap();
 }
 
-/// A runtime whose `cljrs.edn` declares `pinlib` as a `:local/root` native dep.
-fn globals_with_local_dep(root: &Path) -> Arc<cljrs_runtime::tiered::GlobalEnv> {
+/// A runtime whose `cljrs.edn` declares `pinlib` as a `:local/root` native
+/// dep, with `crate_subdir` as its `:rust/crate`.
+fn globals_with_local_dep(
+    root: &Path,
+    crate_subdir: Option<&str>,
+) -> Arc<cljrs_runtime::tiered::GlobalEnv> {
     let globals = cljrs_runtime::Runtime::builder()
         .execution_mode(cljrs_runtime::ExecutionMode::TreeWalk)
         .build()
@@ -328,7 +359,7 @@ fn globals_with_local_dep(root: &Path) -> Arc<cljrs_runtime::tiered::GlobalEnv> 
             cljrs_project::config::Dependency::Local {
                 root: root.to_path_buf(),
                 rust_init: Some(Arc::from("pinlib::cljrs_init")),
-                rust_crate_dir: None,
+                rust_crate_dir: crate_subdir.map(Arc::from),
                 rust_load_dylib: true,
             },
         )],
@@ -378,19 +409,14 @@ fn local_root_native_dep_is_built_from_the_working_tree() {
     }
 
     let ws_root = workspace_root();
+    let _env = TestEnv::new(&ws_root);
     let tree = tempfile::tempdir().unwrap();
     write_pinlib_tree(tree.path(), &ws_root, 7);
 
-    let cache_home = tempfile::tempdir().unwrap();
-    // SAFETY: single gated test invocation; no concurrent env readers.
-    unsafe {
-        std::env::set_var("HOME", cache_home.path());
-        std::env::set_var("CLJRS_WORKSPACE_ROOT", &ws_root);
-    }
     let _mutator = cljrs_gc::register_mutator();
 
     assert_eq!(
-        require_pinlib(&globals_with_local_dep(tree.path())),
+        require_pinlib(&globals_with_local_dep(tree.path(), None)),
         7,
         "the dylib must be built from the working tree as it stands"
     );
@@ -399,10 +425,174 @@ fn local_root_native_dep_is_built_from_the_working_tree() {
     // runtime: the rebuilt dylib must carry the edit.
     std::fs::write(tree.path().join("src/lib.rs"), pinlib_source(8)).unwrap();
     assert_eq!(
-        require_pinlib(&globals_with_local_dep(tree.path())),
+        require_pinlib(&globals_with_local_dep(tree.path(), None)),
         8,
         "an edited working tree must be rebuilt, not served from cache"
     );
+}
+
+/// Write a two-crate working tree: the dylib crate at `crates/pinlib`, and the
+/// sibling `crates/pintag` it takes the build tag from by path dependency.
+/// This is the layout `:rust/crate` exists for.
+fn write_multi_crate_tree(root: &Path, ws_root: &Path, tag: i64) {
+    std::fs::create_dir_all(root.join("crates/pinlib/src")).unwrap();
+    std::fs::create_dir_all(root.join("crates/pintag/src")).unwrap();
+
+    std::fs::write(
+        root.join("crates/pintag/Cargo.toml"),
+        r#"[package]
+name = "pintag"
+version = "0.1.0"
+edition = "2024"
+
+[workspace]
+"#,
+    )
+    .unwrap();
+    write_pintag_source(root, tag);
+
+    let pinlib_toml = format!(
+        r#"[package]
+name = "pinlib"
+version = "0.1.0"
+edition = "2024"
+
+[workspace]
+
+[dependencies]
+cljrs-interop = {{ path = "{}" }}
+pintag = {{ path = "../pintag" }}
+"#,
+        ws_root.join("crates/cljrs-interop").display()
+    );
+    std::fs::write(root.join("crates/pinlib/Cargo.toml"), pinlib_toml).unwrap();
+    std::fs::write(
+        root.join("crates/pinlib/src/lib.rs"),
+        r#"use cljrs_interop::{Registry, wrap_fn0};
+
+pub fn cljrs_init(registry: &mut Registry) {
+    registry.define(
+        "pinlib/build-tag",
+        wrap_fn0("build-tag", || Ok::<i64, String>(pintag::TAG)),
+    );
+}
+"#,
+    )
+    .unwrap();
+}
+
+/// Rewrite only the sibling crate's source, leaving `crates/pinlib` untouched.
+fn write_pintag_source(root: &Path, tag: i64) {
+    std::fs::write(
+        root.join("crates/pintag/src/lib.rs"),
+        format!("pub const TAG: i64 = {tag};\n"),
+    )
+    .unwrap();
+}
+
+/// A `:local/root` dep with `:rust/crate` pointing at one crate of a
+/// multi-crate tree is versioned by the whole tree, not by that crate: the
+/// crate's path dependencies are part of what gets built.
+///
+/// Editing only the sibling leaves `crates/pinlib` byte-identical.  Digesting
+/// the `:rust/crate` directory alone therefore yields the same version, the
+/// cached artifact is returned before cargo is ever invoked, and the stale
+/// library is `dlopen`ed.
+#[test]
+fn local_root_native_dep_picks_up_a_sibling_crate_edit() {
+    if std::env::var("CLJRS_DYLIB_E2E").is_err() {
+        eprintln!(
+            "skipping local_root_native_dep_picks_up_a_sibling_crate_edit \
+             (set CLJRS_DYLIB_E2E=1 to run)"
+        );
+        return;
+    }
+
+    let ws_root = workspace_root();
+    let _env = TestEnv::new(&ws_root);
+    let tree = tempfile::tempdir().unwrap();
+    write_multi_crate_tree(tree.path(), &ws_root, 11);
+
+    let _mutator = cljrs_gc::register_mutator();
+    let crate_subdir = Some("crates/pinlib");
+
+    assert_eq!(
+        require_pinlib(&globals_with_local_dep(tree.path(), crate_subdir)),
+        11,
+        "the dylib must be built from the crate :rust/crate names"
+    );
+
+    // The edit is entirely outside `:rust/crate`.
+    write_pintag_source(tree.path(), 12);
+    assert_eq!(
+        require_pinlib(&globals_with_local_dep(tree.path(), crate_subdir)),
+        12,
+        "an edit to a sibling crate must rebuild, not serve the cached artifact"
+    );
+}
+
+/// A `:local/root` dep that opted into `:dylib` but named no `:rust/init` is
+/// still *declined* by versioned resolution, not turned into an error: whether
+/// a dep can answer `ns/f@<sha>` follows from its source having no commit, and
+/// that is settled before `:rust/init` is required.
+///
+/// Not gated on `CLJRS_DYLIB_E2E`: the dep declines before anything is
+/// materialized or built, which is the whole point, so nothing here runs cargo.
+#[test]
+fn a_local_dep_without_rust_init_declines_versioned_resolution() {
+    let ws_root = workspace_root();
+    let _env = TestEnv::new(&ws_root);
+    let _mutator = cljrs_gc::register_mutator();
+
+    let globals = cljrs_runtime::Runtime::builder()
+        .execution_mode(cljrs_runtime::ExecutionMode::TreeWalk)
+        .build()
+        .expect("runtime")
+        .into_globals();
+
+    // The host's own implementation, which the fallback must reach.
+    let head_fn = cljrs_value::NativeFn {
+        name: Arc::from("build-tag"),
+        arity: cljrs_value::Arity::Fixed(0),
+        func: Arc::new(|_args| Ok(Value::Long(99))),
+    };
+    globals.get_or_create_ns("pinlib");
+    globals.intern(
+        "pinlib",
+        Arc::from("build-tag"),
+        Value::NativeFunction(cljrs_gc::GcPtr::new(head_fn)),
+    );
+
+    // `:rust/load :dylib` with no `:rust/init`, on a root that does not exist:
+    // reaching either the validation error or the filesystem would be a bug.
+    let config = cljrs_project::config::DepsConfig {
+        deps: vec![(
+            Arc::from("pinlib"),
+            cljrs_project::config::Dependency::Local {
+                root: PathBuf::from("/nonexistent/local/root"),
+                rust_init: None,
+                rust_crate_dir: None,
+                rust_load_dylib: true,
+            },
+        )],
+        ..Default::default()
+    };
+    *globals.deps_config.write().unwrap() = Some(Arc::new(config));
+    cljrs::native::pinned::install(&globals);
+
+    let sha = "0123456789abcdef0123456789abcdef01234567";
+    let resolved = cljrs_runtime::env::versioned::resolve_versioned_value(
+        &globals,
+        "user",
+        Some("pinlib"),
+        "build-tag",
+        sha,
+    )
+    .expect("a misconfigured local dep must decline versioned resolution, not error it");
+    let Value::NativeFunction(nf) = &resolved else {
+        panic!("expected a native fn, got {resolved:?}");
+    };
+    assert_eq!((nf.get().func)(&[]).unwrap(), Value::Long(99));
 }
 
 /// A `:local/root` dep has no commit, so it cannot answer a versioned symbol
@@ -419,17 +609,12 @@ fn local_root_native_dep_does_not_serve_versioned_resolution() {
     }
 
     let ws_root = workspace_root();
+    let _env = TestEnv::new(&ws_root);
     let tree = tempfile::tempdir().unwrap();
     write_pinlib_tree(tree.path(), &ws_root, 7);
 
-    let cache_home = tempfile::tempdir().unwrap();
-    // SAFETY: single gated test invocation; no concurrent env readers.
-    unsafe {
-        std::env::set_var("HOME", cache_home.path());
-        std::env::set_var("CLJRS_WORKSPACE_ROOT", &ws_root);
-    }
     let _mutator = cljrs_gc::register_mutator();
-    let globals = globals_with_local_dep(tree.path());
+    let globals = globals_with_local_dep(tree.path(), None);
 
     // The host's own implementation, which the fallback must reach.
     let head_fn = cljrs_value::NativeFn {
