@@ -10,7 +10,7 @@ use cljrs_value::{
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::env::env::Env;
+use crate::env::env::{Env, GlobalEnv};
 use crate::env::error::{EvalError, EvalResult, value_error_to_eval_error};
 use crate::interp::destructure::value_to_seq_vec;
 use crate::interp::eval::eval;
@@ -1939,13 +1939,23 @@ fn handle_resolve_here(arg_forms: &[Form], env: &mut Env) -> EvalResult {
     }
     let here = env.current_ns.clone();
     let sym_arg = eval(&arg_forms[0], env)?;
-    let sym_name = match &sym_arg {
+    eval_resolve_here(&sym_arg, &here, &env.globals)
+}
+
+/// The value half of `resolve-here`, shared with the IR interpreter.
+///
+/// `here` is passed rather than read off an `Env`, because the two callers know
+/// it differently: the tree-walker has `env.current_ns`, and the IR interpreter
+/// has the namespace the lowered function was defined in. Both are "the
+/// namespace this call was written in", which is the whole point of the form.
+pub fn eval_resolve_here(sym_arg: &Value, here: &Arc<str>, globals: &Arc<GlobalEnv>) -> EvalResult {
+    let sym_name = match sym_arg {
         Value::Symbol(s) => {
             let sym = s.get();
             if let Some(ns) = &sym.namespace {
-                let full_ns = env.globals.resolve_ns_part_in(&here, ns.as_ref());
+                let full_ns = globals.resolve_ns_part_in(here, ns.as_ref());
                 return Ok(
-                    match env.globals.lookup_var_in_ns(&full_ns, sym.name.as_ref()) {
+                    match globals.lookup_var_in_ns(&full_ns, sym.name.as_ref()) {
                         Some(var_ptr) => Value::Var(var_ptr),
                         None => Value::Nil,
                     },
@@ -1961,7 +1971,7 @@ fn handle_resolve_here(arg_forms: &[Form], env: &mut Env) -> EvalResult {
             )));
         }
     };
-    Ok(match env.globals.lookup_var_in_ns(&here, &sym_name) {
+    Ok(match globals.lookup_var_in_ns(here, &sym_name) {
         Some(var_ptr) => Value::Var(var_ptr),
         None => Value::Nil,
     })

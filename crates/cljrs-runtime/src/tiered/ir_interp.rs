@@ -1150,6 +1150,18 @@ fn dispatch_sentinel_by_name(
         "eval" => crate::interp::apply::eval_eval(args, env),
         "with-bindings*" => crate::interp::apply::eval_with_bindings_star(args, env),
         "send" | "send-off" => crate::interp::apply::eval_send_to_agent(args, env),
+        // `resolve-here` answers relative to the namespace the call was
+        // WRITTEN in, which for a lowered function is the namespace it was
+        // defined in, so `ns` is the right question here and `env.current_ns`
+        // is not.
+        "resolve-here" => {
+            let sym = args.into_iter().next().ok_or_else(|| EvalError::Arity {
+                name: "resolve-here".into(),
+                expected: "1".into(),
+                got: 0,
+            })?;
+            crate::interp::apply::eval_resolve_here(&sym, ns, globals)
+        }
         _ => {
             let callee = load_global_value(globals, ns, name, ns)?;
             apply_value(&callee, args, env)
@@ -1171,6 +1183,7 @@ fn is_sentinel(name: &str) -> bool {
             | "with-bindings*"
             | "send"
             | "send-off"
+            | "resolve-here"
     )
 }
 
