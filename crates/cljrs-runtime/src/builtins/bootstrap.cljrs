@@ -1284,9 +1284,52 @@
               (list 'multi-fn nsym dispatch (first default))
               (list 'multi-fn nsym dispatch))))))
 
+(defn defmethod-pin
+  "The version pin on a `defmethod` target, or nil.
+
+  Two spellings, and only one of them is visible as an `@`. `f@abc1234` keeps
+  the version in a field of its own that `name` does not report, so the symbol
+  prints longer than `ns/name` rebuilds it. `v1/render` carries no `@` at all:
+  the require registered the namespace under its literal versioned name and
+  pointed the alias straight at it, so the pin sits in the namespace the alias
+  resolves to."
+  [sym]
+  (let [bare  (if (namespace sym)
+                (str (namespace sym) "/" (name sym))
+                (name sym))
+        owner (when-let [a (namespace sym)]
+                (when-let [n (get (ns-aliases *ns*) (symbol a))]
+                  (str (ns-name n))))]
+    (cond
+      ;; `name` drops a version wherever it appears, so a name that survives
+      ;; the round trip unchanged carried no pin. Core only: this runs during
+      ;; macroexpansion in whatever namespace the caller is in, which need not
+      ;; have clojure.string loaded.
+      (not= (str sym) bare)                     [:name (str sym)]
+      (and owner (not= owner (name (symbol owner)))) [:namespace owner]
+      :else                                     nil)))
+
 (defmacro defmethod [mname dispatch-val params & body]
-  (list 'add-method mname dispatch-val
-        (cons 'fn (cons (symbol (name mname)) (cons params body)))))
+  ;; A pin is a promise that the thing behind it does not change. Extending a
+  ;; pinned multimethod would break that promise for every other holder of the
+  ;; same pin, so it is refused rather than silently unpinned. The refusal is
+  ;; here, before `add-method`, which is handed the resolved MultiFn and can no
+  ;; longer tell how it was named.
+  (let [pin (defmethod-pin mname)]
+    (cond
+      (= (first pin) :name)
+      (throw (ex-info (str "defmethod cannot extend the versioned name "
+                           (second pin))
+                      {:target (second pin)}))
+
+      (= (first pin) :namespace)
+      (throw (ex-info (str "defmethod cannot extend a multimethod owned by the "
+                           "versioned namespace " (second pin))
+                      {:namespace (second pin)}))
+
+      :else
+      (list 'add-method mname dispatch-val
+            (cons 'fn (cons (symbol (name mname)) (cons params body)))))))
 
 ;; ── protocols: defprotocol as a macro over the protocol* primitive ───────────
 ;; `protocol*` mints the protocol object in the CURRENT namespace, and that is
