@@ -644,6 +644,60 @@ rather than `clojure.core`; `EXPERIMENTAL_SOURCE` adds the `future` macro over
 them. See [`cljrs.core.experimental/future`](#cljrscoreexperimentalfuture--cooperative-not-parallel)
 for why they are not in `clojure.core`.
 
+### What is seqable, and the one place it is decided
+
+```rust
+pub fn is_seqable(v: &Value) -> bool;   // builtins.rs
+```
+
+`ValueIter` is the walker every eager sequence operation runs on — `vec`,
+`into`, `map`, `reduce`, `rest`, `value_to_seq`. `is_seqable` is the predicate
+those operations gate on, and `(seqable? x)` is a builtin over it, so
+`clojure.core/seqable?` is a call rather than a fifth opinion. (It used to be a
+`defn` in `bootstrap.cljrs` spelling the set out again as an `or` of type
+predicates, and it disagreed with the others.)
+
+`is_seqable` is **not** derived from `ValueIter`'s arms: asking the iterator
+means stepping it, and stepping a `LazySeq` realizes it, which a predicate must
+not do. The two are kept honest from the other end instead — `ValueIter`'s
+fallback arm raises, naming the type, where it used to `return None`. That
+distinction is the whole point: "the sequence ended" and "I do not know how to
+walk this" are the same answer to a caller, so a type missing from the walker
+made `vec`, `into`, `map` and `reduce` answer `[]`, `[]`, `nil` and the init
+value instead of failing. A `PersistentQueue` sat in exactly that hole —
+`(vec q)` was `[]` while `(count q)` was `2`.
+
+`seq`, `nth` and `rest` keep hand-written arms only where they earn one: `seq`
+and `rest` return a lazy tail unforced for `LazySeq`/`Cons` and use the O(1)
+`PersistentList::rest`, and everything else in `rest` now goes through the
+shared walker. `nth` is deliberately narrower than `is_seqable` — a map and a
+set are seqable and `nth` refuses them, as on the JVM — so it lists the
+sequential types itself.
+
+### Static members of JVM class names
+
+```rust
+fn jvm_static_member(class: &str, member: &str) -> Option<Value>;   // interp/eval.rs
+```
+
+`is_jvm_class_name` says which class names resolve to themselves as symbols;
+this says which of their static members have a value. Consulted only after
+`ns/name` fails to resolve as a namespace-qualified var, and reading the
+namespace part as WRITTEN rather than through the alias table, because a class
+name is not aliasable.
+
+The set is closed and stays small on purpose: there is no JVM here, so a member
+exists only because this runtime produces it, and a member that is absent must
+read as an unbound symbol rather than as `nil`.
+
+| member | value |
+|---|---|
+| `clojure.lang.PersistentQueue/EMPTY` | the empty `Value::Queue` |
+
+That one is not a convenience. cljrs has a `(queue)` builtin and the JVM does
+not, so the static member is the only spelling of an empty queue that a shared
+`.cljc` can use on both sides — see `tests/cljrs/cljrs/lang_test/queue.cljc`.
+
 ### Map entries
 
 Map entries are a dedicated type, not plain 2-element vectors: seq'ing a map,

@@ -1215,6 +1215,7 @@ pub fn register_all(globals: &Arc<GlobalEnv>, ns: &str) {
         ("get-in", Arity::Variadic { min: 2 }, builtin_get_in),
         ("count", Arity::Fixed(1), builtin_count),
         ("seq", Arity::Fixed(1), builtin_seq),
+        ("seqable?", Arity::Fixed(1), builtin_seqable_q),
         ("rseq", Arity::Fixed(1), builtin_rseq),
         ("first", Arity::Fixed(1), builtin_first),
         ("rest", Arity::Fixed(1), builtin_rest),
@@ -1941,6 +1942,10 @@ impl Iterator for ValueIter {
                         .collect();
                     self.current = Value::List(GcPtr::new(PersistentList::from_iter(items)));
                 }
+                Value::Queue(q) => {
+                    let items: Vec<Value> = q.get().iter().cloned().collect();
+                    self.current = Value::List(GcPtr::new(PersistentList::from_iter(items)));
+                }
                 Value::TypeInstance(ti) => {
                     let mut pairs = Vec::new();
                     ti.get().fields.for_each(|k, v| {
@@ -1948,46 +1953,83 @@ impl Iterator for ValueIter {
                     });
                     self.current = Value::List(GcPtr::new(PersistentList::from_iter(pairs)));
                 }
-                _ => return None,
+                // Loud, not empty. This arm used to `return None`, which reads
+                // as "the sequence ended" and is indistinguishable from a
+                // genuinely empty collection -- so a type missing from the
+                // match above made `vec`, `into`, `map` and `reduce` answer
+                // `[]`, `[]`, `nil` and the init value instead of failing.
+                // A queue sat in exactly that hole. Errors here surface through
+                // `take_error`, which every caller already checks.
+                other => {
+                    self.error = Some(format!(
+                        "cannot iterate: {} is not seqable",
+                        other.type_name()
+                    ));
+                    self.current = Value::Nil;
+                    return None;
+                }
             }
         }
     }
 }
 
+/// Whether `seq` can be called on `v`.
+///
+/// The one statement of it on the Rust side: `value_to_seq`, `vec`, and the
+/// `seqable?` builtin all ask this rather than each carrying a list of
+/// variants, and `clojure.core/seqable?` in `bootstrap.cljrs` is a thin call
+/// onto the builtin.
+///
+/// This must agree with the arms of [`ValueIter::next`], which is the actual
+/// walker. It is not derived from them -- asking the iterator would mean
+/// stepping it, and stepping a `LazySeq` realizes it, which a predicate must
+/// not do. The two are kept honest from the other side instead: `ValueIter`'s
+/// fallback raises rather than ending quietly, so a variant added to one and
+/// forgotten in the other fails loudly at the first element.
+pub fn is_seqable(v: &Value) -> bool {
+    matches!(
+        v.unwrap_meta(),
+        Value::Nil
+            | Value::Cons(_)
+            | Value::List(_)
+            | Value::Vector(_)
+            | Value::Set(_)
+            | Value::Map(_)
+            | Value::LazySeq(_)
+            | Value::Queue(_)
+            | Value::Str(_)
+            | Value::ObjectArray(_)
+            | Value::IntArray(_)
+            | Value::LongArray(_)
+            | Value::ShortArray(_)
+            | Value::ByteArray(_)
+            | Value::FloatArray(_)
+            | Value::DoubleArray(_)
+            | Value::BooleanArray(_)
+            | Value::CharArray(_)
+            | Value::TypeInstance(_)
+    )
+}
+
+fn builtin_seqable_q(args: &[Value]) -> ValueResult<Value> {
+    Ok(Value::Bool(is_seqable(&args[0])))
+}
+
 // ── Helper: value to sequence vector (eager — use only when random access is needed) ──
 
 fn value_to_seq(v: &Value) -> ValueResult<Vec<Value>> {
-    match v {
-        Value::List(_)
-        | Value::Map(_)
-        | Value::Set(_)
-        | Value::Vector(_)
-        | Value::Cons(_)
-        | Value::LazySeq(_)
-        | Value::ObjectArray(_)
-        | Value::BooleanArray(_)
-        | Value::ByteArray(_)
-        | Value::ShortArray(_)
-        | Value::IntArray(_)
-        | Value::LongArray(_)
-        | Value::CharArray(_)
-        | Value::FloatArray(_)
-        | Value::DoubleArray(_)
-        | Value::Str(_)
-        | Value::TypeInstance(_) => {
-            let mut iter = ValueIter::new(v.clone());
-            let result: Vec<Value> = iter.by_ref().collect();
-            if let Some(err) = iter.take_error() {
-                return Err(ValueError::Other(err));
-            }
-            Ok(result)
-        }
-        Value::Nil => Ok(Vec::new()),
-        _ => Err(ValueError::WrongType {
+    if !is_seqable(v) {
+        return Err(ValueError::WrongType {
             expected: "seqable",
             got: v.type_name().to_string(),
-        }),
+        });
     }
+    let mut iter = ValueIter::new(v.clone());
+    let result: Vec<Value> = iter.by_ref().collect();
+    if let Some(err) = iter.take_error() {
+        return Err(ValueError::Other(err));
+    }
+    Ok(result)
 }
 
 fn numeric_as_f64(v: &Value) -> ValueResult<f64> {
@@ -4106,6 +4148,14 @@ fn builtin_seq(args: &[Value]) -> ValueResult<Value> {
                 Ok(cons_from_iter(array.iter().map(|f| Value::Double(*f))))
             }
         }
+        Value::Queue(q) => {
+            let items: Vec<Value> = q.get().iter().cloned().collect();
+            if items.is_empty() {
+                Ok(Value::Nil)
+            } else {
+                Ok(cons_from_iter(items))
+            }
+        }
         Value::TypeInstance(ti) => {
             let mut pairs = Vec::new();
             ti.get().fields.for_each(|k, v| {
@@ -4188,30 +4238,18 @@ fn builtin_rest(args: &[Value]) -> ValueResult<Value> {
             // rest() returns Arc<PersistentList>; clone the pointed-to list.
             Ok(Value::List(GcPtr::new((*l.get().rest()).clone())))
         }
-        Value::Vector(v) => {
-            let items: Vec<Value> = v.get().iter().skip(1).cloned().collect();
-            Ok(Value::List(GcPtr::new(PersistentList::from_iter(items))))
+        // Everything else that can be walked is walked the same way: drop one
+        // element and hand back a list. The arms above earn their place by
+        // being cheaper (List) or by preserving laziness (LazySeq, Cons); the
+        // vector, map, set and string arms that used to sit here were each a
+        // copy of this line, and while they were the copies, a queue, an array
+        // and a deftype instance had no `rest` at all.
+        other => {
+            let items = value_to_seq(other)?;
+            Ok(Value::List(GcPtr::new(PersistentList::from_iter(
+                items.into_iter().skip(1),
+            ))))
         }
-        Value::Map(m) => {
-            let items: Vec<Value> = m
-                .iter()
-                .skip(1)
-                .map(|(k, v)| Value::map_entry(k.clone(), v.clone()))
-                .collect();
-            Ok(Value::List(GcPtr::new(PersistentList::from_iter(items))))
-        }
-        Value::Set(s) => {
-            let items: Vec<Value> = s.iter().skip(1).cloned().collect();
-            Ok(Value::List(GcPtr::new(PersistentList::from_iter(items))))
-        }
-        Value::Str(s) => {
-            let items: Vec<Value> = s.get().chars().skip(1).map(Value::Char).collect();
-            Ok(Value::List(GcPtr::new(PersistentList::from_iter(items))))
-        }
-        _ => Err(ValueError::WrongType {
-            expected: "seqable",
-            got: args[0].type_name().to_string(),
-        }),
     }
 }
 
@@ -4317,6 +4355,21 @@ fn builtin_nth(args: &[Value]) -> ValueResult<Value> {
             .map(Value::Char)
             .or(default)
             .unwrap_or(Value::Nil)),
+        // A queue is Sequential but not Indexed, so the JVM reaches the element
+        // by walking. Deliberately NOT `is_seqable` here: a map and a set are
+        // seqable and `nth` refuses them, which is the whole distinction this
+        // arm has to preserve.
+        Value::Queue(q) => {
+            let items: Vec<Value> = q.get().iter().cloned().collect();
+            if idx >= items.len() && default.is_none() {
+                Err(ValueError::IndexOutOfBounds {
+                    idx,
+                    count: items.len(),
+                })
+            } else {
+                Ok(items.into_iter().nth(idx).or(default).unwrap_or(Value::Nil))
+            }
+        }
         Value::Nil => Ok(default.unwrap_or(Value::Nil)),
         v => Err(ValueError::WrongType {
             expected: "sequential",
@@ -4798,42 +4851,22 @@ fn builtin_empty(args: &[Value]) -> ValueResult<Value> {
 fn builtin_vec(args: &[Value]) -> ValueResult<Value> {
     let meta = args[0].get_meta().cloned();
     let coll = args[0].unwrap_meta();
-    match coll {
-        Value::List(_)
-        | Value::Cons(_)
-        | Value::Set(_)
-        | Value::Vector(_)
-        | Value::Map(_)
-        | Value::LazySeq(_)
-        | Value::Queue(_)
-        | Value::Str(_)
-        | Value::ObjectArray(_)
-        | Value::IntArray(_)
-        | Value::LongArray(_)
-        | Value::ShortArray(_)
-        | Value::ByteArray(_)
-        | Value::FloatArray(_)
-        | Value::DoubleArray(_)
-        | Value::BooleanArray(_)
-        | Value::CharArray(_)
-        | Value::Nil => {
-            let mut iter = ValueIter::new(coll.clone());
-            let v: Vec<Value> = iter.by_ref().collect();
-            if let Some(err) = iter.take_error() {
-                return Err(ValueError::Other(err));
-            }
-            let result = Value::Vector(GcPtr::new(PersistentVector::from_iter(v)));
-            Ok(match meta {
-                Some(m) => result.with_meta(m),
-                None => result,
-            })
-        }
-
-        other => Err(ValueError::WrongType {
+    if !is_seqable(coll) {
+        return Err(ValueError::WrongType {
             expected: "seq",
-            got: other.type_name().to_string(),
-        }),
+            got: coll.type_name().to_string(),
+        });
     }
+    let mut iter = ValueIter::new(coll.clone());
+    let v: Vec<Value> = iter.by_ref().collect();
+    if let Some(err) = iter.take_error() {
+        return Err(ValueError::Other(err));
+    }
+    let result = Value::Vector(GcPtr::new(PersistentVector::from_iter(v)));
+    Ok(match meta {
+        Some(m) => result.with_meta(m),
+        None => result,
+    })
 }
 
 fn builtin_array_q(args: &[Value]) -> ValueResult<Value> {

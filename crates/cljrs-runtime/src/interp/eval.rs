@@ -279,10 +279,17 @@ fn eval_symbol(s: &str, env: &mut Env) -> EvalResult {
                 resolved, sym.name
             )));
         }
-        return env
-            .globals
-            .lookup_in_ns(&resolved, &sym.name)
-            .ok_or_else(|| EvalError::UnboundSymbol(s.to_string()));
+        if let Some(v) = env.globals.lookup_in_ns(&resolved, &sym.name) {
+            return Ok(v);
+        }
+        // `Class/MEMBER` where no namespace of that name exists. The namespace
+        // part is taken as WRITTEN here, not `resolved`: a class name is not
+        // aliasable, so an alias resolving to something else means the symbol
+        // was not naming a class in the first place.
+        if let Some(v) = jvm_static_member(ns_part, &sym.name) {
+            return Ok(v);
+        }
+        return Err(EvalError::UnboundSymbol(s.to_string()));
     }
 
     // JVM class names resolve to themselves as symbols (for instance?, catch, etc.)
@@ -291,6 +298,26 @@ fn eval_symbol(s: &str, env: &mut Env) -> EvalResult {
     }
 
     Err(EvalError::UnboundSymbol(s.to_string()))
+}
+
+/// The value of `Class/MEMBER` for the static members cljrs implements.
+///
+/// [`is_jvm_class_name`] says which class names resolve to themselves as
+/// symbols; this says which of their static members have a cljrs value behind
+/// them. The set is closed and stays small on purpose: there is no JVM here, so
+/// a member exists only because something in this runtime produces it, and a
+/// missing one must read as an unbound symbol rather than as `nil`.
+///
+/// `clojure.lang.PersistentQueue/EMPTY` is the reason the function exists —
+/// it is how Clojure source spells an empty queue literal, so `.cljc` shared
+/// with the JVM cannot use cljrs's own `(queue)` instead.
+fn jvm_static_member(class: &str, member: &str) -> Option<Value> {
+    match (class, member) {
+        ("clojure.lang.PersistentQueue", "EMPTY") => Some(Value::Queue(GcPtr::new(
+            cljrs_value::PersistentQueue::empty(),
+        ))),
+        _ => None,
+    }
 }
 
 /// Recognise JVM-style class names used in Clojure for `instance?`, `catch`, etc.
