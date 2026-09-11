@@ -866,10 +866,10 @@ mod tests {
     fn reads_the_package_name() {
         let manifest = r#"
 [package]
-name = "cljrs-raster"
+name = "plain-one"
 version = "0.1.0"
 "#;
-        assert_eq!(package_name_of(manifest).as_deref(), Some("cljrs-raster"));
+        assert_eq!(package_name_of(manifest).as_deref(), Some("plain-one"));
     }
 
     #[test]
@@ -909,11 +909,14 @@ name = "also-wrong"
     fn a_workspace_inherited_version_does_not_confuse_it() {
         let manifest = r#"
 [package]
-name = "cljrs-ffmpeg"
+name = "inherits-version"
 version.workspace = true
 edition.workspace = true
 "#;
-        assert_eq!(package_name_of(manifest).as_deref(), Some("cljrs-ffmpeg"));
+        assert_eq!(
+            package_name_of(manifest).as_deref(),
+            Some("inherits-version")
+        );
     }
 
     /// A working-tree dep is versioned by a digest of its whole root, not of
