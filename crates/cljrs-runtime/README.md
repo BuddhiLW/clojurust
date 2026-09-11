@@ -1192,6 +1192,17 @@ two of the seven primitives actually do:
 | `multi-fn` | builtin fn | mints a `MultiFn` with an optional default dispatch value |
 | `add-method` | builtin fn | writes one entry into `MultiFn.methods`, keyed exactly as `remove-method` reads it |
 
+The one place the family is NOT spelled through its macros is the bootstrap's
+own use of it: the three core protocols (`ICounted`, `ILookup`, `ISeqable`)
+and their extensions over the collection types are written over `protocol*`,
+`protocol-fn` and `extend` directly. The tree-walker re-expands a macro on
+every use, and these macros expand with interpreted `map`/`zipmap`, so spelled
+as macros those five forms cost ~87ms of every runtime's startup (0.04s became
+0.25s, and every test building a runtime per case slowed 8x, measured
+2026-09-10). Each is exactly what its macro would produce, and the comment
+above them in `bootstrap.cljrs` says so; keep them in step if the macros change
+shape.
+
 Because the family is now macro-backed, the two passes that must route it away
 from compiled code — `cljrs-ir`'s ANF lowerer and `cljrs-compiler`'s
 interpreted preamble — read it on the EXPANDED form. Membership is therefore

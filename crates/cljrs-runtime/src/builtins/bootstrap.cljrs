@@ -1483,27 +1483,35 @@
 
 ;; ── Phase 6 (built-in protocols): ICounted, ILookup, ISeqable ────────────────
 
-(defprotocol ICounted
-  (-count [coll]))
+;; Written over the primitives rather than through `defprotocol` /
+;; `extend-protocol`, on purpose. Those macros expand with interpreted
+;; `map` / `zipmap` / `distinct`, and the tree-walker re-expands a macro on
+;; every use, so the five forms below cost ~87ms of every runtime's startup
+;; when spelled as macros (measured 2026-09-10: 6-9ms per `defprotocol`,
+;; ~7ms per extended type; a startup of 0.04s became 0.25s, and every test
+;; that builds a runtime per case slowed 8x). Each form here is exactly what
+;; its macro would have produced; if the macros change shape, change these to
+;; match. `-lookup`'s second arglist is kept as written above it in history.
 
-(defprotocol ILookup
-  (-lookup [coll k] [-lookup [coll k not-found]]))
+(def ICounted (protocol* ICounted [{:name "-count" :min-arity 1 :variadic false}] false))
+(def ^{:arglists '([coll])} -count (protocol-fn ICounted "-count"))
 
-(defprotocol ISeqable
-  (-seq [coll]))
+(def ILookup (protocol* ILookup [{:name "-lookup" :min-arity 2 :variadic false}] false))
+(def ^{:arglists '([coll k] [-lookup [coll k not-found]])} -lookup (protocol-fn ILookup "-lookup"))
 
-(extend-protocol ICounted
-  List    (-count [c] (count c))
-  Vector  (-count [c] (count c))
-  Map     (-count [c] (count c))
-  Set     (-count [c] (count c))
-  String  (-count [c] (count c)))
+(def ISeqable (protocol* ISeqable [{:name "-seq" :min-arity 1 :variadic false}] false))
+(def ^{:arglists '([coll])} -seq (protocol-fn ISeqable "-seq"))
 
-(extend-protocol ISeqable
-  List    (-seq [c] (seq c))
-  Vector  (-seq [c] (seq c))
-  Map     (-seq [c] (seq c))
-  Set     (-seq [c] (seq c)))
+(extend 'List   ICounted {:-count (fn ([c] (count c)))})
+(extend 'Vector ICounted {:-count (fn ([c] (count c)))})
+(extend 'Map    ICounted {:-count (fn ([c] (count c)))})
+(extend 'Set    ICounted {:-count (fn ([c] (count c)))})
+(extend 'String ICounted {:-count (fn ([c] (count c)))})
+
+(extend 'List   ISeqable {:-seq (fn ([c] (seq c)))})
+(extend 'Vector ISeqable {:-seq (fn ([c] (seq c)))})
+(extend 'Map    ISeqable {:-seq (fn ([c] (seq c)))})
+(extend 'Set    ISeqable {:-seq (fn ([c] (seq c)))})
 
 ;; ── Dynamic variables ──────────────────────────────────────────────────────
 
