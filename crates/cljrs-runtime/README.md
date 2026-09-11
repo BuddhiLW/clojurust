@@ -356,6 +356,7 @@ pub fn refer_named(&self, dst_ns: &str, src_ns: &str, names: &[Arc<str>]);
 /// runtime init, the loader, `in-ns`, `ns` and versioned-namespace setup use
 /// to seed a namespace with core.
 pub fn refer_core(&self, dst_ns: &str);
+// Creates `dst_ns` if it does not exist; a no-op only while `clojure.core` itself is unregistered.
 
 /// Install (or, with `None`, remove) the `(:refer-clojure ...)` filter for
 /// `dst_ns` and re-apply the automatic core refer under it.  Refers inherited
