@@ -1048,7 +1048,11 @@ resulting Var's metadata, merged with any reader/attr-map metadata via
 `merge_meta`.  `defn`/`defmacro` additionally derive `{:arglists (...)}` from
 the evaluated `CljxFn`'s parsed arities (`arglists_meta`, in `special.rs`);
 for `defmacro` the implicit `&form`/`&env` params are elided from the shown
-signature.  This is what `clojure.core/doc` and `doc-data` (in the `builtins`
+signature. `defmacro` also records on the `CljxFn` whether the body mentions
+`&env` at all (`macro_uses_env`, via `form_mentions_symbol`, a total match
+over `FormKind`); both expansion paths, `macro_apply` and `macroexpand_1`,
+build the locals map only for a macro that can read it, because that map
+costs about 5us per local in scope on every expansion.  This is what `clojure.core/doc` and `doc-data` (in the `builtins`
 module) read back, and what `cljrs-nrepl`'s `op_lookup` surfaces to editors.
 
 ### `meta_form_is_async(meta: &Form) -> bool`

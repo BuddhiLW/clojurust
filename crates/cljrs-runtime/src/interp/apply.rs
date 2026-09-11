@@ -859,30 +859,39 @@ fn macro_apply(
         .map(|f| crate::builtins::form::resolve_auto_forms(f, env))
         .collect::<EvalResult<Vec<Form>>>()?;
 
+    // The unevaluated arguments as values, converted once: they are both the
+    // tail of `&form` and the macro's own arguments.
+    let arg_vals: Vec<Value> = resolved_args
+        .iter()
+        .map(form_to_value)
+        .collect::<EvalResult<Vec<Value>>>()?;
+
     // &form: the whole call expression as a list value.
     let form_val = {
         let mut items = vec![form_to_value(func_form)?];
-        for f in &resolved_args {
-            items.push(form_to_value(f)?);
-        }
+        items.extend(arg_vals.iter().cloned());
         Value::List(GcPtr::new(PersistentList::from_iter(items)))
     };
 
     // &env: local variable bindings at call site as a map (symbol → value).
-    let env_val = {
+    // Built only for a macro whose body mentions `&env`: the map costs about
+    // 5us per local in scope on every expansion, and the tree-walker expands
+    // a macro on every use, so `when` in a loop body inside a wide `let` paid
+    // it per iteration for a value nothing read.
+    let env_val = if mfn.macro_uses_env {
         let (names, vals) = env.all_local_bindings();
         let mut m = MapValue::empty();
         for (name, val) in names.iter().zip(vals.iter()) {
             m = m.assoc(Value::symbol(Symbol::simple(name.as_ref())), val.clone());
         }
         Value::Map(m)
+    } else {
+        Value::Map(MapValue::empty())
     };
 
     // Prepend &form and &env, then pass remaining arg forms as unevaluated values.
     let mut args = vec![form_val, env_val];
-    for f in &resolved_args {
-        args.push(form_to_value(f)?);
-    }
+    args.extend(arg_vals);
 
     let expanded_val = call_cljrs_fn(mfn, args.as_ref(), env)?;
     let dummy_span = cljrs_types::span::Span::new(Arc::new("<macro>".to_string()), 0, 0, 1, 1);

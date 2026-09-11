@@ -401,6 +401,7 @@ pub struct CljxFn {
     pub closed_over_names: Vec<Arc<str>>,
     pub closed_over_vals: Vec<Value>,
     pub is_macro: bool,
+    pub macro_uses_env: bool,  // set by defmacro: does the body mention `&env`? expansion builds the locals map only then
     pub is_async: bool,       // ^:async — dispatched via the async runtime when one is registered
     pub defining_ns: Arc<str>,
     pub self_ptr: Option<GcPtr<CljxFn>>, // back-pointer for named-fn pointer identity (issue #194)

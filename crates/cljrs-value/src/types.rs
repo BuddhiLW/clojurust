@@ -849,6 +849,12 @@ pub struct CljxFn {
     pub closed_over_vals: Vec<Value>,
     /// True if this function was defined with `defmacro`.
     pub is_macro: bool,
+    /// For a macro: whether its body mentions `&env` anywhere. Computed once
+    /// by `defmacro`. Expansion builds the `&env` map of every local in scope
+    /// only when this is true: that map costs about 5us per local on EVERY
+    /// expansion (measured 2026-09-10, debug), and almost no macro reads it.
+    /// Conservatively `true` for a function that is not a macro.
+    pub macro_uses_env: bool,
     /// True if this function carries `^:async` metadata. When an async runtime
     /// (`cljrs-async`) is registered, calling such a function spawns its body as
     /// a task and returns a `Value::Future` immediately instead of running it
@@ -878,6 +884,7 @@ impl CljxFn {
             closed_over_names,
             closed_over_vals,
             is_macro,
+            macro_uses_env: true,
             is_async: false,
             defining_ns,
             self_ptr: None,
