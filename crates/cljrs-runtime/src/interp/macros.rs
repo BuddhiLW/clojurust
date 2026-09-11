@@ -30,14 +30,17 @@ pub fn macroexpand_1(form: &Form, env: &mut Env) -> EvalResult<Form> {
 
         // Build &form value (the whole call as a list).
         let form_val = form_to_value(&resolved)?;
-        // Build &env value (local bindings as a map — empty at top level).
-        let env_val = {
+        // Build &env value (local bindings as a map — empty at top level), and
+        // only for a macro whose body mentions `&env`; see `macro_apply`.
+        let env_val = if macro_fn.macro_uses_env {
             let (names, vals) = env.all_local_bindings();
             let mut m = cljrs_value::MapValue::empty();
             for (name, val) in names.iter().zip(vals.iter()) {
                 m = m.assoc(Value::symbol(Symbol::simple(name.as_ref())), val.clone());
             }
             Value::Map(m)
+        } else {
+            Value::Map(cljrs_value::MapValue::empty())
         };
         let mut args = vec![form_val, env_val];
         for p in &parts[1..] {

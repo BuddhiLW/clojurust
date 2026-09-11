@@ -1221,6 +1221,51 @@ pub fn eval_defn(args: &[Form], env: &mut Env, private: bool) -> EvalResult {
 
 // ── defmacro ──────────────────────────────────────────────────────────────────
 
+/// Whether `name` occurs as a symbol anywhere in `form`: inside every
+/// collection, reader wrapper, metadata and reader-conditional clause.
+///
+/// `defmacro` asks this about `&env` so that expansion can skip building the
+/// locals map for the macros that never read it. Every `FormKind` variant is
+/// matched by name, no wildcard, so a variant added to the reader is a compile
+/// error here rather than a silently missed mention.
+fn form_mentions_symbol(form: &Form, name: &str) -> bool {
+    match &form.kind {
+        FormKind::Symbol(s) => s == name,
+        FormKind::Nil
+        | FormKind::Bool(_)
+        | FormKind::Int(_)
+        | FormKind::BigInt(_)
+        | FormKind::Float(_)
+        | FormKind::BigDecimal(_)
+        | FormKind::Ratio(_)
+        | FormKind::Char(_)
+        | FormKind::Str(_)
+        | FormKind::Regex(_)
+        | FormKind::Symbolic(_)
+        | FormKind::Keyword(_)
+        | FormKind::AutoKeyword(_)
+        | FormKind::AutoSymbol(_) => false,
+        FormKind::List(items)
+        | FormKind::Vector(items)
+        | FormKind::Map(items)
+        | FormKind::Set(items)
+        | FormKind::AnonFn(items)
+        | FormKind::ReaderCond { clauses: items, .. } => {
+            items.iter().any(|f| form_mentions_symbol(f, name))
+        }
+        FormKind::Quote(inner)
+        | FormKind::SyntaxQuote(inner)
+        | FormKind::Unquote(inner)
+        | FormKind::UnquoteSplice(inner)
+        | FormKind::Deref(inner)
+        | FormKind::Var(inner)
+        | FormKind::TaggedLiteral(_, inner) => form_mentions_symbol(inner, name),
+        FormKind::Meta(meta, inner) => {
+            form_mentions_symbol(meta, name) || form_mentions_symbol(inner, name)
+        }
+    }
+}
+
 /// Prepend `&form` and `&env` Form symbols to an arity form's parameter vector.
 ///
 /// Handles:
@@ -1306,6 +1351,9 @@ fn eval_defmacro(args: &[Form], env: &mut Env) -> EvalResult {
         Value::Fn(f) => {
             let mut mfn = f.get().clone();
             mfn.is_macro = true;
+            mfn.macro_uses_env = args[rest_start..]
+                .iter()
+                .any(|f| form_mentions_symbol(f, "&env"));
             Value::Macro(GcPtr::new(mfn))
         }
         other => other,
