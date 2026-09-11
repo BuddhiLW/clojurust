@@ -460,6 +460,14 @@ impl GlobalEnv {
 
     /// Apply the automatic `clojure.core` refer that every namespace starts
     /// with, narrowed by `dst_ns`'s `(:refer-clojure ...)` filter.
+    ///
+    /// Creates `dst_ns` when it does not exist yet. It used to return
+    /// silently instead, which made `refer_core` on a not-yet-registered
+    /// namespace a no-op nobody could see: every caller had to remember
+    /// `get_or_create_ns` first, and the two that forgot got a namespace in
+    /// which `inc` was unbound (7ea56de's fixtures were modelling a namespace
+    /// nobody could be in). A namespace that is worth referring core into is
+    /// worth existing.
     pub fn refer_core(&self, dst_ns: &str) {
         self.refer_core_impl(dst_ns, false);
     }
@@ -469,12 +477,13 @@ impl GlobalEnv {
     /// a filter after the namespace was pre-referred neither leaves stale
     /// names behind nor exposes a window where core is only half-referred.
     fn refer_core_impl(&self, dst_ns: &str, replace: bool) {
+        // Before the read lock below: creation takes the write lock.
+        let dst = self.get_or_create_ns(dst_ns);
         let map = self.namespaces.read().unwrap();
+        // `clojure.core` itself is registered by `builtins::register_all`
+        // before anything can ask for it; the bootstrap is the only caller
+        // that could run ahead of it, and it does not.
         let src = match map.get("clojure.core") {
-            Some(ns) => ns.clone(),
-            None => return,
-        };
-        let dst = match map.get(dst_ns) {
             Some(ns) => ns.clone(),
             None => return,
         };
