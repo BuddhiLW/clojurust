@@ -57,12 +57,16 @@ fn workspace_root() -> PathBuf {
 }
 
 /// How the fixture crate spells its entry point.
+///
+/// `SafeExternC` exists only under `aot_full_test`: the ungated build never
+/// constructs it, and an ungated variant would read as dead code.
 #[derive(Clone, Copy)]
 enum Spelling {
     /// What both in-tree extensions declare: the honest signature for a
     /// function that dereferences a raw pointer.
     UnsafeExternC,
     /// What `docs/book/src/rust-interop/project-setup.md` teaches.
+    #[cfg(feature = "aot_full_test")]
     SafeExternC,
 }
 
@@ -77,6 +81,7 @@ impl Spelling {
                      register(unsafe { &mut *registry });\n\
                  }\n"
             }
+            #[cfg(feature = "aot_full_test")]
             Spelling::SafeExternC => {
                 "#[unsafe(no_mangle)]\n\
                  pub extern \"C\" fn cljrs_init_fixture(registry: *mut Registry) {\n    \
@@ -133,6 +138,7 @@ pub fn register(registry: &mut Registry) {{
 
 /// Compile `source` with the fixture crate wired in as `:rust :init`, run the
 /// binary, and return its stdout.
+#[allow(clippy::result_large_err)]
 fn compile_with_native_init(name: &str, spelling: Spelling, source: &str) -> String {
     let _guard = AOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 
