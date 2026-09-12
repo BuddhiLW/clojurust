@@ -100,10 +100,7 @@ pub fn to_json(v: &Value) -> Result<Json, String> {
         }
 
         other => {
-            return Err(format!(
-                "no JSON representation for {}",
-                other.type_name()
-            ));
+            return Err(format!("no JSON representation for {}", other.type_name()));
         }
     })
 }
