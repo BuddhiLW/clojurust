@@ -7,7 +7,7 @@ use crate::builtins::form::{
     expand_pairs, expand_reader_conds, expand_reader_conds_cow, form_to_value, resolve_auto_forms,
     select_reader_cond,
 };
-use crate::env::env::{Env, RequireRefer, RequireSpec};
+use crate::env::env::{Env, GlobalEnv, RequireRefer, RequireSpec};
 use crate::env::error::{EvalError, EvalResult};
 use crate::env::loader::load_ns;
 use crate::interp::destructure::bind_pattern;
@@ -2253,28 +2253,57 @@ fn build_impl_fn(
 
 // ── defmulti ──────────────────────────────────────────────────────────────────
 
-fn eval_defmulti(args: &[Form], env: &mut Env) -> EvalResult {
-    // (defmulti name dispatch-fn-form) or (defmulti name "doc" dispatch-fn :default val)
-    let (name, name_meta) = require_sym_meta(args, 0, "defmulti", env)?;
-    let name_arc: Arc<str> = Arc::from(name.as_str());
+/// The parsed head of a `defmulti` form.
+///
+/// `(defmulti name docstring? attr-map? dispatch-fn & options)` — the two
+/// optional parts sit between the name and the dispatch function, and each is
+/// only taken as such when a form still follows it, so the dispatch function
+/// is never mistaken for one of them.
+struct DefmultiHead<'a> {
+    docstring: Option<String>,
+    attr_map: Option<&'a Form>,
+    /// Index of the dispatch-fn form; `args[dispatch_idx + 1..]` are options.
+    dispatch_idx: usize,
+}
 
-    let rest_start = if args.len() > 2 && args[1].as_string().is_some() {
-        2
-    } else {
-        1
-    };
+/// Split a `defmulti`'s arguments into its head parts. Pure: reads shapes only.
+fn parse_defmulti_head<'a>(args: &'a [Form]) -> EvalResult<DefmultiHead<'a>> {
+    let mut i = 1;
+    let mut docstring = None;
+    let mut attr_map = None;
 
-    if args.len() <= rest_start {
+    if i < args.len()
+        && let Some(s) = args[i].as_string()
+    {
+        docstring = Some(s.to_string());
+        i += 1;
+    }
+    if i + 1 < args.len() && matches!(args[i].kind, FormKind::Map(_)) {
+        attr_map = Some(&args[i]);
+        i += 1;
+    }
+    if i >= args.len() {
         return Err(EvalError::Runtime(
             "defmulti requires a dispatch function".into(),
         ));
     }
+    Ok(DefmultiHead {
+        docstring,
+        attr_map,
+        dispatch_idx: i,
+    })
+}
 
-    let dispatch_fn = eval(&args[rest_start], env)?;
+fn eval_defmulti(args: &[Form], env: &mut Env) -> EvalResult {
+    let (name, name_meta) = require_sym_meta(args, 0, "defmulti", env)?;
+    let name_arc: Arc<str> = Arc::from(name.as_str());
+    let head = parse_defmulti_head(args)?;
+
+    let dispatch_fn = eval(&args[head.dispatch_idx], env)?;
 
     // Parse optional :default val.
     let mut default_dispatch = ":default".to_string();
-    let mut i = rest_start + 1;
+    let mut i = head.dispatch_idx + 1;
     while i + 1 < args.len() {
         if let FormKind::Keyword(k) = &args[i].kind
             && k == "default"
@@ -2285,11 +2314,22 @@ fn eval_defmulti(args: &[Form], env: &mut Env) -> EvalResult {
         i += 2;
     }
 
+    // Metadata sources, weakest first: `^` marks on the name, then the attr
+    // map, then the docstring.  Clojure builds the same order in
+    // `clojure.core/defmulti` -- `(conj (meta mm-name) m)` puts the attr map,
+    // docstring already merged into it, on top of the name's metadata.
+    let attr_meta = match head.attr_map {
+        Some(form) => Some(eval(form, env)?),
+        None => None,
+    };
+    let meta = merge_meta(name_meta, attr_meta);
+    let meta = merge_meta(meta, head.docstring.as_deref().map(doc_meta));
+
     let mfn = MultiFn::new(name_arc.clone(), dispatch_fn, default_dispatch);
     let var = env
         .globals
         .intern(&env.current_ns, name_arc, Value::MultiFn(GcPtr::new(mfn)));
-    if let Some(meta_val) = name_meta {
+    if let Some(meta_val) = meta {
         var.get().set_meta(meta_val);
     }
     Ok(Value::Var(var))
@@ -2310,12 +2350,67 @@ fn eval_defmethod(args: &[Form], env: &mut Env) -> EvalResult {
     let (multi_name, _) = require_sym_meta(args, 0, "defmethod", env)?;
     let multi_name = multi_name.as_str();
 
-    let mf_ptr = match env.globals.lookup_in_ns(&env.current_ns, multi_name) {
+    // The multimethod may live in another namespace, which is the normal case
+    // for an open dispatch: one namespace owns the `defmulti`, others extend
+    // it. Resolve `alias/name` and `fully.qualified.ns/name` the way ordinary
+    // qualified symbols resolve (`eval_symbol`, `binding`), instead of looking
+    // only in the current ns — otherwise `(defmethod other/render :x ...)`
+    // reports that a perfectly good multimethod "is not a multimethod".
+    let parsed = cljrs_value::Symbol::parse(multi_name);
+    // A pinned name (`mylib/render@abc1234`) refers to an immutable past
+    // version, which is not a thing a method can be installed into. `parse`
+    // splits the suffix off into `version`, so without this guard the pin is
+    // dropped and HEAD is extended instead.
+    if parsed.version.is_some() {
+        return Err(EvalError::Runtime(format!(
+            "defmethod: {multi_name} is versioned; extend the multimethod at HEAD"
+        )));
+    }
+    let owner_ns: Arc<str> = match parsed.namespace.as_deref() {
+        Some(ns_part) => env
+            .globals
+            .resolve_alias(&env.current_ns, ns_part)
+            .unwrap_or_else(|| Arc::from(ns_part)),
+        None => env.current_ns.clone(),
+    };
+    // A pin can also live in the NAMESPACE half. `(require '[mylib@abc1234 :as
+    // v1])` registers the namespace under its literal versioned name, so the
+    // alias resolves straight to it and `parsed.version` is None; the guard
+    // above never sees it. Gated on the boundary like the privacy check below,
+    // so a versioned namespace's own source can still extend its own
+    // multimethods while it loads.
+    if owner_ns.as_ref() != env.current_ns.as_ref()
+        && cljrs_value::symbol::split_version(&owner_ns).1.is_some()
+    {
+        return Err(EvalError::Runtime(format!(
+            "defmethod: {multi_name} resolves to the versioned namespace {owner_ns}; \
+             extend the multimethod at HEAD"
+        )));
+    }
+    // Reaching into another namespace respects privacy the way `eval_symbol`
+    // does: refusing to extend a private multimethod from outside is what
+    // `^:private` on a `defmulti` is for.
+    if owner_ns.as_ref() != env.current_ns.as_ref()
+        && let Some(var) = env.globals.lookup_var(&owner_ns, &parsed.name)
+        && GlobalEnv::var_is_private(var.get())
+    {
+        return Err(EvalError::Runtime(format!(
+            "defmethod: var {owner_ns}/{} is not public",
+            parsed.name
+        )));
+    }
+
+    let mf_ptr = match env.globals.lookup_in_ns(&owner_ns, &parsed.name) {
         Some(Value::MultiFn(mf)) => mf,
-        _ => {
+        Some(other) => {
             return Err(EvalError::Runtime(format!(
-                "defmethod: {} is not a multimethod",
-                multi_name
+                "defmethod: {multi_name} is bound to a {}, not a multimethod",
+                other.type_name()
+            )));
+        }
+        None => {
+            return Err(EvalError::Runtime(format!(
+                "defmethod: {multi_name} is not defined (no multimethod to extend)"
             )));
         }
     };
