@@ -1244,20 +1244,45 @@
 ;; form looked the whole string up as an intern of the current namespace.
 
 (defmacro defmulti [mname & body]
-  ;; (defmulti name "doc"? dispatch-fn :default val?)
-  (let [tail     (if (and (string? (first body)) (next body)) (next body) body)
-        dispatch (first tail)
+  ;; (defmulti name docstring? attr-map? dispatch-fn & options)
+  ;;
+  ;; A leading string is ALWAYS the docstring, even with nothing after it, so
+  ;; `(defmulti area "Area.")` reports a missing dispatch function instead of
+  ;; deferring the error to the first call, where a string is not callable.
+  ;;
+  ;; A map is the attr-map only when a form still FOLLOWS it. A map is itself
+  ;; callable, so `(defmulti lookup {:a :first})` is a legitimate map-valued
+  ;; dispatch function and must not be read as an attr-map with no dispatch.
+  ;; That asymmetry is the whole subtlety here: the string case is decided by
+  ;; the type alone, the map case needs the lookahead.
+  (let [docstring (when (string? (first body)) (first body))
+        after-doc (if docstring (next body) body)
+        attr-map  (when (and (map? (first after-doc)) (next after-doc))
+                    (first after-doc))
+        tail      (if attr-map (next after-doc) after-doc)
+        dispatch  (first tail)
         ;; A one-element vector marks PRESENCE, so `:default nil` still counts.
-        default  (loop [o (next tail)]
-                   (cond
-                     (nil? o)               nil
-                     (= (first o) :default) [(second o)]
-                     :else                  (recur (next (next o)))))
-        nsym     (list 'quote (symbol (name mname)))]
-    (list 'def mname
-          (if default
-            (list 'multi-fn nsym dispatch (first default))
-            (list 'multi-fn nsym dispatch)))))
+        default   (loop [o (next tail)]
+                    (cond
+                      (nil? o)               nil
+                      (= (first o) :default) [(second o)]
+                      :else                  (recur (next (next o)))))
+        ;; Precedence, not merely presence: the attr map sits on top of the
+        ;; name's own `^` marks, and an explicit docstring beats a :doc the
+        ;; attr map carries.
+        marks     (merge (meta mname) attr-map)
+        merged    (if docstring (assoc (or marks {}) :doc docstring) marks)
+        ;; The metadata belongs on the var `def` binds, so it rides on the
+        ;; name symbol; `nsym` is the bare name the multi-fn reports.
+        bare      (with-meta (symbol (name mname)) (or merged {}))
+        nsym      (list 'quote (symbol (name mname)))]
+    (if (nil? tail)
+      (throw (ex-info "defmulti requires a dispatch function"
+                      {:name (symbol (name mname))}))
+      (list 'def bare
+            (if default
+              (list 'multi-fn nsym dispatch (first default))
+              (list 'multi-fn nsym dispatch))))))
 
 (defn defmethod-pin
   "The version pin on a `defmethod` target, or nil.

@@ -7,7 +7,7 @@ use crate::builtins::form::{
     expand_pairs, expand_reader_conds, expand_reader_conds_cow, form_to_value, resolve_auto_forms,
     select_reader_cond,
 };
-use crate::env::env::{Env, GlobalEnv, RequireRefer, RequireSpec};
+use crate::env::env::{Env, RequireRefer, RequireSpec};
 use crate::env::error::{EvalError, EvalResult};
 use crate::env::loader::load_ns;
 use crate::interp::destructure::bind_pattern;
