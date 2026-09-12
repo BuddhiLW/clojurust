@@ -63,6 +63,17 @@ pub enum Dependency {
     /// A local directory on disk, resolved relative to the `cljrs.edn` file.
     Local {
         root: PathBuf,
+        /// `:rust/init` — fully-qualified path to the dep's native init
+        /// function, when the dep ships Rust code.
+        rust_init: Option<Arc<str>>,
+        /// `:rust/crate` — directory of the dep's Cargo.toml relative to
+        /// `root` (defaults to `root` itself).
+        rust_crate_dir: Option<Arc<str>>,
+        /// `:rust/load :dylib` — build the dep's crate from the working tree
+        /// as a cdylib and load it, instead of resolving its natives against
+        /// the current binary. Unlike the git form there is no pinned commit,
+        /// so a local dep serves `require` only, never versioned resolution.
+        rust_load_dylib: bool,
     },
 }
 
