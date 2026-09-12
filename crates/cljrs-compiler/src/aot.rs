@@ -2091,8 +2091,16 @@ fn build_harness(
     if let Some(rc) = rust_config {
         native_deps.push_str(&deps.dep_line("cljrs-interop"));
         if let Some(crate_name) = rc.crate_name() {
-            let crate_dir = rc.crate_dir.display();
-            native_deps.push_str(&format!("{crate_name} = {{ path = \"{crate_dir}\" }}\n"));
+            // `crate_name` is the Rust identifier the generated source calls
+            // the crate by; Cargo resolves the dependency by the crate's
+            // PACKAGE name, which is usually the hyphenated spelling. See
+            // `native_dep` for why emitting one as the other does not link.
+            let package = crate::native_dep::read_package_name(&rc.crate_dir);
+            native_deps.push_str(&crate::native_dep::dep_line(
+                crate_name,
+                &rc.crate_dir.display().to_string(),
+                package.as_deref(),
+            ));
         }
     }
     // The harness links the base runtime plus whatever the host's extensions
