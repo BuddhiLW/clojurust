@@ -68,6 +68,12 @@ pub fn default_set() -> ExtensionSet {
         cljrs_base64::init,
         "cljrs_base64::init",
     ));
+    #[cfg(feature = "json")]
+    set.push(Extension::new(
+        "cljrs-json",
+        cljrs_json::init,
+        "cljrs_json::init",
+    ));
 
     set
 }

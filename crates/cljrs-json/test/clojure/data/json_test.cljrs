@@ -1,0 +1,108 @@
+(ns clojure.data.json-test
+  (:require [clojure.test :refer [deftest is testing]]
+            [clojure.data.json :as json]))
+
+;; ── write-str ───────────────────────────────────────────────────────────────
+
+(deftest test-write-scalars
+  (testing "the JSON literals"
+    (is (= "null" (json/write-str nil)))
+    (is (= "true" (json/write-str true)))
+    (is (= "false" (json/write-str false))))
+
+  (testing "numbers"
+    (is (= "0" (json/write-str 0)))
+    (is (= "-17" (json/write-str -17)))
+    (is (= "1.5" (json/write-str 1.5))))
+
+  (testing "strings are quoted and escaped"
+    (is (= "\"hi\"" (json/write-str "hi")))
+    (is (= "\"a\\\"b\"" (json/write-str "a\"b")))
+    (is (= "\"a\\nb\"" (json/write-str "a\nb")))))
+
+(deftest test-write-keyword-becomes-its-name
+  (testing "a keyword is a string, without the colon"
+    (is (= "\"id\"" (json/write-str :id))))
+  (testing "a qualified keyword keeps its namespace"
+    (is (= "\"a/b\"" (json/write-str :a/b)))))
+
+(deftest test-write-collections
+  (testing "vectors and lists are arrays"
+    (is (= "[]" (json/write-str [])))
+    (is (= "[1,2,3]" (json/write-str [1 2 3])))
+    (is (= "[1,2,3]" (json/write-str '(1 2 3)))))
+
+  (testing "a map is an object whose keyword keys became strings"
+    (is (= "{\"a\":1}" (json/write-str {:a 1}))))
+
+  (testing "nesting"
+    (is (= "{\"a\":[1,{\"b\":null}]}"
+           (json/write-str {:a [1 {:b nil}]})))))
+
+(deftest test-write-a-jsonrpc-request
+  (testing "the shape the universe CLI actually sends"
+    (is (= "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"universe/list\"}"
+           (json/write-str {:jsonrpc "2.0" :id 1 :method "universe/list"})))))
+
+;; ── read-str ────────────────────────────────────────────────────────────────
+
+(deftest test-read-scalars
+  (is (nil? (json/read-str "null")))
+  (is (= true (json/read-str "true")))
+  (is (= false (json/read-str "false")))
+  (is (= 42 (json/read-str "42")))
+  (is (= -1 (json/read-str "-1")))
+  (is (= 1.5 (json/read-str "1.5")))
+  (is (= "hi" (json/read-str "\"hi\""))))
+
+(deftest test-an-integer-reads-as-a-long
+  (testing "so arithmetic on it is integer arithmetic"
+    (is (= 3 (+ 1 (json/read-str "2"))))))
+
+(deftest test-read-collections
+  (is (= [] (json/read-str "[]")))
+  (is (= [1 2 3] (json/read-str "[1,2,3]")))
+  (is (= {} (json/read-str "{}"))))
+
+(deftest test-object-keys-are-strings
+  (testing "matching clojure.data.json's default and the .cljw host primitive"
+    (let [m (json/read-str "{\"result\":7}")]
+      (is (= 7 (get m "result")))
+      (is (nil? (get m :result))
+          "a keyword must NOT find a string key — callers use (get m \"k\")"))))
+
+(deftest test-read-str-keywordize-opts-in
+  (let [m (json/read-str-keywordize "{\"result\":7}")]
+    (is (= 7 (get m :result)))))
+
+(deftest test-read-nested
+  (let [m (json/read-str "{\"a\":[1,{\"b\":null}],\"c\":\"d\"}")]
+    (is (= "d" (get m "c")))
+    (is (= 1 (first (get m "a"))))
+    (is (nil? (get (second (get m "a")) "b")))))
+
+(deftest test-read-rejects-malformed-input
+  (testing "a parse error is an error, not nil"
+    (is (thrown? Exception (json/read-str "{")))
+    (is (thrown? Exception (json/read-str "not json")))))
+
+;; ── round trip ──────────────────────────────────────────────────────────────
+
+(deftest test-round-trip-through-string-keys
+  (testing "a written map reads back with string keys and equal values"
+    (let [written (json/write-str {:jsonrpc "2.0" :id 3 :method "ping"})
+          back    (json/read-str written)]
+      (is (= "2.0" (get back "jsonrpc")))
+      (is (= 3 (get back "id")))
+      (is (= "ping" (get back "method")))))
+
+  (testing "keywordized, a map round-trips to itself"
+    (is (= {:jsonrpc "2.0" :id 3 :method "ping"}
+           (json/read-str-keywordize
+            (json/write-str {:jsonrpc "2.0" :id 3 :method "ping"}))))))
+
+(deftest test-a-jsonrpc-error-reply-is-reachable
+  (testing "the branch the CLI takes on failure"
+    (let [m (json/read-str "{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32601,\"message\":\"no such method\"}}")]
+      (is (= "no such method" (get (get m "error") "message")))
+      (is (nil? (get m "result"))))))
