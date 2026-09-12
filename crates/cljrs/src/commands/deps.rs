@@ -53,7 +53,7 @@ fn run_deps_fetch(name: Option<String>) -> miette::Result<i32> {
                     }
                 }
             }
-            cljrs_project::config::Dependency::Local { root } => {
+            cljrs_project::config::Dependency::Local { root, .. } => {
                 if root.exists() {
                     eprintln!("{dep_name}: local dep at {} — ok", root.display());
                 } else {
@@ -110,7 +110,7 @@ fn run_deps_status() -> miette::Result<i32> {
                     all_ok = false;
                 }
             }
-            cljrs_project::config::Dependency::Local { root } => {
+            cljrs_project::config::Dependency::Local { root, .. } => {
                 if root.exists() {
                     println!("{dep_name}: local dep at {} — ok", root.display());
                 } else {
