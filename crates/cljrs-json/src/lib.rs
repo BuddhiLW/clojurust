@@ -171,7 +171,7 @@ pub fn register(registry: &mut Registry) {
         wrap_fn1(
             "clojure.data.json/write-str",
             |v: Value| -> Result<String, String> {
-                Ok(serde_json::to_string(&to_json(&v)?).map_err(|e| e.to_string())?)
+                serde_json::to_string(&to_json(&v)?).map_err(|e| e.to_string())
             },
         ),
     );
