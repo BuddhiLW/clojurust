@@ -24,8 +24,13 @@ use cljrs_ir::IrFunction;
 #[derive(Debug)]
 pub enum AotError {
     Io(std::io::Error),
-    Parse(cljrs_types::error::CljxError),
-    Codegen(crate::codegen::CodegenError),
+    /// Boxed: `CljxError` is 128 bytes and `CodegenError` 136, and an enum is
+    /// as large as its largest variant. Unboxed, every `AotResult` in the
+    /// crate — including `compile_file`'s, which every AOT caller uses — paid
+    /// 136 bytes on its *success* path to carry an error that is rare by
+    /// construction. Boxing these two takes `AotError` to 32.
+    Parse(Box<cljrs_types::error::CljxError>),
+    Codegen(Box<crate::codegen::CodegenError>),
     Eval(String),
     Link(String),
     /// The wasm backend could not lower a construct in the program.
@@ -88,12 +93,12 @@ impl From<std::io::Error> for AotError {
 }
 impl From<cljrs_types::error::CljxError> for AotError {
     fn from(e: cljrs_types::error::CljxError) -> Self {
-        AotError::Parse(e)
+        AotError::Parse(Box::new(e))
     }
 }
 impl From<crate::codegen::CodegenError> for AotError {
     fn from(e: crate::codegen::CodegenError) -> Self {
-        AotError::Codegen(e)
+        AotError::Codegen(Box::new(e))
     }
 }
 #[cfg(feature = "wasm-aot")]
