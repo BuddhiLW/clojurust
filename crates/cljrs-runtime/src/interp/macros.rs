@@ -198,6 +198,13 @@ pub fn macroexpand_all(form: &Form, env: &mut Env) -> EvalResult<Form> {
 /// If `sym` resolves to a macro in the current env, return its CljxFn.
 fn resolve_macro(sym: &str, env: &Env) -> Option<cljrs_value::CljxFn> {
     let parsed = Symbol::parse(sym);
+    let name = parsed.name.as_ref();
+    // A local binding shadows a core macro at call position:
+    // (let [doc (fn [x] x)] (doc 1)) calls the local, it does not expand
+    // clojure.core/doc. Only unqualified symbols can be locals.
+    if parsed.namespace.is_none() && env.lookup_local_frames(name).is_some() {
+        return None;
+    }
     // A namespace part may be an alias (`:require [... :as m]`), not a real
     // namespace name — resolve it the same way `eval_symbol`/`(var ...)` do,
     // falling back to the literal text only if it isn't a known alias.
@@ -208,7 +215,6 @@ fn resolve_macro(sym: &str, env: &Env) -> Option<cljrs_value::CljxFn> {
             .unwrap_or_else(|| Arc::from(ns_part)),
         None => env.current_ns.clone(),
     };
-    let name = parsed.name.as_ref();
 
     let v = env.globals.lookup_in_ns(&ns, name)?;
     if let Value::Macro(f) = v {
