@@ -1,3 +1,6 @@
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::hash::{BuildHasherDefault, Hasher};
 use std::sync::Arc;
 
 /// An interned Clojure symbol, optionally namespace-qualified, optionally
@@ -39,7 +42,36 @@ impl Symbol {
     ///
     /// The `@` version suffix is detected in the *name* portion (after any `/`
     /// split).  A bare `"/"` remains an unqualified symbol as before.
+    ///
+    /// Memoized per thread. Parsing is pure, but it allocates one `Arc<str>`
+    /// per component, and the callers that dominate are conversions that see
+    /// the *same* text over and over: `form_to_value` re-derives every symbol
+    /// in a form tree each time a quoted form is evaluated or a macro call is
+    /// expanded, and `macroexpand` runs the latter to a fixed point. A cache
+    /// hit is three refcount bumps against three allocations plus two scans.
     pub fn parse(s: &str) -> Self {
+        INTERNED
+            .try_with(|table| {
+                if let Some(sym) = table.borrow().get(s).cloned() {
+                    return sym;
+                }
+                let sym = Self::parse_uncached(s);
+                let mut table = table.borrow_mut();
+                // `gensym` mints a fresh name per call, so an uncapped table
+                // would grow without bound in a long-running program. Past the
+                // cap parsing still answers, just uncached; the entries already
+                // in are the ones a program returns to.
+                if table.len() < INTERN_CAP {
+                    table.insert(Box::from(s), sym.clone());
+                }
+                sym
+            })
+            // During thread teardown the table is already gone.
+            .unwrap_or_else(|_| Self::parse_uncached(s))
+    }
+
+    /// [`Symbol::parse`] without the memo table.
+    fn parse_uncached(s: &str) -> Self {
         // Split namespace qualifier on the first `/`.
         let (ns_part, name_part) = match s.find('/') {
             Some(idx) if idx > 0 && idx < s.len() - 1 => (Some(&s[..idx]), &s[idx + 1..]),
@@ -74,6 +106,46 @@ impl Symbol {
             (None, Some(v)) => format!("{}@{}", self.name, v),
             (None, None) => self.name.to_string(),
         }
+    }
+}
+
+/// Upper bound on memoized parses per thread. See [`Symbol::parse`].
+const INTERN_CAP: usize = 4096;
+
+thread_local! {
+    /// Memo table behind [`Symbol::parse`], keyed by the exact source text.
+    ///
+    /// Thread-local rather than shared: the table is written on nearly every
+    /// miss, so one lock would serialize symbol parsing across the tiering
+    /// threads to buy sharing that a per-thread table does not need.
+    static INTERNED: RefCell<HashMap<Box<str>, Symbol, BuildHasherDefault<FnvHasher>>> =
+        RefCell::new(HashMap::default());
+}
+
+/// FNV-1a, for the [`INTERNED`] table only.
+///
+/// Symbol text is short and this table is read on a hot path, where SipHash's
+/// per-call setup costs more than the collision resistance is worth: the keys
+/// are program identifiers, not adversarial input.
+#[derive(Debug)]
+pub struct FnvHasher(u64);
+
+impl Default for FnvHasher {
+    fn default() -> Self {
+        Self(0xcbf2_9ce4_8422_2325)
+    }
+}
+
+impl Hasher for FnvHasher {
+    fn write(&mut self, bytes: &[u8]) {
+        for b in bytes {
+            self.0 ^= u64::from(*b);
+            self.0 = self.0.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    }
+
+    fn finish(&self) -> u64 {
+        self.0
     }
 }
 
@@ -162,5 +234,38 @@ mod tests {
         let s = Symbol::parse("my-fn@not-hex");
         assert_eq!(s.name.as_ref(), "my-fn@not-hex");
         assert!(s.version.is_none());
+    }
+
+    /// The memo table keys on the whole source text, so texts that share a
+    /// component must not answer for each other.
+    #[test]
+    fn memoized_parse_agrees_with_the_uncached_parse() {
+        for s in [
+            "foo",
+            "a/b",
+            "b",
+            "/",
+            "a/b@abc1234",
+            "b@abc1234",
+            "my-fn@abc",
+            "clojure.core/map",
+            "map",
+        ] {
+            // Twice, so the second answer is the cached one.
+            assert_eq!(Symbol::parse(s), Symbol::parse_uncached(s), "first {s}");
+            assert_eq!(Symbol::parse(s), Symbol::parse_uncached(s), "cached {s}");
+        }
+    }
+
+    /// Past the cap parsing still answers correctly, just without caching.
+    #[test]
+    fn parse_is_correct_beyond_the_intern_cap() {
+        for i in 0..(INTERN_CAP + 64) {
+            let text = format!("gen-{i}/sym-{i}@abc1234");
+            let sym = Symbol::parse(&text);
+            assert_eq!(sym, Symbol::parse_uncached(&text));
+            assert_eq!(sym.namespace.as_deref(), Some(format!("gen-{i}").as_str()));
+            assert_eq!(sym.version.as_deref(), Some("abc1234"));
+        }
     }
 }
