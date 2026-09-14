@@ -85,12 +85,15 @@ Implementation roadmap for a Rust-hosted Clojure dialect. Native file extension 
 - [x] Collection ops: `conj`, `assoc`, `dissoc`, `get`, `get-in`, `assoc-in`, `update`, `update-in`, `merge`, `into`, `empty`
 - [x] Seq ops: `first`, `rest`, `next`, `cons`, `seq`, `count`, `nth`, `last`, `butlast`, `reverse`, `concat`
 - [x] Higher-order: `map`, `filter`, `reduce`, `keep`, `remove`, `mapcat`, `take`, `drop`, `take-while`, `drop-while`, `partition`, `partition-all`, `group-by`, `sort`, `sort-by`
+  - [x] `mapv` over one or more collections (arities 1-4 and variadic)
 - [x] Lazy sequences: `lazy-seq`, `range`, `repeat`, `iterate`, `cycle`, `repeatedly` (via `Thunk`/`LazySeq` + `Value::Cons`)
 - [x] String functions: `join`, `split`, `trim`, `upper-case`, `lower-case`, `replace`, `starts-with?`, `ends-with?`
 - [x] I/O: `print`, `println`, `prn`, `pr`, `pr-str`, `str`, `read-string`, `slurp`, `spit`
 - [x] Math: `Math/abs`, `Math/pow`, `Math/sqrt`, `Math/floor`, `Math/ceil`, `Math/round`, `Math/log`, `Math/log10`, `Math/exp`, `Math/sin`, `Math/cos`, `Math/tan`, `Math/asin`, `Math/acos`, `Math/atan`, `Math/atan2`, `Math/sinh`, `Math/cosh`, `Math/tanh`, `Math/hypot`, `Math/PI`, `Math/E`
 - [x] Miscellaneous: `apply`, `comp`, `partial`, `juxt`, `memoize`, `constantly`, `identity`, `not`, `complement`, `gensym`, `type`, `class`, `hash`
 - [x] Core macros: `when`, `when-not`, `if-let`, `when-let`, `if-not`, `cond`, `condp`, `case`, `and`, `or`, `->`, `->>`, `as->`, `doto`, `dotimes`, `doseq`, `for`
+  - [x] `for` as a real list comprehension: multiple binding pairs (rightmost fastest) and the `:let`/`:when`/`:while` modifiers
+  - [ ] Loop-based `for` expansion, so a `:while` may follow a `:when` in the same binding group
 - [x] Namespace ops: `in-ns`, `alias`, `refer` (basic); `ns` with `:require`/`:refer-clojure` (`:exclude`/`:only`/`:rename`)
 - [x] `require` — file-based namespace loading with `:as` alias and `:refer [...]`/`:refer :all`
 - [x] `load-file` — evaluate a source file by absolute path
