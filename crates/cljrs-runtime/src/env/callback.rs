@@ -139,15 +139,36 @@ where
     f(&mut env)
 }
 
+/// How a callback reaches an evaluator. A `GlobalEnv` carries one of these,
+/// pointing at [`invoke_in_host`] in the binary that BUILT that runtime.
+pub(crate) type CallbackDispatch =
+    fn(Arc<GlobalEnv>, Arc<str>, bool, &Value, Vec<Value>) -> ValueResult<Value>;
+
 pub fn invoke(f: &Value, args: Vec<Value>) -> ValueResult<Value> {
-    let (globals, ns) = EVAL_CONTEXT.with(|stack| {
+    let (globals, ns, is_async) = EVAL_CONTEXT.with(|stack| {
         let s = stack.borrow();
         let ec = s
             .last()
             .ok_or_else(|| ValueError::Other("invoke called outside eval context".into()))?;
-        Ok((ec.globals.clone(), ec.current_ns.clone()))
+        Ok((ec.globals.clone(), ec.current_ns.clone(), ec.is_async))
     })?;
+    // Hand the call to the runtime that owns these values. A project cdylib
+    // links its own copy of this crate: evaluating there would run the host's
+    // state through the plugin's persistent-collection code.
+    (globals.callback_dispatch)(globals.clone(), ns, is_async, f, args)
+}
+
+pub(crate) fn invoke_in_host(
+    globals: Arc<GlobalEnv>,
+    ns: Arc<str>,
+    is_async: bool,
+    f: &Value,
+    args: Vec<Value>,
+) -> ValueResult<Value> {
     let mut env = Env::new(globals, &ns);
+    // The eval context knew this, and the Env rebuilt from it has to agree:
+    // blocking builtins reject inside an `^:async` body.
+    env.is_async = is_async;
     // Fast path for Clojure functions: call directly through the GlobalEnv
     // function pointer, bypassing the large apply_value stack frame.
     // Unwrap metadata so a WithMeta-wrapped fn is callable.

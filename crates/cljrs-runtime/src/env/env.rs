@@ -98,6 +98,10 @@ pub struct GlobalEnv {
     /// How this runtime executes function calls.  Fixed when the runtime is
     /// built; see [`crate::RuntimeBuilder::execution_mode`].
     execution_mode: ExecutionMode,
+    /// Callback entry point in the binary that constructed this runtime, so a
+    /// project cdylib does not interpret host values with its own copy of the
+    /// runtime. See [`crate::env::callback::invoke`].
+    pub(crate) callback_dispatch: crate::env::callback::CallbackDispatch,
     /// Which tiers are live right now (see [`TierState`]).  Starts at
     /// [`TierState::TreeWalk`] — nothing can be lowered until `clojure.core`
     /// exists — and is raised once to `execution_mode.target_tier()` when the
@@ -234,6 +238,7 @@ impl GlobalEnv {
             builtin_sources: RwLock::new(HashMap::new()),
             gc_config: RwLock::new(None),
             execution_mode,
+            callback_dispatch: crate::env::callback::invoke_in_host,
             tier_state: AtomicU8::new(TierState::TreeWalk as u8),
             tiers: crate::tiered::tiers::Tiers::new(id),
             async_rt: RwLock::new(None),
