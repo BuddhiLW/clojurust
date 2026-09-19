@@ -558,6 +558,16 @@ of them group the same way:
 |---|---|---|---|
 | `record?` | yes | no | no |
 | `with-meta` accepted | yes | **no** | yes |
+| `coll?` / `map?` / `seqable?` | yes | no | no |
+
+The collection row is the one that was wrong in both directions until
+2026-09-19. `Value::is_coll` listed no datatype variant at all, so a record
+answered `false` to `coll?` while answering `true` to `map?` and seqing fine;
+every piece of generic code that branches on `coll?` to decide whether to
+recurse silently treated a record as a scalar. `map?` and `is_seqable` matched
+the `TypeInstance` variant without reading `kind`, so a `deftype` instance
+claimed to be a map. All three now read `kind.is_record()`, and the family is
+pinned as a table in `cljrs-runtime/tests/collection_predicate_parity.rs`.
 
 A boolean can express two members of a three-member set, so it always loses one
 distinction — and which one it loses depends on who wrote the boolean.  Here it

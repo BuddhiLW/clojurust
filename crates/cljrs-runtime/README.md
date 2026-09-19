@@ -695,6 +695,14 @@ sequential types itself. A queue and the nine array kinds share one arm there,
 `nth_walked`, which walks the value and states the bounds rule once: out of
 range without a default is an error, with a default it is the default.
 
+A `TypeInstance` is seqable only when its `kind` is `Record`. `deftype` and
+`reify` are not: on the JVM neither generated class implements `Seqable`, so
+`(seq (->T 1))` throws there and must here. The same `kind.is_record()` test
+decides `map?` and `Value::is_coll`, and the three are pinned together against
+Clojure's answers in `tests/collection_predicate_parity.rs` — the bug they fix
+was one predicate in the family disagreeing with its neighbours about one kind
+of value, which only a table makes visible.
+
 ### Static members of JVM class names
 
 ```rust

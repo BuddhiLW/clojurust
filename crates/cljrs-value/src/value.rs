@@ -1292,21 +1292,29 @@ impl Value {
     }
 
     /// True for any collection.
+    ///
+    /// A `defrecord` instance counts, because on the JVM the generated class
+    /// implements `IPersistentCollection`; `deftype` and `reify` do not and so
+    /// do not count here either. The distinction is not cosmetic: generic code
+    /// branches on `coll?` to decide whether to recurse, walk, or break a line,
+    /// and a record that answers false is silently treated as a scalar by every
+    /// one of those branches.
     pub fn is_coll(&self) -> bool {
         self.unwrap_meta().is_coll_inner()
     }
 
     fn is_coll_inner(&self) -> bool {
-        matches!(
-            self,
+        match self {
             Value::List(_)
-                | Value::Vector(_)
-                | Value::Map(_)
-                | Value::Set(_)
-                | Value::Queue(_)
-                | Value::LazySeq(_)
-                | Value::Cons(_)
-        )
+            | Value::Vector(_)
+            | Value::Map(_)
+            | Value::Set(_)
+            | Value::Queue(_)
+            | Value::LazySeq(_)
+            | Value::Cons(_) => true,
+            Value::TypeInstance(ti) => ti.get().kind.is_record(),
+            _ => false,
+        }
     }
 }
 

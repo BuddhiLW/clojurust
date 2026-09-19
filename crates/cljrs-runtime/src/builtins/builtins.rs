@@ -2023,7 +2023,11 @@ pub fn is_seqable(v: &Value) -> bool {
             | Value::DoubleArray(_)
             | Value::BooleanArray(_)
             | Value::CharArray(_)
-            | Value::TypeInstance(_)
+    ) || matches!(
+        v.unwrap_meta(),
+        // Only a `defrecord` seqs, into its key/value pairs. `deftype` and
+        // `reify` refuse on the JVM, where neither implements Seqable.
+        Value::TypeInstance(ti) if ti.get().kind.is_record()
     )
 }
 
@@ -3397,10 +3401,14 @@ fn builtin_case_eq(args: &[Value]) -> ValueResult<Value> {
     Ok(Value::Bool(same_numeric_type && args[0] == args[1]))
 }
 fn builtin_map_q(args: &[Value]) -> ValueResult<Value> {
-    Ok(Value::Bool(matches!(
-        args[0].unwrap_meta(),
-        Value::Map(_) | Value::TypeInstance(_)
-    )))
+    // A `defrecord` is a map: its generated class implements IPersistentMap.
+    // A `deftype` or `reify` instance is not, however map-shaped its field
+    // table happens to be internally.
+    Ok(Value::Bool(match args[0].unwrap_meta() {
+        Value::Map(_) => true,
+        Value::TypeInstance(ti) => ti.get().kind.is_record(),
+        _ => false,
+    }))
 }
 fn builtin_vector_q(args: &[Value]) -> ValueResult<Value> {
     Ok(Value::Bool(matches!(

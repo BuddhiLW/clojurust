@@ -35,15 +35,6 @@
   alone. Rebind it with `binding`."
   72)
 
-(defn- breakable?
-  "Whether `x` is something `pprint` may split across lines.
-
-  Records are tested separately from `coll?` on purpose: in this runtime
-  `(coll? some-record)` is false while `(map? some-record)` is true, so a
-  record would otherwise never break no matter how wide it printed."
-  [x]
-  (or (coll? x) (record? x)))
-
 (defn- delims
   "The opening and closing delimiters to wrap `x`'s children in.
 
@@ -66,7 +57,7 @@
   rather than a staircase."
   [x indent]
   (let [flat (pr-str x)]
-    (if (or (not (breakable? x))
+    (if (or (not (coll? x))
             (<= (+ indent (count flat)) *print-right-margin*))
       flat
       (let [[open close] (delims x)
