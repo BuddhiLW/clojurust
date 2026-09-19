@@ -45,7 +45,7 @@ Recorded divergences:
 | `cljrs/lang_test/queue.cljc` | `PersistentQueue` seqability (`seq`, `vec`, `into`, `map`, `reduce`, `first`/`rest`, `nth`) and `clojure.lang.PersistentQueue/EMPTY` |
 | `cljrs/lang_test/nth_arrays.cljc` | `nth` over every array kind, its bounds rule, and the map/set refusals that keep it narrower than `seqable?` |
 | `cljrs/lang_test/rust_io.cljc` | `exists?`, `directory?`, `regular-file?`, `make-parents`, `delete-file` on cljrs (`clojure.rust.io`) and on the JVM (`clojure.java.io`) |
-| `cljrs/lang_test/multimethod.cljc` | Hierarchy dispatch, specificity, `prefer-method`, the method table, the `defmulti` head |
+| `cljrs/lang_test/multimethod.cljc` | Hierarchy dispatch, specificity, `prefer-method`, the method table, the `defmulti` head, recursion from a method body into its own multimethod |
 | `cljrs/lang_test/meta_transparency.cljc` | Property oracle: `^meta F` evaluates to what `F` evaluates to |
 | `cljrs/lang_test/fixture/proto.cljc` | A protocol in a namespace of its own; no tests |
 | `../cljrs-jvm-oracle.clj` | Runs the corpus on JVM Clojure, deriving namespaces from the tree |

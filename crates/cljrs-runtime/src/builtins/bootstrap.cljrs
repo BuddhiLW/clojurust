@@ -1328,9 +1328,13 @@
       ;; a `deftest` body `*ns*` is `user`, so a check would call every target
       ;; undefined. Letting the emitted symbol resolve is what keeps the alias,
       ;; refer and privacy rules in one place.
+      ;;
+      ;; The emitted `fn` MUST stay anonymous. A `fn` self-name is a local
+      ;; binding over the whole body, so naming it after the multimethod makes
+      ;; the method's own name resolve to the method instead of to the MultiFn.
       :else
       (list 'add-method mname dispatch-val
-            (cons 'fn (cons (symbol (name mname)) (cons params body)))))))
+            (cons 'fn (cons params body))))))
 
 ;; ── protocols: defprotocol as a macro over the protocol* primitive ───────────
 ;; `protocol*` mints the protocol object in the CURRENT namespace, and that is
