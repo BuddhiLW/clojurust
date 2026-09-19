@@ -81,9 +81,15 @@ pub extern "C" fn cljrs_init_my_project(registry: *mut Registry) {
 
 The function name in `:rust :init` (`"my_project::cljrs_init_my_project"`) must
 match the Rust function name used in `#[no_mangle]`
-(`cljrs_init_my_project`). The crate prefix (`my_project`) is used when
-generating the AOT harness; it must match the `[package] name` in `Cargo.toml`
-with hyphens replaced by underscores.
+(`cljrs_init_my_project`). The crate prefix (`my_project`) is the Rust
+*identifier* for your crate — the `[package] name` with hyphens replaced by
+underscores, which is how Rust source always spells it.
+
+You do **not** have to rename your package to match. A hyphenated package name
+(`my-plugin`) is the Rust norm and works: the AOT harness reads the real name
+from your `Cargo.toml` and emits `package = "my-plugin"` alongside the
+identifier, so Cargo resolves the dependency while generated source keeps
+calling the crate `my_plugin`.
 
 ### Name the symbol after your crate
 
