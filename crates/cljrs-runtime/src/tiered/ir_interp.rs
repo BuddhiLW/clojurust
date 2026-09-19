@@ -1201,9 +1201,12 @@ fn dispatch_known_fn(known_fn: &KnownFn, args: Vec<Value>, env: &mut Env) -> Eva
             Ok(Value::Bool(result))
         }
         KnownFn::Lt | KnownFn::Gt | KnownFn::Lte | KnownFn::Gte => builtin_compare(known_fn, &args),
-        KnownFn::Identical => Ok(Value::Bool(
-            args.len() == 2 && std::ptr::eq(&args[0] as *const _, &args[1] as *const _),
-        )),
+        // `&args[0]` and `&args[1]` are two slots of one Vec, so they are never
+        // the same pointer: this used to answer false for every pair.
+        KnownFn::Identical if args.len() == 2 => {
+            Ok(crate::builtins::builtins::builtin_identical(&args).unwrap_or(Value::Bool(false)))
+        }
+        KnownFn::Identical => Ok(Value::Bool(false)),
 
         // ── Type predicates ─────────────────────────────────────────────
         //

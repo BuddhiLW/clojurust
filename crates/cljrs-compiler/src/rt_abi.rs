@@ -2769,13 +2769,20 @@ pub unsafe extern "C" fn rt_is_map(v: *const Value) -> *const Value {
 
 // ── Identity ────────────────────────────────────────────────────────────────
 
-/// `(identical? a b)` — pointer identity.
+/// `(identical? a b)`: scalar value or shared heap identity, decided by
+/// `builtin_identical`. `a` and `b` are the argument boxes, not the values, so
+/// comparing the two pointers answers a question nobody asked.
 ///
 /// # Safety
 /// Both pointers must be valid.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rt_identical(a: *const Value, b: *const Value) -> *const Value {
-    intern_bool(std::ptr::eq(a, b))
+    let args = [unsafe { val_ref(a) }.clone(), unsafe { val_ref(b) }.clone()];
+    let same = matches!(
+        cljrs_runtime::builtins::builtins::builtin_identical(&args),
+        Ok(Value::Bool(true))
+    );
+    intern_bool(same)
 }
 
 // ── Str ─────────────────────────────────────────────────────────────────────
