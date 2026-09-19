@@ -138,7 +138,6 @@ pub fn register(registry: &mut Registry) {{
 
 /// Compile `source` with the fixture crate wired in as `:rust :init`, run the
 /// binary, and return its stdout.
-#[allow(clippy::result_large_err)]
 fn compile_with_native_init(name: &str, spelling: Spelling, source: &str) -> String {
     let _guard = AOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 
