@@ -913,6 +913,31 @@ guess at an encoding.
 the environment is process-global state the transaction was not handed as an
 argument, and it can change under it between retries.
 
+### Process control and stdin (`process.rs`)
+
+- `(System/exit status)`: terminates the process with `status`. Never returns,
+  so nothing after it in the program runs.
+- `(read-line)`: the next line of stdin without its terminator (`\r\n` and
+  `\n` both terminate one, and an unterminated final line is still a line), or
+  `nil` at end of input.
+
+A command-line program needs both to be portable: a `.cljc` script that reads a
+line, decides, and exits with a status had no way to do any of it, and
+`(resolve 'System/exit)` answered `nil`. `clojure.rust.io/read-line` is a
+different function, taking a reader; this is `clojure.core`'s zero-argument one,
+over stdin, as on the JVM.
+
+`System/exit` flushes stdout and stderr first, because `process::exit` runs no
+destructors and would otherwise drop whatever the program had buffered. It then
+exits from a **fresh thread**: on Linux `exit` runs TLS destructors on its
+calling thread, and the evaluation thread may be inside Tokio's scheduler, whose
+thread-local core cannot be destroyed while it is checked out ("Oh no! We never
+placed the Core back"), and the abort that follows would lose the status code.
+
+Both are **denied inside a transaction function**, for the same reason
+`System/getenv` is: a retry cannot put a consumed line of stdin back, and
+nothing can undo ending the process.
+
 ### `eval`
 
 `eval` is registered as a sentinel and intercepted where the environment is

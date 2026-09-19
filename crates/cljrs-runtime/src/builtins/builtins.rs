@@ -8,6 +8,7 @@ use crate::builtins::bitops::{
     builtin_bit_and_not, builtin_bit_clear, builtin_bit_flip, builtin_bit_set, builtin_bit_test,
 };
 use crate::builtins::new::{builtin_exception_dot, builtin_new};
+use crate::builtins::process::{builtin_exit, builtin_read_line};
 use crate::builtins::regex::{
     builtin_re_find, builtin_re_groups, builtin_re_matcher, builtin_re_matches, builtin_re_pattern,
 };
@@ -559,6 +560,10 @@ const BUILTIN_DOCS: &[(&str, &str)] = &[
         "Returns a monotonic time in nanoseconds from an arbitrary origin; only differences are meaningful.",
     ),
     (
+        "System/exit",
+        "Terminates the process with the given status code; never returns.",
+    ),
+    (
         "Thread/sleep",
         "Blocks the current thread for n milliseconds.",
     ),
@@ -650,6 +655,10 @@ const BUILTIN_DOCS: &[(&str, &str)] = &[
     ("newline", "Writes a newline to *out*."),
     ("flush", "Flushes *out*."),
     ("read-string", "Reads one object from the given string."),
+    (
+        "read-line",
+        "Reads the next line from stdin, without its terminator, or nil at end of input.",
+    ),
     ("slurp", "Reads the contents of a file into a string."),
     (
         "spit",
@@ -1423,6 +1432,7 @@ pub fn register_all(globals: &Arc<GlobalEnv>, ns: &str) {
         ("printf", Arity::Variadic { min: 1 }, builtin_printf),
         ("newline", Arity::Fixed(0), builtin_newline),
         ("flush", Arity::Fixed(0), builtin_flush),
+        ("read-line", Arity::Fixed(0), builtin_read_line),
         // Special forms need stub vars so (resolve 'name) finds them.
         // These are never called at runtime (the special form dispatch
         // intercepts them first), but resolve/var must be able to find them.
@@ -1536,6 +1546,7 @@ pub fn register_all(globals: &Arc<GlobalEnv>, ns: &str) {
         ("Math/tanh", Arity::Fixed(1), builtin_tanh),
         ("Math/hypot", Arity::Fixed(2), builtin_hypot),
         ("System/getenv", Arity::Variadic { min: 0 }, builtin_getenv),
+        ("System/exit", Arity::Fixed(1), builtin_exit),
         ("log10", Arity::Fixed(1), builtin_log10),
         ("sin", Arity::Fixed(1), builtin_sin),
         ("cos", Arity::Fixed(1), builtin_cos),

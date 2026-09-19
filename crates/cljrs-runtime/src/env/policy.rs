@@ -95,6 +95,11 @@ pub fn check_native(name: &str) -> EvalResult<()> {
         // Reads process-global state the transaction did not receive as an
         // argument, and which can change under it between calls.
         "System/getenv",
+        // Consumes a line of stdin, which a retry cannot put back.
+        "read-line",
+        // A transaction function can be retried; ending the process is the one
+        // effect no retry can undo.
+        "System/exit",
     ];
     if DENIED.contains(&name) {
         Err(forbidden(name))
