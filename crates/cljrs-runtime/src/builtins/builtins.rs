@@ -3134,7 +3134,11 @@ fn builtin_gte(args: &[Value]) -> ValueResult<Value> {
     Ok(Value::Bool(true))
 }
 
-fn builtin_identical(args: &[Value]) -> ValueResult<Value> {
+/// `(identical? a b)`: scalars by value, keywords by name, every heap value by
+/// the `GcPtr` it holds. This is the definition of cljrs identity. The IR
+/// interpreter and the native ABI's `rt_identical` both answer through it, so
+/// no tier can disagree about it.
+pub fn builtin_identical(args: &[Value]) -> ValueResult<Value> {
     macro_rules! peq {
         ($a:expr, $b:expr) => {
             GcPtr::ptr_eq($a, $b)
