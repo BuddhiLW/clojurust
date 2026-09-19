@@ -5671,31 +5671,14 @@ fn assoc_in_impl(m: Value, keys: &[Value], val: Value) -> ValueResult<Value> {
     if keys.is_empty() {
         return Ok(val);
     }
-    // Unwrap metadata (like `get`/`assoc` do) so a map carrying meta isn't
-    // mistaken for a non-map and blown away to a fresh single-key map.
-    let meta = m.get_meta().cloned();
-    let base = m.unwrap_meta();
+    // Each level is exactly `(assoc m k (assoc-in (get m k) ks v))`, so it goes
+    // through the same `get` and `assoc` as the builtins: a vector on the path
+    // is indexed and stays a vector (appending at its count, an error past it),
+    // nil becomes a map, and a level's metadata is kept by `assoc`.
     let k = &keys[0];
-    let inner = match base {
-        Value::Map(map) => map.get(k).unwrap_or(Value::Nil),
-        Value::TypeInstance(ti) => ti.get().fields.get(k).unwrap_or(Value::Nil),
-        _ => Value::Nil,
-    };
+    let inner = builtin_get(&[m.clone(), k.clone()])?;
     let updated = assoc_in_impl(inner, &keys[1..], val)?;
-    let result = match base {
-        Value::Map(map) => Value::Map(map.assoc(k.clone(), updated)),
-        Value::TypeInstance(ti) => Value::TypeInstance(GcPtr::new(TypeInstance {
-            type_tag: ti.get().type_tag.clone(),
-            fields: ti.get().fields.assoc(k.clone(), updated),
-            mutable: ti.get().mutable.clone(),
-            kind: ti.get().kind,
-        })),
-        _ => Value::Map(MapValue::empty().assoc(k.clone(), updated)),
-    };
-    Ok(match meta {
-        Some(meta) => result.with_meta(meta),
-        None => result,
-    })
+    builtin_assoc(&[m, k.clone(), updated])
 }
 
 fn builtin_update_in_stub(_args: &[Value]) -> ValueResult<Value> {
