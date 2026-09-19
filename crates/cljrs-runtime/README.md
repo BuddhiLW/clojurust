@@ -626,6 +626,18 @@ Thread-local eval context for Rust→Clojure callbacks (`invoke`, `with_eval_con
 - `invoke(f: &Value, args: Vec<Value>) -> ValueResult<Value>` — call a Clojure-callable value through the innermost context. Honors `^:async` dispatch (via `apply::dispatch_if_async`) so a native/compiled caller of an `^:async` fn gets a `Value::Future`, not a synchronously-run body
 - `with_eval_context(f)` — run a closure with a temporary `Env` built from the innermost context
 
+`invoke` does not evaluate anything itself. It reads the context, then hands the
+call to `GlobalEnv::callback_dispatch`, a function pointer each `GlobalEnv`
+carries to `invoke_in_host` **in the binary that built it**. That is what makes
+a callback from a project cdylib safe: the plugin links its own copy of this
+crate, with its own copy of every persistent-collection routine, and running
+host state through those was observed to corrupt the structure outright (`rpds`
+panicking with "cannot have a branch at this height" once a callback grew a
+vector past 32 elements, with host `archery` 1.2.2 against plugin `archery`
+1.2.3). Dispatching through the host's pointer keeps the interpreter, the GC and
+the collections on one side of the boundary. It is not a promise of a stable
+Rust ABI across arbitrary dependency versions: it removes the need for one here.
+
 ### `async_hook` submodule
 
 The optional async-runtime seam (`AsyncRuntime` trait, installed by `cljrs-async`).  Async-JIT activation is *not* here: the dispatcher reaches it through the calling runtime's own backend (`GlobalEnv::jit_backend()` → `JitBackend::compile_async_arity`), so a runtime without a JIT simply keeps tree-walking `^:async` bodies.
