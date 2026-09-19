@@ -12,8 +12,8 @@
 /// this pins it. Measured before the rename: the two addresses were equal.
 #[test]
 fn extension_init_symbols_are_unique_per_crate() {
-    let base64 = cljrs_base64::cljrs_init_cljrs_base64 as usize;
-    let blake3 = cljrs_blake3::cljrs_init_cljrs_blake3 as usize;
+    let base64 = cljrs_base64::cljrs_init_cljrs_base64 as *const () as usize;
+    let blake3 = cljrs_blake3::cljrs_init_cljrs_blake3 as *const () as usize;
     assert_ne!(
         base64, blake3,
         "two extension crates resolved their init to one address, so one \
