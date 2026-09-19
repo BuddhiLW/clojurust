@@ -148,3 +148,45 @@
   (testing "cljrs rejects the form, the JVM defers to the call"
     #?(:rust (is (thrown? Exception (eval (read-string "(defmulti no-dispatch)"))))
        :clj (is (var? (eval (read-string "(defmulti no-dispatch)"))))))) 
+
+;; ── A method body may call its own multimethod ───────────────────────────────
+;;
+;; The fn `defmethod` emits is anonymous. A self-name is a local binding over
+;; the whole body, so a method named after its multimethod would re-enter
+;; itself instead of dispatching.
+
+(defmulti area-rec :kind)
+
+(defmethod area-rec :square [{:keys [side]}] (* side side))
+(defmethod area-rec :pair [{:keys [a b]}] (+ (area-rec a) (area-rec b)))
+
+(deftest a-method-calling-its-own-multimethod-re-dispatches
+  (testing "the call in the body reaches the multimethod, not the method"
+    (is (= 13 (area-rec {:kind :pair
+                         :a {:kind :square :side 2}
+                         :b {:kind :square :side 3}}))))
+  (testing "a method reached recursively may itself recur"
+    (is (= 14 (area-rec {:kind :pair
+                         :a {:kind :square :side 1}
+                         :b {:kind :pair
+                             :a {:kind :square :side 2}
+                             :b {:kind :square :side 3}}})))))
+
+(defmulti parity-of :step)
+(defmethod parity-of :even [{:keys [n]}]
+  (if (zero? n) true (parity-of {:step :odd :n (dec n)})))
+(defmethod parity-of :odd [{:keys [n]}]
+  (if (zero? n) false (parity-of {:step :even :n (dec n)})))
+
+(deftest two-methods-of-one-multimethod-recur-into-each-other
+  (testing "control alternates between the methods, so each call re-dispatches"
+    (is (true? (parity-of {:step :even :n 4})))
+    (is (false? (parity-of {:step :even :n 3})))))
+
+(defmulti total-of (fn [x] (if (vector? x) :many :one)))
+(defmethod total-of :one [x] x)
+(defmethod total-of :many [xs] (reduce + 0 (map total-of xs)))
+
+(deftest recursion-holds-when-the-dispatch-fn-is-not-a-keyword
+  (testing "a plain fn in the dispatch position dispatches the nested call too"
+    (is (= 15 (total-of [1 [2 3] [[4] 5]])))))

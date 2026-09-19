@@ -155,3 +155,55 @@ fn multi_fn_defaults_its_default_dispatch_value() {
                (pr-str (m :anything))";
     assert_eq!(eval_pr(src), ":fell-through");
 }
+
+// ── A method body may call its own multimethod ───────────────────────────────
+//
+// The fn the expansion emits is ANONYMOUS. A `fn` self-name is a local binding
+// over the whole body, so naming it after the multimethod made the name resolve
+// to the method itself: the recursive call re-entered the same method with the
+// wrong argument instead of dispatching, and the mis-destructured value reached
+// the MultiFn as a nil dispatch value one frame later.
+
+#[test]
+fn a_method_body_calling_its_own_multimethod_re_dispatches() {
+    let src = "(defmulti area :kind)
+               (defmethod area :square [{:keys [side]}] (* side side))
+               (defmethod area :pair [{:keys [a b]}] (+ (area a) (area b)))
+               (pr-str (area {:kind :pair
+                              :a {:kind :square :side 2}
+                              :b {:kind :square :side 3}}))";
+    assert_eq!(eval_pr(src), "13");
+}
+
+#[test]
+fn a_method_reached_recursively_may_itself_recur() {
+    let src = "(defmulti area :kind)
+               (defmethod area :square [{:keys [side]}] (* side side))
+               (defmethod area :pair [{:keys [a b]}] (+ (area a) (area b)))
+               (pr-str (area {:kind :pair
+                              :a {:kind :square :side 1}
+                              :b {:kind :pair
+                                  :a {:kind :square :side 2}
+                                  :b {:kind :square :side 3}}}))";
+    assert_eq!(eval_pr(src), "14");
+}
+
+#[test]
+fn two_methods_of_one_multimethod_recur_into_each_other() {
+    let src = "(defmulti parity :step)
+               (defmethod parity :even [{:keys [n]}]
+                 (if (zero? n) true (parity {:step :odd :n (dec n)})))
+               (defmethod parity :odd [{:keys [n]}]
+                 (if (zero? n) false (parity {:step :even :n (dec n)})))
+               (pr-str [(parity {:step :even :n 4}) (parity {:step :even :n 3})])";
+    assert_eq!(eval_pr(src), "[true false]");
+}
+
+#[test]
+fn recursion_holds_when_the_dispatch_fn_is_not_a_keyword() {
+    let src = "(defmulti total (fn [x] (if (vector? x) :many :one)))
+               (defmethod total :one [x] x)
+               (defmethod total :many [xs] (reduce + 0 (map total xs)))
+               (pr-str (total [1 [2 3] [[4] 5]]))";
+    assert_eq!(eval_pr(src), "15");
+}
