@@ -28,8 +28,6 @@ pub fn macroexpand_1(form: &Form, env: &mut Env) -> EvalResult<Form> {
             unreachable!()
         };
 
-        // Build &form value (the whole call as a list).
-        let form_val = form_to_value(&resolved)?;
         // Build &env value (local bindings as a map — empty at top level), and
         // only for a macro whose body mentions `&env`; see `macro_apply`.
         let env_val = if macro_fn.macro_uses_env {
@@ -42,10 +40,41 @@ pub fn macroexpand_1(form: &Form, env: &mut Env) -> EvalResult<Form> {
         } else {
             Value::Map(cljrs_value::MapValue::empty())
         };
-        let mut args = vec![form_val, env_val];
-        for p in &parts[1..] {
-            args.push(form_to_value(p)?);
-        }
+
+        // `&form` is the whole call as a list and the macro's arguments are
+        // that same list's tail, so convert each part once and share the
+        // values between the two rather than converting every argument
+        // subtree a second time. A macro body is often the largest thing in
+        // the call, and `macroexpand` runs this to a fixed point.
+        //
+        // A `#?@` splice among the parts is the one case where the two
+        // sequences genuinely differ: spliced into the list it contributes
+        // its elements to the enclosing sequence, while in an argument
+        // position it has no siblings and `form_to_value` rejects it. That
+        // case keeps the original two-pass conversion.
+        let spliced = parts
+            .iter()
+            .any(|f| matches!(f.kind, FormKind::ReaderCond { .. }));
+        let (form_val, arg_vals) = if spliced {
+            let mut arg_vals = Vec::with_capacity(parts.len() - 1);
+            for p in &parts[1..] {
+                arg_vals.push(form_to_value(p)?);
+            }
+            (form_to_value(&resolved)?, arg_vals)
+        } else {
+            let mut vals = Vec::with_capacity(parts.len());
+            for p in parts.iter() {
+                vals.push(form_to_value(p)?);
+            }
+            let form_val = crate::builtins::form::values_to_list(vals.iter().cloned());
+            let arg_vals = vals.split_off(1);
+            (form_val, arg_vals)
+        };
+
+        let mut args = Vec::with_capacity(arg_vals.len() + 2);
+        args.push(form_val);
+        args.push(env_val);
+        args.extend(arg_vals);
         let expanded = crate::interp::apply::call_cljrs_fn(&macro_fn, &args, env)?;
         let dummy = Span::new(Arc::new("<macro>".to_string()), 0, 0, 1, 1);
         return value_to_form(&expanded, dummy);
