@@ -41,6 +41,8 @@ src/
     walk.cljrs            Pure Clojure implementation of clojure.walk
     data.cljrs            Pure Clojure implementation of clojure.data
     zip.cljrs             Pure Clojure implementation of clojure.zip
+    pprint.cljrs          Pure Clojure implementation of clojure.pprint
+                          (data dispatch only; no cl-format)
     edn.cljrs             Clojure source for clojure.edn (ns decl; natives pre-registered)
     rust/
       io.cljrs            Clojure source for clojure.rust.io (ns decl; natives pre-registered)
@@ -104,6 +106,7 @@ the `IoReader`, `IoWriter`, and `StringReader` native object types.
 | `clojure.set` | `set.rs` + `clojure/set.cljrs` | Native Rust, loaded lazily |
 | `clojure.rust.io` | `io.rs` + `clojure/rust/io.cljrs` | Native Rust, loaded lazily; not built for wasm32 |
 | `clojure.test` | `clojure/test.cljrs` | Pure Clojure, loaded lazily |
+| `clojure.pprint` | `clojure/pprint.cljrs` | Pure Clojure, loaded lazily; data dispatch only, no `cl-format` |
 | `clojure.spec.alpha` | `clojure/spec/alpha.cljrs` | Pure Clojure, loaded lazily |
 | `clojure.spec.test.alpha` | `clojure/spec/test/alpha.cljrs` | Pure Clojure, loaded lazily |
 | `clojure.spec.gen.alpha` | `clojure/spec/gen/alpha.cljrs` | Pure Clojure, loaded lazily; every fn throws (no generator engine) |

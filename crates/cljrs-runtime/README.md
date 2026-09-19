@@ -1198,6 +1198,7 @@ two of the seven primitives actually do:
 | `protocol*` | special form | mints a `Protocol` in the CURRENT namespace — `Protocol.ns` qualifies the method symbol that extend-via-metadata dispatch looks up |
 | `protocol-fn` | builtin fn | the dispatch `ProtocolFn` for one method, arity read back out of the protocol's own spec |
 | `extend` | builtin fn | writes `{method → fn}` into `Protocol.impls` under a type tag; Clojure's own signature |
+| `extenders` | builtin fn | reads `Protocol.impls` back out as a sorted list of type-tag symbols, `nil` when nothing extends it |
 | `make-type-instance`, `make-type-instance-mut` | builtin fns | construct a `deftype` `TypeInstance` (the latter with interior-mutable cells) |
 | `make-reify-instance` | builtin fn | the same shape, recording `DatatypeKind::Reify` — one builtin per datatype form, so the caller states which it meant rather than the runtime guessing from a gensym'd type tag |
 | `multi-fn` | builtin fn | mints a `MultiFn` with an optional default dispatch value |
