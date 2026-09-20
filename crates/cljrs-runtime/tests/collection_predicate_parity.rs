@@ -81,9 +81,12 @@ fn the_collection_predicates_agree_with_the_jvm_for_every_kind_of_value() {
         "#,
     );
 
-    // value, coll?, map?, sequential?, associative?, counted?, seqable?, record?
+    // An expression and the seven answers Clojure gives for it, in the order
+    // the predicate list below reads them.
+    type Row = (&'static str, bool, bool, bool, bool, bool, bool, bool);
+
     #[rustfmt::skip]
-    let table: &[(&str, bool, bool, bool, bool, bool, bool, bool)] = &[
+    let table: &[Row] = &[
         //  expr        coll   map    seq'l  assoc  count  seqbl  record
         ("rec",         true,  true,  false, true,  true,  true,  true),
         ("typ",         false, false, false, false, false, false, false),
