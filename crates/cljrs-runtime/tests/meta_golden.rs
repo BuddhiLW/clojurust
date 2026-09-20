@@ -17,27 +17,30 @@
 //! UPDATE_GOLDEN=1 cargo test -p cljrs-runtime --test meta_golden
 //! ```
 
-use std::sync::Arc;
-
 use cljrs_reader::Parser;
-use cljrs_runtime::env::env::{Env, GlobalEnv};
+use cljrs_runtime::env::env::Env;
 use cljrs_value::Value;
+
+mod common;
+use common::reset_env_in;
+
+/// The namespace every row runs in. It is the same name each time and emptied
+/// between rows: `::kw` resolves against the current namespace, so the name is
+/// part of the recorded answer and must not drift. `user` specifically, because
+/// that is the name the golden file already records and a rename would rewrite
+/// every `::kw` row for no behavioural reason.
+const NS: &str = "user";
+
+fn make_env(
+    mode: cljrs_runtime::ExecutionMode,
+) -> (std::sync::Arc<cljrs_runtime::env::env::GlobalEnv>, Env) {
+    reset_env_in(mode, NS)
+}
 
 const GOLDEN: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/tests/golden/reader_metadata.txt"
 );
-
-fn make_env(mode: cljrs_runtime::ExecutionMode) -> (Arc<GlobalEnv>, Env) {
-    let globals = cljrs_runtime::Runtime::builder()
-        .execution_mode(mode)
-        .eager_clojure_test(true)
-        .build()
-        .expect("runtime")
-        .into_globals();
-    let env = Env::new(globals.clone(), "user");
-    (globals, env)
-}
 
 /// The answer, or the message of the error — never a span or a debug dump,
 /// which would make the golden file churn on unrelated edits.
@@ -136,8 +139,11 @@ fn render() -> String {
                     "evaluated" => format!("^{ann} {form}"),
                     _ => format!("`^{ann} {form}"),
                 };
-                // A fresh environment per row: an annotation that defines or
-                // mutates something must not leak into the next row's answer.
+                // A fresh namespace per row over one shared runtime: an
+                // annotation that defines or mutates something must not leak
+                // into the next row's answer, and what a row can define is a
+                // var, which is what a namespace holds. Building a runtime per
+                // row instead cost this suite 49 of the suite's 193 seconds.
                 let (_g, mut env) = make_env(cljrs_runtime::ExecutionMode::TreeWalk);
                 let got = outcome(&mut env, &format!("(meta {expr})"));
                 out.push_str(&format!("{position} | (meta {expr}) => {got}\n"));

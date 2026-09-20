@@ -103,6 +103,20 @@ src/
     backend.rs          — JitBackend: the seam a compiler installs on a runtime
 
 tests/
+  common/mod.rs                    — one runtime per test thread, one namespace per
+                                     case: `shared_globals`, `fresh_env`,
+                                     `fresh_env_in(mode)`, `reset_env_in(mode, ns)`,
+                                     `eval_in`, `eval_fresh`. Property suites use it
+                                     instead of building a runtime per case
+  runtime_startup_canary.rs        — the one suite that still pays for a runtime on
+                                     purpose: asserts a build stays under 150ms in
+                                     debug (best of five), so a startup regression
+                                     fails with a number rather than as CI getting
+                                     slower
+  collection_predicate_parity.rs   — coll?/map?/sequential?/associative?/counted?/
+                                     seqable?/record? as a table, against Clojure's
+                                     answers, over record, deftype, reify and the
+                                     built-in kinds
   no_gc_eval.rs                    — (no-gc) arithmetic, def provenance, region stack
   versioned_resolution.rs          — versioned resolution against a real git fixture
   vcs_provider.rs                  — the VcsProvider seam: default provider, degradation
