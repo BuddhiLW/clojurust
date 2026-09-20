@@ -128,6 +128,12 @@ tests/
   qualified_protocol_impl.rs       — a qualified protocol name in an impl position
                                      (defrecord/deftype/reify/extend-*) resolves
                                      through its own namespace
+  defmulti_attr_map.rs             — `defmulti`'s four head shapes (docstring
+                                     and/or attr map before the dispatch fn),
+                                     and the metadata precedence between them:
+                                     docstring beats attr map beats `^` marks
+                                     on the name
+
   defmethod_cross_ns.rs            — `defmethod` on a multimethod owned by
                                      another namespace, named through a
                                      `:require :as` alias, in full, or via
@@ -1230,6 +1236,13 @@ it was never given. The two messages point at different repairs — a missing
 `defmethod_cross_ns.rs` pins. `resolve` reports a private var just as the JVM
 does, so extending one across namespaces still fails on the access rule and is
 not mistaken for a missing var.
+
+The fn the `defmethod` expansion emits is ANONYMOUS. A `fn` self-name is a
+local binding over the whole body, so naming it after the multimethod makes the
+method's own name resolve to the method rather than to the `MultiFn`, and a
+body that calls its own multimethod re-enters itself instead of dispatching.
+Clojure emits `(fn ~@fn-tail)` for the same reason. `defmulti_macro.rs` and
+`tests/cljrs/cljrs/lang_test/multimethod.cljc` pin it.
 
 `deftype*` uses `parse_field_specs` (field name + mutability,
 metadata-transparent) and `register_impls_for_tag`. `synth_field_scope` wraps a
