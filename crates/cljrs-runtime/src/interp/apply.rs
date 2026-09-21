@@ -226,11 +226,9 @@ pub fn is_form_intercepted(name: &str) -> bool {
 pub fn eval_call(func_form: &Form, arg_forms: &[Form], env: &mut Env) -> EvalResult {
     // Interop: (.methodName target args...) — method call syntax.
     if let FormKind::Symbol(s) = &func_form.kind
-        && let Some(method) = s.strip_prefix('.')
-        && !method.is_empty()
-        && method != "."
+        && is_method_sugar(s)
     {
-        return eval_method_call(method, arg_forms, env);
+        return eval_method_call(&s[1..], arg_forms, env);
     }
 
     // Evaluate the callee first.
@@ -331,6 +329,12 @@ fn eval_method_call(method: &str, arg_forms: &[Form], env: &mut Env) -> EvalResu
 
     dispatch_method(method, &target, &args)
 }
+
+/// The `.method` / `.-field` head predicate.
+///
+/// Re-exported from `cljrs_ir::lower` so the evaluator, the async evaluator,
+/// the ANF lowerer and the AOT driver all read one definition.
+pub use cljrs_ir::lower::is_method_sugar;
 
 /// Dispatch `(.method target args…)` on an already-evaluated target.
 ///
@@ -1879,10 +1883,9 @@ fn handle_resolve(arg_forms: &[Form], env: &mut Env) -> EvalResult {
             let sym = s.get();
             // If qualified (ns/name), use the given ns; otherwise current ns.
             if let Some(ns) = &sym.namespace {
-                let full_ns = env
-                    .globals
-                    .resolve_alias(&resolve_ns, ns.as_ref())
-                    .unwrap_or_else(|| ns.clone());
+                // Relative to `*ns*`, not to `env.current_ns` — `resolve` is
+                // defined in terms of the dynamic var.
+                let full_ns = env.globals.resolve_ns_part_in(&resolve_ns, ns.as_ref());
                 return Ok(
                     match env.globals.lookup_var_in_ns(&full_ns, sym.name.as_ref()) {
                         Some(var_ptr) => Value::Var(var_ptr),
