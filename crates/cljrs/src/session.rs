@@ -185,7 +185,7 @@ fn apply_deps_config(globals: &Arc<GlobalEnv>, cwd: &Path) {
 fn add_dep_source_paths(globals: &Arc<GlobalEnv>, config: &cljrs_project::config::DepsConfig) {
     for (name, dep) in &config.deps {
         let root = match dep {
-            cljrs_project::config::Dependency::Local { root } => {
+            cljrs_project::config::Dependency::Local { root, .. } => {
                 if root.is_dir() {
                     root.clone()
                 } else {
@@ -227,7 +227,7 @@ pub fn collect_dep_src_paths(config: &cljrs_project::config::DepsConfig) -> Vec<
     let mut paths = Vec::new();
     for (name, dep) in &config.deps {
         let root = match dep {
-            cljrs_project::config::Dependency::Local { root } => {
+            cljrs_project::config::Dependency::Local { root, .. } => {
                 if root.is_dir() {
                     root.clone()
                 } else {

@@ -152,3 +152,58 @@ vendor {:local/root "../vendor/utils"}
 ```
 
 `:local/root` is a path relative to the `cljrs.edn` file's directory.
+
+### Native dependencies
+
+A dependency that ships Rust code can have that code built as a cdylib and
+loaded into the runtime, so `(require '[my.lib])` brings in a namespace no
+Clojure source provides. Opt in with `:rust/load :dylib` and name the crate's
+init function:
+
+```clojure
+{:deps
+ {my.lib {:git/url  "https://github.com/user/my-lib"
+          :git/sha  "abc1234ef"
+          :rust/load :dylib
+          :rust/init "my_lib::cljrs_init"}}}
+```
+
+`:rust/init` is the fully-qualified path to a `pub fn(&mut Registry)`. Add
+`:rust/crate "path/to/crate"` when the crate is not at the dependency's root.
+
+**Developing one locally.** The same keys work on a `:local/root` dependency,
+which builds the working tree as it currently stands — no commit, no push:
+
+```clojure
+{:deps
+ {my.lib {:local/root "../my-lib"
+          :rust/load  :dylib
+          :rust/init  "my_lib::cljrs_init"
+          :rust/crate "src/crates/thing"}}}
+```
+
+Edit the crate and the next `require` rebuilds it: a local dependency is
+versioned by a digest of its source files, so a changed tree is a different
+build. The digest covers the whole `:local/root`, not just the `:rust/crate`
+subdirectory, so editing a sibling crate the extension depends on also
+rebuilds. This is the loop for writing an extension; pin it with `:git/sha`
+to ship it.
+
+Two limits apply to a local native dependency, both following from its having
+no commit:
+
+- It cannot serve a **versioned symbol** (`my.lib/f@<sha>`). Those resolve
+  against pinned dependencies only; a local one is skipped.
+- It is **not reproducible**. Two machines with different working trees get
+  different builds, silently. Only `:git/sha` makes a build repeatable.
+
+Builds are cached under `~/.cljrs/cache/dylibs/` per crate, version, compiler
+and cljrs version, and are guarded by an ABI handshake: a wrapper built by a
+different `rustc`, profile, or cljrs version is refused rather than loaded.
+The generated wrapper crate and its cargo target directory are shared by every
+version of one dependency, so an edit costs an incremental rebuild; only the
+built library is copied out to a per-version path, which is what makes a
+rebuilt library load instead of the one already open.
+
+Set `CLJRS_DYLIB_OFFLINE=1` to build wrappers with `cargo --offline`, for a
+machine whose cargo cache already holds everything the dependency needs.
