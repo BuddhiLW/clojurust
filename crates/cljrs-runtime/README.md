@@ -836,6 +836,25 @@ The `System/…` and `Thread/…` names follow the existing `Math/…` conventio
 JVM static's name registered as an ordinary builtin, so portable code that
 reaches for a clock resolves without a reader conditional.
 
+### Process environment (`builtins.rs`)
+
+- `(System/getenv)` — the whole environment, as a map of string to string.
+- `(System/getenv "NAME")` — that variable's value, or `nil` when unset.
+
+Same convention as the clock above, and the same nil-for-unset answer as
+`java.lang.System/getenv`, so `.cljc` that reads an environment variable needs
+no reader conditional.
+
+Reads through `std::env::vars_os` and skips what is not valid UTF-8:
+`std::env::vars()` *panics* on a non-UTF-8 entry, and one stray variable in the
+caller's environment must not take the runtime down. The one-arg form reports
+such a variable as unset, which is `std::env::var`'s own answer rather than a
+guess at an encoding.
+
+`System/getenv` is **denied inside a transaction function** (`env::policy`):
+the environment is process-global state the transaction was not handed as an
+argument, and it can change under it between retries.
+
 ### `eval`
 
 `eval` is registered as a sentinel and intercepted where the environment is
@@ -1050,6 +1069,7 @@ implement sentinel operations without hitting the stub errors registered in
 | `eval_with_bindings_star(args, env)` | `with-bindings*` — push binding frame, call f |
 | `eval_send_to_agent(args, env)` | `send` / `send-off` — dispatch action to agent |
 | `dispatch_method(method, target, args)` | `(.method target args…)` — interop method dispatch on an evaluated target (strings, vectors, seqs); on a `TypeInstance` only `.-field` reads are supported (mutable cell first, then the field map) |
+| `is_method_sugar(head)` | re-exported from `cljrs_ir::lower`: whether a head symbol is the `.method` / `.-field` sugar (`..` and a bare `.` are not). One definition, read by `eval_call`, `cljrs-async`'s `eval_call_async`, the ANF lowerer and the AOT driver |
 
 `make_lazy_seq_from_fn(f, globals, ns)` (already public) creates a `LazySeq`
 from a zero-arg callable; the above `make_delay_from_fn` is the analogous
