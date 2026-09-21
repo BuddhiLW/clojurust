@@ -313,6 +313,27 @@ binding (`:rust/load :dylib` in `cljrs.edn`).  The same machinery also makes a
 namespace, registering the package's exports into the live (unversioned)
 namespace.
 
+Two dependency forms reach it, differing only in where the crate source comes
+from:
+
+- `:git/url` + `:git/sha` — a commit, materialized by `cljrs_project::vcs`.
+  Serves versioned resolution and `require`; its artifact is cached forever.
+- `:local/root` — a working tree, built as it currently stands.  Serves
+  `require` only, since there is no commit to resolve `@<sha>` against, and is
+  declined by versioned resolution before validation so a misconfigured local
+  dependency leaves that path exactly as it was.  Versioned by
+  `digest_source_tree` over the **whole root**, not just the `:rust/crate`
+  subdirectory: the crate being built normally has path dependencies on its
+  siblings, so an edit outside it still changes what cargo produces.
+
+The generated wrapper crate and its cargo target directory are keyed by
+`(dep crate, ABI fingerprint)` and shared across versions, so an edit costs an
+incremental rebuild rather than a fresh one and leaves one target directory
+behind rather than one per edit.  The built cdylib is then copied to a
+version-unique path: `dlopen` keys on the path, so a rebuilt library has to
+arrive somewhere the previous one never occupied.  `CLJRS_DYLIB_OFFLINE=1`
+builds wrappers with `cargo --offline`.
+
 ### Status
 
 Versioned-namespaces plan, Phase 5 (see `docs/archive/versioned-namespaces-plan.md`).
@@ -331,10 +352,20 @@ src/native/pinned.rs — install (both loader hooks), wrapper crate generation,
               Registry init
 build.rs    — captures `rustc -V` for the host side of the ABI fingerprint
 tests/
-  pinned_dylib_e2e.rs — gated end-to-end test (CLJRS_DYLIB_E2E=1): two-commit
-              native crate fixture; pinned (versioned-symbol) resolution loads
-              the v1 dylib while HEAD stays untouched, and a plain `require`
-              loads the v1 dylib into the unversioned namespace
+  pinned_dylib_e2e.rs — gated end-to-end tests (CLJRS_DYLIB_E2E=1), serialized
+              on an env lock because each points HOME at its own cache:
+              `pinned_native_dylib_end_to_end` (versioned-symbol resolution
+              loads the v1 dylib while HEAD stays untouched),
+              `native_dep_loaded_by_plain_require` (a plain `require` loads the
+              v1 dylib into the unversioned namespace),
+              `local_root_native_dep_is_built_from_the_working_tree` (a
+              `:local/root` dep builds the tree as it stands, and an edit
+              rebuilds),
+              `local_root_native_dep_picks_up_a_sibling_crate_edit` (a
+              two-crate tree under `:rust/crate`: editing only the sibling
+              crate must still rebuild), and
+              `local_root_native_dep_does_not_serve_versioned_resolution`
+              (a local dep declines `@<sha>` and the host binding answers)
 ```
 
 ### Public API
@@ -359,17 +390,26 @@ pub const INIT_SYMBOL: &[u8];  // b"cljrs_dylib_init\0"
 1. The versioned resolver (`cljrs_runtime::env::versioned`) calls the installed
    `PinnedNativeLoader` when a pinned lookup is about to fall back to a
    native function.
-2. The loader finds a `:rust/load :dylib` git dep covering the namespace
-   (exact or dotted-prefix match) with a `:rust/init` function.
+2. The loader finds a `:rust/load :dylib` dep covering the namespace
+   (exact or dotted-prefix match) with a `:rust/init` function.  Versioned
+   resolution takes only the git form; a `:local/root` dep is declined here,
+   before the `:rust/init` check, so a misconfigured one cannot turn the
+   fallback into an error.
 3. `cljrs_project::vcs::fetch_remote` + a gitoxide worktree checkout of the pinned
    commit's tree (`~/.cljrs/cache/dylibs/checkouts/<crate>@<commit>`, no
    `.git`; a `.cljrs-checkout-complete` sentinel marks a finished checkout).
-4. A wrapper cdylib crate is generated
-   (`~/.cljrs/cache/dylibs/<crate>@<commit>/fp-<hash>/`), pinning the same
+4. A wrapper cdylib crate is generated in
+   `~/.cljrs/cache/dylibs/build/<crate>-<hash>/`, keyed by `(dep crate, ABI
+   fingerprint)` and so shared across versions, pinning the same
    `cljrs-interop` as the host (local checkout path when found —
    `CLJRS_WORKSPACE_ROOT` override honored — else the published `=version`),
    and built with cargo **in the host's profile** (debug/release —
-   `cljrs-gc` object headers differ between profiles).
+   `cljrs-gc` object headers differ between profiles).  Cargo runs online
+   unless `CLJRS_DYLIB_OFFLINE` is set, since it resolves the dependency's own
+   crates here.  The built library is then copied to the version-unique
+   `~/.cljrs/cache/dylibs/<crate>@<version>/fp-<hash>/`, which is what gets
+   `dlopen`ed: reusing the path an already-loaded library occupies would not
+   pick the rebuild up.
 5. dlopen → `cljrs_dylib_abi()` fingerprint must equal
    `abi_fingerprint()` exactly, else refuse → `cljrs_dylib_init(*mut
    Registry)` registers the package's exports through
@@ -383,7 +423,8 @@ pub const INIT_SYMBOL: &[u8];  // b"cljrs_dylib_init\0"
 When `(require '[my.native.lib :as l])` finds no Clojure source for the
 namespace, `cljrs-runtime`'s unversioned loader consults the installed
 `NativeRequireLoader`.  It runs the same fetch/checkout/wrapper-build pipeline
-(steps 2–4 above), keyed on the dep's pinned `:git/sha`, then runs
+(steps 2–4 above), keyed on the dep's pinned `:git/sha` or, for a
+`:local/root` dep, on a digest of its whole source tree, then runs
 `cljrs_dylib_init` through `Registry::for_require(...)` — an **unversioned**
 view — so the exports land in the live `my.native.lib` namespace.  The loader
 returns and the unversioned loader marks the namespace loaded, so `l/encode`
