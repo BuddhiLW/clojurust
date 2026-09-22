@@ -165,7 +165,7 @@ init function:
  {my.lib {:git/url  "https://github.com/user/my-lib"
           :git/sha  "abc1234ef"
           :rust/load :dylib
-          :rust/init "my_lib::cljrs_init"}}}
+          :rust/init "my_lib::cljrs_init_my_lib"}}}
 ```
 
 `:rust/init` is the fully-qualified path to a `pub fn(&mut Registry)`. Add
@@ -178,7 +178,7 @@ which builds the working tree as it currently stands — no commit, no push:
 {:deps
  {my.lib {:local/root "../my-lib"
           :rust/load  :dylib
-          :rust/init  "my_lib::cljrs_init"
+          :rust/init  "my_lib::cljrs_init_my_lib"
           :rust/crate "src/crates/thing"}}}
 ```
 

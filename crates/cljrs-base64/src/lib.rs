@@ -136,12 +136,11 @@ pub fn register(registry: &mut Registry) {
 ///
 /// The name carries the crate, and that is the whole point of it. This symbol
 /// is `no_mangle`, so every extension crate that spelled it `cljrs_init` would
-/// export the SAME symbol. Two such crates link into one binary without any
-/// error: the linker resolves both references to a single definition, so
-/// `other_crate::cljrs_init` and this one become the same address and one
-/// plugin's registration silently replaces the other's. Naming the symbol after
-/// the crate makes that collision impossible to express rather than merely
-/// unlikely.
+/// export the SAME symbol. If the linker pulls both defining archive members
+/// into a binary, it reports a duplicate-symbol error. If it only needs one,
+/// both Rust paths can instead resolve to that definition and one plugin's
+/// registration is silently skipped. Naming the symbol after the crate makes
+/// both forms of the collision impossible to express.
 ///
 /// Nothing in the loader hardcodes the name: it takes the last `::` segment of
 /// `:rust :init`, so the name is data and an extension may choose any unique
