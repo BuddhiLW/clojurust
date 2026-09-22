@@ -103,6 +103,20 @@ src/
     backend.rs          — JitBackend: the seam a compiler installs on a runtime
 
 tests/
+  common/mod.rs                    — one runtime per test thread, one namespace per
+                                     case: `shared_globals`, `fresh_env`,
+                                     `fresh_env_in(mode)`, `reset_env_in(mode, ns)`,
+                                     `eval_in`, `eval_fresh`. Property suites use it
+                                     instead of building a runtime per case
+  runtime_startup_canary.rs        — the one suite that still pays for a runtime on
+                                     purpose: asserts a build stays under 150ms in
+                                     debug (best of five), so a startup regression
+                                     fails with a number rather than as CI getting
+                                     slower
+  collection_predicate_parity.rs   — coll?/map?/sequential?/associative?/counted?/
+                                     seqable?/record? as a table, against Clojure's
+                                     answers, over record, deftype, reify and the
+                                     built-in kinds
   no_gc_eval.rs                    — (no-gc) arithmetic, def provenance, region stack
   versioned_resolution.rs          — versioned resolution against a real git fixture
   vcs_provider.rs                  — the VcsProvider seam: default provider, degradation
@@ -151,6 +165,16 @@ tests/
                                      eager IR lowering: the lowerer must decline
                                      a `set!` on a local (own binary — it flips
                                      the process-wide eager-lowering switch)
+  dispatch_family_expansion.rs     — the bootstrap macros and
+                                     `cljrs_ir::lower::DISPATCH_FAMILY` pinned
+                                     against each other: every primitive a
+                                     surface datatype form expands THROUGH must
+                                     be a family member
+  datatype_in_fn_tiered.rs         — `deftype`/`defrecord`/`reify` inside a
+                                     function body under forced eager lowering:
+                                     lowering sees the EXPANDED body, so the
+                                     name it must decline on is `deftype*` (own
+                                     binary — forced eager lowering)
   destructure_or_default_eager.rs  — `:or` destructuring defaults are evaluated
                                      eagerly (`(get m :k default)`), identically
                                      in the tree-walker and the IR tier (own
@@ -569,10 +593,11 @@ collection.
 keywords, maps, sets, vars, protocol/multimethod dispatch). For a
 `Value::ProtocolFn` callee whose protocol has `extend_via_metadata` set (`(defprotocol
 Name :extend-via-metadata true ...)`), dispatch first checks the first arg's
-metadata for an entry keyed by the `ProtocolFn` itself (e.g. `(with-meta {}
-{my-method (fn [this] ...)})`) before falling back to the type-tag `impls`
-lookup — this lets a value implement a protocol without a matching
-`extend-type`/`extend-protocol`. Protocol dispatch helpers shared with the
+metadata for an entry keyed by the method's FULLY-QUALIFIED SYMBOL — `ns/method`,
+built from `Protocol.ns`, which is why `protocol*` has to be a special form —
+e.g. `` (with-meta {} {`my-method (fn [this] ...)}) ``, before falling back to
+the type-tag `impls` lookup. This lets a value implement a protocol without a
+matching `extend-type`/`extend-protocol`. Protocol dispatch helpers shared with the
 Phase 10.6 inline caches:
 
 - `type_tag_of(val: &Value) -> Arc<str>` — canonical protocol dispatch tag of a value
@@ -1075,17 +1100,69 @@ conditional in ANY slot of an `ns` require spec, namespace included, so
 `[#?(:clj clojure.core :cljs cljs.core) :as core]` reads — an option selecting
 no branch is dropped, a namespace selecting none is an error.
 
-`deftype` and `defrecord` share `parse_field_specs` (field name + mutability,
-metadata-transparent), `build_positional_ctor` (`->Name`, routed to the
-`make-type-instance-mut` builtin when the type declares mutable fields) and
-`intern_type_symbol` (so `(instance? Name x)` resolves); only `defrecord` also
-gets `build_map_ctor`. `synth_field_scope` wraps a method body in a `let*`
-binding each field a param does not shadow — a mutable field through
-`(.-field this)` (the live cell) and an immutable one through `(:field this)` —
-plus a hidden `__deftype_self__` handle when any field is mutable, which is how
-`eval_set_bang` finds the instance whose cell a bare `(set! field v)` updates.
-`resolve_protocol_sym` resolves a protocol named in an impl position
-(`extend-type`, `extend-protocol`, `reify`/`defrecord`/`deftype`) through the
+**The datatype, protocol and multimethod family is Clojure, not Rust.**
+`deftype`, `defrecord`, `reify`, `defprotocol`, `extend-type`,
+`extend-protocol`, `defmulti` and `defmethod` are all macros in
+`bootstrap.cljrs`. What stays here is only what needs the interpreter, and only
+two of the seven primitives actually do:
+
+| primitive | kind | why it is irreducible |
+|---|---|---|
+| `deftype*` | special form | mints a type tag and registers method impls with the fields in scope; returns the tag |
+| `protocol*` | special form | mints a `Protocol` in the CURRENT namespace — `Protocol.ns` qualifies the method symbol that extend-via-metadata dispatch looks up |
+| `protocol-fn` | builtin fn | the dispatch `ProtocolFn` for one method, arity read back out of the protocol's own spec |
+| `extend` | builtin fn | writes `{method → fn}` into `Protocol.impls` under a type tag; Clojure's own signature |
+| `make-type-instance`, `make-type-instance-mut` | builtin fns | construct a `TypeInstance` (the latter with interior-mutable cells) |
+| `multi-fn` | builtin fn | mints a `MultiFn` with an optional default dispatch value |
+| `add-method` | builtin fn | writes one entry into `MultiFn.methods`, keyed exactly as `remove-method` reads it |
+
+The one place the family is NOT spelled through its macros is the bootstrap's
+own use of it: the three core protocols (`ICounted`, `ILookup`, `ISeqable`)
+and their extensions over the collection types are written over `protocol*`,
+`protocol-fn` and `extend` directly. The tree-walker re-expands a macro on
+every use, and these macros expand with interpreted `map`/`zipmap`, so spelled
+as macros those five forms cost ~87ms of every runtime's startup (0.04s became
+0.25s, and every test building a runtime per case slowed 8x, measured
+2026-09-10). Each is exactly what its macro would produce, and the comment
+above them in `bootstrap.cljrs` says so; keep them in step if the macros change
+shape.
+
+Because the family is now macro-backed, the two passes that must route it away
+from compiled code — `cljrs-ir`'s ANF lowerer and `cljrs-compiler`'s
+interpreted preamble — read it on the EXPANDED form. Membership is therefore
+stated once, in `cljrs_ir::lower::DISPATCH_FAMILY`, and holds both the surface
+names and the `*` primitives they expand to. `builtins.rs` no longer registers
+`deftype`, `defrecord` or `reify` as `builtin_stub_nil`: the bootstrap
+`defmacro`s bind those vars, so `(resolve 'deftype)` finds a macro. The stubs
+that remain are for special forms with no Clojure definition.
+
+Naming the target by SYMBOL in a macro expansion rather than by string in a Rust
+handler is not only shorter: `(defmethod other.ns/m ...)` and
+`(extend-type T other.ns/P ...)` resolve through the ordinary rules, aliases
+included, where a handler doing `lookup_in_ns(current_ns, "other.ns/m")` cannot.
+
+Putting the target in evaluation position does cost one thing, and `defmethod`
+pays it back deliberately. The two ways a target can be wrong — no such var, and
+the wrong kind of var — fail at two different sites once the name is evaluated,
+and neither site knows it was serving a `defmethod`. So the missing-var case is
+diagnosed in the macro, where the target is still a symbol: `(nil? (resolve
+mname))` reports "not defined; require the namespace that defines it". The
+wrong-kind case can only be seen after evaluation, so `add-method` states what
+the value is *not* ("not a multimethod, got long") rather than naming a target
+it was never given. The two messages point at different repairs — a missing
+`:require` versus a name that is a `def` — which is what
+`defmethod_cross_ns.rs` pins. `resolve` reports a private var just as the JVM
+does, so extending one across namespaces still fails on the access rule and is
+not mistaken for a missing var.
+
+`deftype*` uses `parse_field_specs` (field name + mutability,
+metadata-transparent) and `register_impls_for_tag`. `synth_field_scope` wraps a
+method body in a `let*` binding each field a param does not shadow — a mutable
+field through `(.-field this)` (the live cell) and an immutable one through
+`(:field this)` — plus a hidden `__deftype_self__` handle when any field is
+mutable, which is how `eval_set_bang` finds the instance whose cell a bare
+`(set! field v)` updates. `resolve_protocol_sym` resolves a protocol named in an
+impl position (`deftype*`, and so `reify`/`defrecord`/`deftype`) through the
 current ns's `:require :as` aliases and through its own namespace when
 qualified — not as a literal intern of the current ns.
 
