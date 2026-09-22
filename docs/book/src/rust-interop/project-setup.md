@@ -91,13 +91,12 @@ The convention is `cljrs_init_<crate>`, and the reason is `#[no_mangle]`. An
 unmangled symbol is global to the whole process image, so two extension crates
 that both call theirs `cljrs_init` export the *same* symbol.
 
-That does not fail to link, which is what makes it worth a rule. When `cljrs
-compile` links two such extensions into one AOT binary, the linker resolves
-every reference to a single definition: `crate_a::cljrs_init` and
-`crate_b::cljrs_init` become the same address, one crate's registration
-silently replaces the other's, and the second namespace is simply never
-defined. There is no error at build time and none at run time, only a missing
-namespace.
+When `cljrs compile` links two such extensions into one AOT binary, the result
+depends on archive extraction. If another reference pulls both defining object
+files into the link, the build fails with a duplicate-symbol error. Otherwise,
+the linker can select one definition and route both Rust paths to it, silently
+skipping the other crate's registration. Codegen-unit partitioning and link
+order can change which outcome occurs.
 
 Nothing in cljrs hardcodes the name. The loader takes the last `::` segment of
 `:rust :init` and looks that up, so the symbol name is data: any spelling works
