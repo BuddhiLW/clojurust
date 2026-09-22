@@ -236,7 +236,8 @@ pub fn register(registry: &mut Registry) {
 /// ```
 ///
 /// The name carries the crate on purpose; see `cljrs_base64::cljrs_init_cljrs_base64`
-/// for why a shared `cljrs_init` silently collides instead of failing to link.
+/// for why a shared `cljrs_init` can fail to link or silently resolve to the
+/// wrong crate's hook.
 ///
 /// # Safety
 /// `registry` must be a valid, non-null `*mut Registry` and must remain
