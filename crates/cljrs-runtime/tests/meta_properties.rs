@@ -17,35 +17,17 @@
 //! Assertions are phrased *in Clojure* (`(= … …)` → `"true"`) rather than by
 //! comparing printed forms, so map iteration order cannot make a law flaky.
 
-use std::sync::Arc;
-
-use cljrs_reader::Parser;
-use cljrs_runtime::env::env::{Env, GlobalEnv};
-use cljrs_value::Value;
+use cljrs_runtime::env::env::Env;
 use proptest::prelude::*;
 
-fn make_env() -> (Arc<GlobalEnv>, Env) {
-    let globals = cljrs_runtime::Runtime::builder()
-        .execution_mode(cljrs_runtime::ExecutionMode::TreeWalk)
-        .eager_clojure_test(true)
-        .build()
-        .expect("runtime")
-        .into_globals();
-    let env = Env::new(globals.clone(), "user");
-    (globals, env)
-}
+mod common;
+use common::fresh_env as make_env;
 
-/// Evaluate in a caller-supplied environment — building a `Runtime` per case
-/// would dominate the run time of a property test.
+/// Evaluate in a caller-supplied environment, rendered as the text a reader
+/// would see. Building a `Runtime` per case would dominate the run time of a
+/// property test, so `make_env` hands out a namespace over a shared one.
 fn eval_in(env: &mut Env, src: &str) -> Result<String, String> {
-    let mut parser = Parser::new(src.to_string(), "<prop>".to_string());
-    let forms = parser.parse_all().map_err(|e| format!("parse: {e:?}"))?;
-    let mut result = Value::Nil;
-    for form in forms {
-        result =
-            cljrs_runtime::interp::eval::eval(&form, env).map_err(|e| format!("eval: {e:?}"))?;
-    }
-    Ok(format!("{result}"))
+    common::eval_in(env, src).map(|v| format!("{v}"))
 }
 
 fn is_true(env: &mut Env, src: &str) -> bool {
