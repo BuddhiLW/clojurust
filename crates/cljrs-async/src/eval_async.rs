@@ -8,9 +8,13 @@
 //! Asynchronous tree-walking evaluation for `^:async` function bodies.
 //!
 //! [`eval_async`] mirrors the synchronous [`cljrs_runtime::interp::eval::eval`] for the
-//! handful of forms where an `await` can legitimately appear — `await` itself,
-//! `do`, `if`, `let`/`let*`, and function-call arguments — and delegates every
-//! other form to the synchronous evaluator. When it reaches an `(await x)` it
+//! forms where an `await` can legitimately appear — `await` itself, `do`, `if`,
+//! `let`/`let*`, `loop`/`loop*`, `recur`, `try`, collection literals, and
+//! function-call arguments — and delegates every other form to the synchronous
+//! evaluator. Any sub-expression a delegated form evaluates therefore takes the
+//! blocking `await` path, which on the single-threaded `LocalSet` deadlocks
+//! whenever the awaited future is not already settled: a form that can carry an
+//! `await` needs an arm here, not a fallthrough. When it reaches an `(await x)` it
 //! cooperatively yields to the Tokio `LocalSet` executor until the awaited
 //! `Future`/`Promise` resolves, instead of blocking the OS thread the way the
 //! sync `await` fallback does.
@@ -222,9 +226,13 @@ pub async fn eval_async(form: &Form, env: &mut Env) -> EvalResult {
             // inside catch bodies) cooperate with the executor instead of taking
             // the blocking sync path.
             "try" => return eval_try_async(&forms[1..], env).await,
+            // `recur` needs an async handler because its *arguments* may await
+            // (`(recur (conj acc (<? ch)) (inc i))`). The sync `eval_recur`
+            // would evaluate them on the blocking deref path, parking the
+            // single LocalSet thread forever.
+            "recur" => return eval_recur_async(&forms[1..], env).await,
             // Other special forms (binding/…) don't yield yet: run them
-            // synchronously. A `recur` that targets the enclosing async fn
-            // surfaces as `EvalError::Recur` and is caught by `run_async_fn`.
+            // synchronously.
             other if is_special_form(other) => return eval(&expanded, env),
             _ => {}
         }
@@ -462,6 +470,23 @@ async fn eval_loop_async(args: &[Form], env: &mut Env) -> EvalResult {
     }
 }
 
+/// `(recur args…)` — evaluate every argument with [`eval_async`] so an `await`
+/// in a recur position yields, then raise the `EvalError::Recur` trampoline
+/// signal that [`eval_loop_async`] (loop target) or [`run_async_fn`] (fn target)
+/// catches. Mirrors the synchronous `eval_recur` (`cljrs_runtime::interp::special`)
+/// apart from the evaluator used for the arguments.
+async fn eval_recur_async(args: &[Form], env: &mut Env) -> EvalResult {
+    let mut vals: Vec<Value> = Vec::with_capacity(args.len());
+    for form in args {
+        // Root the arguments already evaluated: each remaining `await` is a
+        // yield point at which a GC cycle may run.
+        let _vals_root = cljrs_runtime::env::gc_roots::root_values(&vals);
+        let val = Box::pin(eval_async(form, env)).await?;
+        vals.push(val);
+    }
+    Err(EvalError::Recur(vals))
+}
+
 /// A function call whose arguments may contain `await`s. Arguments are
 /// evaluated with [`eval_async`] (so awaits yield), then the callee is applied.
 ///
@@ -470,6 +495,27 @@ async fn eval_loop_async(args: &[Form], env: &mut Env) -> EvalResult {
 /// special spreading/atom handling those builtins require. Such calls do not
 /// yield on awaits inside their arguments in Phase B.
 async fn eval_call_async(head: &Form, args: &[Form], whole: &Form, env: &mut Env) -> EvalResult {
+    // Interop: `(.method target args…)` / `(.-field target)`. The head names a
+    // method, not a value, so it must be routed before the callee is
+    // evaluated — `eval` on it raises `UnboundSymbol`. Mirrors `eval_call`;
+    // the target and arguments still take the yielding path, so an `await`
+    // inside either cooperates.
+    if let FormKind::Symbol(s) = &head.kind
+        && cljrs_runtime::interp::apply::is_method_sugar(s)
+    {
+        let Some((target_form, arg_forms)) = args.split_first() else {
+            return Err(EvalError::Runtime(format!("{s} requires a target object")));
+        };
+        let target = Box::pin(eval_async(target_form, env)).await?;
+        let _target_root = cljrs_runtime::env::gc_roots::root_value(&target);
+        let mut argv: Vec<Value> = Vec::with_capacity(arg_forms.len());
+        for a in arg_forms {
+            let _args_root = cljrs_runtime::env::gc_roots::root_values(&argv);
+            argv.push(Box::pin(eval_async(a, env)).await?);
+        }
+        return cljrs_runtime::interp::apply::dispatch_method(&s[1..], &target, &argv);
+    }
+
     let callee = eval(head, env)?;
     match &callee {
         Value::NativeFunction(nf)
