@@ -297,7 +297,7 @@ Build with e.g. `cargo build --release --features enable-rustyline,no-gc`.
 | `miette` (workspace, `fancy`) | Rich terminal error rendering. `fancy` — the renderer half of miette — is enabled *here only*; the library crates take miette without it |
 | `rustyline` (workspace, optional) | Line-editing REPL when `enable-rustyline` is on              |
 | `libloading` (workspace)    | `dlopen` for the project `:rust` cdylib and pinned native packages |
-| `serde_json`                | Reading `target_directory` out of `cargo metadata` output          |
+| `serde_json`                | Reading `cargo metadata` output (`target_directory`; a native wrapper's path packages) and the wrapper build record |
 
 ---
 
@@ -324,15 +324,33 @@ from:
   dependency leaves that path exactly as it was.  Versioned by
   `digest_source_tree` over the **whole root**, not just the `:rust/crate`
   subdirectory: the crate being built normally has path dependencies on its
-  siblings, so an edit outside it still changes what cargo produces.
+  siblings, so an edit outside it still changes what cargo produces.  The walk
+  skips `target`, `.git`, `.hg`, `.svn`, `.jj` and `node_modules`, does not
+  follow directory symlinks (a symlinked directory contributes its link
+  target, a symlinked file its contents), and identifies files over 1 MiB by
+  length and mtime rather than reading them.
 
 The generated wrapper crate and its cargo target directory are keyed by
 `(dep crate, ABI fingerprint)` and shared across versions, so an edit costs an
 incremental rebuild rather than a fresh one and leaves one target directory
 behind rather than one per edit.  The built cdylib is then copied to a
 version-unique path: `dlopen` keys on the path, so a rebuilt library has to
-arrive somewhere the previous one never occupied.  `CLJRS_DYLIB_OFFLINE=1`
+arrive somewhere the previous one never occupied.  The copy goes to a
+temporary sibling and is renamed into place, so an interrupted publish never
+leaves a truncated library at the artifact path.  `CLJRS_DYLIB_OFFLINE=1`
 builds wrappers with `cargo --offline`.
+
+Cargo decides what to recompile by mtime, so an edit that keeps a file's mtime
+(`cp -p`, `rsync --times`) would otherwise be relinked stale out of the shared
+target directory.  `last-build.json` in the wrapper directory records which
+version the target directory last built and where it was published; when it
+names another version (or is missing while a target directory exists), the
+path packages under the dep's source root are `cargo clean -p`ed before the
+build, and the record is removed until the new build is published.  For a
+`:local/root` dep the superseded version's artifact directory is then removed,
+so an edited tree keeps one library rather than one per edit.  The wrapper
+crate's files are only rewritten when their contents change, so an unchanged
+wrapper is not recompiled.
 
 ### Status
 
@@ -363,7 +381,10 @@ tests/
               rebuilds),
               `local_root_native_dep_picks_up_a_sibling_crate_edit` (a
               two-crate tree under `:rust/crate`: editing only the sibling
-              crate must still rebuild), and
+              crate must still rebuild),
+              `local_root_native_dep_picks_up_an_edit_that_keeps_its_mtime`
+              (a sibling edit whose mtime is set back must still be compiled,
+              and the superseded artifact is evicted), and
               `local_root_native_dep_does_not_serve_versioned_resolution`
               (a local dep declines `@<sha>` and the host binding answers)
 ```
