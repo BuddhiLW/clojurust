@@ -1100,6 +1100,27 @@ conditional in ANY slot of an `ns` require spec, namespace included, so
 `[#?(:clj clojure.core :cljs cljs.core) :as core]` reads — an option selecting
 no branch is dropped, a namespace selecting none is an error.
 
+**Pieces shared with the async evaluator.** `cljrs-async`'s `eval_async` has its
+own arm for every special form that evaluates a sub-expression in place, because
+running one on the sync path parks the `LocalSet` thread at any `await` inside
+it. To keep those arms from re-implementing the forms, `special.rs` exposes each
+form's non-evaluating parts:
+
+| item | used for |
+|---|---|
+| `parse_try_args`, `CatchClause`, `catch_type_matches`, `eval_error_to_value` | `try` |
+| `DefTarget`, `parse_def(args, env) -> EvalResult<DefTarget>`, `intern_def(target, val, env)` | `def`: name, merged `^meta`/docstring and value form, then interning an evaluated value |
+| `defonce_existing(name, env) -> Option<Value>` | `defonce`: the already-bound var it leaves untouched |
+| `throw_value(val) -> EvalError` | `throw`: wraps a non-error value in an `ExceptionInfo` |
+| `set_bang_symbol(sym, val, env)`, `set_bang_field_target(form) -> Option<(&str, &Form)>`, `set_type_instance_field(inst, field, val)`, `set_bang_target_error()` | `set!` on a symbol, on `(.-field inst)`, and the error for any other target |
+| `push_letfn_frame(args, env) -> EvalResult<()>` | `letfn`: pushes a frame with every fn mutually bound (popped already on error) |
+
+Two thread-local stacks gained a resume operation for the same caller, which
+keeps `binding`/`with-out-str` state installed only while its own task is
+polled: `dynamics::take_frame(guard) -> HashMap<VarKey, Value>` pops a
+`binding` frame and returns it, and
+`builtins::builtins::resume_output_capture(buf)` pushes a capture buffer back.
+
 **The datatype, protocol and multimethod family is Clojure, not Rust.**
 `deftype`, `defrecord`, `reify`, `defprotocol`, `extend-type`,
 `extend-protocol`, `defmulti` and `defmethod` are all macros in

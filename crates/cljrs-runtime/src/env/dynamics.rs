@@ -43,6 +43,15 @@ pub fn push_frame(bindings: HashMap<VarKey, Value>) -> BindingGuard {
     BindingGuard
 }
 
+/// Pop the frame `guard` owns and hand it back, so a caller that yields between
+/// uses (the async evaluator) can keep a `binding` frame off the thread-local
+/// stack while other tasks on the same thread run, and push it again later.
+/// Must be called with the innermost frame's guard.
+pub fn take_frame(guard: BindingGuard) -> HashMap<VarKey, Value> {
+    std::mem::forget(guard);
+    BINDING_STACK.with(|s| s.borrow_mut().pop().unwrap_or_default())
+}
+
 fn pop_frame() {
     BINDING_STACK.with(|s| {
         s.borrow_mut().pop();

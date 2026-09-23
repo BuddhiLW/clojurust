@@ -108,6 +108,13 @@ pub fn push_output_capture() {
     OUTPUT_CAPTURE.with(|stack| stack.borrow_mut().push(String::new()));
 }
 
+/// Push `buf` as the capture buffer, continuing a capture previously taken off
+/// the stack with [`pop_output_capture`]. The async evaluator uses this to keep
+/// a `with-out-str` buffer installed only while its own task is being polled.
+pub fn resume_output_capture(buf: String) {
+    OUTPUT_CAPTURE.with(|stack| stack.borrow_mut().push(buf));
+}
+
 /// Pop the top capture buffer and return its contents.
 pub fn pop_output_capture() -> Option<String> {
     OUTPUT_CAPTURE.with(|stack| stack.borrow_mut().pop())
