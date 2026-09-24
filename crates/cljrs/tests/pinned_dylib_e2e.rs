@@ -40,7 +40,7 @@ static ENV_LOCK: Mutex<()> = Mutex::new(());
 /// `cljrs-interop` is taken from.
 struct TestEnv {
     _guard: MutexGuard<'static, ()>,
-    _home: tempfile::TempDir,
+    home: tempfile::TempDir,
 }
 
 impl TestEnv {
@@ -56,8 +56,13 @@ impl TestEnv {
         }
         TestEnv {
             _guard: guard,
-            _home: home,
+            home,
         }
+    }
+
+    /// The private `HOME` this test runs under.
+    fn home(&self) -> &Path {
+        self.home.path()
     }
 }
 
@@ -528,6 +533,69 @@ fn local_root_native_dep_picks_up_a_sibling_crate_edit() {
         require_pinlib(&globals_with_local_dep(tree.path(), crate_subdir)),
         12,
         "an edit to a sibling crate must rebuild, not serve the cached artifact"
+    );
+}
+
+/// An edit that does not advance the file's mtime (`cp -p`, `rsync --times`,
+/// a timestamp-preserving archive) changes the tree's digest but not cargo's
+/// view of it: cargo decides freshness by mtime, and the target directory is
+/// shared across versions.  The build must still carry the edit rather than
+/// relink the previous version's code and publish it under the new version.
+///
+/// Also checks that the superseded working-tree artifact is evicted, so a tree
+/// edited many times leaves one library behind rather than one per edit.
+#[test]
+fn local_root_native_dep_picks_up_an_edit_that_keeps_its_mtime() {
+    if std::env::var("CLJRS_DYLIB_E2E").is_err() {
+        eprintln!(
+            "skipping local_root_native_dep_picks_up_an_edit_that_keeps_its_mtime \
+             (set CLJRS_DYLIB_E2E=1 to run)"
+        );
+        return;
+    }
+
+    let ws_root = workspace_root();
+    let env = TestEnv::new(&ws_root);
+    let tree = tempfile::tempdir().unwrap();
+    write_multi_crate_tree(tree.path(), &ws_root, 21);
+
+    let tag_file = tree.path().join("crates/pintag/src/lib.rs");
+    let old = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(946_684_800);
+    let set_old_mtime = || {
+        std::fs::File::options()
+            .write(true)
+            .open(&tag_file)
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+    };
+    set_old_mtime();
+
+    let _mutator = cljrs_gc::register_mutator();
+    let crate_subdir = Some("crates/pinlib");
+
+    assert_eq!(
+        require_pinlib(&globals_with_local_dep(tree.path(), crate_subdir)),
+        21
+    );
+
+    write_pintag_source(tree.path(), 22);
+    set_old_mtime();
+    assert_eq!(
+        require_pinlib(&globals_with_local_dep(tree.path(), crate_subdir)),
+        22,
+        "an edit that keeps its mtime must still be compiled, not relinked stale"
+    );
+
+    let artifacts: Vec<_> = std::fs::read_dir(env.home().join(".cljrs/cache/dylibs"))
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|name| name.starts_with("pinlib@local-"))
+        .collect();
+    assert_eq!(
+        artifacts.len(),
+        1,
+        "the superseded artifact must be evicted, found {artifacts:?}"
     );
 }
 
