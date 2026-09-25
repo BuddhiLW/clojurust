@@ -48,7 +48,13 @@ Current capabilities:
 - **Transducers** — map, filter, take, drop, partition-all, partition-by, distinct, dedupe, etc.
 - **Rust interop** — `#[cljrs_interop::export]` proc-macro, NativeObject, FromValue/IntoValue
   marshalling, protocol dispatch, and dynamic loading of native `.so`/`.dylib`
-- **Standard library** — clojure.string, clojure.set, clojure.test, clojure.walk, clojure.edn, clojure.zip, clojure.data, clojure.template
+- **Native tools, unchanged** — `clojure.java.shell/sh` runs any host program by argv
+  (never through a shell) and returns `{:exit :out :err}`, so a tool that already exists
+  as a binary needs no bindings and no rebuild: its command line is the seam. The same
+  `.cljc` runs on clojurust, JVM Clojure and [ClojureWasm](https://github.com/BuddhiLW/ClojureWasm);
+  [AutoPDF's Clojure client](https://github.com/BuddhiLW/AutoPDF/tree/main/clients/clojure)
+  drives the unmodified Go `autopdf` CLI and renders the same PDF on all three
+- **Standard library** — clojure.string, clojure.set, clojure.test, clojure.walk, clojure.edn, clojure.zip, clojure.data, clojure.template, clojure.java.shell
 - **IR acceleration** — hot function arities are lowered to IR on a background worker and dispatched from an IR cache
 
 Tooling:
