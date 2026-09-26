@@ -1384,6 +1384,9 @@ fn is_interpreter_only_sym(s: &str) -> bool {
 /// any top-level form whose expansion tree contains them must stay interpreted.
 /// So must one containing an anonymous `^:async` fn, which lowering refuses
 /// because a compiled closure cannot be dispatched as async.
+/// The walk does not stop at `quote`, so quoted data that merely looks like
+/// one of these (`'^:async (fn [] 1)`, `'(await x)`) is also interpreted —
+/// conservative, never wrong.
 fn expanded_needs_interpreter(form: &cljrs_reader::Form) -> bool {
     use cljrs_reader::form::FormKind;
     if form.is_async_fn_form() {

@@ -148,7 +148,8 @@ pub fn eval(form: &Form, env: &mut Env) -> EvalResult {
             // `^:async (fn …)` is both: it makes the fn async, and — an `fn`
             // taking runtime metadata — lands `{:async true}` on it.
             // A stacked annotation (`^:async ^:a (fn …)`) has already wrapped
-            // the fresh fn.
+            // the fresh fn. One unwrap suffices: `Value::with_meta` flattens,
+            // so stacked annotations never nest `WithMeta`.
             if meta.requests_async() && form.unmeta().is_fn_form() {
                 let target = match &mut value {
                     Value::WithMeta(inner, _) => inner.as_mut(),

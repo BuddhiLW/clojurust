@@ -158,14 +158,15 @@ fn anonymous_async_fn_stays_async_once_its_builder_is_promoted() {
         let mut env = Env::new(globals, "user");
         eval_sync(
             "(defn outer [] (type (^:async (fn [] 1)))) \
-             (defn inner [] (type ((fn ^:async [] 1))))",
+             (defn inner [] (type ((fn ^:async [] 1)))) \
+             (defn stacked [] (type (^:async ^:a ^:b (fn [] 1))))",
             &mut env,
         );
         for _ in 0..3 {
-            let outer = eval_sync("(str (outer))", &mut env);
-            let inner = eval_sync("(str (inner))", &mut env);
-            assert_eq!(outer, Value::string("Future"));
-            assert_eq!(inner, Value::string("Future"));
+            for probe in ["outer", "inner", "stacked"] {
+                let r = eval_sync(&format!("(str ({probe}))"), &mut env);
+                assert_eq!(r, Value::string("Future"), "{probe}");
+            }
         }
     });
 }

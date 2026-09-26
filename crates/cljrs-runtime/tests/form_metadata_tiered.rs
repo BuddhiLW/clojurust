@@ -186,6 +186,10 @@ fn an_async_fn_keeps_its_annotation_in_every_tier() {
     // this answered `{:async true}` cold and `nil` once promoted.
     assert_kept_on_tree_walker("(meta ^:async (fn [] 1))", "{:async true}");
     assert_kept_on_tree_walker("(meta ^:async ^:a (fn [] 1))", "{:a true, :async true}");
+    assert_kept_on_tree_walker(
+        "(meta ^:async ^:a ^:b (fn [] 1))",
+        "{:b true, :a true, :async true}",
+    );
     assert_kept_on_tree_walker("(meta (fn ^:async [] 1))", "nil");
 }
 

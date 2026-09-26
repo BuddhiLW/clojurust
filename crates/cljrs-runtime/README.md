@@ -1027,6 +1027,19 @@ metadata).  IR lowering refuses any body containing such an anonymous async fn
 (`Form::is_async_fn_form`), so it is always built here and calling it returns a
 `Future` in every tier.
 
+The spellings that request async, exhaustively (`^{:async true}` works wherever
+`^:async` does, and `fn*` wherever `fn` does):
+
+| spelling | async? |
+|---|---|
+| `^:async (fn [..] ..)` | yes |
+| `(fn ^:async [..] ..)` | yes |
+| `(fn ^:async name [..] ..)` | yes |
+| `(defn ^:async name [..] ..)` | yes |
+| `(defn name {:async true} [..] ..)` | yes |
+| `(fn name ^:async [..] ..)` | **no** — metadata on a params vector after a name is a hint |
+| `(defn name ^:async [..] ..)` | **no** — same |
+
 ### Which natives need form-level interception
 
 `is_form_intercepted(name) -> bool` is the canonical list of natives that
