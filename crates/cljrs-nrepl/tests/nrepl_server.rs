@@ -295,3 +295,53 @@ fn client_scenario(port: u16) {
     let resp = c.request(&[("op", "frobnicate")]);
     assert!(statuses(&resp[0]).contains(&"unknown-op".to_string()));
 }
+
+/// A host whose interpreter thread also runs its own work drives the server
+/// through a `Poller` instead of the blocking `serve`: nREPL jobs are handled
+/// between the host's own steps, and neither starves the other.
+#[test]
+fn poller_interleaves_nrepl_jobs_with_host_work() {
+    let globals = {
+        let runtime = cljrs_runtime::Runtime::builder()
+            .execution_mode(cljrs_runtime::ExecutionMode::Tiered)
+            .build()
+            .expect("runtime");
+        cljrs_stdlib::install(&runtime);
+        runtime.into_globals()
+    };
+    let server = cljrs_nrepl::start(cljrs_nrepl::Config::default(), globals).expect("start");
+    let port = server.port();
+    let mut poller = server.into_poller();
+
+    let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+    let client = std::thread::spawn(move || {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let mut c = Client::connect(port);
+            let resp = c.request(&[("op", "clone")]);
+            let session = field(&resp, "new-session")
+                .expect("new-session")
+                .to_string();
+            let resp = eval(&mut c, &session, "(+ 40 2)");
+            field(&resp, "value").map(str::to_string)
+        }));
+        let _ = done_tx.send(());
+        result
+    });
+
+    let mut eval_form = cljrs_runtime::tiered::eval;
+    let mut host_steps = 0u32;
+    while done_rx.try_recv().is_err() {
+        let status = poller.poll_timeout(&mut eval_form, Duration::from_millis(20));
+        assert_eq!(status, cljrs_nrepl::PollStatus::Open);
+        // The host's own work between polls.
+        host_steps += 1;
+    }
+    let value = match client.join().expect("client thread") {
+        Ok(value) => value,
+        Err(panic) => std::panic::resume_unwind(panic),
+    };
+    assert_eq!(value.as_deref(), Some("42"));
+    assert!(host_steps > 0, "the host never got a turn");
+    // Dropping the poller shuts the server down and joins its network thread.
+    drop(poller);
+}
