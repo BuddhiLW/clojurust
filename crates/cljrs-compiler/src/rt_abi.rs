@@ -1384,6 +1384,19 @@ fn stash_pending_exception(val: Value) {
 }
 
 /// Apply a filter predicate to `elem`.  Returns `Some(keep)`, or `None` if the
+/// Stash a failed call's error as the pending exception, as the interpreter
+/// surfaces it: a thrown value as itself, any other builtin `ValueError` as a
+/// catchable `Value::Error` (see `value_error_to_eval_error`). Returning nil
+/// for the latter made a missing protocol method look like a method that
+/// returned nil.
+fn stash_call_error(err: cljrs_value::ValueError) {
+    let val = match cljrs_runtime::env::error::value_error_to_eval_error(err) {
+        cljrs_runtime::env::error::EvalError::Thrown(val) => val,
+        other => cljrs_runtime::interp::special::eval_error_to_value(&other),
+    };
+    stash_pending_exception(val);
+}
+
 /// predicate threw (exception already stashed).  `Set`/`Map` predicates are
 /// tested directly; others are `invoke`d.
 #[inline]
@@ -2682,13 +2695,10 @@ pub unsafe extern "C" fn rt_call(
 
     match cljrs_runtime::env::callback::invoke(callee, arg_values) {
         Ok(result) => box_invoke_result(result),
-        Err(cljrs_value::ValueError::Thrown(val)) => {
-            PENDING_EXCEPTION.with(|cell| {
-                *cell.borrow_mut() = Some(box_val(val));
-            });
+        Err(e) => {
+            stash_call_error(e);
             rt_const_nil()
         }
-        Err(_e) => rt_const_nil(),
     }
 }
 
@@ -4790,11 +4800,10 @@ pub unsafe extern "C" fn rt_load_global_versioned_ic(
 fn invoke_boxed(callee: &Value, args: Vec<Value>) -> *const Value {
     match cljrs_runtime::env::callback::invoke(callee, args) {
         Ok(result) => box_invoke_result(result),
-        Err(cljrs_value::ValueError::Thrown(val)) => {
-            stash_pending_exception(val);
+        Err(e) => {
+            stash_call_error(e);
             rt_const_nil()
         }
-        Err(_e) => rt_const_nil(),
     }
 }
 
