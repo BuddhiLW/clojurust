@@ -2026,7 +2026,7 @@ fn eval_extend_type(args: &[Form], env: &mut Env) -> EvalResult {
             "extend-type: first arg must be a type symbol".into(),
         ));
     };
-    let type_tag = crate::interp::apply::resolve_type_tag(type_sym);
+    let type_tag = resolve_extend_type_tag(env, type_sym);
 
     let mut current_proto: Option<GcPtr<Protocol>> = None;
 
@@ -2098,7 +2098,7 @@ fn eval_extend_protocol(args: &[Form], env: &mut Env) -> EvalResult {
     for form in &args[1..] {
         match &form.unmeta().kind {
             FormKind::Symbol(s) => {
-                current_type = Some(crate::interp::apply::resolve_type_tag(s));
+                current_type = Some(resolve_extend_type_tag(env, s));
             }
             FormKind::List(parts) => {
                 let type_tag = current_type.as_ref().ok_or_else(|| {
@@ -2652,12 +2652,22 @@ fn build_map_ctor(type_name: &str, type_tag: &Arc<str>, env: &mut Env) {
     globals.intern(&ns, fn_name, Value::Fn(GcPtr::new(ctor)));
 }
 
-/// Intern the type NAME as a Symbol value so `(instance? TypeName x)` and other
-/// name references resolve to the type tag.
-fn intern_type_symbol(type_name: &str, env: &mut Env) {
+/// The dispatch tag of a record or deftype: its name qualified by the defining
+/// namespace, `my.ns.Point`, as the JVM names the generated class. Two
+/// namespaces may each define a `Point`; with a bare-name tag the second one's
+/// protocol impls replaced the first one's, and `instance?` could not tell
+/// their instances apart.
+fn qualified_type_tag(type_name: &str, env: &Env) -> Arc<str> {
+    Arc::from(format!("{}.{}", env.current_ns, type_name))
+}
+
+/// Intern the type NAME as a Symbol value holding its qualified tag, so
+/// `(instance? TypeName x)`, `extend-type`, and other name references resolve
+/// to the tag.
+fn intern_type_symbol(type_name: &str, type_tag: &Arc<str>, env: &mut Env) {
     let ns = env.current_ns.clone();
     let globals = env.globals.clone();
-    let type_sym = cljrs_value::Symbol::simple(type_name.to_string());
+    let type_sym = cljrs_value::Symbol::simple(type_tag.to_string());
     globals.intern(
         &ns,
         Arc::from(type_name),
@@ -2678,7 +2688,7 @@ fn eval_defrecord(args: &[Form], env: &mut Env) -> EvalResult {
     // here; unwrapped so the form reads, and deliberately not silently applied
     // somewhere it would not belong.
     let (type_name, _) = require_sym_meta(args, 0, "defrecord", env)?;
-    let type_tag: Arc<str> = Arc::from(type_name.as_str());
+    let type_tag = qualified_type_tag(&type_name, env);
 
     // Parse field names from the vector, peeling any per-field metadata.
     // (A defrecord field is always immutable, so the mutability flag is dropped.)
@@ -2696,7 +2706,7 @@ fn eval_defrecord(args: &[Form], env: &mut Env) -> EvalResult {
     // the map `map->T`; then intern the type name so `(instance? T x)` resolves.
     build_positional_ctor(&type_name, &type_tag, &field_names, &[], env);
     build_map_ctor(&type_name, &type_tag, env);
-    intern_type_symbol(&type_name, env);
+    intern_type_symbol(&type_name, &type_tag, env);
     Ok(Value::Nil)
 }
 
@@ -2712,7 +2722,7 @@ fn eval_deftype(args: &[Form], env: &mut Env) -> EvalResult {
     // Type metadata (e.g. ^:private) has no var to hold it; unwrapped so the
     // name reads, and deliberately not applied anywhere it would not belong.
     let (type_name, _) = require_sym_meta(args, 0, "deftype", env)?;
-    let type_tag: Arc<str> = Arc::from(type_name.as_str());
+    let type_tag = qualified_type_tag(&type_name, env);
 
     let specs = parse_field_specs(&args[1], "deftype")?;
     let field_names: Vec<Arc<str>> = specs.iter().map(|(n, _)| n.clone()).collect();
@@ -2730,7 +2740,7 @@ fn eval_deftype(args: &[Form], env: &mut Env) -> EvalResult {
     // deftype gets a positional `->T` constructor and its type symbol, but no
     // `map->T` (Clojure reserves that for defrecord).
     build_positional_ctor(&type_name, &type_tag, &field_names, &mutable_names, env);
-    intern_type_symbol(&type_name, env);
+    intern_type_symbol(&type_name, &type_tag, env);
     Ok(Value::Nil)
 }
 
@@ -2755,6 +2765,37 @@ fn eval_reify(args: &[Form], env: &mut Env) -> EvalResult {
 }
 
 // ── register_impls_for_tag ────────────────────────────────────────────────────
+
+/// Resolve a type symbol in `extend-type` / `extend-protocol` to its dispatch
+/// tag. A record or deftype name resolves through the namespace that defined it
+/// (its var holds the qualified tag, see [`intern_type_symbol`]), honouring
+/// `:require :as` aliases and qualified names as [`resolve_protocol_sym`] does.
+/// Anything else (`String`, `Long`, `nil`, a native type) is a built-in tag and
+/// passes through [`crate::interp::apply::resolve_type_tag`].
+fn resolve_extend_type_tag(env: &Env, s: &str) -> Arc<str> {
+    let parsed = cljrs_value::Symbol::parse(s);
+    let val = match parsed.namespace.as_deref() {
+        Some(ns_part) => {
+            let ns = env
+                .globals
+                .resolve_alias(&env.current_ns, ns_part)
+                .unwrap_or_else(|| Arc::from(ns_part));
+            env.globals.lookup_in_ns(&ns, &parsed.name)
+        }
+        None => env.globals.lookup_in_ns(&env.current_ns, s),
+    };
+    match val {
+        Some(Value::Symbol(sym)) => {
+            let tag = sym.get().full_name();
+            if tag.ends_with(&format!(".{}", parsed.name)) {
+                Arc::from(tag)
+            } else {
+                crate::interp::apply::resolve_type_tag(s)
+            }
+        }
+        _ => crate::interp::apply::resolve_type_tag(s),
+    }
+}
 
 /// Resolve a protocol NAME symbol in an impl position (extend-type, extend-protocol,
 /// reify/defrecord), honouring the current namespace's `:require :as` aliases and
