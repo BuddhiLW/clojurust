@@ -18,6 +18,9 @@ struct Client {
     stream: TcpStream,
     buf: Vec<u8>,
     next_id: u64,
+    /// Responses read while collecting another request's, kept for their own
+    /// `collect` (an interrupt's reply can arrive before the eval's "done").
+    stashed: Vec<Msg>,
 }
 
 impl Client {
@@ -30,12 +33,19 @@ impl Client {
             stream,
             buf: Vec::new(),
             next_id: 0,
+            stashed: Vec::new(),
         }
     }
 
     /// Send a request and collect every response for it up to and including
     /// the one whose status contains "done".
     fn request(&mut self, pairs: &[(&str, &str)]) -> Vec<Msg> {
+        let id = self.send(pairs);
+        self.collect(&id)
+    }
+
+    /// Send a request without waiting for its responses; returns its id.
+    fn send(&mut self, pairs: &[(&str, &str)]) -> String {
         self.next_id += 1;
         let id = format!("t-{}", self.next_id);
         let mut dict = BTreeMap::new();
@@ -45,14 +55,32 @@ impl Client {
         }
         let bytes = bencode::encode_to_vec(&Bencode::Dict(dict));
         self.stream.write_all(&bytes).expect("write failed");
+        id
+    }
 
+    /// Collect the responses to request `id` up to and including "done".
+    fn collect(&mut self, id: &str) -> Vec<Msg> {
+        let id_of = |dict: &Msg| {
+            dict.get(b"id".as_slice())
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+        };
         let mut responses = Vec::new();
         loop {
-            let msg = self.read_message();
-            let dict = msg.as_dict().expect("response is not a dict").clone();
-            // Only collect responses to this request (defensive; the server
-            // sends nothing unsolicited).
-            if dict.get(b"id".as_slice()).and_then(|v| v.as_str()) != Some(&id) {
+            let dict = match self
+                .stashed
+                .iter()
+                .position(|m| id_of(m).as_deref() == Some(id))
+            {
+                Some(i) => self.stashed.remove(i),
+                None => {
+                    let msg = self.read_message();
+                    msg.as_dict().expect("response is not a dict").clone()
+                }
+            };
+            // Responses to other in-flight requests wait for their own collect.
+            if id_of(&dict).as_deref() != Some(id) {
+                self.stashed.push(dict);
                 continue;
             }
             let done = statuses(&dict).iter().any(|s| s == "done");
@@ -281,6 +309,9 @@ fn client_scenario(port: u16) {
     let resp = c.request(&[("op", "interrupt"), ("session", &session_a)]);
     assert!(statuses(&resp[0]).contains(&"session-idle".to_string()));
 
+    // interrupt stops an eval that is already running.
+    interrupt_running_eval(&mut c, &session_a);
+
     // close removes the session.
     let resp = c.request(&[("op", "close"), ("session", &session_a)]);
     assert!(statuses(&resp[0]).contains(&"session-closed".to_string()));
@@ -344,4 +375,105 @@ fn poller_interleaves_nrepl_jobs_with_host_work() {
     assert!(host_steps > 0, "the host never got a turn");
     // Dropping the poller shuts the server down and joins its network thread.
     drop(poller);
+}
+
+/// Start a non-terminating eval in `session`, check that an interrupt for
+/// another id is refused, interrupt it, and check the session still works.
+fn interrupt_running_eval(c: &mut Client, session: &str) {
+    let eval_id = c.send(&[
+        ("op", "eval"),
+        ("session", session),
+        ("code", "(loop [] (recur))"),
+    ]);
+    // Let the eval get going; the interrupt must stop it mid-form.
+    std::thread::sleep(Duration::from_millis(300));
+
+    let resp = c.request(&[
+        ("op", "interrupt"),
+        ("session", session),
+        ("interrupt-id", "no-such-id"),
+    ]);
+    assert_eq!(statuses(&resp[0]), ["interrupt-id-mismatch", "done"]);
+
+    let started = std::time::Instant::now();
+    let interrupt_id = c.send(&[
+        ("op", "interrupt"),
+        ("session", session),
+        ("interrupt-id", &eval_id),
+    ]);
+    let eval_resp = c.collect(&eval_id);
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "interrupt took {:?}",
+        started.elapsed()
+    );
+    let eval_statuses: Vec<Vec<String>> = eval_resp.iter().map(statuses).collect();
+    assert!(
+        eval_statuses.contains(&vec!["interrupted".to_string()]),
+        "{eval_statuses:?}"
+    );
+    assert_eq!(eval_statuses.last().unwrap(), &vec!["done".to_string()]);
+    let resp = c.collect(&interrupt_id);
+    assert_eq!(statuses(&resp[0]), ["done"]);
+
+    // The session is still usable.
+    let resp = eval(c, session, "(+ 1 2)");
+    assert_eq!(field(&resp, "value"), Some("3"));
+
+    // No stale flag: a long-running eval after the interrupt, and after an
+    // eval that fails, still runs to completion.
+    let counted = "(loop [n 0] (if (< n 200000) (recur (inc n)) n))";
+    let resp = eval(c, session, counted);
+    assert_eq!(field(&resp, "value"), Some("200000"));
+    let resp = eval(c, session, "(throw (ex-info \"boom\" {}))");
+    assert!(
+        resp.iter()
+            .any(|m| statuses(m).contains(&"eval-error".to_string()))
+    );
+    let resp = eval(c, session, counted);
+    assert_eq!(field(&resp, "value"), Some("200000"));
+
+    // Nothing runs any more.
+    let resp = c.request(&[("op", "interrupt"), ("session", session)]);
+    assert_eq!(statuses(&resp[0]), ["session-idle", "done"]);
+}
+
+/// The Poller path (a host driving the server from its own loop) can stop a
+/// running eval too: the eval runs inside `poll`, so the interrupt must reach
+/// it from the network thread while `poll` has not returned.
+#[test]
+fn poller_interrupts_running_eval() {
+    let globals = {
+        let runtime = cljrs_runtime::Runtime::builder()
+            .execution_mode(cljrs_runtime::ExecutionMode::Tiered)
+            .build()
+            .expect("runtime");
+        cljrs_stdlib::install(&runtime);
+        runtime.into_globals()
+    };
+    let server = cljrs_nrepl::start(cljrs_nrepl::Config::default(), globals).expect("start");
+    let port = server.port();
+    let mut poller = server.into_poller();
+
+    let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+    let client = std::thread::spawn(move || {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let mut c = Client::connect(port);
+            let resp = c.request(&[("op", "clone")]);
+            let session = field(&resp, "new-session")
+                .expect("new-session")
+                .to_string();
+            interrupt_running_eval(&mut c, &session);
+        }));
+        let _ = done_tx.send(());
+        result
+    });
+
+    let mut eval_form = cljrs_runtime::tiered::eval;
+    while done_rx.try_recv().is_err() {
+        poller.poll_timeout(&mut eval_form, Duration::from_millis(20));
+    }
+    if let Err(panic) = client.join().expect("client thread") {
+        std::panic::resume_unwind(panic);
+    }
 }

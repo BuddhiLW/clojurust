@@ -84,16 +84,27 @@ impl Engine {
             let sid = req.session.clone().unwrap_or_default();
             let _ = replies.send(
                 Response::for_request(&req, &sid)
-                    .status(&["done", "interrupted"])
+                    .status(&["interrupted"])
                     .build(),
             );
+            let _ = replies.send(Response::for_request(&req, &sid).status(&["done"]).build());
         } else {
             match req.op.as_str() {
                 "clone" => self.op_clone(&req, &replies),
                 "close" => self.op_close(&req, &replies),
                 "ls-sessions" => self.op_ls_sessions(&req, &replies),
-                "eval" => self.op_eval(&req, &replies, eval_form, &cancelled),
-                "load-file" => self.op_load_file(&req, &replies, eval_form, &cancelled),
+                "eval" | "load-file" => {
+                    // The network thread's `interrupt` sets `cancelled`; with
+                    // it installed on the execution-credit meter, the running
+                    // eval stops at its next checkpoint in any tier.
+                    let _interrupt =
+                        cljrs_runtime::env::gas::InterruptGuard::install(cancelled.clone());
+                    if req.op == "eval" {
+                        self.op_eval(&req, &replies, eval_form, &cancelled);
+                    } else {
+                        self.op_load_file(&req, &replies, eval_form, &cancelled);
+                    }
+                }
                 "completions" => self.op_completions(&req, &replies),
                 "lookup" => self.op_lookup(&req, &replies),
                 _ => {
@@ -289,8 +300,8 @@ impl Engine {
 
         let mut interrupted = false;
         for form in &forms {
-            // Best-effort interrupt between top-level forms; a single form
-            // that loops forever cannot be stopped.
+            // Interrupted between top-level forms (a running form is stopped
+            // by the interrupt flag installed on the gas meter, below).
             if cancelled.load(Ordering::SeqCst) {
                 interrupted = true;
                 break;
@@ -323,6 +334,13 @@ impl Engine {
                         }
                     }
                 }
+                // An interrupt unwinds as `GasExhausted`; any failure once the
+                // flag is set is reported as the interrupt (a native bridge
+                // may have wrapped the signal in another error).
+                Err(_) if cancelled.load(Ordering::SeqCst) => {
+                    interrupted = true;
+                    break;
+                }
                 Err(e) => {
                     let msg = eval_error_message(&e);
                     let _ = replies.send(
@@ -352,12 +370,14 @@ impl Engine {
             globals.intern(STATE_NS, format!("{sid}-{slot}").into(), val);
         }
 
-        let status: &[&str] = if interrupted {
-            &["done", "interrupted"]
-        } else {
-            &["done"]
-        };
-        let _ = replies.send(Response::for_request(req, &sid).status(status).build());
+        if interrupted {
+            let _ = replies.send(
+                Response::for_request(req, &sid)
+                    .status(&["interrupted"])
+                    .build(),
+            );
+        }
+        let _ = replies.send(Response::for_request(req, &sid).status(&["done"]).build());
     }
 
     // ── Tooling ops ───────────────────────────────────────────────────────────
