@@ -46,8 +46,19 @@ use std::thread::sleep;
 use std::time::Duration;
 // ── Output capture (for with-out-str) ─────────────────────────────────────────
 
+/// One entry of the capture stack: a buffer, plus an optional sink that
+/// receives the buffered text incrementally (streamed capture).
+struct OutputCapture {
+    buf: String,
+    sink: Option<Box<dyn FnMut(&str)>>,
+}
+
+/// A streamed capture flushes once its buffer holds this many bytes, even
+/// without a newline.
+const STREAM_FLUSH_THRESHOLD: usize = 1024;
+
 thread_local! {
-    static OUTPUT_CAPTURE: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+    static OUTPUT_CAPTURE: std::cell::RefCell<Vec<OutputCapture>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
 // BigDecimal precision
@@ -106,26 +117,78 @@ fn apply_precision_or_default(result: BigDecimal) -> ValueResult<BigDecimal> {
 
 /// Push a new capture buffer onto the stack.
 pub fn push_output_capture() {
-    OUTPUT_CAPTURE.with(|stack| stack.borrow_mut().push(String::new()));
+    OUTPUT_CAPTURE.with(|stack| {
+        stack.borrow_mut().push(OutputCapture {
+            buf: String::new(),
+            sink: None,
+        })
+    });
 }
 
-/// Pop the top capture buffer and return its contents.
+/// Push a *streamed* capture: output written while it is the top of the
+/// stack is handed to `sink` as it is produced — at each newline, once
+/// [`STREAM_FLUSH_THRESHOLD`] bytes are pending, and when the capture is
+/// popped. A nested [`push_output_capture`] (e.g. `with-out-str`) still
+/// captures its own output without streaming it.
+pub fn push_streaming_output_capture(sink: Box<dyn FnMut(&str)>) {
+    OUTPUT_CAPTURE.with(|stack| {
+        stack.borrow_mut().push(OutputCapture {
+            buf: String::new(),
+            sink: Some(sink),
+        })
+    });
+}
+
+/// Pop the top capture buffer and return its contents. For a streamed
+/// capture the pending text is flushed to its sink first and the returned
+/// string is empty.
 pub fn pop_output_capture() -> Option<String> {
-    OUTPUT_CAPTURE.with(|stack| stack.borrow_mut().pop())
+    let top = OUTPUT_CAPTURE.with(|stack| stack.borrow_mut().pop())?;
+    match top.sink {
+        None => Some(top.buf),
+        Some(mut sink) => {
+            if !top.buf.is_empty() {
+                sink(&top.buf);
+            }
+            Some(String::new())
+        }
+    }
 }
 
 /// Write to the current capture buffer if active, otherwise to stdout.
 /// Returns true if captured, false if written to stdout.
 fn capture_or_print(s: &str) -> bool {
-    OUTPUT_CAPTURE.with(|stack| {
+    // Take any chunk due for a streamed flush out of the stack, and call the
+    // sink with the stack unborrowed (the sink may run arbitrary code).
+    let due = OUTPUT_CAPTURE.with(|stack| {
         let mut stack = stack.borrow_mut();
-        if let Some(buf) = stack.last_mut() {
-            buf.push_str(s);
-            true
+        let top = stack.last_mut()?;
+        top.buf.push_str(s);
+        top.sink.as_ref()?;
+        let cut = if top.buf.len() >= STREAM_FLUSH_THRESHOLD {
+            top.buf.len()
         } else {
-            false
+            top.buf.rfind('\n').map(|i| i + 1)?
+        };
+        let rest = top.buf.split_off(cut);
+        let chunk = std::mem::replace(&mut top.buf, rest);
+        // Borrow the sink out while it runs.
+        let depth = stack.len();
+        let top = stack.last_mut()?;
+        top.sink.take().map(|sink| (chunk, sink, depth))
+    });
+    let Some((chunk, mut sink, depth)) = due else {
+        return OUTPUT_CAPTURE.with(|stack| !stack.borrow().is_empty());
+    };
+    sink(&chunk);
+    OUTPUT_CAPTURE.with(|stack| {
+        if let Some(entry) = stack.borrow_mut().get_mut(depth - 1)
+            && entry.sink.is_none()
+        {
+            entry.sink = Some(sink);
         }
-    })
+    });
+    true
 }
 
 // ── Docstrings ───────────────────────────────────────────────────────────────

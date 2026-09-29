@@ -9,6 +9,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use cljrs_gc::GcPtr;
+use cljrs_reader::Form;
+use cljrs_reader::form::FormKind;
 use cljrs_runtime::env::dynamics;
 use cljrs_runtime::tiered::{EvalError, GlobalEnv};
 use cljrs_value::{Keyword, Value, Var};
@@ -107,6 +109,10 @@ impl Engine {
                 }
                 "completions" => self.op_completions(&req, &replies),
                 "lookup" => self.op_lookup(&req, &replies),
+                "macroexpand" => self.op_macroexpand(&req, &replies),
+                "analyze-last-stacktrace" | "stacktrace" => {
+                    self.op_analyze_last_stacktrace(&req, &replies)
+                }
                 _ => {
                     let sid = self.ensure_session(req.session.as_deref());
                     let _ = replies.send(
@@ -307,16 +313,20 @@ impl Engine {
                 break;
             }
             let _alloc_frame = cljrs_gc::push_alloc_frame();
-            cljrs_runtime::builtins::builtins::push_output_capture();
+            // Stream output while the form runs (at newlines / a size
+            // threshold); the pop flushes whatever is left.
+            let (out_req, out_sid, out_replies) = (req.clone(), sid.clone(), replies.clone());
+            cljrs_runtime::builtins::builtins::push_streaming_output_capture(Box::new(
+                move |text: &str| {
+                    let _ = out_replies.send(
+                        Response::for_request(&out_req, &out_sid)
+                            .str_field("out", text)
+                            .build(),
+                    );
+                },
+            ));
             let result = eval_form(form, &mut session.env);
-            let out = cljrs_runtime::builtins::builtins::pop_output_capture().unwrap_or_default();
-            if !out.is_empty() {
-                let _ = replies.send(
-                    Response::for_request(req, &sid)
-                        .str_field("out", &out)
-                        .build(),
-                );
-            }
+            let _ = cljrs_runtime::builtins::builtins::pop_output_capture();
             match result {
                 Ok(value) => {
                     let _ = replies.send(
@@ -458,6 +468,119 @@ impl Engine {
         );
     }
 
+    /// cider-nrepl `macroexpand`: expand `code` in `ns` with the requested
+    /// expander and reply with the printed expansion.
+    fn op_macroexpand(&mut self, req: &Request, replies: &UnboundedSender<Bencode>) {
+        let sid = self.ensure_session(req.session.as_deref());
+        let globals = self.globals.clone();
+        let session = self.sessions.get_mut(&sid).expect("session just ensured");
+        let ns = req
+            .ns
+            .as_deref()
+            .filter(|ns| globals.namespaces.read().unwrap().contains_key(*ns))
+            .map(Arc::from)
+            .unwrap_or_else(|| session.env.current_ns.clone());
+        let mut env = cljrs_runtime::tiered::Env::new(globals, &ns);
+        let expander = req.expander.as_deref().unwrap_or("macroexpand");
+        let strip = matches!(req.display_namespaces.as_deref(), Some("none" | "tidy"));
+        let code = req.code.clone().unwrap_or_default();
+
+        let result: Result<String, String> = (|| {
+            let mut parser = cljrs_reader::Parser::new(code, "<macroexpand>".to_string());
+            let form = parser
+                .parse_one()
+                .map_err(|e| format!("{e}"))?
+                .ok_or_else(|| "no form to expand".to_string())?;
+            let _alloc_frame = cljrs_gc::push_alloc_frame();
+            use cljrs_runtime::interp::macros;
+            let mut expanded = match expander {
+                "macroexpand-1" => macros::macroexpand_1(&form, &mut env),
+                "macroexpand" => macros::macroexpand(&form, &mut env),
+                "macroexpand-all" => macros::macroexpand_all(&form, &mut env),
+                other => return Err(format!("unknown expander: {other}")),
+            }
+            .map_err(|e| eval_error_message(&e))?;
+            if strip {
+                strip_namespaces(&mut expanded);
+            }
+            let value = cljrs_runtime::builtins::form::form_to_value(&expanded)
+                .map_err(|e| eval_error_message(&e))?;
+            Ok(format!("{value}"))
+        })();
+
+        match result {
+            Ok(expansion) => {
+                let _ = replies.send(
+                    Response::for_request(req, &sid)
+                        .str_field("expansion", expansion)
+                        .status(&["done"])
+                        .build(),
+                );
+            }
+            Err(msg) => {
+                let _ = replies.send(
+                    Response::for_request(req, &sid)
+                        .str_field("err", format!("{msg}\n"))
+                        .status(&["macroexpand-error", "done"])
+                        .build(),
+                );
+            }
+        }
+    }
+
+    /// cider-nrepl `analyze-last-stacktrace` (legacy `stacktrace`): one
+    /// message per cause of the session's `*e`, outermost first.
+    fn op_analyze_last_stacktrace(&mut self, req: &Request, replies: &UnboundedSender<Bencode>) {
+        let sid = self.ensure_session(req.session.as_deref());
+        let session = self.sessions.get(&sid).expect("session just ensured");
+        let err = session.stars[3].clone();
+        let causes: Vec<(String, String, Option<String>)> = match &err {
+            Value::Nil => Vec::new(),
+            Value::Error(e) => {
+                let mut out = Vec::new();
+                let mut cur = Some(e.clone());
+                while let Some(ex) = cur {
+                    let info = ex.get();
+                    let data = info.data().map(|d| format!("{}", Value::Map(d)));
+                    // An exception carrying ex-data is what Clojure calls an
+                    // ExceptionInfo (CIDER keys its data display off that
+                    // class); anything else keeps cljrs's own kind name.
+                    let class = if data.is_some() {
+                        "clojure.lang.ExceptionInfo".to_string()
+                    } else {
+                        info.type_name().to_string()
+                    };
+                    out.push((class, info.message(), data));
+                    cur = info.cause();
+                }
+                out
+            }
+            // A thrown non-exception value (`(throw 42)`).
+            other => vec![(other.type_name().to_string(), format!("{other}"), None)],
+        };
+        if causes.is_empty() {
+            let _ = replies.send(
+                Response::for_request(req, &sid)
+                    .status(&["no-error", "done"])
+                    .build(),
+            );
+            return;
+        }
+        for (class, message, data) in causes {
+            let mut resp = Response::for_request(req, &sid)
+                .str_field("class", class)
+                .str_field("message", message)
+                // cljrs records no stack frames on its exceptions yet; an
+                // empty list is the honest answer.
+                .field("stacktrace", Bencode::List(Vec::new()));
+            if let Some(data) = data {
+                resp = resp.str_field("data", data);
+            }
+            let _ = replies.send(resp.build());
+        }
+        let _ = replies.send(Response::for_request(req, &sid).status(&["done"]).build());
+    }
+
     fn op_lookup(&mut self, req: &Request, replies: &UnboundedSender<Bencode>) {
         let sid = self.ensure_session(req.session.as_deref());
         let session = &self.sessions[&sid];
@@ -538,6 +661,37 @@ fn var_kind(var: &GcPtr<Var>) -> &'static str {
             | Value::MultiFn(_),
         ) => "function",
         _ => "var",
+    }
+}
+
+/// Drop the namespace from every qualified symbol in `form`
+/// (`display-namespaces` `none`).
+fn strip_namespaces(form: &mut Form) {
+    match &mut form.kind {
+        FormKind::Symbol(s) => {
+            if let Some((_, name)) = s.split_once('/')
+                && !name.is_empty()
+            {
+                *s = name.to_string();
+            }
+        }
+        FormKind::List(items)
+        | FormKind::Vector(items)
+        | FormKind::Map(items)
+        | FormKind::Set(items)
+        | FormKind::AnonFn(items) => items.iter_mut().for_each(strip_namespaces),
+        FormKind::Quote(f)
+        | FormKind::SyntaxQuote(f)
+        | FormKind::Unquote(f)
+        | FormKind::UnquoteSplice(f)
+        | FormKind::Deref(f)
+        | FormKind::Var(f)
+        | FormKind::TaggedLiteral(_, f) => strip_namespaces(f),
+        FormKind::Meta(m, f) => {
+            strip_namespaces(m);
+            strip_namespaces(f);
+        }
+        _ => {}
     }
 }
 

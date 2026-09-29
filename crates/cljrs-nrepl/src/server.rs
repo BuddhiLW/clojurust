@@ -193,6 +193,7 @@ fn dispatch(
 
 /// The ops this server understands, advertised to clients.
 const OPS: &[&str] = &[
+    "analyze-last-stacktrace",
     "clone",
     "close",
     "completions",
@@ -202,6 +203,8 @@ const OPS: &[&str] = &[
     "load-file",
     "lookup",
     "ls-sessions",
+    "macroexpand",
+    "stacktrace",
 ];
 
 /// The Clojure language level this dialect implements, as reported to nREPL
