@@ -41,17 +41,26 @@ impl Pending {
     }
 
     /// Set the cancellation flag for `id` in `session` (any id in the session
-    /// when `id` is `None`). Returns true if something was flagged.
-    fn interrupt(&self, session: &str, id: Option<&str>) -> bool {
+    /// when `id` is `None`), reporting the nREPL status of the attempt.
+    fn interrupt(&self, session: &str, id: Option<&str>) -> &'static [&'static str] {
         let map = self.map.lock().unwrap();
         let mut hit = false;
+        let mut busy = false;
         for ((s, i), flag) in map.iter() {
-            if s == session && id.is_none_or(|want| want == i) {
+            if s != session {
+                continue;
+            }
+            busy = true;
+            if id.is_none_or(|want| want == i) {
                 flag.store(true, Ordering::SeqCst);
                 hit = true;
             }
         }
-        hit
+        match (hit, busy) {
+            (true, _) => &["done"],
+            (false, true) => &["interrupt-id-mismatch", "done"],
+            (false, false) => &["session-idle", "done"],
+        }
     }
 }
 
@@ -153,13 +162,8 @@ fn dispatch(
         }
         "interrupt" => {
             let session = req.session.clone().unwrap_or_default();
-            let hit = pending.interrupt(&session, req.interrupt_id.as_deref());
-            let resp = Response::for_request(&req, &session);
-            let resp = if hit {
-                resp.status(&["done"])
-            } else {
-                resp.status(&["done", "session-idle"])
-            };
+            let status = pending.interrupt(&session, req.interrupt_id.as_deref());
+            let resp = Response::for_request(&req, &session).status(status);
             let _ = reply_tx.send(resp.build());
         }
         _ => {

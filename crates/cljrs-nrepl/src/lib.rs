@@ -76,7 +76,8 @@ pub(crate) struct Job {
     pub req: Request,
     /// Channel back to the connection's writer task.
     pub replies: tokio::sync::mpsc::UnboundedSender<Bencode>,
-    /// Set by an `interrupt` op; checked before the job starts evaluating.
+    /// Set by an `interrupt` op. Checked before the job starts, and installed
+    /// on the gas meter while it evaluates so a running eval stops too.
     pub cancelled: Arc<AtomicBool>,
     /// Entry to clear from the in-flight registry when the job completes.
     pub pending_key: Option<server::PendingKey>,
