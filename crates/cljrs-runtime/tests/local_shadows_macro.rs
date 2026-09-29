@@ -68,5 +68,8 @@ fn core_macro_still_expands_without_a_local() {
     // A macro whose expansion is observable in the value, not just in not
     // erroring: when expands to an if.
     let result = eval_src("(when true :expanded)");
-    assert_eq!(result, Value::keyword(cljrs_value::Keyword::parse("expanded")));
+    assert_eq!(
+        result,
+        Value::keyword(cljrs_value::Keyword::parse("expanded"))
+    );
 }
