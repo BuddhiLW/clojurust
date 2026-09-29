@@ -1478,15 +1478,17 @@
 ;; inline because `resolve` answers in the caller's namespace.
 (defn- extend-tag-form [tsym]
   (if (symbol? tsym)
-    `(let [v# (resolve (quote ~tsym))
-           t# (when (var? v#) (deref v#))
-           n# (str "." (name (quote ~tsym)))
-           s# (str t#)]
-       (if (and (symbol? t#)
-                (> (count s#) (count n#))
-                (= n# (subs s# (- (count s#) (count n#)))))
-         t#
-         (quote ~tsym)))
+    ;; `resolve` takes a plain symbol; a head may carry metadata (^:m Type).
+    (let [bare (symbol (namespace tsym) (name tsym))]
+      `(let [v# (resolve (quote ~bare))
+             t# (when (var? v#) (deref v#))
+             n# (str "." (name (quote ~bare)))
+             s# (str t#)]
+         (if (and (symbol? t#)
+                  (> (count s#) (count n#))
+                  (= n# (subs s# (- (count s#) (count n#)))))
+           t#
+           (quote ~tsym))))
     (list 'quote tsym)))
 
 (defmacro extend-type [tsym & specs]

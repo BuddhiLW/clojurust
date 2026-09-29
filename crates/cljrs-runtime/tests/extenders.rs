@@ -85,8 +85,11 @@ fn extenders_reports_the_types_extending_a_protocol() {
         "#,
     );
 
-    // (2) every extending type, in a stable order.
-    assert_eq!(printed(&mut env, "(extenders IShape)"), "(Sq Tri)");
+    // (2) every extending type, in a stable order, named by its qualified tag.
+    assert_eq!(
+        printed(&mut env, "(extenders IShape)"),
+        "(user.Sq user.Tri)"
+    );
     assert_eq!(
         printed(&mut env, "(= (extenders IShape) (extenders IShape))"),
         "true"
@@ -113,7 +116,10 @@ fn extenders_reports_the_types_extending_a_protocol() {
         "(defrecord Circle [r])
          (extend-type Circle IShape (area [s] (* 3 (:r s) (:r s))))",
     );
-    assert_eq!(printed(&mut env, "(extenders IShape)"), "(Circle Sq Tri)");
+    assert_eq!(
+        printed(&mut env, "(extenders IShape)"),
+        "(user.Circle user.Sq user.Tri)"
+    );
 
     // A protocol nobody touched is still nil, not polluted by its neighbours.
     assert_eq!(printed(&mut env, "(extenders IUntouched)"), "nil");
