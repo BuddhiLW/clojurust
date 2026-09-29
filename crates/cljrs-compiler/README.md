@@ -439,12 +439,13 @@ impl CompileSession {
 
 **Extension init symbols must be unique per crate** (`tests/extension_init_symbols.rs`).
 A plugin crate's C-ABI entry point is `#[no_mangle]`, so two crates that both
-name it `cljrs_init` export the same symbol.  Linking both into one AOT binary
-does *not* fail: the linker resolves every reference to a single definition, so
-`crate_a::cljrs_init` and `crate_b::cljrs_init` become the same address and one
-crate's registration silently replaces the other's.  The convention is therefore
-`cljrs_init_<crate>`, and that test is the only place two plugin crates share a
-binary, which is why `cljrs-blake3` is a dev-dependency here.
+name it `cljrs_init` export the same symbol. If both defining archive members
+are needed, the link fails with a duplicate-symbol error. If only one is pulled
+in, both Rust paths can instead resolve to that definition and one crate's
+registration is silently skipped. The outcome can change with codegen-unit
+partitioning and link order. The convention is therefore `cljrs_init_<crate>`.
+The identity test links Base64 and BLAKE3 directly; `aot_e2e` also covers the
+field case of the default Base64 extension beside a user `:rust :init` crate.
 
 `compile_file` and `compile_file_to_wasm` take a `&CompileSession` and call
 `register_all` on the bootstrap environment (so `require` resolves during
@@ -520,7 +521,10 @@ versioned dependencies always do.
 
 `needs_interpreter` reads the form as written; `expanded_needs_interpreter`
 reads it again after macroexpansion and recurses, so a form that only *contains*
-an interpreter-only construct is caught too. Neither spells the datatype,
+an interpreter-only construct is caught too. That includes an anonymous async fn
+(`^:async (fn …)` or `(fn ^:async […] …)`, per `Form::is_async_fn_form`),
+which lowering refuses because a compiled closure cannot be dispatched as
+async. Neither spells the datatype,
 protocol and multimethod family out: both call
 `cljrs_ir::lower::in_dispatch_family`, the same predicate the ANF lowerer
 rejects on, so a member cannot be known to one pass and not the other. The

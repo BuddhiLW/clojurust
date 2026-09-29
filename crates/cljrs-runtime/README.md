@@ -1121,12 +1121,31 @@ build the locals map only for a macro that can read it, because that map
 costs about 5us per local in scope on every expansion.  This is what `clojure.core/doc` and `doc-data` (in the `builtins`
 module) read back, and what `cljrs-nrepl`'s `op_lookup` surfaces to editors.
 
-### `meta_form_is_async(meta: &Form) -> bool`
+### Recognising `:async`
 
-Returns true when a `^meta` form (or attr-map literal) requests `:async` — either
-the keyword shorthand `^:async` or an explicit `{:async true}` map.  `fn`/`defn`
-use it to set `CljxFn::is_async`, which `env::apply::dispatch_if_async`
-checks at call time to route through the async runtime.
+`fn`/`defn` set `CljxFn::is_async` when a `^meta` form (or attr-map literal)
+requests `:async`, as decided by `Form::requests_async` in `cljrs-reader` — the
+same predicate IR lowering uses.  `env::apply::dispatch_if_async` checks the
+flag at call time to route through the async runtime.  The `^:async` may sit on
+the fn's first argument (`(fn ^:async [..] ..)`, peeled by `eval_fn`) or on the
+whole form (`^:async (fn [..] ..)`, handled by `eval`'s `FormKind::Meta` arm,
+which also attaches `{:async true}` as metadata since an `fn` form takes runtime
+metadata).  IR lowering refuses any body containing such an anonymous async fn
+(`Form::is_async_fn_form`), so it is always built here and calling it returns a
+`Future` in every tier.
+
+The spellings that request async, exhaustively (`^{:async true}` works wherever
+`^:async` does, and `fn*` wherever `fn` does):
+
+| spelling | async? |
+|---|---|
+| `^:async (fn [..] ..)` | yes |
+| `(fn ^:async [..] ..)` | yes |
+| `(fn ^:async name [..] ..)` | yes |
+| `(defn ^:async name [..] ..)` | yes |
+| `(defn name {:async true} [..] ..)` | yes |
+| `(fn name ^:async [..] ..)` | **no** — metadata on a params vector after a name is a hint |
+| `(defn name ^:async [..] ..)` | **no** — same |
 
 ### Which natives are intercepted, and by whom
 
@@ -1244,6 +1263,27 @@ the return value in `:post` conditions); `spec_element` resolves a reader
 conditional in ANY slot of an `ns` require spec, namespace included, so
 `[#?(:clj clojure.core :cljs cljs.core) :as core]` reads — an option selecting
 no branch is dropped, a namespace selecting none is an error.
+
+**Pieces shared with the async evaluator.** `cljrs-async`'s `eval_async` has its
+own arm for every special form that evaluates a sub-expression in place, because
+running one on the sync path parks the `LocalSet` thread at any `await` inside
+it. To keep those arms from re-implementing the forms, `special.rs` exposes each
+form's non-evaluating parts:
+
+| item | used for |
+|---|---|
+| `parse_try_args`, `CatchClause`, `catch_type_matches`, `eval_error_to_value` | `try` |
+| `DefTarget`, `parse_def(args, env) -> EvalResult<DefTarget>`, `intern_def(target, val, env)` | `def`: name, merged `^meta`/docstring and value form, then interning an evaluated value |
+| `defonce_existing(name, env) -> Option<Value>` | `defonce`: the already-bound var it leaves untouched |
+| `throw_value(val) -> EvalError` | `throw`: wraps a non-error value in an `ExceptionInfo` |
+| `set_bang_symbol(sym, val, env)`, `set_bang_field_target(form) -> Option<(&str, &Form)>`, `set_type_instance_field(inst, field, val)`, `set_bang_target_error()` | `set!` on a symbol, on `(.-field inst)`, and the error for any other target |
+| `push_letfn_frame(args, env) -> EvalResult<()>` | `letfn`: pushes a frame with every fn mutually bound (popped already on error) |
+
+Two thread-local stacks gained a resume operation for the same caller, which
+keeps `binding`/`with-out-str` state installed only while its own task is
+polled: `dynamics::take_frame(guard) -> HashMap<VarKey, Value>` pops a
+`binding` frame and returns it, and
+`builtins::builtins::resume_output_capture(buf)` pushes a capture buffer back.
 
 **The datatype, protocol and multimethod family is Clojure, not Rust.**
 `deftype`, `defrecord`, `reify`, `defprotocol`, `extend-type`,

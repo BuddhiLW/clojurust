@@ -84,6 +84,81 @@ fn assert_output(name: &str, source: &str, expected: &str) {
 
 // ── Constants & arithmetic ─────────────────────────────────────────────────
 
+/// The CLI's default extension set always pulls `cljrs-base64` into an AOT
+/// harness. A user crate that retained the formerly documented `cljrs_init`
+/// spelling must coexist with it: before Base64's hook became crate-specific,
+/// this either failed to link or silently called Base64's hook twice.
+#[test]
+#[allow(clippy::result_large_err)]
+fn test_user_rust_init_coexists_with_default_base64_extension() {
+    let _guard = AOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+    let project = tempfile::tempdir().expect("temporary user extension project");
+    let crate_dir = project.path().join("legacy-user-extension");
+    std::fs::create_dir_all(crate_dir.join("src")).unwrap();
+
+    let interop_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../cljrs-interop")
+        .canonicalize()
+        .expect("cljrs-interop checkout");
+    std::fs::write(
+        crate_dir.join("Cargo.toml"),
+        format!(
+            r#"[package]
+name = "legacy_user_extension"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+cljrs-interop = {{ path = {:?} }}
+"#,
+            interop_dir
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        crate_dir.join("src/lib.rs"),
+        r#"use cljrs_interop::Registry;
+
+// Keep the old, generic spelling to prove existing user crates remain valid.
+#[unsafe(no_mangle)]
+pub extern "C" fn cljrs_init(_registry: *mut Registry) {
+    println!("legacy-user-init");
+}
+"#,
+    )
+    .unwrap();
+
+    let src_path = project.path().join("main.cljrs");
+    let bin_path = project.path().join("aot-user-init-bin");
+    std::fs::write(&src_path, "(println \"aot-main\")\n").unwrap();
+
+    let rust_config = cljrs_project::config::RustConfig {
+        crate_dir,
+        init_fn: Some("legacy_user_extension::cljrs_init".into()),
+    };
+    let session = common::session(vec![]).rust_config(Some(rust_config));
+    let result = std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn({
+            let src = src_path.clone();
+            let bin = bin_path.clone();
+            move || cljrs_compiler::aot::compile_file(&src, &bin, &session)
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+    result.unwrap_or_else(|e| panic!("AOT compilation with user init failed: {e:?}"));
+
+    assert_eq!(
+        run_binary("user_rust_init", &bin_path).trim(),
+        "legacy-user-init\naot-main"
+    );
+}
+
 #[test]
 #[cfg(feature = "aot_full_test")]
 fn test_constants() {

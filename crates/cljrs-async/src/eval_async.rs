@@ -9,7 +9,8 @@
 //!
 //! [`eval_async`] mirrors the synchronous [`cljrs_runtime::interp::eval::eval`] for the
 //! forms where an `await` can legitimately appear — `await` itself, `do`, `if`,
-//! `let`/`let*`, `loop`/`loop*`, `recur`, `try`, collection literals, and
+//! `let`/`let*`, `loop`/`loop*`, `recur`, `try`, `def`, `defonce`, `and`, `or`,
+//! `throw`, `set!`, `letfn`, `binding`, `with-out-str`, collection literals, and
 //! function-call arguments — and delegates every other form to the synchronous
 //! evaluator. Any sub-expression a delegated form evaluates therefore takes the
 //! blocking `await` path, which on the single-threaded `LocalSet` deadlocks
@@ -231,8 +232,21 @@ pub async fn eval_async(form: &Form, env: &mut Env) -> EvalResult {
             // would evaluate them on the blocking deref path, parking the
             // single LocalSet thread forever.
             "recur" => return eval_recur_async(&forms[1..], env).await,
-            // Other special forms (binding/…) don't yield yet: run them
-            // synchronously.
+            // The remaining forms that evaluate a sub-expression in place (as
+            // opposed to registering a body to run later, like `fn`/`defn`)
+            // each need their own arm for the same reason as `recur`.
+            "def" => return eval_def_async(&forms[1..], env).await,
+            "defonce" => return eval_defonce_async(&forms[1..], env).await,
+            "and" => return eval_and_async(&forms[1..], env).await,
+            "or" => return eval_or_async(&forms[1..], env).await,
+            "throw" => return eval_throw_async(&forms[1..], env).await,
+            "set!" => return eval_set_bang_async(&forms[1..], env).await,
+            "letfn" => return eval_letfn_async(&forms[1..], env).await,
+            "binding" => return eval_binding_async(&forms[1..], env).await,
+            "with-out-str" => return eval_with_out_str_async(&forms[1..], env).await,
+            // What is left either evaluates nothing an `await` could sit in
+            // (`quote`, `var`, `fn`, `defn`, `ns`, …) or is `.`, which the
+            // sync evaluator rejects outright. Run them synchronously.
             other if is_special_form(other) => return eval(&expanded, env),
             _ => {}
         }
@@ -479,12 +493,250 @@ async fn eval_recur_async(args: &[Form], env: &mut Env) -> EvalResult {
     let mut vals: Vec<Value> = Vec::with_capacity(args.len());
     for form in args {
         // Root the arguments already evaluated: each remaining `await` is a
-        // yield point at which a GC cycle may run.
-        let _vals_root = cljrs_runtime::env::gc_roots::root_values(&vals);
-        let val = Box::pin(eval_async(form, env)).await?;
+        // yield point at which a GC cycle may run. The root records a raw
+        // (ptr, len), so it is dropped before `push` can move the storage.
+        let val = {
+            let _vals_root = cljrs_runtime::env::gc_roots::root_values(&vals);
+            Box::pin(eval_async(form, env)).await?
+        };
         vals.push(val);
     }
     Err(EvalError::Recur(vals))
+}
+
+/// `(def name "doc"? value?)` with a yielding value expression. Name, metadata
+/// and interning are shared with the synchronous `def`.
+async fn eval_def_async(args: &[Form], env: &mut Env) -> EvalResult {
+    let target = cljrs_runtime::interp::special::parse_def(args, env)?;
+    let val = match target.value_form {
+        Some(form) => {
+            // `^{...}` metadata was evaluated by `parse_def`; keep it alive
+            // across the value's yield points.
+            let _meta_root = target
+                .meta
+                .as_ref()
+                .map(cljrs_runtime::env::gc_roots::root_value);
+            eval_def_value_async(form, env).await?
+        }
+        None => Value::Nil,
+    };
+    cljrs_runtime::interp::special::intern_def(target, val, env)
+}
+
+/// Evaluate a `def` value expression. Under no-gc the sync `def` allocates it
+/// in the StaticArena, because the var outlives every scratch region; the
+/// allocation context is thread-local, so here it is installed per poll.
+async fn eval_def_value_async(form: &Form, env: &mut Env) -> EvalResult {
+    #[cfg(feature = "no-gc")]
+    {
+        let mut ctx: Option<cljrs_gc::alloc_ctx::StaticCtxGuard> = None;
+        poll_scoped(
+            Box::pin(eval_async(form, env)),
+            &mut ctx,
+            |ctx| *ctx = Some(cljrs_gc::alloc_ctx::StaticCtxGuard::new()),
+            |ctx| *ctx = None,
+        )
+        .await
+    }
+    #[cfg(not(feature = "no-gc"))]
+    {
+        Box::pin(eval_async(form, env)).await
+    }
+}
+
+/// `(defonce name value)`: the value expression is evaluated, yieldingly, only
+/// when the var is not already bound.
+async fn eval_defonce_async(args: &[Form], env: &mut Env) -> EvalResult {
+    if args.is_empty() {
+        return Err(EvalError::Runtime("defonce requires a name".into()));
+    }
+    let target = cljrs_runtime::interp::special::parse_def(args, env)?;
+    if let Some(var) = cljrs_runtime::interp::special::defonce_existing(&target.name, env) {
+        return Ok(var);
+    }
+    Box::pin(eval_def_async(args, env)).await
+}
+
+/// `(and forms…)`, short-circuiting, with yielding operands.
+async fn eval_and_async(args: &[Form], env: &mut Env) -> EvalResult {
+    let mut result = Value::Bool(true);
+    for form in args {
+        result = Box::pin(eval_async(form, env)).await?;
+        if matches!(result, Value::Nil | Value::Bool(false)) {
+            return Ok(result);
+        }
+    }
+    Ok(result)
+}
+
+/// `(or forms…)`, short-circuiting, with yielding operands.
+async fn eval_or_async(args: &[Form], env: &mut Env) -> EvalResult {
+    let mut last = Value::Nil;
+    for form in args {
+        last = Box::pin(eval_async(form, env)).await?;
+        if !matches!(last, Value::Nil | Value::Bool(false)) {
+            return Ok(last);
+        }
+    }
+    Ok(last)
+}
+
+/// `(throw x)` with a yielding `x`.
+async fn eval_throw_async(args: &[Form], env: &mut Env) -> EvalResult {
+    let val = match args.first() {
+        Some(f) => Box::pin(eval_async(f, env)).await?,
+        None => Value::Nil,
+    };
+    Err(cljrs_runtime::interp::special::throw_value(val))
+}
+
+/// `(set! target value)` with a yielding value and, for a `(.-field inst)`
+/// target, a yielding `inst`. Evaluation order matches the sync `set!`.
+async fn eval_set_bang_async(args: &[Form], env: &mut Env) -> EvalResult {
+    use cljrs_runtime::interp::special as sp;
+    let target = args
+        .first()
+        .ok_or_else(|| EvalError::Runtime("set! requires a target".into()))?;
+    let val = match args.get(1) {
+        Some(f) => Box::pin(eval_async(f, env)).await?,
+        None => Value::Nil,
+    };
+    match &target.kind {
+        FormKind::Symbol(sym) => sp::set_bang_symbol(sym, val, env),
+        _ => match sp::set_bang_field_target(target) {
+            Some((field, inst_form)) => {
+                let _val_root = cljrs_runtime::env::gc_roots::root_value(&val);
+                let inst = Box::pin(eval_async(inst_form, env)).await?;
+                sp::set_type_instance_field(&inst, field, val.clone())
+            }
+            None => Err(sp::set_bang_target_error()),
+        },
+    }
+}
+
+/// `(letfn [fns…] body…)`: the fns are built by the shared sync helper (building
+/// a closure evaluates nothing), and the body yields.
+async fn eval_letfn_async(args: &[Form], env: &mut Env) -> EvalResult {
+    cljrs_runtime::interp::special::push_letfn_frame(args, env)?;
+    let result = eval_body_async(&args[1..], env).await;
+    env.pop_frame();
+    result
+}
+
+/// `(binding [var val …] body…)` with yielding inits and body.
+///
+/// Dynamic bindings live on a thread-local stack, and every task on the
+/// `LocalSet` shares the thread. Leaving the frame pushed across a yield would
+/// let other tasks see it, and would let them pop it (or have theirs popped).
+/// So the frame is pushed at the start of each poll of the body and taken back
+/// off at the end; between polls its values sit in a rooted slice, which picks
+/// up any `set!` the body made.
+async fn eval_binding_async(args: &[Form], env: &mut Env) -> EvalResult {
+    use cljrs_runtime::env::dynamics;
+    let pairs = match args.first().and_then(|f| f.as_vector()) {
+        Some(v) => expand_pairs(v)
+            .map_err(|_| EvalError::Runtime("binding vector must have even count".into()))?
+            .into_owned(),
+        None => return Err(EvalError::Runtime("binding requires a vector".into())),
+    };
+
+    let mut keys: Vec<dynamics::VarKey> = Vec::with_capacity(pairs.len() / 2);
+    let mut vals: Vec<Value> = Vec::with_capacity(pairs.len() / 2);
+    for pair in pairs.chunks(2) {
+        let Some(sym_str) = pair[0].as_symbol() else {
+            return Err(EvalError::Runtime("binding targets must be symbols".into()));
+        };
+        let parsed = cljrs_value::Symbol::parse(sym_str);
+        let ns_part = env.resolve_ns_or_current(parsed.namespace.as_deref());
+        let var_ptr = env
+            .globals
+            .lookup_var_in_ns(&ns_part, &parsed.name)
+            .ok_or_else(|| EvalError::UnboundSymbol(sym_str.to_string()))?;
+        let val = {
+            let _vals_root = cljrs_runtime::env::gc_roots::root_values(&vals);
+            Box::pin(eval_async(&pair[1], env)).await?
+        };
+        keys.push(dynamics::var_key_of(&var_ptr));
+        vals.push(val);
+    }
+
+    // `vals` is not resized from here on, so its storage is stable while rooted.
+    let _vals_root = cljrs_runtime::env::gc_roots::root_values(&vals);
+    let mut state = (keys, vals, None::<dynamics::BindingGuard>);
+    poll_scoped(
+        Box::pin(eval_body_async(&args[1..], env)),
+        &mut state,
+        |(keys, vals, guard)| {
+            // Built in binding order, so a repeated var keeps its last value,
+            // as in the sync `binding`.
+            let frame = keys.iter().copied().zip(vals.iter().cloned()).collect();
+            *guard = Some(dynamics::push_frame(frame));
+        },
+        |(keys, vals, guard)| {
+            if let Some(guard) = guard.take() {
+                let frame = dynamics::take_frame(guard);
+                for (key, slot) in keys.iter().zip(vals.iter_mut()) {
+                    if let Some(v) = frame.get(key) {
+                        *slot = v.clone();
+                    }
+                }
+            }
+        },
+    )
+    .await
+}
+
+/// `(with-out-str body…)` with a yielding body. The capture buffer is
+/// thread-local, so, as with `binding`, it is installed only while this task is
+/// being polled and held here in between; output printed by other tasks while
+/// this one is suspended is not captured.
+async fn eval_with_out_str_async(body: &[Form], env: &mut Env) -> EvalResult {
+    use cljrs_runtime::builtins::builtins::{pop_output_capture, resume_output_capture};
+    let mut buf = String::new();
+    let result = poll_scoped(
+        Box::pin(eval_body_async(body, env)),
+        &mut buf,
+        |buf| resume_output_capture(std::mem::take(buf)),
+        |buf| *buf = pop_output_capture().unwrap_or_default(),
+    )
+    .await;
+    result?;
+    Ok(Value::string(buf))
+}
+
+/// Drive `fut` to completion with thread-local state installed only for the
+/// duration of each poll: `enter` runs before every poll and `exit` after it,
+/// including when the poll unwinds. Tasks on the `LocalSet` share one thread,
+/// so thread-local state a body relies on must not stay installed while it is
+/// suspended and another task runs.
+async fn poll_scoped<F, S>(
+    mut fut: std::pin::Pin<Box<F>>,
+    state: &mut S,
+    enter: impl Fn(&mut S),
+    exit: impl Fn(&mut S),
+) -> F::Output
+where
+    F: Future + ?Sized,
+{
+    struct Exit<'a, S, X: Fn(&mut S)> {
+        state: &'a mut S,
+        exit: &'a X,
+    }
+    impl<S, X: Fn(&mut S)> Drop for Exit<'_, S, X> {
+        fn drop(&mut self) {
+            (self.exit)(self.state);
+        }
+    }
+
+    std::future::poll_fn(|cx| {
+        enter(state);
+        let _exit = Exit {
+            state: &mut *state,
+            exit: &exit,
+        };
+        fut.as_mut().poll(cx)
+    })
+    .await
 }
 
 /// A function call whose arguments may contain `await`s. Arguments are
@@ -510,8 +762,11 @@ async fn eval_call_async(head: &Form, args: &[Form], whole: &Form, env: &mut Env
         let _target_root = cljrs_runtime::env::gc_roots::root_value(&target);
         let mut argv: Vec<Value> = Vec::with_capacity(arg_forms.len());
         for a in arg_forms {
-            let _args_root = cljrs_runtime::env::gc_roots::root_values(&argv);
-            argv.push(Box::pin(eval_async(a, env)).await?);
+            let val = {
+                let _args_root = cljrs_runtime::env::gc_roots::root_values(&argv);
+                Box::pin(eval_async(a, env)).await?
+            };
+            argv.push(val);
         }
         return cljrs_runtime::interp::apply::dispatch_method(&s[1..], &target, &argv);
     }
@@ -531,8 +786,11 @@ async fn eval_call_async(head: &Form, args: &[Form], whole: &Form, env: &mut Env
     let _callee_root = cljrs_runtime::env::gc_roots::root_value(&callee);
     let mut argv: Vec<Value> = Vec::with_capacity(args.len());
     for a in args {
-        let _args_root = cljrs_runtime::env::gc_roots::root_values(&argv);
-        argv.push(Box::pin(eval_async(a, env)).await?);
+        let val = {
+            let _args_root = cljrs_runtime::env::gc_roots::root_values(&argv);
+            Box::pin(eval_async(a, env)).await?
+        };
+        argv.push(val);
     }
     cljrs_runtime::env::apply::apply_value(&callee, argv, env)
 }
