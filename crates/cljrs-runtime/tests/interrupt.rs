@@ -84,6 +84,17 @@ fn interrupt_is_not_caught_by_try() {
     assert_eq!(result, "interrupted");
 }
 
+/// The flag is set while thousands of non-tail frames are live: the
+/// interrupt must unwind through all of them.
+#[test]
+fn interrupt_unwinds_live_non_tail_recursion() {
+    let result = interrupted_eval(
+        "(defn sink [n] (if (= n 0) (loop [] (recur)) (+ 1 (sink (dec n)))))",
+        "(sink 5000)",
+    );
+    assert_eq!(result, "interrupted");
+}
+
 #[test]
 fn interrupt_stops_deep_non_tail_recursion() {
     let flag = Arc::new(AtomicBool::new(true));
@@ -104,4 +115,32 @@ fn interrupt_stops_deep_non_tail_recursion() {
         .join()
         .expect("worker panicked");
     assert_eq!(result, "interrupted");
+}
+
+/// A flag left set by an interrupted evaluation must not stop the next one:
+/// once its guard is dropped, evaluation runs normally, including after the
+/// interrupted evaluation ended in an error.
+#[test]
+fn stale_flag_does_not_stop_next_eval() {
+    let mut env = env();
+    let flag = Arc::new(AtomicBool::new(true));
+    {
+        let _guard = InterruptGuard::install(flag.clone());
+        let result = cljrs_runtime::tiered::eval(&forms("(loop [] (recur))").remove(0), &mut env);
+        assert_eq!(describe(result), "interrupted");
+    }
+    assert!(flag.load(Ordering::Relaxed), "the old flag stays set");
+    {
+        // A fresh job with its own (clear) flag, one that errors.
+        let _guard = InterruptGuard::install(Arc::new(AtomicBool::new(false)));
+        let result =
+            cljrs_runtime::tiered::eval(&forms("(throw (ex-info \"x\" {}))").remove(0), &mut env);
+        assert!(describe(result).starts_with("error"));
+    }
+    let _guard = InterruptGuard::install(Arc::new(AtomicBool::new(false)));
+    let result = cljrs_runtime::tiered::eval(
+        &forms("(loop [n 0] (if (< n 100000) (recur (inc n)) n))").remove(0),
+        &mut env,
+    );
+    assert_eq!(describe(result), "value: 100000");
 }
