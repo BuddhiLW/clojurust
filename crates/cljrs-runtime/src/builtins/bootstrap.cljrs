@@ -1471,17 +1471,35 @@
                                      (filter (fn [i] (= n (mname i))) impls))))
                  names))))
 
+;; The form naming type symbol `tsym` as a dispatch tag at run time. A record or
+;; deftype name resolves through the namespace that defined it to the qualified
+;; tag its var holds (`my.ns.Point`), aliases and qualified names included;
+;; anything else (`String`, `nil`, a native type) stays the bare symbol. Emitted
+;; inline because `resolve` answers in the caller's namespace.
+(defn- extend-tag-form [tsym]
+  (if (symbol? tsym)
+    `(let [v# (resolve (quote ~tsym))
+           t# (when (var? v#) (deref v#))
+           n# (str "." (name (quote ~tsym)))
+           s# (str t#)]
+       (if (and (symbol? t#)
+                (> (count s#) (count n#))
+                (= n# (subs s# (- (count s#) (count n#)))))
+         t#
+         (quote ~tsym)))
+    (list 'quote tsym)))
+
 (defmacro extend-type [tsym & specs]
   (cons 'do
         (map (fn [g]
-               (list 'extend (list 'quote tsym) (first g)
+               (list 'extend (extend-tag-form tsym) (first g)
                      (extend-impl-map (second g))))
              (extend-spec-groups specs))))
 
 (defmacro extend-protocol [psym & specs]
   (cons 'do
         (map (fn [g]
-               (list 'extend (list 'quote (first g)) psym
+               (list 'extend (extend-tag-form (first g)) psym
                      (extend-impl-map (second g))))
              (extend-spec-groups specs))))
 
@@ -1893,12 +1911,11 @@
         immm  (zipmap (map kw imm) (map bare imm))
         mutm  (zipmap (map kw mut) (map bare mut))]
     `(do
-       (deftype* ~tsym ~fields ~@impls)
+       (def ~tsym (symbol (deftype* ~tsym ~fields ~@impls)))
        (defn ~ctor [~@plain]
          ~(if (seq mut)
-            `(make-type-instance-mut ~tname ~immm ~mutm)
-            `(make-type-instance ~tname ~immm)))
-       (def ~tsym (quote ~tsym))
+            `(make-type-instance-mut (str ~tsym) ~immm ~mutm)
+            `(make-type-instance (str ~tsym) ~immm)))
        ~tsym)))
 
 ;; defrecord: like deftype but fields are always immutable and it also gets the
@@ -1912,10 +1929,9 @@
         plain (mapv bare fields)
         fmap  (zipmap (map kw fields) (map bare fields))]
     `(do
-       (deftype* ~tsym ~plain ~@impls)
-       (defn ~pos [~@plain] (make-record-instance ~tname ~fmap))
-       (defn ~mapc [m#] (make-record-instance ~tname m#))
-       (def ~tsym (quote ~tsym))
+       (def ~tsym (symbol (deftype* ~tsym ~plain ~@impls)))
+       (defn ~pos [~@plain] (make-record-instance (str ~tsym) ~fmap))
+       (defn ~mapc [m#] (make-record-instance (str ~tsym) m#))
        ~tsym)))
 
 ;; reify: an anonymous, field-less instance whose methods close over the

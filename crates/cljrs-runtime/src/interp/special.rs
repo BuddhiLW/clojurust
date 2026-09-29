@@ -2272,7 +2272,7 @@ fn eval_deftype_star(args: &[Form], env: &mut Env) -> EvalResult {
     // Type metadata (e.g. ^:private) has no var to hold it; unwrapped so the
     // name reads, and deliberately not applied anywhere it would not belong.
     let (type_name, _) = require_sym_meta(args, 0, "deftype*", env)?;
-    let type_tag: Arc<str> = Arc::from(type_name.as_str());
+    let type_tag = qualified_type_tag(&type_name, env);
 
     let specs = parse_field_specs(&args[1], "deftype*")?;
     let field_names: Vec<Arc<str>> = specs.iter().map(|(n, _)| n.clone()).collect();
@@ -2289,7 +2289,16 @@ fn eval_deftype_star(args: &[Form], env: &mut Env) -> EvalResult {
     // Return the minted tag so a caller (e.g. the `reify` macro) can feed it
     // straight to `make-type-instance` — a single dataflow source for the tag,
     // rather than a second textual reference that a gensym could desync.
-    Ok(Value::string(type_name))
+    Ok(Value::string(type_tag.to_string()))
+}
+
+/// The dispatch tag of a record or deftype: its name qualified by the defining
+/// namespace, `my.ns.Point`, as the JVM names the generated class. Two
+/// namespaces may each define a `Point`; with a bare-name tag the second one's
+/// protocol impls replaced the first one's, and `instance?` could not tell
+/// their instances apart.
+fn qualified_type_tag(type_name: &str, env: &Env) -> Arc<str> {
+    Arc::from(format!("{}.{}", env.current_ns, type_name))
 }
 
 // ── register_impls_for_tag ────────────────────────────────────────────────────
