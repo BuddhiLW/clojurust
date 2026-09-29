@@ -90,7 +90,7 @@ pub fn fresh_env_in(mode: cljrs_runtime::ExecutionMode) -> (Arc<GlobalEnv>, Env)
         n
     });
     let ns = format!("prop-case-{n}");
-    // Creates the namespace as well as referring into it.
+    globals.get_or_create_ns(&ns);
     globals.refer_core(&ns);
     let env = Env::new(globals.clone(), &ns);
     (globals, env)
@@ -107,7 +107,7 @@ pub fn fresh_env_in(mode: cljrs_runtime::ExecutionMode) -> (Arc<GlobalEnv>, Env)
 pub fn reset_env_in(mode: cljrs_runtime::ExecutionMode, ns: &str) -> (Arc<GlobalEnv>, Env) {
     let globals = shared_globals_in(mode);
     globals.namespaces.write().unwrap().remove(ns);
-    // Recreates the namespace as well as referring into it.
+    globals.get_or_create_ns(ns);
     globals.refer_core(ns);
     let env = Env::new(globals.clone(), ns);
     (globals, env)

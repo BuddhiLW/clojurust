@@ -139,6 +139,14 @@ pub fn push_streaming_output_capture(sink: Box<dyn FnMut(&str)>) {
     });
 }
 
+/// Push `buf` as the capture buffer, continuing a capture previously taken off
+/// the stack with [`pop_output_capture`]. The async evaluator uses this to keep
+/// a `with-out-str` buffer installed only while its own task is being polled;
+/// that buffer is always a plain (non-streamed) capture.
+pub fn resume_output_capture(buf: String) {
+    OUTPUT_CAPTURE.with(|stack| stack.borrow_mut().push(OutputCapture { buf, sink: None }));
+}
+
 /// Pop the top capture buffer and return its contents. For a streamed
 /// capture the pending text is flushed to its sink first and the returned
 /// string is empty.
