@@ -1472,16 +1472,18 @@
                  names))))
 
 ;; The form naming type symbol `tsym` as a dispatch tag at run time. A record or
-;; deftype name resolves through the namespace that defined it to the qualified
-;; tag its var holds (`my.ns.Point`), aliases and qualified names included;
-;; anything else (`String`, `nil`, a native type) stays the bare symbol. Emitted
-;; inline because `resolve` answers in the caller's namespace.
+;; deftype name resolves, through the namespace the code is evaluated in (the
+;; same one deftype* minted the tag in), to the qualified tag its var holds
+;; (`my.ns.Point`), aliases and qualified names included; anything else
+;; (`String`, `nil`, a native type) stays the bare symbol. `(var ...)` rather
+;; than `resolve`, because `resolve` answers in `*ns*`, which differs from the
+;; evaluating namespace under `eval` from another namespace's code.
 (defn- extend-tag-form [tsym]
   (if (symbol? tsym)
-    ;; `resolve` takes a plain symbol; a head may carry metadata (^:m Type).
+    ;; `var` takes a plain symbol; a head may carry metadata (^:m Type).
     (let [bare (symbol (namespace tsym) (name tsym))]
-      `(let [v# (resolve (quote ~bare))
-             t# (when (var? v#) (deref v#))
+      `(let [v# (try (var ~bare) (catch Exception _# nil))
+             t# (when v# (deref v#))
              n# (str "." (name (quote ~bare)))
              s# (str t#)]
          (if (and (symbol? t#)
