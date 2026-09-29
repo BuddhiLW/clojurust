@@ -26,3 +26,6 @@ cljrs-ir      = { workspace = true }
 cljrs-value   = { workspace = true }
 cljrs-runtime = { workspace = true }
 cljrs-reader  = { workspace = true }
+
+[dev-dependencies]
+proptest = "1"
