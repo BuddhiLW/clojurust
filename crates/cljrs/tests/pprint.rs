@@ -128,12 +128,13 @@ fn a_record_breaks_and_keeps_its_tag() {
         r#"(->Person "Ada Lovelace" "ada@example.org"
                      {:street "aaaaaaaaaaaaaaaaaaaaa" :city "bbbbbbbbbbbb"})"#,
     );
+    // The tag is the record's namespace-qualified name, as the JVM prints it.
     assert!(
-        out.starts_with("#Person{:name \"Ada Lovelace\"\n"),
+        out.starts_with("#user.Person{:name \"Ada Lovelace\"\n"),
         "record must break under its own tag:\n{out}"
     );
     assert!(
-        out.contains("\n        :email "),
+        out.contains("\n             :email "),
         "fields must align past the tag:\n{out}"
     );
 }
