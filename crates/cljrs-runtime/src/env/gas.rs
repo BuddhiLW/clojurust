@@ -6,10 +6,20 @@
 //! Native code reports exhaustion through per-scope sticky thread-local flags,
 //! allowing the signal to survive callback/JIT bridge boundaries without
 //! contaminating a healthy enclosing or subsequent scope.
+//!
+//! The same checkpoints also observe *interrupt flags*: an embedder (e.g. the
+//! nREPL server) installs an `Arc<AtomicBool>` with [`InterruptGuard`] for the
+//! extent of an evaluation, and another thread sets it to stop that
+//! evaluation. A set flag makes every subsequent charge fail exactly like an
+//! exhausted budget, so the evaluation unwinds through the same uncatchable
+//! [`EvalError::GasExhausted`](crate::env::error::EvalError::GasExhausted)
+//! path in every tier (tree-walker, IR interpreter, JIT). Use
+//! [`interrupt_requested`] to tell an interrupt from real exhaustion. When no
+//! interrupt is pending the cost is one relaxed atomic load per charge.
 
 use std::cell::RefCell;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 /// A shareable, monotonically-decreasing execution-credit budget.
 #[derive(Debug)]
@@ -42,6 +52,39 @@ impl GasMeter {
 thread_local! {
     static ACTIVE: RefCell<Vec<Arc<GasMeter>>> = const { RefCell::new(Vec::new()) };
     static EXHAUSTED: RefCell<Vec<bool>> = const { RefCell::new(Vec::new()) };
+    static INTERRUPTS: RefCell<Vec<Arc<AtomicBool>>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Installs an interrupt flag for the dynamic extent of an evaluation on
+/// this thread. While installed, setting the flag (from any thread) makes the
+/// next execution-credit checkpoint fail, unwinding the evaluation as
+/// `GasExhausted`; [`interrupt_requested`] then reports true.
+#[must_use = "dropping InterruptGuard immediately uninstalls the interrupt flag"]
+pub struct InterruptGuard;
+
+impl InterruptGuard {
+    pub fn install(flag: Arc<AtomicBool>) -> Self {
+        INTERRUPTS.with(|flags| flags.borrow_mut().push(flag));
+        Self
+    }
+}
+
+impl Drop for InterruptGuard {
+    fn drop(&mut self) {
+        INTERRUPTS.with(|flags| {
+            flags.borrow_mut().pop();
+        });
+    }
+}
+
+/// True when an interrupt flag installed on this thread has been set.
+pub fn interrupt_requested() -> bool {
+    INTERRUPTS.with(|flags| {
+        flags
+            .borrow()
+            .iter()
+            .any(|flag| flag.load(Ordering::Relaxed))
+    })
 }
 
 /// Installs a meter for the dynamic extent of an evaluation.
@@ -70,7 +113,7 @@ impl Drop for GasGuard {
 
 /// Charge the active evaluation, or succeed at no cost when unmetered.
 pub fn charge(cost: u64) -> bool {
-    if is_exhausted() {
+    if interrupt_requested() || is_exhausted() {
         return false;
     }
     let charged = ACTIVE.with(|active| {
@@ -100,7 +143,8 @@ pub fn charge(cost: u64) -> bool {
 
 /// Peek at the native-tier exhaustion signal set by a failed charge.
 pub fn is_exhausted() -> bool {
-    EXHAUSTED.with(|exhausted| exhausted.borrow().iter().any(|value| *value))
+    interrupt_requested()
+        || EXHAUSTED.with(|exhausted| exhausted.borrow().iter().any(|value| *value))
 }
 
 /// Clone the complete active meter stack for async task propagation.
@@ -164,5 +208,21 @@ mod tests {
         assert!(!is_exhausted());
         assert!(charge(1));
         assert_eq!(outer.remaining(), 9);
+    }
+
+    #[test]
+    fn interrupt_flag_fails_charges_until_uninstalled() {
+        let flag = Arc::new(AtomicBool::new(false));
+        {
+            let _guard = InterruptGuard::install(flag.clone());
+            assert!(charge(1));
+            flag.store(true, Ordering::Relaxed);
+            assert!(!charge(1));
+            assert!(is_exhausted());
+            assert!(interrupt_requested());
+        }
+        assert!(!interrupt_requested());
+        assert!(!is_exhausted());
+        assert!(charge(1));
     }
 }
