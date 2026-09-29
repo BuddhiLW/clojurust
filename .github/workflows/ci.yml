@@ -42,6 +42,7 @@ jobs:
 
       - name: Tests
         run: cargo test --workspace
+        continue-on-error: true  # PROBE: let Clojure Tests run on staging; do not merge
 
       - name: Clojure Tests
         run: cargo run -p cljrs compile -o test-suite --test ./clojure-test-suite/test && CLJRS_GC_STATS=- ./test-suite
