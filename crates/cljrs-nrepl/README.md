@@ -11,14 +11,21 @@
 - The **network thread** (spawned by `start`) runs a current-thread tokio runtime with the TCP listener. Per-connection tasks decode bencode frames and answer `describe` and `interrupt` directly.
 - Every other op becomes a `Job` — plain `Send` data (strings, a reply channel, a cancellation flag) — sent over an mpsc channel to the **interpreter thread**, which processes jobs in `Server::serve` / `Server::serve_with`.
 
-Supported ops: `clone`, `close`, `describe`, `eval`, `interrupt`, `load-file`, `lookup`, `ls-sessions`, `completions`.
+Supported ops: `clone`, `close`, `describe`, `eval`, `interrupt`, `load-file`, `lookup`, `ls-sessions`, `completions`, plus these cider-nrepl ops:
+
+- `macroexpand` — keys `code`, `ns`, `expander` (`macroexpand-1`, `macroexpand` (default) or `macroexpand-all`) and `display-namespaces` (`qualified` (default), `none` or `tidy`). Replies `{"expansion": <printed form>}` then `done`; a read or expansion failure replies `err` with status `["macroexpand-error" "done"]`. Uses the runtime's own `cljrs_runtime::interp::macros` expanders.
+- `analyze-last-stacktrace` (also answered under the legacy name `stacktrace`) — one message per cause of the session's `*e`, outermost first, with `class`, `message`, `data` (the printed `ex-data`, when present) and `stacktrace` (a list of frames); then `done`. With no `*e` the reply is `["no-error" "done"]`.
+
+`eval` and `load-file` stream `out` messages while a form runs: printed text is sent at each newline, whenever 1 KiB is pending without one, and when the form ends. This holds for `serve`, `serve_with` and `Poller` alike, since all three run the same engine.
 
 Each session has its own `Env` (namespace) and its own `*1`/`*2`/`*3`/`*e`, bound via the dynamic-binding stack around each request. Retained values are interned in the hidden `cljrs.nrepl.session-state` namespace so the GC traces them between evals.
 
 ### Limitations
 
 - **Interrupt is best-effort.** A queued request is dropped, and a multi-form request stops between forms, but a single form that loops forever cannot be cancelled (the interpreter has no preemption hook).
-- **Output is batched per form**, not streamed incrementally: `out` is delivered when the printing form finishes (it reuses the interpreter's thread-local output-capture stack from `cljrs_runtime::builtins`).
+- **No `err` stream for user output.** cljrs has no stderr writer for user code (`*err*` is unbound and every print goes to `*out*`), so only `out` is streamed; `err` carries evaluation errors only. Text printed inside `with-out-str` is captured by it and not streamed.
+- **`macroexpand`:** `display-namespaces` `tidy` behaves like `none` (every namespace is dropped, not only those referred into `ns`), and `print-meta` is ignored.
+- **`analyze-last-stacktrace` frames are always empty.** cljrs records no stack frames on its exceptions, so `stacktrace` is an empty list rather than invented JVM frames. `class` is `clojure.lang.ExceptionInfo` for an exception carrying `ex-data` (CIDER keys its data view off that name) and otherwise cljrs's own error kind (`WrongType`, `ArityError`, `Other`, …); a thrown non-exception value reports its type name.
 - Requests without a session share a single `"default"` session rather than receiving a transient one.
 
 ## File layout
@@ -29,7 +36,7 @@ Each session has its own `Env` (namespace) and its own `*1`/`*2`/`*3`/`*e`, boun
 | `src/bencode.rs` | Hand-rolled bencode codec (the nREPL subset) with incremental decoding for TCP framing |
 | `src/protocol.rs` | `Request` decoding and the `Response` builder |
 | `src/server.rs` | Network thread: accept loop, per-connection reader/writer tasks, `describe`/`interrupt`, in-flight registry |
-| `src/engine.rs` | Interpreter thread: session registry, eval with output capture and `*1`/`*2`/`*3`/`*e`, completions, lookup |
+| `src/engine.rs` | Interpreter thread: session registry, eval with streamed output and `*1`/`*2`/`*3`/`*e`, completions, lookup, macroexpand, analyze-last-stacktrace |
 | `tests/nrepl_server.rs` | End-to-end test: full stdlib env + scripted bencode client over TCP |
 
 ## Public API

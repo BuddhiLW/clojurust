@@ -134,7 +134,16 @@ fn client_scenario(port: u16) {
         .get(b"ops".as_slice())
         .and_then(|v| v.as_dict())
         .expect("describe has ops");
-    for op in ["clone", "eval", "completions", "lookup", "interrupt"] {
+    for op in [
+        "clone",
+        "eval",
+        "completions",
+        "lookup",
+        "interrupt",
+        "macroexpand",
+        "analyze-last-stacktrace",
+        "stacktrace",
+    ] {
         assert!(ops.contains_key(op.as_bytes()), "missing op {op}");
     }
 
@@ -266,6 +275,71 @@ fn client_scenario(port: u16) {
     };
     assert!(!sessions.contains(&session_a.as_str()));
 
+    // Output is streamed while a form runs, not batched at its end.
+    let resp = eval(
+        &mut c,
+        &session_b,
+        "(do (println \"first\") (Thread/sleep 200) (println \"second\") :ok)",
+    );
+    let outs: Vec<&str> = resp
+        .iter()
+        .filter_map(|m| m.get(b"out".as_slice()).and_then(|v| v.as_str()))
+        .collect();
+    assert_eq!(outs, vec!["first\n", "second\n"], "responses: {resp:?}");
+    assert_eq!(field(&resp, "value"), Some(":ok"));
+
+    // macroexpand with each expander.
+    let expand = |c: &mut Client, expander: &str, code: &str, display: &str| -> Vec<Msg> {
+        c.request(&[
+            ("op", "macroexpand"),
+            ("session", &session_b),
+            ("ns", "user"),
+            ("code", code),
+            ("expander", expander),
+            ("display-namespaces", display),
+        ])
+    };
+    for expander in ["macroexpand-1", "macroexpand", "macroexpand-all"] {
+        let resp = expand(&mut c, expander, "(when x y)", "qualified");
+        let expansion = field(&resp, "expansion").unwrap_or_else(|| panic!("{resp:?}"));
+        assert!(expansion.starts_with("(if x"), "{expander}: {expansion}");
+        assert!(statuses(resp.last().unwrap()).contains(&"done".to_string()));
+    }
+    let resp = expand(&mut c, "macroexpand", "(when x y)", "none");
+    assert!(field(&resp, "expansion").is_some(), "{resp:?}");
+    let resp = expand(&mut c, "macroexpand", "(when", "qualified");
+    assert!(
+        statuses(resp.last().unwrap()).contains(&"macroexpand-error".to_string()),
+        "{resp:?}"
+    );
+
+    // analyze-last-stacktrace: no-error on a fresh session, then the causes
+    // of *e after a throw.
+    let resp = c.request(&[("op", "clone")]);
+    let session_c = field(&resp, "new-session")
+        .expect("new-session")
+        .to_string();
+    let resp = c.request(&[("op", "analyze-last-stacktrace"), ("session", &session_c)]);
+    assert!(
+        statuses(&resp[0]).contains(&"no-error".to_string()),
+        "{resp:?}"
+    );
+    eval(&mut c, &session_c, "(throw (ex-info \"boom\" {:a 1}))");
+    for op in ["analyze-last-stacktrace", "stacktrace"] {
+        let resp = c.request(&[("op", op), ("session", &session_c)]);
+        assert_eq!(field(&resp, "message"), Some("boom"), "{resp:?}");
+        assert!(
+            field(&resp, "data").unwrap_or("").contains(":a"),
+            "{resp:?}"
+        );
+        assert!(field(&resp, "class").is_some());
+        assert!(matches!(
+            resp[0].get(b"stacktrace".as_slice()),
+            Some(Bencode::List(_))
+        ));
+        assert_eq!(statuses(resp.last().unwrap()), vec!["done".to_string()]);
+    }
+
     // unknown op gets a clean error.
     let resp = c.request(&[("op", "frobnicate")]);
     assert!(statuses(&resp[0]).contains(&"unknown-op".to_string()));
@@ -296,7 +370,17 @@ fn poller_interleaves_nrepl_jobs_with_host_work() {
             let session = field(&resp, "new-session")
                 .expect("new-session")
                 .to_string();
-            let resp = eval(&mut c, &session, "(+ 40 2)");
+            // Output streams through the Poller path too.
+            let resp = eval(
+                &mut c,
+                &session,
+                "(do (println \"a\") (Thread/sleep 100) (println \"b\") (+ 40 2))",
+            );
+            let outs = resp
+                .iter()
+                .filter(|m| m.contains_key(b"out".as_slice()))
+                .count();
+            assert_eq!(outs, 2, "responses: {resp:?}");
             field(&resp, "value").map(str::to_string)
         }));
         let _ = done_tx.send(());

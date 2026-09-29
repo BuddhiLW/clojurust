@@ -189,6 +189,7 @@ fn dispatch(
 
 /// The ops this server understands, advertised to clients.
 const OPS: &[&str] = &[
+    "analyze-last-stacktrace",
     "clone",
     "close",
     "completions",
@@ -198,6 +199,8 @@ const OPS: &[&str] = &[
     "load-file",
     "lookup",
     "ls-sessions",
+    "macroexpand",
+    "stacktrace",
 ];
 
 fn describe_response(req: &Request) -> Bencode {
