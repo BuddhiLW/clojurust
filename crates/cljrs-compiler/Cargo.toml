@@ -50,7 +50,6 @@ cranelift-module   = { workspace = true }
 cranelift-object   = { workspace = true }
 cranelift-jit      = { workspace = true }
 cranelift-native   = { workspace = true }
-target-lexicon     = { workspace = true }
 
 wasm-encoder       = { version = "0.244", optional = true }
 

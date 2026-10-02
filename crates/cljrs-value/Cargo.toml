@@ -17,7 +17,6 @@ regex-full  = ["dep:regex"]
 small-regex = ["dep:regex-lite"]
 
 [dependencies]
-cljrs-types   = { workspace = true }
 cljrs-gc      = { workspace = true }
 cljrs-reader  = { workspace = true }
 num-bigint   = { workspace = true }
