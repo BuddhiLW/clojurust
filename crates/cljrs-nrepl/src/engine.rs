@@ -916,6 +916,20 @@ mod display_namespaces_tests {
         format!("{value}")
     }
 
+    /// Metadata is part of the form: both the metadata and what it annotates
+    /// are redisplayed.
+    #[test]
+    fn symbols_in_metadata_and_under_it_are_redisplayed() {
+        let mut form = parse("^{:tag a.b/T} c.d/x").remove(0);
+        redisplay_symbols(&mut form, &|_, name| Some(name.to_string()));
+        let FormKind::Meta(meta, annotated) = &form.kind else {
+            panic!("expected a metadata form, got {:?}", form.kind);
+        };
+        let _alloc_frame = cljrs_gc::push_alloc_frame();
+        assert_eq!(printed(meta), "{:tag T}");
+        assert_eq!(printed(annotated), "x");
+    }
+
     proptest! {
         /// `none` prints exactly the form with every qualifier erased, and a
         /// second pass changes nothing.
