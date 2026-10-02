@@ -1181,6 +1181,20 @@ handler is not only shorter: `(defmethod other.ns/m ...)` and
 `(extend-type T other.ns/P ...)` resolve through the ordinary rules, aliases
 included, where a handler doing `lookup_in_ns(current_ns, "other.ns/m")` cannot.
 
+A record or deftype's dispatch tag is qualified by its defining namespace
+(`my.ns.Point`), so `extend-type` and `extend-protocol` reach it through the
+type's var. An unqualified `Point` therefore has to resolve where it is
+extended: defined there, referred, or imported. `ns` honours `(:import [my.ns
+Point])`, `(:import (my.ns Point))` and `(:import my.ns.Point)` by referring the
+var of each named type that is loaded (`import_types` in `special.rs`; the
+package is also tried with `_` read as `-`), and ignores names that are not
+loaded types, such as host classes in a `.cljc` file. A type symbol that does
+not resolve cannot be told from a native type's tag (`String`, a
+`NativeObject`'s `type_tag`), so it registers under the bare name; when a call
+then finds no implementation for `my.ns.Point` while one sits under bare
+`Point`, the "No implementation" error says so (`unqualified_impl_hint` in
+`env/apply.rs`).
+
 Putting the target in evaluation position does cost one thing, and `defmethod`
 pays it back deliberately. The two ways a target can be wrong — no such var, and
 the wrong kind of var — fail at two different sites once the name is evaluated,
