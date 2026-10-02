@@ -44,7 +44,7 @@ use std::task::{Context, Poll};
 
 use cljrs_runtime::env::env::GlobalEnv;
 use cljrs_runtime::env::error::{EvalError, EvalResult};
-use cljrs_runtime::env::gc_roots::{ValueRootGuard, root_value, root_values};
+use cljrs_runtime::env::gc_roots::{ValueRootGuard, root_values_unchecked};
 use cljrs_value::{CljxFuture, FutureState, Value};
 
 use crate::eval_async::spawn_future;
@@ -157,11 +157,12 @@ pub fn check_ready(val: &Value) -> Readiness {
 /// A `Future` that drives a compiled poll function to completion on the current
 /// `LocalSet`, keeping its state machine GC-rooted while suspended.
 pub struct CompiledAsyncTask {
-    sm: Box<CljxStateMachine>,
     // Root guards keep `sm.slots` and `sm.pending` reachable to the collector
     // across every `.await`.  Held for the whole task; dropped on completion.
-    _slots_root: ValueRootGuard,
-    _pending_root: ValueRootGuard,
+    // Declared before `sm` so they are dropped before the storage they root.
+    _slots_root: ValueRootGuard<'static>,
+    _pending_root: ValueRootGuard<'static>,
+    sm: Box<CljxStateMachine>,
 }
 
 impl CompiledAsyncTask {
@@ -172,12 +173,16 @@ impl CompiledAsyncTask {
         // The Vec buffer (slots) and the boxed `pending` field both live behind
         // the box's stable heap allocation, so these raw-pointer roots remain
         // valid even as the `CompiledAsyncTask` (and thus the box pointer) moves.
-        let slots_root = root_values(&sm.slots);
-        let pending_root = root_value(&sm.pending);
+        //
+        // SAFETY: `slots` keeps its length for the task's lifetime (its
+        // elements are only overwritten in place), `pending` is a field of
+        // the boxed machine, and both guards are dropped before `sm`.
+        let slots_root = unsafe { root_values_unchecked(&sm.slots) };
+        let pending_root = unsafe { root_values_unchecked(std::slice::from_ref(&sm.pending)) };
         Self {
-            sm,
             _slots_root: slots_root,
             _pending_root: pending_root,
+            sm,
         }
     }
 }

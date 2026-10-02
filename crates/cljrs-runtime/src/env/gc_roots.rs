@@ -51,11 +51,12 @@ fn run_stw_reclaim() {
 thread_local! {
     static ENV_ROOTS: RefCell<Vec<*const Env>> = const { RefCell::new(Vec::new()) };
     /// Shadow stack of Value pointers on the Rust call stack that need to
-    /// survive GC.  Each entry is a `(ptr, count)` pair pointing to a
-    /// contiguous slice of Values (e.g., a Vec's backing storage or a single
-    /// Value on the stack).
-    static VALUE_ROOTS: RefCell<Vec<(*const cljrs_value::Value, usize)>> =
-        const { RefCell::new(Vec::new()) };
+    /// survive GC.  Each entry points to a contiguous slice of Values (e.g.,
+    /// a Vec's backing storage or a single Value on the stack) and carries
+    /// the id of the guard that owns it.
+    static VALUE_ROOTS: RefCell<Vec<ValueRoot>> = const { RefCell::new(Vec::new()) };
+    /// Source of [`ValueRoot::id`]s for this thread.
+    static NEXT_VALUE_ROOT_ID: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     /// Shadow stack for `Option<Value>` slices (e.g., the IR interpreter's
     /// register file).  Each entry is `(ptr, count)` pointing to a fixed-size
     /// heap slice whose address will not change for the lifetime of the entry.
@@ -74,18 +75,53 @@ impl Drop for EnvRootGuard {
     }
 }
 
-/// RAII guard that pops one entry from the value shadow stack on drop.
-pub struct ValueRootGuard {
-    pushed: bool,
+/// One entry of the value shadow stack.
+struct ValueRoot {
+    id: u64,
+    ptr: *const cljrs_value::Value,
+    len: usize,
 }
 
-impl Drop for ValueRootGuard {
+/// RAII guard that removes its own entry from the value shadow stack on drop.
+///
+/// The guard borrows what it roots. The shadow stack holds a raw pointer to
+/// those values, so they must neither move nor be freed while the guard
+/// lives; the borrow makes the compiler reject a caller that hands a rooted
+/// `Vec` to a callee, or pushes to it, with the guard still in scope.
+///
+/// Guards need not be dropped in the order they were made. Async tasks hold
+/// them across `.await` and finish in any order, so a guard removes the entry
+/// with its own id, not whichever entry is on top.
+pub struct ValueRootGuard<'a> {
+    id: Option<u64>,
+    // The entry lives in this thread's shadow stack, so the guard must be
+    // dropped on this thread: the raw pointer makes it `!Send`.
+    _rooted: std::marker::PhantomData<(&'a [cljrs_value::Value], *const ())>,
+}
+
+impl Drop for ValueRootGuard<'_> {
     fn drop(&mut self) {
-        if self.pushed {
-            VALUE_ROOTS.with(|roots| {
-                roots.borrow_mut().pop();
-            });
-        }
+        let Some(id) = self.id else { return };
+        VALUE_ROOTS.with(|roots| {
+            let mut roots = roots.borrow_mut();
+            // Almost always the newest entry.
+            if let Some(at) = roots.iter().rposition(|root| root.id == id) {
+                roots.remove(at);
+            }
+        });
+    }
+}
+
+fn push_value_root<'a>(ptr: *const cljrs_value::Value, len: usize) -> ValueRootGuard<'a> {
+    let id = NEXT_VALUE_ROOT_ID.with(|next| {
+        let id = next.get();
+        next.set(id.wrapping_add(1));
+        id
+    });
+    VALUE_ROOTS.with(|roots| roots.borrow_mut().push(ValueRoot { id, ptr, len }));
+    ValueRootGuard {
+        id: Some(id),
+        _rooted: std::marker::PhantomData,
     }
 }
 
@@ -99,24 +135,69 @@ pub fn push_env_root(env: &Env) -> EnvRootGuard {
 }
 
 /// Register a single Value as a GC root.
-pub fn root_value(val: &cljrs_value::Value) -> ValueRootGuard {
-    VALUE_ROOTS.with(|roots| {
-        roots
-            .borrow_mut()
-            .push((val as *const cljrs_value::Value, 1));
-    });
-    ValueRootGuard { pushed: true }
+pub fn root_value(val: &cljrs_value::Value) -> ValueRootGuard<'_> {
+    push_value_root(val as *const cljrs_value::Value, 1)
 }
 
 /// Register a slice of Values as GC roots (e.g., a Vec<Value>).
-pub fn root_values(vals: &[cljrs_value::Value]) -> ValueRootGuard {
+///
+/// The guard borrows the slice, so the values stay put while they are rooted:
+///
+/// ```
+/// use cljrs_runtime::env::gc_roots::root_values;
+/// let args = vec![cljrs_value::Value::Nil];
+/// let root = root_values(&args);
+/// drop(root);
+/// drop(args);
+/// ```
+///
+/// Handing the `Vec` away with the root still live does not compile. It used
+/// to, and the collector then traced the freed buffer:
+///
+/// ```compile_fail,E0505
+/// use cljrs_runtime::env::gc_roots::root_values;
+/// let args = vec![cljrs_value::Value::Nil];
+/// let root = root_values(&args);
+/// drop(args);
+/// drop(root);
+/// ```
+///
+/// Neither does growing it, which may reallocate the buffer:
+///
+/// ```compile_fail,E0502
+/// use cljrs_runtime::env::gc_roots::root_values;
+/// let mut args = vec![cljrs_value::Value::Nil];
+/// let root = root_values(&args);
+/// args.push(cljrs_value::Value::Nil);
+/// drop(root);
+/// ```
+pub fn root_values(vals: &[cljrs_value::Value]) -> ValueRootGuard<'_> {
     if vals.is_empty() {
-        return ValueRootGuard { pushed: false };
+        return ValueRootGuard {
+            id: None,
+            _rooted: std::marker::PhantomData,
+        };
     }
-    VALUE_ROOTS.with(|roots| {
-        roots.borrow_mut().push((vals.as_ptr(), vals.len()));
-    });
-    ValueRootGuard { pushed: true }
+    push_value_root(vals.as_ptr(), vals.len())
+}
+
+/// Register a slice of Values as GC roots without borrowing it, for an owner
+/// that stores the guard next to the values it roots.
+///
+/// # Safety
+///
+/// The slice must stay at this address, with every element initialized, until
+/// the returned guard is dropped: its storage must not be freed, reallocated
+/// or moved. Elements may be overwritten in place. The guard must be dropped
+/// before the storage is.
+pub unsafe fn root_values_unchecked(vals: &[cljrs_value::Value]) -> ValueRootGuard<'static> {
+    if vals.is_empty() {
+        return ValueRootGuard {
+            id: None,
+            _rooted: std::marker::PhantomData,
+        };
+    }
+    push_value_root(vals.as_ptr(), vals.len())
 }
 
 /// RAII guard that pops one entry from the option-value shadow stack on drop.
@@ -262,11 +343,11 @@ fn trace_env_roots(env: &Env, visitor: &mut cljrs_gc::MarkVisitor) {
 fn trace_value_roots(visitor: &mut cljrs_gc::MarkVisitor) {
     use cljrs_gc::Trace;
     VALUE_ROOTS.with(|roots| {
-        for &(ptr, count) in roots.borrow().iter() {
-            // SAFETY: pointers are valid — they point to Values on this thread's
-            // still-live stack frames or heap-allocated Vecs whose owners are
-            // on still-live stack frames.
-            let slice = unsafe { std::slice::from_raw_parts(ptr, count) };
+        for root in roots.borrow().iter() {
+            // SAFETY: each entry's guard either borrows the values it points
+            // to, so they cannot have moved or been freed, or was made with
+            // `root_values_unchecked`, whose caller vouches for the same.
+            let slice = unsafe { std::slice::from_raw_parts(root.ptr, root.len) };
             for val in slice {
                 val.trace(visitor);
             }
@@ -366,4 +447,54 @@ pub fn async_gc_collect() {
     });
     // Reclaim superseded JIT code while the world is still stopped.
     run_stw_reclaim();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cljrs_value::Value;
+
+    fn rooted() -> Vec<(*const Value, usize)> {
+        VALUE_ROOTS.with(|roots| roots.borrow().iter().map(|r| (r.ptr, r.len)).collect())
+    }
+
+    #[test]
+    fn a_guard_removes_its_own_entry_whatever_the_drop_order() {
+        let before = rooted();
+        let first = vec![Value::Nil];
+        let second = vec![Value::Nil, Value::Nil];
+        let first_root = root_values(&first);
+        let second_root = root_values(&second);
+
+        // Two async tasks finish in any order: the older guard goes first.
+        drop(first_root);
+        let mut expected = before.clone();
+        expected.push((second.as_ptr(), 2));
+        assert_eq!(rooted(), expected, "the newer root must survive");
+
+        drop(second_root);
+        assert_eq!(rooted(), before);
+    }
+
+    #[test]
+    fn an_empty_slice_registers_nothing() {
+        let before = rooted();
+        let none: Vec<Value> = Vec::new();
+        let root = root_values(&none);
+        assert_eq!(rooted(), before);
+        drop(root);
+        assert_eq!(rooted(), before);
+    }
+
+    #[test]
+    fn a_single_value_is_rooted_as_a_slice_of_one() {
+        let before = rooted();
+        let value = Value::Nil;
+        let root = root_value(&value);
+        let mut expected = before.clone();
+        expected.push((&value as *const Value, 1));
+        assert_eq!(rooted(), expected);
+        drop(root);
+        assert_eq!(rooted(), before);
+    }
 }
