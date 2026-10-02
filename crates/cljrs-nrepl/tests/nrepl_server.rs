@@ -363,6 +363,45 @@ fn client_scenario(port: u16) {
     }
     let resp = expand(&mut c, "macroexpand", "(when x y)", "none");
     assert!(field(&resp, "expansion").is_some(), "{resp:?}");
+    // display-namespaces: `none` drops every namespace; `tidy` drops only one
+    // the bare name still resolves through, and otherwise prefers an alias.
+    eval(
+        &mut c,
+        &session_b,
+        "(ns tidy.probe (:require [clojure.string :as string]))",
+    );
+    eval(
+        &mut c,
+        &session_b,
+        "(defmacro probe [xs] `(vector (clojure.string/join \",\" ~xs) (inc 1) (cljrs.unloaded/f 2)))",
+    );
+    let shown = |c: &mut Client, display: &str| -> String {
+        let resp = c.request(&[
+            ("op", "macroexpand"),
+            ("session", &session_b),
+            ("ns", "tidy.probe"),
+            ("code", "(probe [1])"),
+            ("expander", "macroexpand-1"),
+            ("display-namespaces", display),
+        ]);
+        field(&resp, "expansion")
+            .unwrap_or_else(|| panic!("{resp:?}"))
+            .to_string()
+    };
+    assert_eq!(
+        shown(&mut c, "qualified"),
+        "(clojure.core/vector (clojure.string/join \",\" [1]) (clojure.core/inc 1) (cljrs.unloaded/f 2))"
+    );
+    assert_eq!(
+        shown(&mut c, "tidy"),
+        "(vector (string/join \",\" [1]) (inc 1) (cljrs.unloaded/f 2))"
+    );
+    assert_eq!(
+        shown(&mut c, "none"),
+        "(vector (join \",\" [1]) (inc 1) (f 2))"
+    );
+    eval(&mut c, &session_b, "(in-ns 'user)");
+
     let resp = expand(&mut c, "macroexpand", "(when", "qualified");
     assert!(
         statuses(resp.last().unwrap()).contains(&"macroexpand-error".to_string()),

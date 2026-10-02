@@ -480,9 +480,9 @@ impl Engine {
             .filter(|ns| globals.namespaces.read().unwrap().contains_key(*ns))
             .map(Arc::from)
             .unwrap_or_else(|| session.env.current_ns.clone());
-        let mut env = cljrs_runtime::tiered::Env::new(globals, &ns);
+        let mut env = cljrs_runtime::tiered::Env::new(globals.clone(), &ns);
         let expander = req.expander.as_deref().unwrap_or("macroexpand");
-        let strip = matches!(req.display_namespaces.as_deref(), Some("none" | "tidy"));
+        let display = req.display_namespaces.as_deref();
         let code = req.code.clone().unwrap_or_default();
 
         let result: Result<String, String> = (|| {
@@ -500,8 +500,14 @@ impl Engine {
                 other => return Err(format!("unknown expander: {other}")),
             }
             .map_err(|e| eval_error_message(&e))?;
-            if strip {
-                strip_namespaces(&mut expanded);
+            match display {
+                Some("none") => {
+                    redisplay_symbols(&mut expanded, &|_, name| Some(name.to_string()));
+                }
+                Some("tidy") => redisplay_symbols(&mut expanded, &|qualifier, name| {
+                    tidy_symbol(&globals, &ns, qualifier, name)
+                }),
+                _ => {}
             }
             let value = cljrs_runtime::builtins::form::form_to_value(&expanded)
                 .map_err(|e| eval_error_message(&e))?;
@@ -664,35 +670,65 @@ fn var_kind(var: &GcPtr<Var>) -> &'static str {
     }
 }
 
-/// Drop the namespace from every qualified symbol in `form`
-/// (`display-namespaces` `none`).
-fn strip_namespaces(form: &mut Form) {
+/// Replace every qualified symbol `qualifier/name` in `form` with what
+/// `display(qualifier, name)` returns; `None` leaves the symbol as written.
+fn redisplay_symbols(form: &mut Form, display: &impl Fn(&str, &str) -> Option<String>) {
     match &mut form.kind {
         FormKind::Symbol(s) => {
-            if let Some((_, name)) = s.split_once('/')
+            if let Some((qualifier, name)) = s.split_once('/')
+                && !qualifier.is_empty()
                 && !name.is_empty()
+                && let Some(shown) = display(qualifier, name)
             {
-                *s = name.to_string();
+                *s = shown;
             }
         }
         FormKind::List(items)
         | FormKind::Vector(items)
         | FormKind::Map(items)
         | FormKind::Set(items)
-        | FormKind::AnonFn(items) => items.iter_mut().for_each(strip_namespaces),
+        | FormKind::AnonFn(items) => items
+            .iter_mut()
+            .for_each(|item| redisplay_symbols(item, display)),
         FormKind::Quote(f)
         | FormKind::SyntaxQuote(f)
         | FormKind::Unquote(f)
         | FormKind::UnquoteSplice(f)
         | FormKind::Deref(f)
         | FormKind::Var(f)
-        | FormKind::TaggedLiteral(_, f) => strip_namespaces(f),
+        | FormKind::TaggedLiteral(_, f) => redisplay_symbols(f, display),
         FormKind::Meta(m, f) => {
-            strip_namespaces(m);
-            strip_namespaces(f);
+            redisplay_symbols(m, display);
+            redisplay_symbols(f, display);
         }
         _ => {}
     }
+}
+
+/// `display-namespaces` `tidy`: how `qualifier/name` reads from inside `ns`.
+///
+/// The qualifier is dropped only when the bare name resolves, in `ns`, to the
+/// very var the qualified symbol names (defined there or referred), so the
+/// expansion still evaluates as shown. Otherwise the namespace is shortened to
+/// an alias `ns` has for it, or left as written.
+fn tidy_symbol(globals: &GlobalEnv, ns: &str, qualifier: &str, name: &str) -> Option<String> {
+    let full = globals.resolve_ns_part_in(ns, qualifier);
+    let bare_is_same_var = globals.lookup_var_in_ns(ns, name).is_some_and(|var| {
+        let var = var.get();
+        var.namespace == full && var.name.as_ref() == name
+    });
+    if bare_is_same_var {
+        return Some(name.to_string());
+    }
+    let namespaces = globals.namespaces.read().unwrap();
+    let current = namespaces.get(ns)?.get();
+    let aliases = current.aliases.lock().unwrap();
+    aliases
+        .iter()
+        .filter(|(_, target)| **target == full)
+        .map(|(alias, _)| alias)
+        .min_by_key(|alias| (alias.len(), alias.to_string()))
+        .map(|alias| format!("{alias}/{name}"))
 }
 
 /// Fetch `key` (as a keyword) from a metadata map value.
@@ -719,5 +755,191 @@ fn eval_error_message(e: &EvalError) -> String {
         EvalError::GasExhausted => "gas exhausted".to_string(),
         EvalError::Recur(_) => "recur outside of loop/fn".to_string(),
         other => other.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod display_namespaces_tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    /// A runtime with the stdlib, and a namespace `tidy.law` that has a core
+    /// name shadowed, a namespace under two aliases, a referred var, and a
+    /// required namespace with no alias.
+    fn law_globals() -> Arc<GlobalEnv> {
+        let runtime = cljrs_runtime::Runtime::builder()
+            .execution_mode(cljrs_runtime::ExecutionMode::Tiered)
+            .build()
+            .expect("runtime");
+        cljrs_stdlib::install(&runtime);
+        let globals = runtime.into_globals();
+        let mut env = cljrs_runtime::tiered::Env::new(globals.clone(), "user");
+        let src = "(ns tidy.law
+                     (:refer-clojure :exclude [map])
+                     (:require [clojure.string :as string]
+                               [clojure.string :as s]
+                               [clojure.set :refer [union]]
+                               [clojure.walk]))
+                   (def map 1)
+                   (def local 2)";
+        for form in parse(src) {
+            cljrs_runtime::tiered::eval(&form, &mut env).expect("setup");
+        }
+        globals
+    }
+
+    fn parse(src: &str) -> Vec<Form> {
+        cljrs_reader::Parser::new(src.to_string(), "<test>".to_string())
+            .parse_all()
+            .expect("parse")
+    }
+
+    fn tidied(globals: &GlobalEnv, symbol: &str) -> String {
+        let (qualifier, name) = symbol.split_once('/').expect("a qualified symbol");
+        tidy_symbol(globals, "tidy.law", qualifier, name).unwrap_or_else(|| symbol.to_string())
+    }
+
+    /// The var a printed symbol names when read from inside `tidy.law`.
+    fn names_var(globals: &GlobalEnv, shown: &str) -> Option<(String, String)> {
+        // The whole symbol first: core interns interop-style names such as
+        // `Math/hypot` whole, so a `/` does not always separate a namespace.
+        let whole = globals.lookup_var_in_ns("tidy.law", shown);
+        let var = whole.or_else(|| {
+            let (qualifier, name) = shown.split_once('/')?;
+            let full = globals.resolve_ns_part_in("tidy.law", qualifier);
+            globals.lookup_var_in_ns(&full, name)
+        })?;
+        let var = var.get();
+        Some((var.namespace.to_string(), var.name.to_string()))
+    }
+
+    #[test]
+    fn tidy_drops_a_namespace_only_where_the_bare_name_still_resolves() {
+        let globals = law_globals();
+        for (qualified, shown) in [
+            ("clojure.core/+", "+"),
+            ("tidy.law/local", "local"),
+            ("tidy.law/map", "map"),
+            // Excluded from the core refer and shadowed by a local def.
+            ("clojure.core/map", "clojure.core/map"),
+            ("clojure.set/union", "union"),
+            // Required, not referred, no alias: left as written.
+            ("clojure.walk/postwalk", "clojure.walk/postwalk"),
+            // Not referred: the shorter of the two aliases.
+            ("clojure.string/join", "s/join"),
+            ("string/join", "s/join"),
+            ("no.such.ns/f", "no.such.ns/f"),
+        ] {
+            assert_eq!(tidied(&globals, qualified), shown, "{qualified}");
+        }
+    }
+
+    /// The law `tidy` exists to keep: whatever it prints for a var names that
+    /// same var when read back in the namespace. Checked for every interned
+    /// var of every loaded namespace.
+    #[test]
+    fn a_tidied_symbol_names_the_var_it_was_printed_for() {
+        let globals = law_globals();
+        let vars: Vec<(String, String)> = {
+            let namespaces = globals.namespaces.read().unwrap();
+            namespaces
+                .iter()
+                .flat_map(|(ns, ptr)| {
+                    let interns = ptr.get().interns.lock().unwrap();
+                    interns
+                        .keys()
+                        .map(|name| (ns.to_string(), name.to_string()))
+                        .collect::<Vec<_>>()
+                })
+                .collect()
+        };
+        assert!(vars.len() > 500, "expected the stdlib, got {}", vars.len());
+        let mut stripped = 0;
+        for (ns, name) in vars {
+            let shown = tidied(&globals, &format!("{ns}/{name}"));
+            stripped += usize::from(shown == name);
+            assert_eq!(
+                names_var(&globals, &shown),
+                Some((ns.clone(), name.clone())),
+                "{ns}/{name} was shown as {shown}"
+            );
+        }
+        assert!(stripped > 100, "core's refers should print bare");
+    }
+
+    /// A generated form: symbols, some qualified, under nested collections.
+    #[derive(Clone, Debug)]
+    enum Tree {
+        Symbol(Option<String>, String),
+        List(Vec<Tree>),
+        Vector(Vec<Tree>),
+        Quote(Box<Tree>),
+    }
+
+    impl Tree {
+        fn source(&self, qualified: bool) -> String {
+            let all = |items: &[Tree]| {
+                items
+                    .iter()
+                    .map(|item| item.source(qualified))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            };
+            match self {
+                Tree::Symbol(Some(qualifier), name) if qualified => format!("{qualifier}/{name}"),
+                Tree::Symbol(_, name) => name.clone(),
+                Tree::List(items) => format!("({})", all(items)),
+                Tree::Vector(items) => format!("[{}]", all(items)),
+                Tree::Quote(item) => format!("'{}", item.source(qualified)),
+            }
+        }
+    }
+
+    fn tree() -> impl Strategy<Value = Tree> {
+        // The `x` keeps a generated name from reading as `nil`, `true`, …
+        let symbol = (
+            proptest::option::of("[a-z]{1,3}(\\.[a-z]{1,3})?"),
+            "x[a-z]{0,3}",
+        )
+            .prop_map(|(qualifier, name)| Tree::Symbol(qualifier, name));
+        symbol.prop_recursive(4, 24, 4, |inner| {
+            prop_oneof![
+                proptest::collection::vec(inner.clone(), 0..4).prop_map(Tree::List),
+                proptest::collection::vec(inner.clone(), 0..4).prop_map(Tree::Vector),
+                inner.prop_map(|item| Tree::Quote(Box::new(item))),
+            ]
+        })
+    }
+
+    fn printed(form: &Form) -> String {
+        let value = cljrs_runtime::builtins::form::form_to_value(form).expect("form value");
+        format!("{value}")
+    }
+
+    proptest! {
+        /// `none` prints exactly the form with every qualifier erased, and a
+        /// second pass changes nothing.
+        #[test]
+        fn none_erases_every_qualifier_and_nothing_else(tree in tree()) {
+            let _alloc_frame = cljrs_gc::push_alloc_frame();
+            let mut form = parse(&tree.source(true)).remove(0);
+            let bare = parse(&tree.source(false)).remove(0);
+            let strip = |_: &str, name: &str| Some(name.to_string());
+            redisplay_symbols(&mut form, &strip);
+            prop_assert_eq!(printed(&form), printed(&bare));
+            redisplay_symbols(&mut form, &strip);
+            prop_assert_eq!(printed(&form), printed(&bare));
+        }
+
+        /// A display that answers `None` (what `tidy` does for a symbol it
+        /// cannot shorten) leaves the form as written.
+        #[test]
+        fn a_symbol_with_no_shorter_display_is_left_as_written(tree in tree()) {
+            let _alloc_frame = cljrs_gc::push_alloc_frame();
+            let original = parse(&tree.source(true)).remove(0);
+            let mut form = original.clone();
+            redisplay_symbols(&mut form, &|_, _| None);
+            prop_assert_eq!(printed(&form), printed(&original));
+        }
     }
 }
