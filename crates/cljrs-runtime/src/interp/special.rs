@@ -1761,8 +1761,13 @@ fn eval_ns(args: &[Form], env: &mut Env) -> EvalResult {
                         load_ns(env.globals.clone(), &spec, &name)?;
                     }
                 }
+                Some(FormKind::Keyword(k)) if k == "import" => {
+                    for spec in &expand_reader_conds(&items[1..]) {
+                        import_types(env, &name, spec);
+                    }
+                }
                 // `:refer-clojure` was handled in the pass above; other clauses
-                // (`:use`, `:import`) — skip for now.
+                // (`:use`) — skip for now.
                 _ => {}
             }
         }
@@ -1770,6 +1775,51 @@ fn eval_ns(args: &[Form], env: &mut Env) -> EvalResult {
 
     let ns_ptr = env.globals.get_or_create_ns(&env.current_ns);
     Ok(Value::Namespace(ns_ptr))
+}
+
+/// Apply one `(:import ...)` spec (`[pkg Name ...]`, `(pkg Name ...)` or
+/// `pkg.Name`) by referring each named record or deftype into `dst_ns`.
+///
+/// A type's dispatch tag is qualified by its defining namespace, so an
+/// unqualified `Name` only reaches that tag through a var `dst_ns` can
+/// resolve; without the refer, `(extend-type Name ...)` in the importing
+/// namespace registers its methods under a tag no instance carries.
+fn import_types(env: &Env, dst_ns: &str, spec: &Form) {
+    match &spec.unmeta().kind {
+        FormKind::Vector(items) | FormKind::List(items) => {
+            let mut syms = items.iter().filter_map(Form::as_symbol);
+            if let Some(pkg) = syms.next() {
+                for name in syms {
+                    import_type(env, dst_ns, pkg, name);
+                }
+            }
+        }
+        FormKind::Symbol(s) => {
+            if let Some((pkg, name)) = s.rsplit_once('.') {
+                import_type(env, dst_ns, pkg, name);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Refer the type `name` defined in namespace `pkg` into `dst_ns`. `pkg` is
+/// also tried with `_` read as `-`, the JVM's package spelling of a namespace.
+/// Anything that is not a loaded record or deftype (a host class in a `.cljc`
+/// file, say) is left alone, as `:import` was before it referred anything.
+fn import_type(env: &Env, dst_ns: &str, pkg: &str, name: &str) {
+    let demunged = pkg.replace('_', "-");
+    for ns in [pkg, demunged.as_str()] {
+        let tag = format!("{ns}.{name}");
+        let names_type = matches!(
+            env.globals.lookup_in_ns(ns, name),
+            Some(Value::Symbol(s)) if s.get().to_string() == tag
+        );
+        if names_type {
+            env.globals.refer_named(dst_ns, ns, &[Arc::from(name)]);
+            return;
+        }
+    }
 }
 
 // ── load-file ─────────────────────────────────────────────────────────────────
