@@ -34,6 +34,8 @@ use cljrs_runtime::env::env::GlobalEnv;
 mod edn;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod io;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod process;
 mod set;
 mod string;
 // ── Embedded sources ──────────────────────────────────────────────────────────
@@ -46,6 +48,8 @@ const CLOJURE_TEMPLATE_SRC: &str = include_str!("clojure/template.cljrs");
 const CLOJURE_RUST_IO_SRC: &str = include_str!("clojure/rust/io.cljrs");
 #[cfg(not(target_arch = "wasm32"))]
 const CLOJURE_EDN_SRC: &str = include_str!("clojure/edn.cljrs");
+#[cfg(not(target_arch = "wasm32"))]
+const CLOJURE_JAVA_SHELL_SRC: &str = include_str!("clojure/java/shell.cljrs");
 const CLOJURE_WALK_SRC: &str = include_str!("clojure/walk.cljrs");
 const CLOJURE_PPRINT_SRC: &str = include_str!("clojure/pprint.cljrs");
 const CLOJURE_DATA_SRC: &str = include_str!("clojure/data.cljrs");
@@ -106,6 +110,11 @@ pub fn register(globals: &Arc<GlobalEnv>) {
 
         edn::register(globals, "clojure.edn");
         globals.register_builtin_source("clojure.edn", CLOJURE_EDN_SRC);
+
+        // clojure.java.shell ─ `sh` over the native clojure.rust.process/run,
+        // which is also a transaction-policy denied capability.
+        process::register(globals, "clojure.rust.process");
+        globals.register_builtin_source("clojure.java.shell", CLOJURE_JAVA_SHELL_SRC);
     }
 
     // clojure.walk ─ pure Clojure, no native helpers.
@@ -1475,5 +1484,236 @@ mod tests {
                 assert!(run(src, &mut env).is_err(), "expected {src} to throw");
             }
         });
+    }
+
+    // ── clojure.java.shell ────────────────────────────────────────────────────
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn shell_env() -> Env {
+        let (_, mut env) = make_env();
+        run(
+            "(require '[clojure.java.shell :refer [sh with-sh-dir with-sh-env]])",
+            &mut env,
+        )
+        .unwrap();
+        // A string of at least n chars, doubled rather than built from a lazy
+        // `repeat`, which costs ~0.2 ms per element in the interpreter.
+        run(
+            "(defn big [s n] (loop [s s] (if (>= (count s) n) s (recur (str s s)))))",
+            &mut env,
+        )
+        .unwrap();
+        env
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn truthy(src: &str, env: &mut Env) {
+        assert_eq!(run(src, env).unwrap(), Value::Bool(true), "{src}");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_sh_exit_is_data() {
+        let mut env = shell_env();
+        truthy(
+            "(= {:exit 0 :out \"hi\" :err \"\"} (sh \"printf\" \"hi\"))",
+            &mut env,
+        );
+        truthy(
+            "(= {:exit 3 :out \"\" :err \"e\"} (sh \"sh\" \"-c\" \"printf e >&2; exit 3\"))",
+            &mut env,
+        );
+        truthy(
+            "(= 137 (:exit (sh \"sh\" \"-c\" \"kill -9 $$\")))",
+            &mut env,
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_sh_in_dir_env() {
+        let mut env = shell_env();
+        truthy("(= \"piped\" (:out (sh \"cat\" :in \"piped\")))", &mut env);
+        truthy(
+            "(= 262144 (count (:out (sh \"cat\" :in (big \"x\" 262144)))))",
+            &mut env,
+        );
+        truthy("(= \"/\\n\" (:out (sh \"pwd\" :dir \"/\")))", &mut env);
+        truthy(
+            "(= \"/\\n\" (:out (with-sh-dir \"/\" (sh \"pwd\"))))",
+            &mut env,
+        );
+        truthy(
+            "(= \"FOO=bar\\n\" (:out (sh \"/usr/bin/env\" :env {\"FOO\" \"bar\"})))",
+            &mut env,
+        );
+        truthy(
+            "(= \"A=1=2\\n\" (:out (with-sh-env [\"A=1=2\"] (sh \"/usr/bin/env\"))))",
+            &mut env,
+        );
+        // The program is found on the parent's PATH although :env replaces it.
+        truthy(
+            "(= \"x\" (:out (sh \"printf\" \"x\" :env {\"X\" \"1\"})))",
+            &mut env,
+        );
+        // A child that exits without reading a large :in does not kill us.
+        truthy(
+            "(= 0 (:exit (sh \"true\" :in (big \"y\" 1048576))))",
+            &mut env,
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_sh_out_bytes() {
+        let mut env = shell_env();
+        truthy(
+            "(= [97 98] (vec (:out (sh \"printf\" \"ab\" :out-enc :bytes))))",
+            &mut env,
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_sh_refusals() {
+        let mut env = shell_env();
+        for src in [
+            "(sh \"cljrs-no-such-program-x\")",
+            "(sh \"pwd\" :dir \"/no/such/dir\")",
+            "(sh \"printf\" \"x\" :env {\"A=B\" \"1\"})",
+            "(sh \"printf\" \"x\" :env {\"A\" \"\\u0000\"})",
+            "(sh \"printf\" \"x\" :out-enc \"latin1\")",
+            "(sh :in \"x\")",
+            "(clojure.rust.process/run [])",
+        ] {
+            assert!(run(src, &mut env).is_err(), "expected {src} to throw");
+        }
+    }
+
+    /// `s` as a Clojure string literal: printable ASCII kept, `"` and `\`
+    /// escaped, everything else (NUL included) spelled `\uXXXX`.
+    #[cfg(unix)]
+    fn clj_string_lit(s: &str) -> String {
+        let mut out = String::from("\"");
+        for c in s.chars() {
+            match c {
+                '"' => out.push_str("\\\""),
+                '\\' => out.push_str("\\\\"),
+                ' '..='~' => out.push(c),
+                _ => out.push_str(&format!("\\u{:04x}", c as u32)),
+            }
+        }
+        out.push('"');
+        out
+    }
+
+    /// A string of Basic Multilingual Plane characters, NUL excluded: the
+    /// `\uXXXX` escape spells exactly these.
+    #[cfg(unix)]
+    fn bmp_string(max: usize) -> impl proptest::strategy::Strategy<Value = String> {
+        use proptest::prelude::*;
+        prop::collection::vec(prop::char::range('\u{1}', '\u{ffff}'), 0..max)
+            .prop_map(|cs| cs.into_iter().collect())
+    }
+
+    /// Law 1: an :env value holding a NUL anywhere is refused with an error,
+    /// never a panic out of `Command::env`. Law 2: every NUL-free value
+    /// reaches the child byte for byte. Law 2 is what keeps law 1 honest: a
+    /// fix that refused every value would pass law 1 alone.
+    #[test]
+    #[cfg(unix)]
+    fn test_env_value_nul_laws() {
+        use proptest::test_runner::{Config, TestRunner};
+        use std::cell::RefCell;
+        let env = RefCell::new(shell_env());
+        let mut runner = TestRunner::new(Config::with_cases(48));
+
+        runner
+            .run(&(bmp_string(8), bmp_string(8)), |(pre, post)| {
+                let v = format!("{pre}\0{post}");
+                let src = format!(
+                    "(clojure.rust.process/run [\"printf\" \"x\"] {{:env {{\"A\" {}}}}})",
+                    clj_string_lit(&v)
+                );
+                proptest::prop_assert!(run(&src, &mut env.borrow_mut()).is_err(), "{src}");
+                Ok(())
+            })
+            .unwrap();
+
+        runner
+            .run(&bmp_string(12), |v| {
+                let src = format!(
+                    "(let [v {}] (= (str \"A=\" v \"\\n\") \
+                     (:out (clojure.rust.process/run [\"/usr/bin/env\"] {{:env {{\"A\" v}}}}))))",
+                    clj_string_lit(&v)
+                );
+                let got = run(&src, &mut env.borrow_mut());
+                proptest::prop_assert_eq!(got.ok(), Some(Value::Bool(true)), "{}", src);
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    /// Golden record of the process module's :env answers, refusals and
+    /// successes alike, byte for byte, so an unintended change shows up as a
+    /// diff in review. Regenerate after an intentional change:
+    ///
+    /// ```sh
+    /// UPDATE_GOLDEN=1 cargo test -p cljrs-stdlib test_process_env_golden
+    /// ```
+    #[test]
+    #[cfg(unix)]
+    fn test_process_env_golden() {
+        const GOLDEN: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/golden/process_env.txt");
+        const ROWS: &[&str] = &[
+            "(:out (clojure.rust.process/run [\"printf\" \"x\"] {:env {\"A\" \"ok\"}}))",
+            "(:out (clojure.rust.process/run [\"/usr/bin/env\"] {:env {\"A\" \"a b=c\"}}))",
+            "(:out (clojure.rust.process/run [\"/usr/bin/env\"] {:env {:A \"kw\"}}))",
+            "(clojure.rust.process/run [\"printf\" \"x\"] {:env {\"A\" \"\\u0000\"}})",
+            "(clojure.rust.process/run [\"printf\" \"x\"] {:env {\"A\" \"a\\u0000b\"}})",
+            "(clojure.rust.process/run [\"printf\" \"x\"] {:env {\"A=B\" \"1\"}})",
+            "(clojure.rust.process/run [\"printf\" \"x\"] {:env {\"A\" 1}})",
+            "(clojure.rust.process/run [\"printf\" \"x\"] {:env [\"A\" \"1\"]})",
+            "(clojure.rust.process/run [])",
+        ];
+        let mut env = shell_env();
+        let mut actual = String::new();
+        for src in ROWS {
+            let outcome = match run(src, &mut env) {
+                Ok(v) => format!("{v:?}"),
+                Err(e) => {
+                    let text = format!("{e:?}").replace('\n', " ");
+                    let msg = text
+                        .split("message: \"")
+                        .nth(1)
+                        .and_then(|s| s.split('"').next())
+                        .or_else(|| text.split('"').nth(1))
+                        .map(str::to_string)
+                        .unwrap_or(text);
+                    format!("ERROR {msg}")
+                }
+            };
+            actual.push_str(&format!("{src}\n  => {outcome}\n"));
+        }
+        if std::env::var_os("UPDATE_GOLDEN").is_some() {
+            std::fs::create_dir_all(std::path::Path::new(GOLDEN).parent().unwrap()).unwrap();
+            std::fs::write(GOLDEN, &actual).unwrap();
+            return;
+        }
+        let expected = std::fs::read_to_string(GOLDEN)
+            .unwrap_or_else(|e| panic!("{GOLDEN}: {e}; run with UPDATE_GOLDEN=1 to create it"));
+        assert_eq!(
+            actual, expected,
+            "process :env answers changed; see {GOLDEN}"
+        );
+    }
+
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn test_process_run_denied_under_transaction_policy() {
+        use cljrs_runtime::env::policy::{TransactionPolicyGuard, check_native};
+        assert!(check_native(process::RUN_NAME).is_ok());
+        let _guard = TransactionPolicyGuard::install();
+        assert!(check_native(process::RUN_NAME).is_err());
     }
 }
