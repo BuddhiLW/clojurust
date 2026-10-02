@@ -315,8 +315,12 @@ pub fn dispatch_if_async(callee: &Value, args: &[Value], env: &Env) -> Option<Va
 pub fn apply_value(callee: &Value, args: Vec<Value>, env: &mut Env) -> EvalResult {
     // Root the callee and args so they survive any GC triggered at the safepoint.
     // These values are on the Rust stack but not yet in any Env frame.
+    //
+    // An arm that hands `args` on to another `apply_value` drops `args_root`
+    // first: the root points into the Vec, and the callee roots it again
+    // before its own safepoint.
     let _callee_root = crate::env::gc_roots::root_value(callee);
-    let _args_root = crate::env::gc_roots::root_values(&args);
+    let args_root = crate::env::gc_roots::root_values(&args);
 
     // GC safepoint at function application boundary — blocks if collection is in progress,
     // and initiates collection if one was requested (memory pressure).
@@ -348,6 +352,7 @@ pub fn apply_value(callee: &Value, args: Vec<Value>, env: &mut Env) -> EvalResul
             // This means captured bindings take priority over the caller's,
             // but vars not in the capture fall through to the caller's frames.
             let _guard = crate::env::dynamics::push_frame(bf_ref.captured_bindings.clone());
+            drop(args_root);
             apply_value(&bf_ref.wrapped, args, env)
         }
         Value::ProtocolFn(pf) => {
@@ -377,6 +382,7 @@ pub fn apply_value(callee: &Value, args: Vec<Value>, env: &mut Env) -> EvalResul
                     cljrs_value::Symbol::qualified(proto.ns.clone(), pf_ref.method_name.clone()),
                 ));
                 if let Some(impl_fn) = m.get(&method_sym) {
+                    drop(args_root);
                     let _impl_root = crate::env::gc_roots::root_value(&impl_fn);
                     return apply_value(&impl_fn, args, env);
                 }
@@ -396,13 +402,14 @@ pub fn apply_value(callee: &Value, args: Vec<Value>, env: &mut Env) -> EvalResul
                     ))
                 })?;
             drop(impls);
+            drop(args_root);
             let _impl_root = crate::env::gc_roots::root_value(&impl_fn);
             apply_value(&impl_fn, args, env)
         }
         Value::MultiFn(mf) => {
             let mf_ref = mf.get();
             let dispatch_val = apply_value(&mf_ref.dispatch_fn, args.clone(), env)?;
-            let _dispatch_root = crate::env::gc_roots::root_value(&dispatch_val);
+            let dispatch_root = crate::env::gc_roots::root_value(&dispatch_val);
             cljrs_gc::safepoint();
             let key = format!("{}", dispatch_val);
             let exact = mf_ref.methods.lock().unwrap().get(&key).cloned();
@@ -458,6 +465,8 @@ pub fn apply_value(callee: &Value, args: Vec<Value>, env: &mut Env) -> EvalResul
                         })?
                 }
             };
+            drop(dispatch_root);
+            drop(args_root);
             let _impl_root = crate::env::gc_roots::root_value(&impl_fn);
             apply_value(&impl_fn, args, env)
         }
@@ -493,7 +502,10 @@ pub fn apply_value(callee: &Value, args: Vec<Value>, env: &mut Env) -> EvalResul
             }
             None => Ok(Value::Nil),
         },
-        Value::WithMeta(inner, _) => apply_value(inner, args, env),
+        Value::WithMeta(inner, _) => {
+            drop(args_root);
+            apply_value(inner, args, env)
+        }
         Value::Var(v) => {
             // Vars in function position are transparently deref'd (IFn on Var).
             // The IR interpreter uses DefVar to create per-call mutable cells for
@@ -506,6 +518,7 @@ pub fn apply_value(callee: &Value, args: Vec<Value>, env: &mut Env) -> EvalResul
                     v.get().name,
                 ))
             })?;
+            drop(args_root);
             apply_value(&inner, args, env)
         }
         other => Err(EvalError::NotCallable(format!(

@@ -268,8 +268,11 @@ fn eval_args(name: &str, arg_forms: &[Form], env: &mut Env) -> EvalResult<Vec<Va
 
     let mut args: Vec<Value> = Vec::with_capacity(arg_forms.len());
     for f in arg_forms {
-        let _root = crate::env::gc_roots::root_values(&args);
-        args.push(eval(f, env)?);
+        let val = {
+            let _root = crate::env::gc_roots::root_values(&args);
+            eval(f, env)?
+        };
+        args.push(val);
     }
     Ok(args)
 }
@@ -309,7 +312,12 @@ pub fn eval_call(func_form: &Form, arg_forms: &[Form], env: &mut Env) -> EvalRes
         crate::env::policy::check_native(&name)?;
         if is_form_intercepted(&name) {
             let args = eval_args(&name, arg_forms, env)?;
-            let _args_root = crate::env::gc_roots::root_values(&args);
+            // The native takes the Vec by value and may shrink or free it
+            // (`alter-meta!` does both), so a root into that Vec would dangle.
+            // Root a copy this frame owns instead: it keeps every argument
+            // alive for the whole call, whatever the native does with its own.
+            let rooted = args.clone();
+            let _args_root = crate::env::gc_roots::root_values(&rooted);
             return dispatch_intercepted(&name, args, env).unwrap_or_else(|| {
                 Err(EvalError::Runtime(format!(
                     "internal: {name} is intercepted but has no dispatch arm"
@@ -323,8 +331,11 @@ pub fn eval_call(func_form: &Form, arg_forms: &[Form], env: &mut Env) -> EvalRes
     let mut args: Vec<Value> = Vec::with_capacity(arg_forms.len());
     for f in arg_forms {
         // Root the already-evaluated args before each eval that could trigger GC.
-        let _args_root = crate::env::gc_roots::root_values(&args);
-        args.push(eval(f, env)?);
+        let val = {
+            let _args_root = crate::env::gc_roots::root_values(&args);
+            eval(f, env)?
+        };
+        args.push(val);
     }
 
     // For Clojure functions, dispatch through `GlobalEnv::call_cljrs_fn` so
@@ -607,7 +618,7 @@ pub fn call_cljrs_fn(f: &CljxFn, args: &[Value], caller_env: &mut Env) -> EvalRe
     loop {
         // Root current_args on the shadow stack so they survive GC.
         // They haven't been bound into the env yet.
-        let _args_root = crate::env::gc_roots::root_values(&current_args);
+        let args_root = crate::env::gc_roots::root_values(&current_args);
 
         // GC safepoint before entering function body
         crate::env::gc_roots::gc_safepoint(&env);
@@ -659,6 +670,8 @@ pub fn call_cljrs_fn(f: &CljxFn, args: &[Value], caller_env: &mut Env) -> EvalRe
             eval_body_with_scratch(&arity.body, &mut scratch, &mut env)
         };
         env.pop_frame();
+        // The body is done with these args; a `recur` below replaces them.
+        drop(args_root);
         // _call_frame drops at the end of this iteration (after the match
         // below), freeing this call's intermediates.
 
@@ -1307,10 +1320,17 @@ pub fn eval_apply(mut args: Vec<Value>, env: &mut Env) -> EvalResult {
     let last = args.pop().unwrap();
     // Root f, last and the fixed args during the spread, which may realize a
     // lazy seq and therefore run arbitrary Clojure code.
-    let _f_root = crate::env::gc_roots::root_value(&f);
-    let _last_root = crate::env::gc_roots::root_value(&last);
-    let _args_root = crate::env::gc_roots::root_values(&args);
-    args.extend(value_to_seq_vec(&last));
+    //
+    // The roots end with the spread: extending `args` may reallocate it, and
+    // a root left pointing at the old buffer would be traced at the safepoint
+    // in `apply_value`, which roots `f` and the final args itself.
+    let spread = {
+        let _f_root = crate::env::gc_roots::root_value(&f);
+        let _last_root = crate::env::gc_roots::root_value(&last);
+        let _args_root = crate::env::gc_roots::root_values(&args);
+        value_to_seq_vec(&last)
+    };
+    args.extend(spread);
     crate::env::apply::apply_value(&f, args, env)
 }
 
