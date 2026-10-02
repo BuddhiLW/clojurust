@@ -5,7 +5,7 @@
 //! an optional `&cljrs_runtime::tiered::GlobalEnv` without changing the backend.
 
 use cljrs_reader::Parser;
-use tower_lsp::lsp_types::{Diagnostic, DocumentSymbol};
+use tower_lsp_server::ls_types::{Diagnostic, DocumentSymbol};
 
 use crate::diagnostics;
 use crate::line_index::{LineIndex, OffsetEncoding};

@@ -28,8 +28,6 @@ vcs-net = ["vcs", "gix/blocking-http-transport-reqwest-rust-tls"]
 ssh = ["vcs-net", "dep:russh", "dep:tokio", "dep:tokio-util"]
 
 [dependencies]
-cljrs-types  = { workspace = true }
-cljrs-gc     = { workspace = true }
 cljrs-reader = { workspace = true }
 thiserror    = { workspace = true }
 

@@ -22,7 +22,6 @@ no-gc = ["cljrs-gc/no-gc", "cljrs-value/no-gc", "cljrs-runtime/no-gc"]
 
 [dependencies]
 cljrs-gc      = { workspace = true }
-cljrs-ir      = { workspace = true }
 cljrs-value   = { workspace = true }
 cljrs-runtime = { workspace = true }
 cljrs-reader  = { workspace = true }

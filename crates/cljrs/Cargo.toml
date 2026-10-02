@@ -7,7 +7,7 @@ license.workspace = true
 repository.workspace = true
 
 [features]
-default = ["async", "net", "charset", "base64", "json", "regex-full", "deps"]
+default = ["async", "net", "charset", "base64", "json", "regex-full", "deps", "ssh"]
 
 # Regex engine and pass-throughs. Every workspace dependency below is taken
 # with default features off (see the note in the root Cargo.toml), so what
@@ -69,6 +69,12 @@ no-gc = [
     "cljrs-async?/no-gc",
 ]
 enable-rustyline = ["rustyline"]
+# Native SSH transport for ssh:// git dependencies (russh). On by default.
+# russh 0.61+ is built on the 0.11 generation of the RustCrypto crates while
+# rPGP (signature verification) is still on 0.10, so this one feature carries
+# about a hundred duplicated crate versions; `--no-default-features` builds
+# that list it without `ssh` leave them out.
+ssh = ["cljrs-project/ssh"]
 async   = ["dep:cljrs-async", "dep:cljrs-io", "dep:tokio"]
 net     = ["dep:cljrs-net", "async"]
 charset = ["dep:cljrs-charset"]
@@ -94,7 +100,7 @@ cljrs-stdlib   = { workspace = true }
 # `aot::compile_file_to_wasm` unconditionally for `--target wasm`.
 cljrs-compiler = { workspace = true, features = ["wasm-aot"] }
 cljrs-interop  = { workspace = true }
-cljrs-project  = { workspace = true, features = ["vcs", "vcs-net", "ssh"] }
+cljrs-project  = { workspace = true, features = ["vcs", "vcs-net"] }
 cljrs-lsp      = { workspace = true }
 cljrs-nrepl    = { workspace = true }
 cljrs-ir       = { workspace = true }
