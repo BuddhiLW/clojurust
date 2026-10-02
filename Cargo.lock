@@ -1023,6 +1023,7 @@ dependencies = [
  "cljrs-reader",
  "cljrs-runtime",
  "cljrs-value",
+ "proptest",
 ]
 
 [[package]]
