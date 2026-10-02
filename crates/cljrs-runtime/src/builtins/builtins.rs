@@ -1903,8 +1903,11 @@ impl Iterator for ValueIter {
                     let ls = ls.clone();
                     // Root self.current so the LazySeq (and the entire chain
                     // it's part of) survives any GC triggered during realize().
-                    let _current_root = crate::env::gc_roots::root_value(&self.current);
-                    self.current = ls.get().realize();
+                    let realized = {
+                        let _current_root = crate::env::gc_roots::root_value(&self.current);
+                        ls.get().realize()
+                    };
+                    self.current = realized;
                     if let Some(err) = ls.get().error() {
                         self.error = Some(err);
                         self.current = Value::Nil;
