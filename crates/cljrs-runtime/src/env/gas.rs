@@ -47,7 +47,7 @@ impl GasMeter {
     /// the budget cannot cover the whole checkpoint.
     pub fn charge(&self, cost: u64) -> bool {
         self.remaining
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |remaining| {
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |remaining| {
                 remaining.checked_sub(cost)
             })
             .is_ok()
