@@ -440,6 +440,15 @@ the evaluator. `EvalError::GasExhausted` is the dedicated caller-facing error.
 Exhaustion state is scoped per guard, so an exhausted inner evaluation cannot
 poison a healthy outer evaluation after the inner guard drops.
 
+The same checkpoints observe interrupt flags. `InterruptGuard::install(flag:
+Arc<AtomicBool>)` scopes a flag to an evaluation on the current thread; setting
+it from any thread fails the next `charge`, and `interrupt_requested() -> bool`
+tells an interrupt from real exhaustion. `active_interrupts() ->
+Vec<Arc<AtomicBool>>` captures the installed flags where an async task is
+spawned, and `InterruptScope::enter(&flags)` makes them the only flags observed
+for the duration of one poll (restoring the previous ones on drop), so a task
+answers only to an interrupt of the evaluation that spawned it.
+
 ### `policy` submodule
 
 Dynamic capability policy used by isolated transaction functions.

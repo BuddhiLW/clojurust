@@ -16,6 +16,11 @@
 //! path in every tier (tree-walker, IR interpreter, JIT). Use
 //! [`interrupt_requested`] to tell an interrupt from real exhaustion. When no
 //! interrupt is pending the cost is one relaxed atomic load per charge.
+//!
+//! An interrupt is scoped to the evaluation, not to the thread: an async task
+//! is polled under the flags of the evaluation that spawned it
+//! ([`active_interrupts`], [`InterruptScope`]), so interrupting whichever
+//! evaluation is driving the executor leaves other evaluations' tasks alone.
 
 use std::cell::RefCell;
 use std::sync::Arc;
@@ -85,6 +90,41 @@ pub fn interrupt_requested() -> bool {
             .iter()
             .any(|flag| flag.load(Ordering::Relaxed))
     })
+}
+
+/// Clone the interrupt flags installed on this thread for async task
+/// propagation, as [`active_meters`] does for gas meters.
+pub fn active_interrupts() -> Vec<Arc<AtomicBool>> {
+    INTERRUPTS.with(|flags| flags.borrow().clone())
+}
+
+/// Makes `flags` the only interrupt flags this thread observes, until dropped.
+///
+/// An interrupt belongs to one evaluation, but the flag stack is per thread,
+/// and every task on a `LocalSet` is polled on the thread of whichever
+/// evaluation happens to be driving it. A task polled inside an interrupted
+/// evaluation's extent would otherwise fail its next charge, though nobody
+/// interrupted the evaluation that spawned it. So a task is polled under the
+/// flags captured where it was spawned, replacing (not stacking on) the
+/// driver's, which are put back when the poll ends.
+#[must_use = "dropping InterruptScope immediately restores the previous interrupt flags"]
+pub struct InterruptScope {
+    outer: Vec<Arc<AtomicBool>>,
+}
+
+impl InterruptScope {
+    pub fn enter(flags: &[Arc<AtomicBool>]) -> Self {
+        let outer = INTERRUPTS.with(|installed| installed.replace(flags.to_vec()));
+        Self { outer }
+    }
+}
+
+impl Drop for InterruptScope {
+    fn drop(&mut self) {
+        INTERRUPTS.with(|installed| {
+            installed.replace(std::mem::take(&mut self.outer));
+        });
+    }
 }
 
 /// Installs a meter for the dynamic extent of an evaluation.
@@ -224,5 +264,63 @@ mod tests {
         assert!(!interrupt_requested());
         assert!(!is_exhausted());
         assert!(charge(1));
+    }
+
+    #[test]
+    fn interrupt_scope_replaces_the_installed_flags_and_restores_them() {
+        let driver = Arc::new(AtomicBool::new(true));
+        let _guard = InterruptGuard::install(driver.clone());
+        assert!(!charge(1));
+        {
+            // A task spawned by an evaluation nobody interrupted.
+            let _scope = InterruptScope::enter(&[]);
+            assert!(!interrupt_requested());
+            assert!(charge(1));
+        }
+        {
+            // A task spawned by the interrupted evaluation itself.
+            let _scope = InterruptScope::enter(&[driver]);
+            assert!(!charge(1));
+        }
+        assert!(interrupt_requested());
+        assert_eq!(active_interrupts().len(), 1);
+    }
+
+    proptest::proptest! {
+        /// Inside a scope the thread observes the scope's flags and no
+        /// others; once it is dropped, the flags installed before it,
+        /// unchanged. Holds for any flags, nested scopes included.
+        #[test]
+        fn interrupt_scope_observes_exactly_its_own_flags(
+            installed in proptest::collection::vec(proptest::bool::ANY, 0..4),
+            scoped in proptest::collection::vec(proptest::bool::ANY, 0..4),
+            nested in proptest::collection::vec(proptest::bool::ANY, 0..4),
+        ) {
+            use proptest::prop_assert_eq;
+            let flags = |set: &[bool]| -> Vec<Arc<AtomicBool>> {
+                set.iter().map(|b| Arc::new(AtomicBool::new(*b))).collect()
+            };
+            let any = |set: &[bool]| set.iter().any(|b| *b);
+
+            let _guards: Vec<InterruptGuard> = flags(&installed)
+                .into_iter()
+                .map(InterruptGuard::install)
+                .collect();
+            prop_assert_eq!(interrupt_requested(), any(&installed));
+            {
+                let _scope = InterruptScope::enter(&flags(&scoped));
+                prop_assert_eq!(interrupt_requested(), any(&scoped));
+                prop_assert_eq!(charge(1), !any(&scoped));
+                {
+                    let _nested = InterruptScope::enter(&flags(&nested));
+                    prop_assert_eq!(interrupt_requested(), any(&nested));
+                    prop_assert_eq!(active_interrupts().len(), nested.len());
+                }
+                prop_assert_eq!(interrupt_requested(), any(&scoped));
+                prop_assert_eq!(active_interrupts().len(), scoped.len());
+            }
+            prop_assert_eq!(interrupt_requested(), any(&installed));
+            prop_assert_eq!(active_interrupts().len(), installed.len());
+        }
     }
 }
