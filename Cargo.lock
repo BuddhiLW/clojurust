@@ -960,6 +960,7 @@ dependencies = [
  "cljrs-stdlib",
  "cljrs-value",
  "miette",
+ "proptest",
  "thiserror",
  "tokio",
 ]

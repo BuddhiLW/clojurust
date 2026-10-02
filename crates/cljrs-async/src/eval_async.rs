@@ -64,6 +64,7 @@ where
     let future = GcPtr::new(CljxFuture::new());
     let task_future = future.clone();
     let gas_meters = cljrs_runtime::env::gas::active_meters();
+    let interrupts = cljrs_runtime::env::gas::active_interrupts();
     tokio::task::spawn_local(async move {
         // Root the result future across GC cycles: the spawning scope's alloc
         // frame may have dropped before the task gets to run.
@@ -72,7 +73,10 @@ where
         let mut task = Box::pin(task);
         let result = std::future::poll_fn(|cx| {
             // LocalSet tasks share an OS thread, so TLS state must be scoped
-            // to one poll and removed before another task can run.
+            // to one poll and removed before another task can run. Meters
+            // stack on the driver's; interrupt flags replace them, so this
+            // task answers only to an interrupt of the eval that spawned it.
+            let _interrupts = cljrs_runtime::env::gas::InterruptScope::enter(&interrupts);
             let _gas_guards = cljrs_runtime::env::gas::install_meters(&gas_meters);
             task.as_mut().poll(cx)
         })
