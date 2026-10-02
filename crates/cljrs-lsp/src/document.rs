@@ -4,7 +4,7 @@
 //! this small type so a later switch to INCREMENTAL sync (e.g. a rope) stays
 //! localized.
 
-use tower_lsp::lsp_types::DocumentSymbol;
+use tower_lsp_server::ls_types::DocumentSymbol;
 
 /// One open text document plus its last-computed symbol outline.
 pub struct Document {

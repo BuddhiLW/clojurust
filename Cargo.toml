@@ -101,7 +101,7 @@ quinn        = { version = "0.11", default-features = false, features = ["runtim
 h3           = "0.0.8"
 h3-quinn     = "0.0.10"
 h2           = "0.4"
-tower-lsp     = "0.20"
+tower-lsp-server = "0.23"
 dashmap       = "6"
 
 # Pure-Rust git (gitoxide) + native commit-signature verification
