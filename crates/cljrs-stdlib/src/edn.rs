@@ -226,7 +226,7 @@ fn strict_map(forms: &[Form], opts: Option<&Value>) -> ValueResult<Value> {
         ));
     }
     let mut map = MapValue::empty();
-    for pair in forms.chunks_exact(2) {
+    for pair in forms.as_chunks::<2>().0 {
         let key = strict_form_to_value(&pair[0], opts)?;
         if map.contains_key(&key) {
             return Err(edn_error("duplicate map key"));
