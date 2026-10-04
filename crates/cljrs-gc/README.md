@@ -10,7 +10,9 @@ fixed **64 MB** soft limit instead of consulting total system RAM.
 **Phase:** 8.1 (GcVisitor + Trace infrastructure) + 8.2 (GcBox/GcHeap
 raw-pointer implementation) — implemented.  `no-gc` mode (Phases 1–8 of
 `docs/archive/no-gc-plan.md`) — implemented.  B3 (`StaticGcPtr`, `static_alloc`) —
-implemented.
+implemented.  Process memory governor
+(`docs/managed-memory-governor-plan.md`) — Phases 0–1 (observe-only
+accounting) implemented.
 
 ---
 
@@ -76,10 +78,16 @@ src/
   cancellation.rs — (GC mode) STW coordination, MutatorGuard, safepoints
   config.rs       — (GC mode) GcConfig, GcCancellation (zero-sized proxy),
                     IsolateCancellation thread-local (per-isolate STW state), GcParked
+  governor.rs     — process-wide managed-memory governor: MemoryConfig,
+                    ProcessMemoryGovernor, IsolateAccount, IsolateControl,
+                    MemoryCharge, MemorySnapshot, pressure policy
   stats.rs        — process-global GcStats counters: GC allocations,
                     region (bump) allocations, GC pauses + freed bytes/objects,
                     isolate-boundary crossings (bytes copied + serialize time)
 tests/
+  governor.rs     — (GC mode) governor integration tests: per-isolate limit
+                    multiplication, exact sweep accounting, cross-thread
+                    collection requests
   no_gc_alloc.rs  — (no-gc mode) integration tests for the allocation context stack:
                     ScratchGuard, StaticCtxGuard, InvocationGuard,
                     pop_for_return protocol, nested guards, destructor ordering
@@ -307,6 +315,103 @@ nor deep-copy while regions are open, it poisons them.  Retired regions are a
 deliberate bounded leak (mirroring the JIT's pinned epochs) that can never
 dangle; `GcHeap::collect` traces them as roots alongside the active stack.
 
+### `governor` — process memory governor
+
+Every isolate keeps its private heap; the governor owns counters, pressure
+policy, and thread-safe control handles.  **Observe-only:** no allocation is
+rejected; growth above the hard limit is counted as an over-limit event.
+
+```rust
+pub enum MemoryClass { GcHeap, Region, SharedValue, MessageQueue, Static, Code, Runtime }
+pub enum PressureLevel { Green, Yellow, Red }   // < soft, >= soft, > hard
+
+pub struct MemoryConfig { pub soft_limit, pub hard_limit, pub critical_reserve,
+                          pub credit_chunk, pub queue_limit }   // bytes
+impl MemoryConfig {
+    pub fn with_limits(soft: usize, hard: usize) -> Result<Self, MemoryConfigError>;
+    pub fn from_optional_limits(soft: Option<usize>, hard: Option<usize>)
+        -> Result<Self, MemoryConfigError>;
+    pub fn platform_default() -> Self;
+    pub fn from_env() -> Result<Self, MemoryConfigError>;   // CLJRS_MEMORY_*, deprecated CLJRS_GC_*
+    pub fn from_lookup(lookup, warn) -> Result<Self, MemoryConfigError>;
+    pub fn validate(&self) -> Result<(), MemoryConfigError>;
+}
+pub fn default_hard_limit() -> usize;                   // cgroup limit, else physical / 2
+pub fn default_soft_limit(hard: usize) -> usize;        // 75%
+pub fn default_critical_reserve(hard: usize) -> usize;  // max(4 MiB, 1%), <= 256 MiB
+pub fn container_memory_limit() -> Option<usize>;       // not on wasm32
+
+pub struct ProcessMemoryGovernor { /* atomics + weak isolate registry */ }
+impl ProcessMemoryGovernor {
+    pub const fn new() -> Self;   // reads MemoryConfig::from_env on first use
+    pub fn with_config(c: MemoryConfig) -> Result<Self, MemoryConfigError>;
+    pub fn configure(&self, c: MemoryConfig) -> Result<(), MemoryConfigError>;
+    pub fn config(&self) -> MemoryConfig;
+    pub fn register_isolate(&'static self, name: impl Into<Arc<str>>) -> IsolateAccount;
+    pub fn reserve_shared(&'static self, class: MemoryClass, bytes: usize)
+        -> Result<MemoryCharge, MemoryLimitExceeded>;   // never Err while observe-only
+    pub fn class_bytes(&self, class: MemoryClass) -> usize;
+    pub fn committed_bytes(&self) -> usize;
+    pub fn pressure(&self) -> PressureLevel;
+    pub fn snapshot(&self) -> MemorySnapshot;
+}
+pub fn governor() -> &'static ProcessMemoryGovernor;   // the process instance
+
+pub struct IsolateAccount { /* single-threaded (!Sync) Cells */ }   // Drop: return charge, unregister
+impl IsolateAccount {
+    pub fn charge(&self, bytes: usize);   // thread-local; publishes per credit_chunk of growth
+    pub fn release(&self, bytes: usize);  // sweep
+    pub fn publish(&self);
+    pub fn record_collection(&self, r: CollectionReport);   // epoch, next target, publish
+    pub fn used_bytes(&self) -> usize;
+    pub fn control(&self) -> &Arc<IsolateControl>;
+}
+pub struct IsolateControl { /* atomics */ }
+impl IsolateControl {
+    pub fn id(&self) -> IsolateId;
+    pub fn name(&self) -> Arc<str>;
+    pub fn request_collection(&self);
+    pub fn collection_requested(&self) -> bool;
+    pub fn take_collection_request(&self) -> bool;
+    pub fn used_bytes(&self) -> usize;
+    pub fn collection_epoch(&self) -> u64;
+    pub fn collection_requests(&self) -> u64;
+}
+pub struct CollectionReport { pub bytes_before, pub bytes_after, pub bytes_returned, pub duration }
+pub struct MemoryCharge;   // RAII; Drop returns its bytes once
+pub struct MemoryLimitExceeded { pub class, pub requested, pub committed, pub hard_limit }
+pub struct MemorySnapshot { /* limits, pressure, committed/used, per class, per isolate,
+                               transitions, requests, over-limit events */ }
+pub struct IsolateSnapshot { /* per-isolate counters */ }
+
+// Calling thread:
+pub fn register_current_isolate(name: &str) -> Option<Arc<IsolateControl>>;
+pub fn with_current_account<R>(f: impl FnOnce(&IsolateAccount) -> R) -> Option<R>;
+pub fn current_control() -> Option<Arc<IsolateControl>>;
+pub fn snapshot() -> MemorySnapshot;   // flushes this thread's account first
+```
+
+`GcHeap::alloc` charges the thread's account; `GcHeap::collect` releases the
+freed bytes and calls `record_collection`.  A thread that allocates without
+registering is registered lazily under its thread name.  The flag behind
+`request_gc` / `gc_requested` / `take_gc_request` lives on the thread's
+`IsolateControl`, so the governor can request a collection from another
+thread.  At `Yellow` the governor requests collection from the allocating
+isolate and from the largest heap, at most once per collection epoch and only
+above the isolate's post-collection target; at `Red` the target is ignored.
+Pressure transitions log at `info` and over-limit events at `debug` under the
+`memory` tracing target.
+
+Phase 1 gaps: the isolate heap is not torn down at thread exit, so
+`IsolateAccount::drop` stops counting bytes that stay allocated until process
+exit; regions, shared values, queues, static data, and code are not charged.
+
+### `GcConfig`
+
+Per-heap collection trigger.  `with_soft_limit(soft)` keeps the default hard
+limit (raised to `soft`); `try_with_limits` / `validate` reject a zero hard
+limit and a soft limit above the hard limit.  The hard limit is not enforced.
+
 ### `stats::GcStats` and `GC_STATS`
 
 ```rust
@@ -333,6 +438,7 @@ pub static GC_STATS: GcStats;
 
 pub const CLJRS_GC_STATS_ENV: &str;       // = "CLJRS_GC_STATS"
 pub fn dump_stats_from_env();
+pub fn report() -> String;   // GC_STATS + governor snapshot; re-exported as stats_report
 ```
 
 Process-global counters updated automatically by `GcHeap::alloc`,

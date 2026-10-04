@@ -2,10 +2,17 @@
 
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-/// GC configuration with soft and hard memory limits.
+/// Per-heap GC configuration with soft and hard memory limits.
 ///
-/// The soft limit is a target that triggers collection when exceeded.
-/// The hard limit is an absolute maximum - exceeding it forces immediate collection.
+/// The soft limit is a collection trigger: when one isolate's heap passes it,
+/// the allocator requests a collection at the next safepoint.  Every isolate
+/// heap applies the limit independently, so N isolates can together hold N
+/// times the soft limit.  Process-wide limits belong to
+/// [`crate::governor::MemoryConfig`].
+///
+/// The hard limit is **not enforced**: no allocation path checks it.  It is
+/// validated and reported, and the CLI forwards it to the process governor,
+/// which observes (but does not yet reject) allocations above it.
 ///
 /// Default values:
 /// - Hard limit: 1/4 of available RAM (or 256MB minimum)
@@ -38,12 +45,48 @@ impl GcConfig {
         }
     }
 
-    /// Create a new GC config with custom limits.
+    /// Create a new GC config with a custom soft limit.  The hard limit is
+    /// the default, raised to `soft_limit` if that is larger.
+    pub fn with_soft_limit(soft_limit: usize) -> Self {
+        Self {
+            hard_limit: default_hard_limit().max(soft_limit),
+            soft_limit,
+        }
+    }
+
+    /// Create a new GC config with custom limits.  Does not validate; see
+    /// [`Self::try_with_limits`].
     pub fn with_limits(soft_limit: usize, hard_limit: usize) -> Self {
         Self {
             soft_limit,
             hard_limit,
         }
+    }
+
+    /// Create a new GC config with custom limits, rejecting a zero hard limit
+    /// and a soft limit above the hard limit.
+    pub fn try_with_limits(
+        soft_limit: usize,
+        hard_limit: usize,
+    ) -> Result<Self, crate::governor::MemoryConfigError> {
+        let config = Self::with_limits(soft_limit, hard_limit);
+        config.validate()?;
+        Ok(config)
+    }
+
+    /// Check that the hard limit is non-zero and not below the soft limit.
+    pub fn validate(&self) -> Result<(), crate::governor::MemoryConfigError> {
+        use crate::governor::MemoryConfigError;
+        if self.hard_limit == 0 {
+            return Err(MemoryConfigError::ZeroHardLimit);
+        }
+        if self.soft_limit > self.hard_limit {
+            return Err(MemoryConfigError::SoftAboveHard {
+                soft_limit: self.soft_limit,
+                hard_limit: self.hard_limit,
+            });
+        }
+        Ok(())
     }
 
     /// Get the hard memory limit in bytes.
@@ -61,7 +104,8 @@ impl GcConfig {
         used > self.soft_limit
     }
 
-    /// Check if memory usage has exceeded the hard limit.
+    /// Check if memory usage has exceeded the hard limit.  No allocation path
+    /// calls this; the hard limit is not enforced.
     pub fn hard_limit_exceeded(&self, used: usize) -> bool {
         used > self.hard_limit
     }
@@ -74,6 +118,10 @@ impl Default for GcConfig {
 }
 
 /// Get default hard limit: 1/4 of available RAM or 256MB minimum.
+///
+/// This is the per-heap default, which is not enforced.  The process-wide
+/// budget has its own default (`governor::default_hard_limit`: cgroup limit,
+/// else ½ of RAM), so the two can differ for the same run.
 fn default_hard_limit() -> usize {
     // Try to get total RAM from system info
     #[cfg(target_os = "linux")]
@@ -170,8 +218,7 @@ pub(crate) struct IsolateCancellation {
     parked_threads: AtomicUsize,
     /// Number of mutator threads registered with the GC.
     registered_threads: AtomicUsize,
-    /// Flag set by the allocator when memory pressure is high.
-    /// The next thread to hit an interpreter safepoint will initiate collection.
+    /// Fallback request flag for thread-local teardown; see `request_gc`.
     gc_requested: AtomicBool,
 }
 
@@ -223,16 +270,28 @@ impl IsolateCancellation {
         self.registered_threads.load(Ordering::SeqCst)
     }
 
+    // The request flag lives on the isolate's `IsolateControl` so the process
+    // governor can set it from another thread.  The local flag is a fallback
+    // for thread-local teardown, when the account is no longer reachable.
+
     fn request_gc(&self) {
-        self.gc_requested.store(true, Ordering::SeqCst);
+        if crate::governor::with_current_account(|a| a.control().request_collection()).is_none() {
+            self.gc_requested.store(true, Ordering::SeqCst);
+        }
     }
 
     fn take_gc_request(&self) -> bool {
-        self.gc_requested.swap(false, Ordering::SeqCst)
+        let local = self.gc_requested.swap(false, Ordering::SeqCst);
+        let governed =
+            crate::governor::with_current_account(|a| a.control().take_collection_request())
+                .unwrap_or(false);
+        local || governed
     }
 
     fn gc_requested(&self) -> bool {
         self.gc_requested.load(Ordering::SeqCst)
+            || crate::governor::with_current_account(|a| a.control().collection_requested())
+                .unwrap_or(false)
     }
 }
 

@@ -108,8 +108,8 @@ run to completion. A synchronous `-main` is awaited as a no-op pass-through.
 
 `run`, `repl`, `compile`, `test` accept:
 - `--src-path <DIR>` — repeatable; directories searched by `require`
-- `--gc-soft-limit-mb <MB>` — soft GC threshold
-- `--gc-hard-limit-mb <MB>` — hard GC threshold
+- `--gc-soft-limit-mb <MB>` — soft GC threshold (per isolate heap only; does not set the process governor's soft limit)
+- `--gc-hard-limit-mb <MB>` — process managed-memory hard limit (reported, not yet enforced; governor soft limit is 75% of it); a soft limit above it is rejected
 
 `run` additionally accepts:
 - `[-- ARGS…]` — positional arguments forwarded verbatim to `-main`
