@@ -118,6 +118,10 @@ impl Default for GcConfig {
 }
 
 /// Get default hard limit: 1/4 of available RAM or 256MB minimum.
+///
+/// This is the per-heap default, which is not enforced.  The process-wide
+/// budget has its own default (`governor::default_hard_limit`: cgroup limit,
+/// else ½ of RAM), so the two can differ for the same run.
 fn default_hard_limit() -> usize {
     // Try to get total RAM from system info
     #[cfg(target_os = "linux")]

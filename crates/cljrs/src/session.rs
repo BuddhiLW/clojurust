@@ -27,6 +27,21 @@ pub fn build_gc_config(
     soft_limit_mb: Option<usize>,
     hard_limit_mb: Option<usize>,
 ) -> miette::Result<Arc<GcConfig>> {
+    let (config, memory) = gc_limits(soft_limit_mb, hard_limit_mb)?;
+    if let Some(memory) = memory {
+        cljrs_gc::governor()
+            .configure(memory)
+            .map_err(|e| miette::miette!("invalid GC limits: {e}"))?;
+    }
+    Ok(Arc::new(config))
+}
+
+/// Validate CLI limits into a per-heap config and, when any limit was given,
+/// a process governor config.  Pure: does not touch the global governor.
+fn gc_limits(
+    soft_limit_mb: Option<usize>,
+    hard_limit_mb: Option<usize>,
+) -> miette::Result<(GcConfig, Option<cljrs_gc::MemoryConfig>)> {
     let mb = |n: usize| n.saturating_mul(1024 * 1024);
     let invalid = |e: cljrs_gc::MemoryConfigError| miette::miette!("invalid GC limits: {e}");
     let config = match (soft_limit_mb, hard_limit_mb) {
@@ -39,13 +54,12 @@ pub fn build_gc_config(
             config.validate().map_err(invalid)?;
             config
         }
-        (None, None) => return Ok(Arc::new(GcConfig::new())),
+        (None, None) => return Ok((GcConfig::new(), None)),
     };
     let memory =
         cljrs_gc::MemoryConfig::from_optional_limits(soft_limit_mb.map(mb), hard_limit_mb.map(mb))
             .map_err(invalid)?;
-    cljrs_gc::governor().configure(memory).map_err(invalid)?;
-    Ok(Arc::new(config))
+    Ok((config, Some(memory)))
 }
 
 /// CLI-level versioned-symbol policy flags, threaded into `setup_globals`.
@@ -490,32 +504,34 @@ pub fn format_eval_error(e: EvalError) -> miette::Report {
 
 #[cfg(test)]
 mod gc_config_tests {
-    use super::build_gc_config;
+    // These call `gc_limits`, not `build_gc_config`, so they never reconfigure
+    // the process-global governor that other tests in this binary may read.
+    use super::gc_limits;
 
     const MB: usize = 1024 * 1024;
 
     #[test]
     fn soft_only_sets_the_soft_limit() {
-        let config = build_gc_config(Some(64), None).unwrap();
+        let (config, _) = gc_limits(Some(64), None).unwrap();
         assert_eq!(config.soft_limit(), 64 * MB);
         assert!(config.hard_limit() >= 64 * MB);
     }
 
     #[test]
     fn both_limits_are_kept() {
-        let config = build_gc_config(Some(64), Some(128)).unwrap();
+        let (config, _) = gc_limits(Some(64), Some(128)).unwrap();
         assert_eq!(config.soft_limit(), 64 * MB);
         assert_eq!(config.hard_limit(), 128 * MB);
     }
 
     #[test]
     fn soft_above_hard_is_rejected() {
-        assert!(build_gc_config(Some(256), Some(128)).is_err());
+        assert!(gc_limits(Some(256), Some(128)).is_err());
     }
 
     #[test]
     fn zero_hard_limit_is_rejected() {
-        assert!(build_gc_config(None, Some(0)).is_err());
-        assert!(build_gc_config(Some(0), Some(0)).is_err());
+        assert!(gc_limits(None, Some(0)).is_err());
+        assert!(gc_limits(Some(0), Some(0)).is_err());
     }
 }

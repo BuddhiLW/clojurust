@@ -38,6 +38,15 @@ applies the limit independently. The value also sets the process-wide memory
 governor's soft limit: when managed memory across all isolates reaches it, the
 governor asks the allocating isolate (and the largest heap) to collect.
 
+Because one value serves both roles, a program running several isolates can
+keep the process at or above the governor's soft limit while every heap stays
+under its own trigger: *N* isolates each just under the limit total about *N*
+times it. The governor then stays at `Yellow` and keeps requesting
+collections (at most once per isolate per collection, and not while a heap is
+below its post-collection size). For multi-isolate programs, set the process
+budget separately with `CLJRS_MEMORY_SOFT_LIMIT_MB` and
+`CLJRS_MEMORY_HARD_LIMIT_MB`, and leave `--gc-soft-limit-mb` unset.
+
 Given alone, it leaves the hard limit at its default (raised to the soft limit
 if the soft limit is larger).
 

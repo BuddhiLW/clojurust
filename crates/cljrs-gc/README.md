@@ -357,7 +357,7 @@ impl ProcessMemoryGovernor {
 }
 pub fn governor() -> &'static ProcessMemoryGovernor;   // the process instance
 
-pub struct IsolateAccount { /* thread-confined Cells */ }   // Drop: return charge, unregister
+pub struct IsolateAccount { /* single-threaded (!Sync) Cells */ }   // Drop: return charge, unregister
 impl IsolateAccount {
     pub fn charge(&self, bytes: usize);   // thread-local; publishes per credit_chunk of growth
     pub fn release(&self, bytes: usize);  // sweep

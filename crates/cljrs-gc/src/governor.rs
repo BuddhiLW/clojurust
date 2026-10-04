@@ -19,7 +19,7 @@
 use std::cell::{Cell, OnceCell};
 use std::fmt;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Mutex, PoisonError, Weak};
 use std::time::Duration;
 
 const KIB: usize = 1024;
@@ -356,7 +356,9 @@ fn parse_env(
 
 /// Default soft limit: 75% of the hard limit.
 pub fn default_soft_limit(hard_limit: usize) -> usize {
-    hard_limit / 4 * 3
+    // Round up, so a nonzero hard limit never yields a zero soft limit
+    // (which would hold the process at `Yellow` permanently).
+    hard_limit - hard_limit / 4
 }
 
 /// Default critical reserve: the larger of 4 MiB or 1% of the hard limit,
@@ -371,6 +373,10 @@ pub fn default_critical_reserve(hard_limit: usize) -> usize {
 ///
 /// Uses the cgroup memory limit when one applies (Linux), otherwise half of
 /// physical memory.  `wasm32` uses a fixed 256 MiB.
+///
+/// This is the process-wide budget.  It is distinct from the per-heap
+/// default in `config.rs` (¼ of RAM, at least 256 MiB), which only sets each
+/// isolate heap's unenforced hard limit, so the two may differ.
 pub fn default_hard_limit() -> usize {
     #[cfg(target_arch = "wasm32")]
     {
@@ -470,11 +476,14 @@ impl IsolateControl {
 
     /// Diagnostic name.
     pub fn name(&self) -> Arc<str> {
-        self.name.lock().unwrap().clone()
+        self.name
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
     }
 
     fn set_name(&self, name: Arc<str>) {
-        *self.name.lock().unwrap() = name;
+        *self.name.lock().unwrap_or_else(PoisonError::into_inner) = name;
     }
 
     /// Ask the isolate to collect at its next safepoint.
@@ -513,7 +522,8 @@ impl IsolateControl {
     /// made.
     fn governor_request(&self, level: PressureLevel) -> bool {
         let epoch = self.collection_epoch();
-        if self.requested_epoch.load(Ordering::Relaxed) == epoch {
+        let prev = self.requested_epoch.load(Ordering::Relaxed);
+        if prev == epoch {
             return false;
         }
         if level < PressureLevel::Red
@@ -521,7 +531,15 @@ impl IsolateControl {
         {
             return false;
         }
-        self.requested_epoch.store(epoch, Ordering::Relaxed);
+        // `evaluate` can run on several publishing threads at once; only the
+        // thread that claims this epoch counts the request.
+        if self
+            .requested_epoch
+            .compare_exchange(prev, epoch, Ordering::Relaxed, Ordering::Relaxed)
+            .is_err()
+        {
+            return false;
+        }
         self.collection_requests.fetch_add(1, Ordering::Relaxed);
         self.request_collection();
         true
@@ -568,7 +586,11 @@ pub struct CollectionReport {
 
 // ── Isolate account ──────────────────────────────────────────────────────────
 
-/// One isolate's thread-confined view of the governor.
+/// One isolate's single-threaded view of the governor.
+///
+/// The counters are `Cell`s, so the account is `!Sync`: only one thread
+/// uses it at a time.  It is `Send`, so nothing stops moving it to another
+/// thread; the runtime keeps it in a thread-local for the isolate's thread.
 ///
 /// Created by [`ProcessMemoryGovernor::register_isolate`].  Dropping the
 /// account returns its charge and unregisters it.
@@ -597,6 +619,9 @@ impl IsolateAccount {
     pub fn charge(&self, bytes: usize) {
         let used = self.used.get() + bytes;
         self.used.set(used);
+        // Drift since the last publish.  `published` can exceed `used`
+        // between a sweep's releases and the next publish; `min` keeps the
+        // subtraction from underflowing in that window.
         if used - self.published.get().min(used) >= self.publish_step.get() {
             self.publish();
         }
@@ -794,7 +819,7 @@ impl ProcessMemoryGovernor {
     /// Replace the process limits and re-evaluate pressure.
     pub fn configure(&self, config: MemoryConfig) -> Result<(), MemoryConfigError> {
         config.validate()?;
-        let mut slot = self.config.lock().unwrap();
+        let mut slot = self.config.lock().unwrap_or_else(PoisonError::into_inner);
         self.install(&config);
         *slot = Some(config);
         drop(slot);
@@ -814,7 +839,7 @@ impl ProcessMemoryGovernor {
         if self.configured.load(Ordering::Acquire) {
             return;
         }
-        let mut slot = self.config.lock().unwrap();
+        let mut slot = self.config.lock().unwrap_or_else(PoisonError::into_inner);
         if slot.is_some() {
             return;
         }
@@ -829,7 +854,11 @@ impl ProcessMemoryGovernor {
     /// The active config.
     pub fn config(&self) -> MemoryConfig {
         self.ensure_configured();
-        self.config.lock().unwrap().clone().expect("configured")
+        self.config
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+            .expect("configured")
     }
 
     fn credit_chunk(&self) -> usize {
@@ -837,12 +866,12 @@ impl ProcessMemoryGovernor {
         self.credit_chunk.load(Ordering::Relaxed)
     }
 
-    /// Register an isolate.  The returned account is thread-confined.
+    /// Register an isolate.  The returned account is single-threaded (`!Sync`).
     pub fn register_isolate(&'static self, name: impl Into<Arc<str>>) -> IsolateAccount {
         let id = self.next_isolate_id.fetch_add(1, Ordering::Relaxed);
         let control = Arc::new(IsolateControl::new(id, name.into()));
         {
-            let mut reg = self.registry.lock().unwrap();
+            let mut reg = self.registry.lock().unwrap_or_else(PoisonError::into_inner);
             reg.retain(|w| w.strong_count() > 0);
             reg.push(Arc::downgrade(&control));
         }
@@ -857,7 +886,7 @@ impl ProcessMemoryGovernor {
     }
 
     fn unregister(&self, control: &Arc<IsolateControl>) {
-        let mut reg = self.registry.lock().unwrap();
+        let mut reg = self.registry.lock().unwrap_or_else(PoisonError::into_inner);
         reg.retain(|w| w.strong_count() > 0 && !std::ptr::eq(w.as_ptr(), Arc::as_ptr(control)));
     }
 
@@ -891,7 +920,9 @@ impl ProcessMemoryGovernor {
         let prev = self.class_bytes[class.index()].fetch_sub(bytes, Ordering::Relaxed);
         if prev < bytes {
             // Restore the counter before reporting, so release builds keep
-            // a sane (zero) value rather than a wrapped one.
+            // a sane (zero) value rather than a wrapped one.  Not atomic with
+            // the `fetch_sub`: a concurrent `add` in between can still lose
+            // bytes.  Underflow is a bug, and this repair is best-effort.
             self.class_bytes[class.index()].fetch_add(bytes - prev, Ordering::Relaxed);
             debug_assert!(
                 false,
@@ -968,7 +999,7 @@ impl ProcessMemoryGovernor {
     }
 
     fn largest_isolate(&self) -> Option<Arc<IsolateControl>> {
-        let reg = self.registry.lock().unwrap();
+        let reg = self.registry.lock().unwrap_or_else(PoisonError::into_inner);
         reg.iter()
             .filter_map(Weak::upgrade)
             .max_by_key(|c| c.used_bytes())
@@ -985,7 +1016,7 @@ impl ProcessMemoryGovernor {
             .iter()
             .fold(0usize, |acc, &b| acc.saturating_add(b));
         let mut isolates: Vec<IsolateSnapshot> = {
-            let reg = self.registry.lock().unwrap();
+            let reg = self.registry.lock().unwrap_or_else(PoisonError::into_inner);
             reg.iter()
                 .filter_map(Weak::upgrade)
                 .map(|c| c.snapshot())
@@ -1247,6 +1278,13 @@ mod tests {
         assert_eq!(big.critical_reserve, MAX_DEFAULT_CRITICAL_RESERVE);
         let c = MemoryConfig::from_optional_limits(None, Some(400 * MIB)).unwrap();
         assert_eq!(c.soft_limit, 300 * MIB);
+        assert_eq!(
+            default_soft_limit(1),
+            1,
+            "tiny hard limit keeps a nonzero soft limit"
+        );
+        assert_eq!(default_soft_limit(3), 3);
+        assert_eq!(default_soft_limit(4), 3);
         let c = MemoryConfig::from_optional_limits(Some(usize::MAX / 2), None).unwrap();
         assert_eq!(
             c.soft_limit, c.hard_limit,
