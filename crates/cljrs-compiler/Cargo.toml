@@ -63,6 +63,9 @@ cljrs-io      = { workspace = true }
 cljrs-net     = { workspace = true }
 cljrs-charset = { workspace = true }
 cljrs-base64  = { workspace = true }
+# Linked alongside cljrs-base64 by the small
+# `extension_init_symbols_are_unique_per_crate` identity regression.
+cljrs-blake3  = { workspace = true }
 tempfile = "3"
 wasmparser = "0.244"
 proptest = "1"

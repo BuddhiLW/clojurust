@@ -24,8 +24,13 @@ use cljrs_ir::IrFunction;
 #[derive(Debug)]
 pub enum AotError {
     Io(std::io::Error),
-    Parse(cljrs_types::error::CljxError),
-    Codegen(crate::codegen::CodegenError),
+    /// Boxed: `CljxError` is 128 bytes and `CodegenError` 136, and an enum is
+    /// as large as its largest variant. Unboxed, every `AotResult` in the
+    /// crate — including `compile_file`'s, which every AOT caller uses — paid
+    /// 136 bytes on its *success* path to carry an error that is rare by
+    /// construction. Boxing these two takes `AotError` to 32.
+    Parse(Box<cljrs_types::error::CljxError>),
+    Codegen(Box<crate::codegen::CodegenError>),
     Eval(String),
     Link(String),
     /// The wasm backend could not lower a construct in the program.
@@ -88,12 +93,12 @@ impl From<std::io::Error> for AotError {
 }
 impl From<cljrs_types::error::CljxError> for AotError {
     fn from(e: cljrs_types::error::CljxError) -> Self {
-        AotError::Parse(e)
+        AotError::Parse(Box::new(e))
     }
 }
 impl From<crate::codegen::CodegenError> for AotError {
     fn from(e: crate::codegen::CodegenError) -> Self {
-        AotError::Codegen(e)
+        AotError::Codegen(Box::new(e))
     }
 }
 #[cfg(feature = "wasm-aot")]
@@ -1377,8 +1382,16 @@ fn is_interpreter_only_sym(s: &str) -> bool {
 /// into the form tree so that e.g. `(do (def x ...) (alter-meta! ...))` is caught.
 /// `await` and `async-spawn` are async special forms only the interpreter understands;
 /// any top-level form whose expansion tree contains them must stay interpreted.
+/// So must one containing an anonymous `^:async` fn, which lowering refuses
+/// because a compiled closure cannot be dispatched as async.
+/// The walk does not stop at `quote`, so quoted data that merely looks like
+/// one of these (`'^:async (fn [] 1)`, `'(await x)`) is also interpreted —
+/// conservative, never wrong.
 fn expanded_needs_interpreter(form: &cljrs_reader::Form) -> bool {
     use cljrs_reader::form::FormKind;
+    if form.is_async_fn_form() {
+        return true;
+    }
     match &form.kind {
         FormKind::List(parts) => {
             if let Some(head) = parts.first()
@@ -1408,6 +1421,7 @@ fn expanded_needs_interpreter(form: &cljrs_reader::Form) -> bool {
             elems.iter().any(expanded_needs_interpreter)
         }
         FormKind::Map(elems) => elems.iter().any(expanded_needs_interpreter),
+        FormKind::Meta(_, inner) => expanded_needs_interpreter(inner),
         _ => false,
     }
 }
@@ -2002,6 +2016,42 @@ struct HarnessInputs<'a> {
     async_polls: &'a [AsyncPollEntry],
 }
 
+/// The harness source that calls an extension's `:rust :init` hook, or nothing
+/// when the project configures none.
+///
+/// The call runs before the preamble so native functions are visible to
+/// macro-expanded code at startup.
+///
+/// **The call is wrapped in `unsafe`, and it has to be.** An entry point takes a
+/// `*mut Registry` and dereferences it, so the honest signature is
+/// `unsafe extern "C" fn`, which is what the extension crates in this workspace
+/// declare. Emitting a bare call to one does not compile:
+///
+/// ```text
+/// error[E0308]: mismatched types
+///   expected safe fn, found unsafe fn
+///   found fn item `unsafe extern "C" fn(_) {cljrs_init}`
+/// ```
+///
+/// The book teaches a *safe* `extern "C" fn`, and that spelling still works:
+/// calling a safe fn inside `unsafe` is merely redundant, which the
+/// `allow(unused_unsafe)` silences. Wrapping therefore accepts both, where
+/// demanding a safe fn would reject the plugins this repo ships.
+///
+/// Kept apart from [`build_harness`] so the emitted shape can be asserted
+/// without compiling a whole program; nothing else here is testable that way.
+fn native_init_code(init_fn: Option<&str>) -> String {
+    match init_fn {
+        Some(init_fn) => format!(
+            "\n    // Register native Rust functions via the user crate's init hook.\n    \
+             let mut __registry = cljrs_interop::Registry::new(globals.clone());\n    \
+             #[allow(unused_unsafe)]\n    \
+             unsafe {{\n        {init_fn}(&mut __registry);\n    }}\n"
+        ),
+        None => String::new(),
+    }
+}
+
 fn build_harness(
     out_path: &Path,
     inputs: HarnessInputs<'_>,
@@ -2045,8 +2095,16 @@ fn build_harness(
     if let Some(rc) = rust_config {
         native_deps.push_str(&deps.dep_line("cljrs-interop"));
         if let Some(crate_name) = rc.crate_name() {
-            let crate_dir = rc.crate_dir.display();
-            native_deps.push_str(&format!("{crate_name} = {{ path = \"{crate_dir}\" }}\n"));
+            // `crate_name` is the Rust identifier the generated source calls
+            // the crate by; Cargo resolves the dependency by the crate's
+            // PACKAGE name, which is usually the hyphenated spelling. See
+            // `native_dep` for why emitting one as the other does not link.
+            let package = crate::native_dep::read_package_name(&rc.crate_dir);
+            native_deps.push_str(&crate::native_dep::dep_line(
+                crate_name,
+                &rc.crate_dir.display().to_string(),
+                package.as_deref(),
+            ));
         }
     }
     // The harness links the base runtime plus whatever the host's extensions
@@ -2230,18 +2288,7 @@ edition = "2024"
         ""
     };
 
-    // Emit the native init call when :rust :init is configured.  The init
-    // function has the signature `fn cljrs_init(registry: &mut Registry)`
-    // and is called before the preamble so native functions are visible to
-    // macro-expanded code at startup.
-    let native_init_code = match rust_config.and_then(|rc| rc.init_fn.as_deref()) {
-        Some(init_fn) => format!(
-            "\n    // Register native Rust functions via the user crate's init hook.\n    \
-             let mut __registry = cljrs_interop::Registry::new(globals.clone());\n    \
-             {init_fn}(&mut __registry);\n"
-        ),
-        None => String::new(),
-    };
+    let native_init_code = native_init_code(rust_config.and_then(|rc| rc.init_fn.as_deref()));
 
     // Register AOT-compiled async poll functions: declare each as an external
     // symbol (defined in the linked object), then register it by ns/name/arity
@@ -3282,6 +3329,46 @@ mod tests {
             .parse_all()
             .expect("parse")
             .remove(0)
+    }
+
+    /// Lowering refuses an anonymous `^:async` fn (a compiled closure cannot
+    /// be dispatched as async), so a top-level form containing one has to be
+    /// interpreted rather than fail `__cljrs_main`'s lowering.
+    #[test]
+    fn a_form_building_an_async_fn_is_interpreted() {
+        for src in [
+            "(def f ^:async (fn [] 1))",
+            "(def f (fn ^:async [] 1))",
+            "(def f ^:a (fn* ^:async [] 1))",
+        ] {
+            assert!(expanded_needs_interpreter(&parse_one(src)), "`{src}`");
+        }
+        assert!(!expanded_needs_interpreter(&parse_one(
+            "(def f ^:a (fn [] 1))"
+        )));
+    }
+
+    #[test]
+    fn no_rust_init_emits_nothing() {
+        assert_eq!(native_init_code(None), "");
+    }
+
+    /// An extension entry point takes a `*mut Registry` and dereferences it, so
+    /// the honest signature is `unsafe extern "C" fn` and a bare call to one
+    /// does not compile. The emitted call must therefore be wrapped.
+    #[test]
+    fn the_init_call_is_wrapped_in_unsafe() {
+        let emitted = native_init_code(Some("my_project::cljrs_init"));
+        assert!(
+            emitted.contains("unsafe {\n        my_project::cljrs_init(&mut __registry);\n    }"),
+            "init call must be inside an unsafe block, got:\n{emitted}"
+        );
+        // The book teaches a SAFE `extern "C" fn`, which is still accepted; the
+        // allow is what keeps that spelling from warning in the generated crate.
+        assert!(
+            emitted.contains("#[allow(unused_unsafe)]"),
+            "a safe entry point would warn without the allow, got:\n{emitted}"
+        );
     }
 
     #[test]

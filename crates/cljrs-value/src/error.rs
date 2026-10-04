@@ -79,24 +79,32 @@ impl ExceptionInfo {
         }
     }
 
-    fn to_via_map(&self) -> ValueResult<Value> {
+    /// Short name of the underlying error kind (`"WrongType"`, `"Other"`,
+    /// …) — the `:type` of this exception's `:via` entry.
+    pub fn type_name(&self) -> &'static str {
+        match self.error {
+            ValueError::WrongType { .. } => "WrongType",
+            ValueError::IndexOutOfBounds { .. } => "IndexOutOfBounds",
+            ValueError::ArityError { .. } => "ArityError",
+            ValueError::NotCallable { .. } => "NotCallable",
+            ValueError::OddMap { .. } => "OddMap",
+            ValueError::Unsupported => "Unsupported",
+            ValueError::Other(_) => "Other",
+            ValueError::GasExhausted => "GasExhausted",
+            ValueError::OutOfRange => "OutOfRange",
+            ValueError::TransientAlreadyPersisted => "TransientAlreadyPersisted",
+            ValueError::Parse => "ParseError",
+            ValueError::Thrown(_) => "Thrown",
+        }
+    }
+
+    /// This exception alone (causes excluded) as a `Throwable->map` `:via`
+    /// entry: `{:type .. :message .. :data ..}`.
+    pub fn to_via_map(&self) -> ValueResult<Value> {
         let map = TransientMap::new();
         map.assoc(
             Value::keyword(Keyword::simple("type")),
-            Value::string(match self.error {
-                ValueError::WrongType { .. } => "WrongType",
-                ValueError::IndexOutOfBounds { .. } => "IndexOutOfBounds",
-                ValueError::ArityError { .. } => "ArityError",
-                ValueError::NotCallable { .. } => "NotCallable",
-                ValueError::OddMap { .. } => "OddMap",
-                ValueError::Unsupported => "Unsupported",
-                ValueError::Other(_) => "Other",
-                ValueError::GasExhausted => "GasExhausted",
-                ValueError::OutOfRange => "OutOfRange",
-                ValueError::TransientAlreadyPersisted => "TransientAlreadyPersisted",
-                ValueError::Parse => "ParseError",
-                ValueError::Thrown(_) => "Thrown",
-            }),
+            Value::string(self.type_name()),
         )?;
         map.assoc(
             Value::keyword(Keyword::simple("message")),

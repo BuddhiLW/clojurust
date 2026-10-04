@@ -62,6 +62,36 @@ pub fn eval_special(head: &str, args: &[Form], env: &mut Env) -> EvalResult {
 // ── def ───────────────────────────────────────────────────────────────────────
 
 fn eval_def(args: &[Form], env: &mut Env) -> EvalResult {
+    let target = parse_def(args, env)?;
+    let val = match target.value_form {
+        Some(form) => {
+            // Under no-gc: def value expressions go to the StaticArena since the
+            // Var must outlive all scratch regions.
+            #[cfg(feature = "no-gc")]
+            let _static_ctx = cljrs_gc::alloc_ctx::StaticCtxGuard::new();
+            eval(form, env)?
+        }
+        None => Value::Nil,
+    };
+    intern_def(target, val, env)
+}
+
+/// A parsed `(def name "doc"? value?)`: everything but the value itself.
+///
+/// Public, together with [`parse_def`] and [`intern_def`], so the async
+/// evaluator (`cljrs-async`) can evaluate `value_form` with a yielding
+/// evaluator and still share the rest of `def`.
+pub struct DefTarget<'a> {
+    pub name: String,
+    /// Metadata from `^meta` on the name and the docstring, merged.
+    pub meta: Option<Value>,
+    /// The value expression; `None` for `(def name)`.
+    pub value_form: Option<&'a Form>,
+}
+
+/// Parse the name, metadata and docstring of a `def` without evaluating its
+/// value expression. `^{...}` metadata on the name *is* evaluated here.
+pub fn parse_def<'a>(args: &'a [Form], env: &mut Env) -> EvalResult<DefTarget<'a>> {
     if args.is_empty() {
         return Err(EvalError::Runtime("def requires a name".into()));
     }
@@ -74,23 +104,31 @@ fn eval_def(args: &[Form], env: &mut Env) -> EvalResult {
     } else {
         (None, 1)
     };
-    let val = if args.len() > val_idx {
-        // Under no-gc: def value expressions go to the StaticArena since the
-        // Var must outlive all scratch regions.
-        #[cfg(feature = "no-gc")]
-        let _static_ctx = cljrs_gc::alloc_ctx::StaticCtxGuard::new();
-        eval(&args[val_idx], env)?
-    } else {
-        Value::Nil
-    };
+    Ok(DefTarget {
+        name,
+        meta: merge_meta(meta_opt, docstring.as_deref().map(doc_meta)),
+        value_form: args.get(val_idx),
+    })
+}
+
+/// Intern `val` under a parsed `def` target in the current namespace.
+pub fn intern_def(target: DefTarget<'_>, val: Value, env: &mut Env) -> EvalResult {
     let var = env
         .globals
-        .intern(&env.current_ns, Arc::from(name.as_str()), val.clone());
-    let meta = merge_meta(meta_opt, docstring.as_deref().map(doc_meta));
-    if let Some(meta_val) = meta {
+        .intern(&env.current_ns, Arc::from(target.name.as_str()), val);
+    if let Some(meta_val) = target.meta {
         var.get().set_meta(meta_val);
     }
     Ok(Value::Var(var))
+}
+
+/// The already-bound var a `defonce` named `name` would leave untouched, if
+/// any.
+pub fn defonce_existing(name: &str, env: &Env) -> Option<Value> {
+    env.globals
+        .lookup_var(&env.current_ns, name)
+        .filter(|var| var.get().is_bound())
+        .map(Value::Var)
 }
 
 /// Build a `{:doc "..."}` metadata map fragment for a docstring.
@@ -165,24 +203,6 @@ pub fn compile_meta_form(meta: &Form, env: &mut Env) -> EvalResult<Value> {
 
 // ── fn* ───────────────────────────────────────────────────────────────────────
 
-/// Does a `^meta` form (or metadata map literal) request `:async`?
-///
-/// Handles the keyword shorthand `^:async` (a bare `:async` keyword form) and
-/// an explicit map such as `^{:async true}` or a `defn` attr-map `{:async true}`.
-pub fn meta_form_is_async(meta: &Form) -> bool {
-    match &meta.kind {
-        FormKind::Keyword(k) => k == "async",
-        FormKind::Map(entries) => entries.chunks(2).any(|kv| {
-            matches!(&kv[0].kind, FormKind::Keyword(k) if k == "async")
-                && !matches!(
-                    kv.get(1).map(|f| &f.kind),
-                    None | Some(FormKind::Bool(false)) | Some(FormKind::Nil)
-                )
-        }),
-        _ => false,
-    }
-}
-
 fn eval_fn(args: &[Form], env: &mut Env) -> EvalResult {
     // Peel any leading `^meta` wrappers, e.g. `(fn ^:async [..] ..)` or
     // `(fn ^:async name [..] ..)`, recording whether `:async` was requested.
@@ -190,7 +210,7 @@ fn eval_fn(args: &[Form], env: &mut Env) -> EvalResult {
     let peeled: Vec<Form>;
     let args: &[Form] = if matches!(args.first().map(|f| &f.kind), Some(FormKind::Meta(..))) {
         let (metas, head) = args[0].peel_meta();
-        is_async |= metas.iter().any(|m| meta_form_is_async(m));
+        is_async |= metas.iter().any(|m| m.requests_async());
         peeled = std::iter::once(head.clone())
             .chain(args[1..].iter().cloned())
             .collect();
@@ -883,42 +903,55 @@ fn eval_set_bang(args: &[Form], env: &mut Env) -> EvalResult {
         Value::Nil
     };
     match &target.kind {
-        FormKind::Symbol(sym) => {
-            // A bare unqualified name inside a deftype method may be one of its
-            // mutable fields; only if not does it fall through to var logic.
-            if !sym.contains('/')
-                && let Some(v) = try_set_mutable_field(env, sym, &val)?
-            {
-                return Ok(v);
+        FormKind::Symbol(sym) => set_bang_symbol(sym, val, env),
+        _ => match set_bang_field_target(target) {
+            Some((field, inst_form)) => {
+                let inst = eval(inst_form, env)?;
+                set_type_instance_field(&inst, field, val)
             }
-            let parsed = cljrs_value::Symbol::parse(sym);
-            let ns = parsed.namespace.as_deref().unwrap_or(&env.current_ns);
-            let var = env
-                .globals
-                .lookup_var_in_ns(ns, &parsed.name)
-                .ok_or_else(|| EvalError::UnboundSymbol(sym.clone()))?;
-            // Prefer updating the thread-local binding if one exists.
-            if !crate::env::dynamics::set_thread_local(&var, val.clone()) {
-                var.get().bind(val.clone());
-            }
-            Ok(val)
-        }
-        // `(set! (.-field inst) v)` — a mutable field on an explicit instance.
-        FormKind::List(parts)
-            if parts.len() == 2
-                && matches!(&parts[0].kind, FormKind::Symbol(op) if op.starts_with(".-")) =>
-        {
-            let FormKind::Symbol(op) = &parts[0].kind else {
-                unreachable!()
-            };
-            let field = &op[2..];
-            let inst = eval(&parts[1], env)?;
-            set_type_instance_field(&inst, field, val)
-        }
-        _ => Err(EvalError::Runtime(
-            "set! requires a symbol or (.-field inst) target".into(),
-        )),
+            None => Err(set_bang_target_error()),
+        },
     }
+}
+
+/// `(set! sym val)` for an already-evaluated `val`: a mutable deftype field in
+/// scope, else the thread-local binding of the var `sym` names, else its root.
+pub fn set_bang_symbol(sym: &str, val: Value, env: &mut Env) -> EvalResult {
+    // A bare unqualified name inside a deftype method may be one of its
+    // mutable fields; only if not does it fall through to var logic.
+    if !sym.contains('/')
+        && let Some(v) = try_set_mutable_field(env, sym, &val)?
+    {
+        return Ok(v);
+    }
+    let parsed = cljrs_value::Symbol::parse(sym);
+    let ns = parsed.namespace.as_deref().unwrap_or(&env.current_ns);
+    let var = env
+        .globals
+        .lookup_var_in_ns(ns, &parsed.name)
+        .ok_or_else(|| EvalError::UnboundSymbol(sym.to_string()))?;
+    // Prefer updating the thread-local binding if one exists.
+    if !crate::env::dynamics::set_thread_local(&var, val.clone()) {
+        var.get().bind(val.clone());
+    }
+    Ok(val)
+}
+
+/// For a `(set! (.-field inst) v)` target, the field name and the `inst`
+/// form; `None` for any other non-symbol target.
+pub fn set_bang_field_target(target: &Form) -> Option<(&str, &Form)> {
+    match &target.kind {
+        FormKind::List(parts) if parts.len() == 2 => match &parts[0].kind {
+            FormKind::Symbol(op) if op.starts_with(".-") => Some((&op[2..], &parts[1])),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// The error for a `set!` target that is neither a symbol nor `(.-field inst)`.
+pub fn set_bang_target_error() -> EvalError {
+    EvalError::Runtime("set! requires a symbol or (.-field inst) target".into())
 }
 
 /// If `sym` names a mutable field of the `__deftype_self__` instance in scope,
@@ -946,7 +979,7 @@ fn try_set_mutable_field(env: &mut Env, sym: &str, val: &Value) -> EvalResult<Op
 }
 
 /// Set a mutable field on an explicit instance: `(set! (.-field inst) v)`.
-fn set_type_instance_field(inst: &Value, field: &str, val: Value) -> EvalResult {
+pub fn set_type_instance_field(inst: &Value, field: &str, val: Value) -> EvalResult {
     let Value::TypeInstance(ti) = inst else {
         return Err(EvalError::Runtime(format!(
             "set! (.-{field} …): target is not a type instance"
@@ -976,8 +1009,14 @@ fn eval_throw(args: &[Form], env: &mut Env) -> EvalResult {
         Some(f) => eval(f, env)?,
         None => Value::Nil,
     };
-    // Wrap non-error values in an ExceptionInfo so try/catch always sees a
-    // Value::Error and ex-message / ex-data work uniformly inside the handler.
+    Err(throw_value(val))
+}
+
+/// The error `(throw val)` raises for an already-evaluated `val`.
+///
+/// Wraps non-error values in an ExceptionInfo so try/catch always sees a
+/// Value::Error and ex-message / ex-data work uniformly inside the handler.
+pub fn throw_value(val: Value) -> EvalError {
     let val = match val {
         Value::Error(_) => val,
         other => {
@@ -990,7 +1029,7 @@ fn eval_throw(args: &[Form], env: &mut Env) -> EvalResult {
             )))
         }
     };
-    Err(EvalError::Thrown(val))
+    EvalError::Thrown(val)
 }
 
 // ── try ───────────────────────────────────────────────────────────────────────
@@ -1163,7 +1202,7 @@ pub fn eval_defn(args: &[Form], env: &mut Env, private: bool) -> EvalResult {
         .ok_or_else(|| EvalError::Runtime("defn requires a symbol name".into()))?;
     let (name_metas, name_sym) = name_form.peel_meta();
     let (name, mut is_async) = match &name_sym.kind {
-        FormKind::Symbol(s) => (s.clone(), name_metas.iter().any(|m| meta_form_is_async(m))),
+        FormKind::Symbol(s) => (s.clone(), name_metas.iter().any(|m| m.requests_async())),
         _ => return Err(EvalError::Runtime("defn name must be a symbol".into())),
     };
     // Optional docstring and/or metadata map after the name.
@@ -1180,7 +1219,7 @@ pub fn eval_defn(args: &[Form], env: &mut Env, private: bool) -> EvalResult {
     let mut attr_meta: Option<Value> = None;
     if rest_start < args.len() && args[rest_start].as_map().is_some() {
         // An attr-map such as `{:async true}` can also request async dispatch.
-        is_async |= meta_form_is_async(&args[rest_start]);
+        is_async |= args[rest_start].requests_async();
         attr_meta = Some(eval(&args[rest_start], env)?);
         rest_start += 1;
     }
@@ -1332,10 +1371,8 @@ fn eval_defonce(args: &[Form], env: &mut Env) -> EvalResult {
     // `(defonce ^:private registry (atom {}))` is accepted here too.
     let (name, _meta) = extract_def_name(&args[0], env)?;
     // If already bound, return immediately.
-    if let Some(var) = env.globals.lookup_var(&env.current_ns, &name)
-        && var.get().is_bound()
-    {
-        return Ok(Value::Var(var));
+    if let Some(var) = defonce_existing(&name, env) {
+        return Ok(var);
     }
     eval_def(args, env)
 }
@@ -1724,8 +1761,13 @@ fn eval_ns(args: &[Form], env: &mut Env) -> EvalResult {
                         load_ns(env.globals.clone(), &spec, &name)?;
                     }
                 }
+                Some(FormKind::Keyword(k)) if k == "import" => {
+                    for spec in &expand_reader_conds(&items[1..]) {
+                        import_types(env, &name, spec);
+                    }
+                }
                 // `:refer-clojure` was handled in the pass above; other clauses
-                // (`:use`, `:import`) — skip for now.
+                // (`:use`) — skip for now.
                 _ => {}
             }
         }
@@ -1733,6 +1775,51 @@ fn eval_ns(args: &[Form], env: &mut Env) -> EvalResult {
 
     let ns_ptr = env.globals.get_or_create_ns(&env.current_ns);
     Ok(Value::Namespace(ns_ptr))
+}
+
+/// Apply one `(:import ...)` spec (`[pkg Name ...]`, `(pkg Name ...)` or
+/// `pkg.Name`) by referring each named record or deftype into `dst_ns`.
+///
+/// A type's dispatch tag is qualified by its defining namespace, so an
+/// unqualified `Name` only reaches that tag through a var `dst_ns` can
+/// resolve; without the refer, `(extend-type Name ...)` in the importing
+/// namespace registers its methods under a tag no instance carries.
+fn import_types(env: &Env, dst_ns: &str, spec: &Form) {
+    match &spec.unmeta().kind {
+        FormKind::Vector(items) | FormKind::List(items) => {
+            let mut syms = items.iter().filter_map(Form::as_symbol);
+            if let Some(pkg) = syms.next() {
+                for name in syms {
+                    import_type(env, dst_ns, pkg, name);
+                }
+            }
+        }
+        FormKind::Symbol(s) => {
+            if let Some((pkg, name)) = s.rsplit_once('.') {
+                import_type(env, dst_ns, pkg, name);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Refer the type `name` defined in namespace `pkg` into `dst_ns`. `pkg` is
+/// also tried with `_` read as `-`, the JVM's package spelling of a namespace.
+/// Anything that is not a loaded record or deftype (a host class in a `.cljc`
+/// file, say) is left alone, as `:import` was before it referred anything.
+fn import_type(env: &Env, dst_ns: &str, pkg: &str, name: &str) {
+    let demunged = pkg.replace('_', "-");
+    for ns in [pkg, demunged.as_str()] {
+        let tag = format!("{ns}.{name}");
+        let names_type = matches!(
+            env.globals.lookup_in_ns(ns, name),
+            Some(Value::Symbol(s)) if s.get().to_string() == tag
+        );
+        if names_type {
+            env.globals.refer_named(dst_ns, ns, &[Arc::from(name)]);
+            return;
+        }
+    }
 }
 
 // ── load-file ─────────────────────────────────────────────────────────────────
@@ -1770,6 +1857,18 @@ fn eval_load_file(args: &[Form], env: &mut Env) -> EvalResult {
 // ── letfn ─────────────────────────────────────────────────────────────────────
 
 fn eval_letfn(args: &[Form], env: &mut Env) -> EvalResult {
+    push_letfn_frame(args, env)?;
+    let result = eval_body(&args[1..], env);
+    env.pop_frame();
+    result
+}
+
+/// Push a local frame binding every fn of `(letfn [fns…] body…)`, mutually
+/// visible. On success the caller evaluates the body and pops the frame; on
+/// error the frame has already been popped.
+///
+/// Public so the async evaluator can run the body with a yielding evaluator.
+pub fn push_letfn_frame(args: &[Form], env: &mut Env) -> EvalResult<()> {
     // (letfn [(f [params] body...) ...] body...)
     //
     // Three passes, because a closure here captures VALUES, not cells:
@@ -1845,10 +1944,7 @@ fn eval_letfn(args: &[Form], env: &mut Env) -> EvalResult {
         }
     }
 
-    let body = &args[1..];
-    let result = eval_body(body, env);
-    env.pop_frame();
-    result
+    Ok(())
 }
 
 // ── in-ns ─────────────────────────────────────────────────────────────────────
@@ -2220,7 +2316,7 @@ fn eval_deftype_star(args: &[Form], env: &mut Env) -> EvalResult {
     // Type metadata (e.g. ^:private) has no var to hold it; unwrapped so the
     // name reads, and deliberately not applied anywhere it would not belong.
     let (type_name, _) = require_sym_meta(args, 0, "deftype*", env)?;
-    let type_tag: Arc<str> = Arc::from(type_name.as_str());
+    let type_tag = qualified_type_tag(&type_name, env);
 
     let specs = parse_field_specs(&args[1], "deftype*")?;
     let field_names: Vec<Arc<str>> = specs.iter().map(|(n, _)| n.clone()).collect();
@@ -2237,7 +2333,16 @@ fn eval_deftype_star(args: &[Form], env: &mut Env) -> EvalResult {
     // Return the minted tag so a caller (e.g. the `reify` macro) can feed it
     // straight to `make-type-instance` — a single dataflow source for the tag,
     // rather than a second textual reference that a gensym could desync.
-    Ok(Value::string(type_name))
+    Ok(Value::string(type_tag.to_string()))
+}
+
+/// The dispatch tag of a record or deftype: its name qualified by the defining
+/// namespace, `my.ns.Point`, as the JVM names the generated class. Two
+/// namespaces may each define a `Point`; with a bare-name tag the second one's
+/// protocol impls replaced the first one's, and `instance?` could not tell
+/// their instances apart.
+fn qualified_type_tag(type_name: &str, env: &Env) -> Arc<str> {
+    Arc::from(format!("{}.{}", env.current_ns, type_name))
 }
 
 // ── register_impls_for_tag ────────────────────────────────────────────────────

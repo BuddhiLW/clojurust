@@ -1,35 +1,16 @@
 //! Property tests for `defonce`'s name extraction: `def` and `defonce` agree
 //! over every name and metadata shape.
+//!
+//! Each case runs in a namespace of its own over one shared runtime (see
+//! `common`), which is what the isolation here actually needs: the cases only
+//! ever `def` and `defonce` names, and a name is a var in a namespace. Before
+//! that, every case built a whole runtime and this suite took 36 seconds.
 
-use std::sync::Arc;
-
-use cljrs_reader::Parser;
-use cljrs_runtime::env::env::{Env, GlobalEnv};
 use cljrs_value::Value;
 use proptest::prelude::*;
 
-fn make_env() -> (Arc<GlobalEnv>, Env) {
-    let globals = cljrs_runtime::Runtime::builder()
-        .execution_mode(cljrs_runtime::ExecutionMode::TreeWalk)
-        .eager_clojure_test(true)
-        .build()
-        .expect("runtime")
-        .into_globals();
-    let env = Env::new(globals.clone(), "user");
-    (globals, env)
-}
-
-fn eval_fresh(src: &str) -> Result<Value, String> {
-    let (_, mut env) = make_env();
-    let mut parser = Parser::new(src.to_string(), "<test>".to_string());
-    let forms = parser.parse_all().map_err(|e| format!("{e:?}"))?;
-    let mut result = Value::Nil;
-    for form in forms {
-        result =
-            cljrs_runtime::interp::eval::eval(&form, &mut env).map_err(|e| format!("{e:?}"))?;
-    }
-    Ok(result)
-}
+mod common;
+use common::eval_fresh;
 
 /// An identifier that cannot collide with `clojure.core`.
 fn var_name() -> impl Strategy<Value = String> {

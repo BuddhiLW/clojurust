@@ -326,6 +326,9 @@ fn find_dylib_dep(config: &cljrs_project::config::DepsConfig, base_ns: &str) -> 
 
 /// Where the wrapper for one `(dep, version)` is generated and what it produces.
 struct WrapperPlan {
+    /// The root of the dep's materialized source: the checkout for a pinned
+    /// dep, the `:local/root` for a working tree.
+    source_root: PathBuf,
     /// The dep's own crate, already on disk.
     crate_dir: PathBuf,
     /// The generated wrapper crate's directory.  Deliberately *not* keyed by
@@ -345,8 +348,62 @@ struct WrapperPlan {
     /// occupies would not be picked up, so this cannot be the shared
     /// [`Self::build_output`].
     artifact: PathBuf,
+    /// [`SourceVersion::key`] of the version being built.
+    version_key: String,
+    /// The [`BuildRecord`] naming the version [`Self::target_dir`] last built.
+    record: PathBuf,
     /// Cache identity, for log lines.
     label: String,
+}
+
+/// Which version the shared build directory last built, and where it was
+/// published.
+///
+/// Cargo decides what to recompile from mtimes, so after an edit that did not
+/// advance one (`cp -p`, `rsync --times`, a timestamp-preserving archive) it
+/// would call a changed crate fresh and relink the previous version's code.
+/// The record is what lets [`build_wrapper`] notice that the target directory
+/// holds another version's build and force the source crates to be rebuilt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BuildRecord {
+    /// [`SourceVersion::key`] of the build.
+    key: String,
+    /// Where that build was published.
+    artifact: PathBuf,
+}
+
+impl BuildRecord {
+    /// The record at `path`; `None` when it is missing or unreadable.
+    fn read(path: &Path) -> Option<BuildRecord> {
+        let text = std::fs::read_to_string(path).ok()?;
+        let json: serde_json::Value = serde_json::from_str(&text).ok()?;
+        Some(BuildRecord {
+            key: json.get("key")?.as_str()?.to_string(),
+            artifact: PathBuf::from(json.get("artifact")?.as_str()?),
+        })
+    }
+
+    fn write(&self, path: &Path) -> Result<(), String> {
+        let json = serde_json::json!({
+            "key": self.key,
+            "artifact": self.artifact.to_string_lossy(),
+        });
+        std::fs::write(path, json.to_string())
+            .map_err(|e| format!("writing {}: {e}", path.display()))
+    }
+}
+
+/// Whether the target directory may hold compiled source crates from a version
+/// other than `key`, so cargo's mtime-based freshness cannot be trusted.
+///
+/// A target directory with no record has unknown provenance: an interrupted
+/// build removes the record before starting (see [`build_wrapper`]), and so
+/// does any build that predates it.
+fn target_is_foreign(previous: Option<&BuildRecord>, key: &str, target_exists: bool) -> bool {
+    match previous {
+        Some(record) => record.key != key,
+        None => target_exists,
+    }
 }
 
 /// Build (or reuse from cache) the wrapper cdylib for `dep`, returning the
@@ -366,12 +423,29 @@ fn build_wrapper(dep: &NativeDep, commit_override: Option<&str>) -> Result<PathB
     }
 
     let version = version_of(dep, &source_root, commit_override)?;
-    let plan = plan_wrapper(dep, crate_dir, &version);
+    let plan = plan_wrapper(dep, source_root, crate_dir, &version);
     if plan.artifact.exists() {
         return Ok(plan.artifact);
     }
 
     write_wrapper_crate(&plan.wrapper_dir, &plan.crate_dir, dep)?;
+
+    let previous = BuildRecord::read(&plan.record);
+    if target_is_foreign(
+        previous.as_ref(),
+        &plan.version_key,
+        plan.target_dir.exists(),
+    ) {
+        clean_source_crates(&plan)?;
+    }
+    // Until this build is published the target directory is in an unknown
+    // state: a failure part-way through may leave some crates compiled from
+    // this version, which a later build of the recorded one would take as
+    // fresh.
+    if plan.record.exists() {
+        std::fs::remove_file(&plan.record)
+            .map_err(|e| format!("removing {}: {e}", plan.record.display()))?;
+    }
     cargo_build(&plan)?;
 
     if !plan.build_output.exists() {
@@ -381,7 +455,42 @@ fn build_wrapper(dep: &NativeDep, commit_override: Option<&str>) -> Result<PathB
         ));
     }
     publish_artifact(&plan)?;
+    BuildRecord {
+        key: plan.version_key.clone(),
+        artifact: plan.artifact.clone(),
+    }
+    .write(&plan.record)?;
+
+    if let (NativeSource::WorkingTree(_), Some(previous)) = (&dep.source, previous) {
+        evict_artifact(&previous.artifact, &plan.artifact, &dylib_cache_root());
+    }
     Ok(plan.artifact)
+}
+
+/// Remove a superseded working-tree artifact, so a tree edited over a long
+/// time does not leave one library per save behind.
+///
+/// Only the working-tree form calls this: a pinned commit's artifact stays
+/// valid forever.  `previous` comes from a file on disk, so nothing outside
+/// `cache_root` is touched, whatever it says.  Failure is ignored — a library
+/// still mapped by a running process cannot be removed on every platform, and
+/// a leftover directory costs only space.
+fn evict_artifact(previous: &Path, current: &Path, cache_root: &Path) {
+    if previous == current {
+        return;
+    }
+    let Some(fp_dir) = previous.parent() else {
+        return;
+    };
+    let Some(label_dir) = fp_dir.parent() else {
+        return;
+    };
+    if label_dir.parent() != Some(cache_root) || current.starts_with(fp_dir) {
+        return;
+    }
+    let _ = std::fs::remove_dir_all(fp_dir);
+    // Holds other ABI fingerprints' builds of the same version, if any.
+    let _ = std::fs::remove_dir(label_dir);
 }
 
 /// Copy the freshly built cdylib to its version-unique path.
@@ -389,19 +498,52 @@ fn build_wrapper(dep: &NativeDep, commit_override: Option<&str>) -> Result<PathB
 /// `dlopen` keys on the path, so a rebuilt library has to arrive somewhere the
 /// previous one never occupied; the shared build directory cannot provide
 /// that, and the copy is what buys it back.
+///
+/// The copy lands on a temporary sibling and is renamed into place.
+/// [`build_wrapper`] trusts any file at the artifact path, so a copy cut short
+/// (interrupt, full disk) must never be visible there; a rename within one
+/// directory is atomic, which also makes two processes publishing the same
+/// version at once safe.
 fn publish_artifact(plan: &WrapperPlan) -> Result<(), String> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
+
     let dir = plan
         .artifact
         .parent()
         .ok_or("wrapper artifact path has no parent directory")?;
+    let file_name = plan
+        .artifact
+        .file_name()
+        .ok_or("wrapper artifact path has no file name")?;
     std::fs::create_dir_all(dir).map_err(|e| format!("creating {}: {e}", dir.display()))?;
-    std::fs::copy(&plan.build_output, &plan.artifact).map_err(|e| {
-        format!(
+    let temp = dir.join(format!(
+        ".{}.{}-{}.tmp",
+        file_name.to_string_lossy(),
+        std::process::id(),
+        NEXT_TEMP.fetch_add(1, Ordering::Relaxed)
+    ));
+    if let Err(e) = std::fs::copy(&plan.build_output, &temp) {
+        let _ = std::fs::remove_file(&temp);
+        return Err(format!(
             "copying {} to {}: {e}",
             plan.build_output.display(),
+            temp.display()
+        ));
+    }
+    if let Err(e) = std::fs::rename(&temp, &plan.artifact) {
+        let _ = std::fs::remove_file(&temp);
+        // Where a rename cannot replace an existing file, a concurrent
+        // publisher of the same version having got there first is success.
+        if plan.artifact.exists() {
+            return Ok(());
+        }
+        return Err(format!(
+            "renaming {} to {}: {e}",
+            temp.display(),
             plan.artifact.display()
-        )
-    })?;
+        ));
+    }
     Ok(())
 }
 
@@ -440,10 +582,24 @@ fn version_of(
     }
 }
 
+/// Directories [`digest_source_tree`] never descends into: build output, VCS
+/// data and other toolchains' dependency trees, none of which cargo reads as
+/// source.
+const NON_SOURCE_DIRS: &[&str] = &["target", ".git", ".hg", ".svn", ".jj", "node_modules"];
+
+/// Files larger than this are identified by length and mtime rather than read
+/// in full.  Rust sources are far smaller; what gets this large is fixtures and
+/// data, which would otherwise be read on every `require`.
+const CONTENT_DIGEST_LIMIT: u64 = 1 << 20;
+
 /// Digest every source file under `dir`, ignoring build output and VCS data.
 ///
 /// Path and contents both feed the hash, so a rename is as much a change as an
 /// edit. Walk order is sorted, making the digest independent of readdir order.
+///
+/// Symlinks are not followed into directories: a cycle would never end, and a
+/// link out of the tree would digest whatever it points at.  A symlinked
+/// directory contributes its link target; a symlinked file, its contents.
 fn digest_source_tree(dir: &Path) -> Result<String, String> {
     let mut acc = String::new();
     let mut stack = vec![dir.to_path_buf()];
@@ -454,27 +610,58 @@ fn digest_source_tree(dir: &Path) -> Result<String, String> {
             .map_err(|e| format!("reading {}: {e}", current.display()))?;
         entries.sort_by_key(|e| e.file_name());
         for entry in entries {
-            let name = entry.file_name();
-            let name = name.to_string_lossy();
-            if name == "target" || name == ".git" {
-                continue;
-            }
             let path = entry.path();
-            if path.is_dir() {
-                stack.push(path);
+            // `DirEntry::file_type` describes the entry itself, never a
+            // symlink's target.
+            let file_type = entry
+                .file_type()
+                .map_err(|e| format!("reading {}: {e}", path.display()))?;
+            if file_type.is_dir() {
+                let name = entry.file_name();
+                if !NON_SOURCE_DIRS.contains(&name.to_string_lossy().as_ref()) {
+                    stack.push(path);
+                }
                 continue;
             }
+            let fingerprint = if file_type.is_symlink() {
+                symlink_fingerprint(&path)?
+            } else {
+                let meta = entry
+                    .metadata()
+                    .map_err(|e| format!("reading {}: {e}", path.display()))?;
+                file_fingerprint(&path, &meta)?
+            };
             let rel = path.strip_prefix(dir).unwrap_or(&path);
-            let bytes =
-                std::fs::read(&path).map_err(|e| format!("reading {}: {e}", path.display()))?;
-            acc.push_str(&format!(
-                "{}|{}\n",
-                rel.display(),
-                stable_hash_bytes(&bytes)
-            ));
+            acc.push_str(&format!("{}|{fingerprint}\n", rel.display()));
         }
     }
     Ok(stable_hash(&acc))
+}
+
+/// A regular file's contribution to [`digest_source_tree`].
+fn file_fingerprint(path: &Path, meta: &std::fs::Metadata) -> Result<String, String> {
+    if meta.len() > CONTENT_DIGEST_LIMIT {
+        return Ok(format!(
+            "len={} mtime={:?}",
+            meta.len(),
+            meta.modified().ok()
+        ));
+    }
+    let bytes = std::fs::read(path).map_err(|e| format!("reading {}: {e}", path.display()))?;
+    Ok(stable_hash_bytes(&bytes))
+}
+
+/// A symlink's contribution to [`digest_source_tree`]: the file it resolves to,
+/// or — for a link to a directory, or a dangling one — its target path.
+fn symlink_fingerprint(path: &Path) -> Result<String, String> {
+    if let Ok(meta) = std::fs::metadata(path)
+        && meta.is_file()
+    {
+        return file_fingerprint(path, &meta);
+    }
+    let target =
+        std::fs::read_link(path).map_err(|e| format!("reading {}: {e}", path.display()))?;
+    Ok(format!("link={}", target.display()))
 }
 
 /// The dep's crate directory within its materialized source.
@@ -512,7 +699,12 @@ fn materialize_source(
 }
 
 /// Derive every path the build needs. Pure: the source is already resolved.
-fn plan_wrapper(dep: &NativeDep, crate_dir: PathBuf, version: &SourceVersion) -> WrapperPlan {
+fn plan_wrapper(
+    dep: &NativeDep,
+    source_root: PathBuf,
+    crate_dir: PathBuf,
+    version: &SourceVersion,
+) -> WrapperPlan {
     let abi = abi_fingerprint();
     let label = format!("{}{}", dep.pkg_ident(), version.slug);
     let fp_hash = stable_hash(&format!("{abi}|{}", version.key));
@@ -528,11 +720,14 @@ fn plan_wrapper(dep: &NativeDep, crate_dir: PathBuf, version: &SourceVersion) ->
         .join(format!("fp-{fp_hash}"))
         .join(&lib_file);
     WrapperPlan {
+        source_root,
         crate_dir,
+        record: wrapper_dir.join("last-build.json"),
         wrapper_dir,
         target_dir,
         build_output,
         artifact,
+        version_key: version.key.clone(),
         label,
     }
 }
@@ -566,18 +761,25 @@ impl NetworkPolicy {
     }
 }
 
+/// A `cargo <subcommand>` run on the generated wrapper, in its target
+/// directory and under the configured [`NetworkPolicy`].
+fn wrapper_cargo(plan: &WrapperPlan, subcommand: &str) -> std::process::Command {
+    let mut cmd = std::process::Command::new("cargo");
+    cmd.arg(subcommand)
+        .current_dir(&plan.wrapper_dir)
+        .env("CARGO_TARGET_DIR", &plan.target_dir);
+    if NetworkPolicy::from_env() == NetworkPolicy::Offline {
+        cmd.arg("--offline");
+    }
+    cmd
+}
+
 /// Run `cargo build` on the generated wrapper, matching the host's profile
 /// (see [`abi_fingerprint`]).
 fn cargo_build(plan: &WrapperPlan) -> Result<(), String> {
-    let mut cmd = std::process::Command::new("cargo");
-    cmd.arg("build")
-        .current_dir(&plan.wrapper_dir)
-        .env("CARGO_TARGET_DIR", &plan.target_dir);
+    let mut cmd = wrapper_cargo(plan, "build");
     if host_profile() == "release" {
         cmd.arg("--release");
-    }
-    if NetworkPolicy::from_env() == NetworkPolicy::Offline {
-        cmd.arg("--offline");
     }
     eprintln!("[cljrs] building native package {}…", plan.label);
     let status = cmd.status().map_err(|e| format!("cargo: {e}"))?;
@@ -588,6 +790,73 @@ fn cargo_build(plan: &WrapperPlan) -> Result<(), String> {
         ));
     }
     Ok(())
+}
+
+/// Discard the compiled output of every crate under [`WrapperPlan::source_root`]
+/// so the next build compiles them from what is on disk now.
+///
+/// Called when the target directory holds another version's build (see
+/// [`BuildRecord`]).  Only the dep's own tree is cleaned: its registry and git
+/// dependencies, and `cljrs-interop`, are keyed by version and stay
+/// incremental.
+fn clean_source_crates(plan: &WrapperPlan) -> Result<(), String> {
+    let out = wrapper_cargo(plan, "metadata")
+        .args(["--format-version", "1"])
+        .stderr(std::process::Stdio::inherit())
+        .output()
+        .map_err(|e| format!("cargo: {e}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "cargo metadata of native wrapper failed (see output above; wrapper at {})",
+            plan.wrapper_dir.display()
+        ));
+    }
+    let metadata: serde_json::Value = serde_json::from_slice(&out.stdout)
+        .map_err(|e| format!("parsing cargo metadata output: {e}"))?;
+    let names = source_crate_names(&metadata, &plan.source_root);
+    if names.is_empty() {
+        return Ok(());
+    }
+
+    let mut cmd = wrapper_cargo(plan, "clean");
+    if host_profile() == "release" {
+        cmd.arg("--release");
+    }
+    for name in &names {
+        cmd.arg("-p").arg(name);
+    }
+    let status = cmd.status().map_err(|e| format!("cargo: {e}"))?;
+    if !status.success() {
+        return Err(format!(
+            "cargo clean of native wrapper failed (see output above; wrapper at {})",
+            plan.wrapper_dir.display()
+        ));
+    }
+    Ok(())
+}
+
+/// Names of the path packages in `cargo metadata` output whose manifest lives
+/// under `source_root`, sorted and deduplicated.
+///
+/// Names rather than package ids: `cargo clean -p` ignores an id's URL and
+/// version qualifiers and cleans by name regardless.
+fn source_crate_names(metadata: &serde_json::Value, source_root: &Path) -> Vec<String> {
+    let mut names: Vec<String> = metadata
+        .get("packages")
+        .and_then(|p| p.as_array())
+        .into_iter()
+        .flatten()
+        .filter(|pkg| pkg.get("source").is_none_or(|s| s.is_null()))
+        .filter(|pkg| {
+            pkg.get("manifest_path")
+                .and_then(|m| m.as_str())
+                .is_some_and(|m| Path::new(m).starts_with(source_root))
+        })
+        .filter_map(|pkg| pkg.get("name")?.as_str().map(str::to_string))
+        .collect();
+    names.sort();
+    names.dedup();
+    names
 }
 
 /// Write the generated wrapper crate (Cargo.toml, build.rs, src/lib.rs).
@@ -647,7 +916,7 @@ panic = "unwind"
 "#,
         version = env!("CARGO_PKG_VERSION"),
     );
-    std::fs::write(wrapper_dir.join("Cargo.toml"), cargo_toml).map_err(|e| e.to_string())?;
+    write_if_changed(&wrapper_dir.join("Cargo.toml"), &cargo_toml)?;
 
     let build_rs = r#"fn main() {
     let rustc = std::env::var("RUSTC").unwrap_or_else(|_| "rustc".to_string());
@@ -659,7 +928,7 @@ panic = "unwind"
     println!("cargo:rustc-env=CLJRS_WRAPPER_RUSTC={version}");
 }
 "#;
-    std::fs::write(wrapper_dir.join("build.rs"), build_rs).map_err(|e| e.to_string())?;
+    write_if_changed(&wrapper_dir.join("build.rs"), build_rs)?;
 
     let lib_rs = format!(
         r#"//! Auto-generated pinned-package wrapper (cljrs).
@@ -704,8 +973,20 @@ pub unsafe extern "C" fn cljrs_dylib_init(registry: *mut cljrs_interop::Registry
 "#,
         init_tail = dep.init_tail(),
     );
-    std::fs::write(wrapper_dir.join("src/lib.rs"), lib_rs).map_err(|e| e.to_string())?;
+    write_if_changed(&wrapper_dir.join("src/lib.rs"), &lib_rs)?;
     Ok(())
+}
+
+/// Write `contents` to `path` unless it already holds exactly that.
+///
+/// The wrapper crate is regenerated on every artifact miss; rewriting identical
+/// bytes would still advance the mtimes and make cargo recompile the wrapper
+/// and rerun its `build.rs` when only the dependency changed.
+fn write_if_changed(path: &Path, contents: &str) -> Result<(), String> {
+    if std::fs::read(path).is_ok_and(|old| old == contents.as_bytes()) {
+        return Ok(());
+    }
+    std::fs::write(path, contents).map_err(|e| format!("writing {}: {e}", path.display()))
 }
 
 /// `s` rendered as a TOML basic string, quotes included.
@@ -1093,13 +1374,213 @@ edition.workspace = true
             slug: "@local-2222".into(),
             key: "/x|2222".into(),
         };
-        let a = plan_wrapper(&dep, crate_dir.clone(), &v1);
-        let b = plan_wrapper(&dep, crate_dir, &v2);
+        let a = plan_wrapper(&dep, crate_dir.clone(), crate_dir.clone(), &v1);
+        let b = plan_wrapper(&dep, crate_dir.clone(), crate_dir, &v2);
 
         assert_ne!(a.artifact, b.artifact);
         assert_eq!(a.wrapper_dir, b.wrapper_dir);
         assert_eq!(a.target_dir, b.target_dir);
         assert_eq!(a.build_output, b.build_output);
+        assert_eq!(a.record, b.record);
         assert!(!a.artifact.starts_with(&a.target_dir));
+    }
+
+    /// Cargo decides freshness by mtime, so a content change that does not
+    /// advance one is invisible to it.  The shared target directory is
+    /// therefore distrusted whenever it last built some other version, or its
+    /// provenance is unknown.
+    #[test]
+    fn a_target_dir_built_from_another_version_is_foreign() {
+        let record = BuildRecord {
+            key: "/x|1111".into(),
+            artifact: PathBuf::from("/a"),
+        };
+        assert!(!target_is_foreign(Some(&record), "/x|1111", true));
+        assert!(target_is_foreign(Some(&record), "/x|2222", true));
+        assert!(target_is_foreign(None, "/x|2222", true));
+        assert!(!target_is_foreign(None, "/x|2222", false));
+    }
+
+    #[test]
+    fn a_build_record_round_trips() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("last-build.json");
+        assert_eq!(BuildRecord::read(&path), None);
+        let record = BuildRecord {
+            key: "/x|1111".into(),
+            artifact: PathBuf::from("/cache/pkg@local-1111/fp-ab/lib.so"),
+        };
+        record.write(&path).unwrap();
+        assert_eq!(BuildRecord::read(&path), Some(record));
+        std::fs::write(&path, "not json").unwrap();
+        assert_eq!(BuildRecord::read(&path), None);
+    }
+
+    /// Only path packages inside the dep's own tree are cleaned: registry
+    /// crates and `cljrs-interop` (a path dep outside it) stay incremental.
+    #[test]
+    fn only_crates_under_the_source_root_are_cleaned() {
+        let metadata = serde_json::json!({
+            "packages": [
+                {"name": "thing", "source": null,
+                 "manifest_path": "/tree/crates/thing/Cargo.toml"},
+                {"name": "sibling", "source": null,
+                 "manifest_path": "/tree/crates/sibling/Cargo.toml"},
+                {"name": "cljrs-interop", "source": null,
+                 "manifest_path": "/cljrs/crates/cljrs-interop/Cargo.toml"},
+                {"name": "cljrs-pinned-wrapper", "source": null,
+                 "manifest_path": "/home/.cljrs/cache/dylibs/build/thing-1/Cargo.toml"},
+                {"name": "serde",
+                 "source": "registry+https://github.com/rust-lang/crates.io-index",
+                 "manifest_path": "/tree/vendor/serde/Cargo.toml"},
+            ]
+        });
+        assert_eq!(
+            source_crate_names(&metadata, Path::new("/tree")),
+            vec!["sibling".to_string(), "thing".to_string()]
+        );
+    }
+
+    /// Publishing goes through a temporary sibling and a rename, so the
+    /// artifact path only ever holds a complete library, and no temporary is
+    /// left behind.
+    #[test]
+    fn publishing_replaces_the_artifact_whole() {
+        let tmp = tempfile::tempdir().unwrap();
+        let build_output = tmp.path().join("out.so");
+        std::fs::write(&build_output, b"new library").unwrap();
+        let artifact = tmp.path().join("pkg@local-1/fp-2/lib.so");
+        std::fs::create_dir_all(artifact.parent().unwrap()).unwrap();
+        std::fs::write(&artifact, b"trunc").unwrap();
+
+        let plan = WrapperPlan {
+            source_root: tmp.path().into(),
+            crate_dir: tmp.path().into(),
+            wrapper_dir: tmp.path().into(),
+            target_dir: tmp.path().join("target"),
+            build_output,
+            artifact: artifact.clone(),
+            version_key: "k".into(),
+            record: tmp.path().join("last-build.json"),
+            label: "pkg@local-1".into(),
+        };
+        publish_artifact(&plan).unwrap();
+
+        assert_eq!(std::fs::read(&artifact).unwrap(), b"new library");
+        let names: Vec<_> = std::fs::read_dir(artifact.parent().unwrap())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(names, vec![std::ffi::OsString::from("lib.so")]);
+    }
+
+    #[test]
+    fn a_superseded_artifact_is_evicted() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let old = root.join("pkg@local-1/fp-a/lib.so");
+        let new = root.join("pkg@local-2/fp-a/lib.so");
+        for p in [&old, &new] {
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, b"lib").unwrap();
+        }
+        evict_artifact(&old, &new, root);
+        assert!(!root.join("pkg@local-1").exists());
+        assert!(new.exists());
+
+        // The current artifact is never removed.
+        evict_artifact(&new, &new, root);
+        assert!(new.exists());
+    }
+
+    /// The record is a file on disk; a path it names outside the cache root is
+    /// left alone.
+    #[test]
+    fn eviction_stays_inside_the_cache_root() {
+        let cache = tempfile::tempdir().unwrap();
+        let elsewhere = tempfile::tempdir().unwrap();
+        let outside = elsewhere.path().join("a/b/lib.so");
+        std::fs::create_dir_all(outside.parent().unwrap()).unwrap();
+        std::fs::write(&outside, b"keep").unwrap();
+        evict_artifact(&outside, &cache.path().join("p@1/fp/lib.so"), cache.path());
+        assert!(outside.exists());
+    }
+
+    /// Unchanged wrapper sources keep their mtimes, so cargo does not rebuild
+    /// the wrapper or rerun its `build.rs` when only the dependency changed.
+    #[test]
+    fn rewriting_identical_contents_leaves_the_file_alone() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("build.rs");
+        write_if_changed(&path, "fn main() {}\n").unwrap();
+        let old = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000);
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+
+        write_if_changed(&path, "fn main() {}\n").unwrap();
+        assert_eq!(std::fs::metadata(&path).unwrap().modified().unwrap(), old);
+
+        write_if_changed(&path, "fn main() { }\n").unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "fn main() { }\n");
+    }
+
+    /// A symlink cycle under the root must terminate: directory links are
+    /// digested by their target, never descended into.
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_cycle_does_not_hang_the_digest() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        std::fs::create_dir_all(root.join("a")).unwrap();
+        std::fs::write(root.join("a/lib.rs"), "x").unwrap();
+        std::os::unix::fs::symlink(root, root.join("a/loop")).unwrap();
+        digest_source_tree(root).unwrap();
+    }
+
+    /// A symlinked file is digested by what it resolves to, so editing the
+    /// target changes the version.
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_file_is_digested_by_contents() {
+        let tree = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let target = outside.path().join("shared.rs");
+        std::fs::write(&target, "1").unwrap();
+        std::os::unix::fs::symlink(&target, tree.path().join("shared.rs")).unwrap();
+        let before = digest_source_tree(tree.path()).unwrap();
+        std::fs::write(&target, "2").unwrap();
+        assert_ne!(before, digest_source_tree(tree.path()).unwrap());
+    }
+
+    /// Build output, VCS data and other toolchains' dependency trees are not
+    /// inputs, at any depth.
+    #[test]
+    fn non_source_directories_do_not_affect_the_digest() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src/lib.rs"), "x").unwrap();
+        let before = digest_source_tree(root).unwrap();
+        for dir in NON_SOURCE_DIRS {
+            std::fs::create_dir_all(root.join("src").join(dir)).unwrap();
+            std::fs::write(root.join("src").join(dir).join("f"), "junk").unwrap();
+        }
+        assert_eq!(before, digest_source_tree(root).unwrap());
+    }
+
+    /// A file over the size limit is identified by length and mtime, so it
+    /// still changes the version when it grows.
+    #[test]
+    fn a_large_file_still_changes_the_digest() {
+        let tmp = tempfile::tempdir().unwrap();
+        let big = tmp.path().join("fixture.bin");
+        std::fs::write(&big, vec![0u8; CONTENT_DIGEST_LIMIT as usize + 1]).unwrap();
+        let before = digest_source_tree(tmp.path()).unwrap();
+        std::fs::write(&big, vec![0u8; CONTENT_DIGEST_LIMIT as usize + 2]).unwrap();
+        assert_ne!(before, digest_source_tree(tmp.path()).unwrap());
     }
 }

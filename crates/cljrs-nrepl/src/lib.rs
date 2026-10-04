@@ -76,7 +76,8 @@ pub(crate) struct Job {
     pub req: Request,
     /// Channel back to the connection's writer task.
     pub replies: tokio::sync::mpsc::UnboundedSender<Bencode>,
-    /// Set by an `interrupt` op; checked before the job starts evaluating.
+    /// Set by an `interrupt` op. Checked before the job starts, and installed
+    /// on the gas meter while it evaluates so a running eval stops too.
     pub cancelled: Arc<AtomicBool>,
     /// Entry to clear from the in-flight registry when the job completes.
     pub pending_key: Option<server::PendingKey>,
@@ -195,5 +196,92 @@ impl Server {
             let _ = std::fs::remove_file(path);
         }
         Ok(())
+    }
+
+    /// Turn the server into a [`Poller`] for an interpreter thread that also
+    /// serves other work. Same thread rule as [`Server::serve`].
+    pub fn into_poller(self) -> Poller {
+        let engine = engine::Engine::new(self.globals.clone());
+        Poller {
+            server: self,
+            engine,
+        }
+    }
+}
+
+/// Whether a [`Poller`]'s server can still receive jobs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PollStatus {
+    /// Still accepting connections; poll again later.
+    Open,
+    /// The network thread is gone (the server was shut down). No job will
+    /// ever arrive again; drop the poller.
+    Closed,
+}
+
+/// A non-blocking nREPL driver.
+///
+/// [`Server::serve_with`] blocks the interpreter thread on the job channel,
+/// so a host whose interpreter thread also runs its own command loop (an
+/// embedded addon isolate, say) could not have an nREPL and keep serving
+/// itself. A `Poller` handles only the jobs already queued and returns, so
+/// the host interleaves them with its own work.
+///
+/// Dropping it shuts the server down: the network thread stops, its thread
+/// is joined, and the port file is removed.
+pub struct Poller {
+    server: Server,
+    engine: engine::Engine,
+}
+
+impl Poller {
+    /// The port the listener is bound to.
+    pub fn port(&self) -> u16 {
+        self.server.port
+    }
+
+    pub fn shutdown_handle(&self) -> ShutdownHandle {
+        self.server.shutdown.clone()
+    }
+
+    /// Handle every job queued right now, without waiting for more.
+    pub fn poll(&mut self, eval_form: &mut impl EvalForm) -> PollStatus {
+        loop {
+            match self.server.job_rx.try_recv() {
+                Ok(job) => self.engine.handle(job, eval_form),
+                Err(mpsc::TryRecvError::Empty) => return PollStatus::Open,
+                Err(mpsc::TryRecvError::Disconnected) => return PollStatus::Closed,
+            }
+        }
+    }
+
+    /// Wait up to `timeout` for a job, then handle everything queued. For a
+    /// host with nothing else to do at the moment, instead of spinning on
+    /// [`Poller::poll`].
+    pub fn poll_timeout(
+        &mut self,
+        eval_form: &mut impl EvalForm,
+        timeout: std::time::Duration,
+    ) -> PollStatus {
+        match self.server.job_rx.recv_timeout(timeout) {
+            Ok(job) => {
+                self.engine.handle(job, eval_form);
+                self.poll(eval_form)
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => PollStatus::Open,
+            Err(mpsc::RecvTimeoutError::Disconnected) => PollStatus::Closed,
+        }
+    }
+}
+
+impl Drop for Poller {
+    fn drop(&mut self) {
+        self.server.shutdown.shutdown();
+        if let Some(handle) = self.server.net_thread.take() {
+            let _ = handle.join();
+        }
+        if let Some(path) = &self.server.port_file {
+            let _ = std::fs::remove_file(path);
+        }
     }
 }

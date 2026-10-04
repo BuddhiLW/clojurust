@@ -9,6 +9,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use cljrs_gc::GcPtr;
+use cljrs_reader::Form;
+use cljrs_reader::form::FormKind;
 use cljrs_runtime::env::dynamics;
 use cljrs_runtime::tiered::{EvalError, GlobalEnv};
 use cljrs_value::{Keyword, Value, Var};
@@ -84,18 +86,33 @@ impl Engine {
             let sid = req.session.clone().unwrap_or_default();
             let _ = replies.send(
                 Response::for_request(&req, &sid)
-                    .status(&["done", "interrupted"])
+                    .status(&["interrupted"])
                     .build(),
             );
+            let _ = replies.send(Response::for_request(&req, &sid).status(&["done"]).build());
         } else {
             match req.op.as_str() {
                 "clone" => self.op_clone(&req, &replies),
                 "close" => self.op_close(&req, &replies),
                 "ls-sessions" => self.op_ls_sessions(&req, &replies),
-                "eval" => self.op_eval(&req, &replies, eval_form, &cancelled),
-                "load-file" => self.op_load_file(&req, &replies, eval_form, &cancelled),
+                "eval" | "load-file" => {
+                    // The network thread's `interrupt` sets `cancelled`; with
+                    // it installed on the execution-credit meter, the running
+                    // eval stops at its next checkpoint in any tier.
+                    let _interrupt =
+                        cljrs_runtime::env::gas::InterruptGuard::install(cancelled.clone());
+                    if req.op == "eval" {
+                        self.op_eval(&req, &replies, eval_form, &cancelled);
+                    } else {
+                        self.op_load_file(&req, &replies, eval_form, &cancelled);
+                    }
+                }
                 "completions" => self.op_completions(&req, &replies),
                 "lookup" => self.op_lookup(&req, &replies),
+                "macroexpand" => self.op_macroexpand(&req, &replies),
+                "analyze-last-stacktrace" | "stacktrace" => {
+                    self.op_analyze_last_stacktrace(&req, &replies)
+                }
                 _ => {
                     let sid = self.ensure_session(req.session.as_deref());
                     let _ = replies.send(
@@ -289,23 +306,27 @@ impl Engine {
 
         let mut interrupted = false;
         for form in &forms {
-            // Best-effort interrupt between top-level forms; a single form
-            // that loops forever cannot be stopped.
+            // Interrupted between top-level forms (a running form is stopped
+            // by the interrupt flag installed on the gas meter, below).
             if cancelled.load(Ordering::SeqCst) {
                 interrupted = true;
                 break;
             }
             let _alloc_frame = cljrs_gc::push_alloc_frame();
-            cljrs_runtime::builtins::builtins::push_output_capture();
+            // Stream output while the form runs (at newlines / a size
+            // threshold); the pop flushes whatever is left.
+            let (out_req, out_sid, out_replies) = (req.clone(), sid.clone(), replies.clone());
+            cljrs_runtime::builtins::builtins::push_streaming_output_capture(Box::new(
+                move |text: &str| {
+                    let _ = out_replies.send(
+                        Response::for_request(&out_req, &out_sid)
+                            .str_field("out", text)
+                            .build(),
+                    );
+                },
+            ));
             let result = eval_form(form, &mut session.env);
-            let out = cljrs_runtime::builtins::builtins::pop_output_capture().unwrap_or_default();
-            if !out.is_empty() {
-                let _ = replies.send(
-                    Response::for_request(req, &sid)
-                        .str_field("out", &out)
-                        .build(),
-                );
-            }
+            let _ = cljrs_runtime::builtins::builtins::pop_output_capture();
             match result {
                 Ok(value) => {
                     let _ = replies.send(
@@ -322,6 +343,13 @@ impl Engine {
                             dynamics::set_thread_local(var, val.clone());
                         }
                     }
+                }
+                // An interrupt unwinds as `GasExhausted`; any failure once the
+                // flag is set is reported as the interrupt (a native bridge
+                // may have wrapped the signal in another error).
+                Err(_) if cancelled.load(Ordering::SeqCst) => {
+                    interrupted = true;
+                    break;
                 }
                 Err(e) => {
                     let msg = eval_error_message(&e);
@@ -352,12 +380,14 @@ impl Engine {
             globals.intern(STATE_NS, format!("{sid}-{slot}").into(), val);
         }
 
-        let status: &[&str] = if interrupted {
-            &["done", "interrupted"]
-        } else {
-            &["done"]
-        };
-        let _ = replies.send(Response::for_request(req, &sid).status(status).build());
+        if interrupted {
+            let _ = replies.send(
+                Response::for_request(req, &sid)
+                    .status(&["interrupted"])
+                    .build(),
+            );
+        }
+        let _ = replies.send(Response::for_request(req, &sid).status(&["done"]).build());
     }
 
     // ── Tooling ops ───────────────────────────────────────────────────────────
@@ -436,6 +466,125 @@ impl Engine {
                 .status(&["done"])
                 .build(),
         );
+    }
+
+    /// cider-nrepl `macroexpand`: expand `code` in `ns` with the requested
+    /// expander and reply with the printed expansion.
+    fn op_macroexpand(&mut self, req: &Request, replies: &UnboundedSender<Bencode>) {
+        let sid = self.ensure_session(req.session.as_deref());
+        let globals = self.globals.clone();
+        let session = self.sessions.get_mut(&sid).expect("session just ensured");
+        let ns = req
+            .ns
+            .as_deref()
+            .filter(|ns| globals.namespaces.read().unwrap().contains_key(*ns))
+            .map(Arc::from)
+            .unwrap_or_else(|| session.env.current_ns.clone());
+        let mut env = cljrs_runtime::tiered::Env::new(globals.clone(), &ns);
+        let expander = req.expander.as_deref().unwrap_or("macroexpand");
+        let display = req.display_namespaces.as_deref();
+        let code = req.code.clone().unwrap_or_default();
+
+        let result: Result<String, String> = (|| {
+            let mut parser = cljrs_reader::Parser::new(code, "<macroexpand>".to_string());
+            let form = parser
+                .parse_one()
+                .map_err(|e| format!("{e}"))?
+                .ok_or_else(|| "no form to expand".to_string())?;
+            let _alloc_frame = cljrs_gc::push_alloc_frame();
+            use cljrs_runtime::interp::macros;
+            let mut expanded = match expander {
+                "macroexpand-1" => macros::macroexpand_1(&form, &mut env),
+                "macroexpand" => macros::macroexpand(&form, &mut env),
+                "macroexpand-all" => macros::macroexpand_all(&form, &mut env),
+                other => return Err(format!("unknown expander: {other}")),
+            }
+            .map_err(|e| eval_error_message(&e))?;
+            match display {
+                Some("none") => {
+                    redisplay_symbols(&mut expanded, &|_, name| Some(name.to_string()));
+                }
+                Some("tidy") => redisplay_symbols(&mut expanded, &|qualifier, name| {
+                    tidy_symbol(&globals, &ns, qualifier, name)
+                }),
+                _ => {}
+            }
+            let value = cljrs_runtime::builtins::form::form_to_value(&expanded)
+                .map_err(|e| eval_error_message(&e))?;
+            Ok(format!("{value}"))
+        })();
+
+        match result {
+            Ok(expansion) => {
+                let _ = replies.send(
+                    Response::for_request(req, &sid)
+                        .str_field("expansion", expansion)
+                        .status(&["done"])
+                        .build(),
+                );
+            }
+            Err(msg) => {
+                let _ = replies.send(
+                    Response::for_request(req, &sid)
+                        .str_field("err", format!("{msg}\n"))
+                        .status(&["macroexpand-error", "done"])
+                        .build(),
+                );
+            }
+        }
+    }
+
+    /// cider-nrepl `analyze-last-stacktrace` (legacy `stacktrace`): one
+    /// message per cause of the session's `*e`, outermost first.
+    fn op_analyze_last_stacktrace(&mut self, req: &Request, replies: &UnboundedSender<Bencode>) {
+        let sid = self.ensure_session(req.session.as_deref());
+        let session = self.sessions.get(&sid).expect("session just ensured");
+        let err = session.stars[3].clone();
+        let causes: Vec<(String, String, Option<String>)> = match &err {
+            Value::Nil => Vec::new(),
+            Value::Error(e) => {
+                let mut out = Vec::new();
+                let mut cur = Some(e.clone());
+                while let Some(ex) = cur {
+                    let info = ex.get();
+                    let data = info.data().map(|d| format!("{}", Value::Map(d)));
+                    // An exception carrying ex-data is what Clojure calls an
+                    // ExceptionInfo (CIDER keys its data display off that
+                    // class); anything else keeps cljrs's own kind name.
+                    let class = if data.is_some() {
+                        "clojure.lang.ExceptionInfo".to_string()
+                    } else {
+                        info.type_name().to_string()
+                    };
+                    out.push((class, info.message(), data));
+                    cur = info.cause();
+                }
+                out
+            }
+            // A thrown non-exception value (`(throw 42)`).
+            other => vec![(other.type_name().to_string(), format!("{other}"), None)],
+        };
+        if causes.is_empty() {
+            let _ = replies.send(
+                Response::for_request(req, &sid)
+                    .status(&["no-error", "done"])
+                    .build(),
+            );
+            return;
+        }
+        for (class, message, data) in causes {
+            let mut resp = Response::for_request(req, &sid)
+                .str_field("class", class)
+                .str_field("message", message)
+                // cljrs records no stack frames on its exceptions yet; an
+                // empty list is the honest answer.
+                .field("stacktrace", Bencode::List(Vec::new()));
+            if let Some(data) = data {
+                resp = resp.str_field("data", data);
+            }
+            let _ = replies.send(resp.build());
+        }
+        let _ = replies.send(Response::for_request(req, &sid).status(&["done"]).build());
     }
 
     fn op_lookup(&mut self, req: &Request, replies: &UnboundedSender<Bencode>) {
@@ -521,6 +670,67 @@ fn var_kind(var: &GcPtr<Var>) -> &'static str {
     }
 }
 
+/// Replace every qualified symbol `qualifier/name` in `form` with what
+/// `display(qualifier, name)` returns; `None` leaves the symbol as written.
+fn redisplay_symbols(form: &mut Form, display: &impl Fn(&str, &str) -> Option<String>) {
+    match &mut form.kind {
+        FormKind::Symbol(s) => {
+            if let Some((qualifier, name)) = s.split_once('/')
+                && !qualifier.is_empty()
+                && !name.is_empty()
+                && let Some(shown) = display(qualifier, name)
+            {
+                *s = shown;
+            }
+        }
+        FormKind::List(items)
+        | FormKind::Vector(items)
+        | FormKind::Map(items)
+        | FormKind::Set(items)
+        | FormKind::AnonFn(items) => items
+            .iter_mut()
+            .for_each(|item| redisplay_symbols(item, display)),
+        FormKind::Quote(f)
+        | FormKind::SyntaxQuote(f)
+        | FormKind::Unquote(f)
+        | FormKind::UnquoteSplice(f)
+        | FormKind::Deref(f)
+        | FormKind::Var(f)
+        | FormKind::TaggedLiteral(_, f) => redisplay_symbols(f, display),
+        FormKind::Meta(m, f) => {
+            redisplay_symbols(m, display);
+            redisplay_symbols(f, display);
+        }
+        _ => {}
+    }
+}
+
+/// `display-namespaces` `tidy`: how `qualifier/name` reads from inside `ns`.
+///
+/// The qualifier is dropped only when the bare name resolves, in `ns`, to the
+/// very var the qualified symbol names (defined there or referred), so the
+/// expansion still evaluates as shown. Otherwise the namespace is shortened to
+/// an alias `ns` has for it, or left as written.
+fn tidy_symbol(globals: &GlobalEnv, ns: &str, qualifier: &str, name: &str) -> Option<String> {
+    let full = globals.resolve_ns_part_in(ns, qualifier);
+    let bare_is_same_var = globals.lookup_var_in_ns(ns, name).is_some_and(|var| {
+        let var = var.get();
+        var.namespace == full && var.name.as_ref() == name
+    });
+    if bare_is_same_var {
+        return Some(name.to_string());
+    }
+    let namespaces = globals.namespaces.read().unwrap();
+    let current = namespaces.get(ns)?.get();
+    let aliases = current.aliases.lock().unwrap();
+    aliases
+        .iter()
+        .filter(|(_, target)| **target == full)
+        .map(|(alias, _)| alias)
+        .min_by_key(|alias| (alias.len(), alias.to_string()))
+        .map(|alias| format!("{alias}/{name}"))
+}
+
 /// Fetch `key` (as a keyword) from a metadata map value.
 fn meta_get(meta: &Value, key: &str) -> Option<Value> {
     match meta {
@@ -545,5 +755,205 @@ fn eval_error_message(e: &EvalError) -> String {
         EvalError::GasExhausted => "gas exhausted".to_string(),
         EvalError::Recur(_) => "recur outside of loop/fn".to_string(),
         other => other.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod display_namespaces_tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    /// A runtime with the stdlib, and a namespace `tidy.law` that has a core
+    /// name shadowed, a namespace under two aliases, a referred var, and a
+    /// required namespace with no alias.
+    fn law_globals() -> Arc<GlobalEnv> {
+        let runtime = cljrs_runtime::Runtime::builder()
+            .execution_mode(cljrs_runtime::ExecutionMode::Tiered)
+            .build()
+            .expect("runtime");
+        cljrs_stdlib::install(&runtime);
+        let globals = runtime.into_globals();
+        let mut env = cljrs_runtime::tiered::Env::new(globals.clone(), "user");
+        let src = "(ns tidy.law
+                     (:refer-clojure :exclude [map])
+                     (:require [clojure.string :as string]
+                               [clojure.string :as s]
+                               [clojure.set :refer [union]]
+                               [clojure.walk]))
+                   (def map 1)
+                   (def local 2)";
+        for form in parse(src) {
+            cljrs_runtime::tiered::eval(&form, &mut env).expect("setup");
+        }
+        globals
+    }
+
+    fn parse(src: &str) -> Vec<Form> {
+        cljrs_reader::Parser::new(src.to_string(), "<test>".to_string())
+            .parse_all()
+            .expect("parse")
+    }
+
+    fn tidied(globals: &GlobalEnv, symbol: &str) -> String {
+        let (qualifier, name) = symbol.split_once('/').expect("a qualified symbol");
+        tidy_symbol(globals, "tidy.law", qualifier, name).unwrap_or_else(|| symbol.to_string())
+    }
+
+    /// The var a printed symbol names when read from inside `tidy.law`.
+    fn names_var(globals: &GlobalEnv, shown: &str) -> Option<(String, String)> {
+        // The whole symbol first: core interns interop-style names such as
+        // `Math/hypot` whole, so a `/` does not always separate a namespace.
+        let whole = globals.lookup_var_in_ns("tidy.law", shown);
+        let var = whole.or_else(|| {
+            let (qualifier, name) = shown.split_once('/')?;
+            let full = globals.resolve_ns_part_in("tidy.law", qualifier);
+            globals.lookup_var_in_ns(&full, name)
+        })?;
+        let var = var.get();
+        Some((var.namespace.to_string(), var.name.to_string()))
+    }
+
+    #[test]
+    fn tidy_drops_a_namespace_only_where_the_bare_name_still_resolves() {
+        let globals = law_globals();
+        for (qualified, shown) in [
+            ("clojure.core/+", "+"),
+            ("tidy.law/local", "local"),
+            ("tidy.law/map", "map"),
+            // Excluded from the core refer and shadowed by a local def.
+            ("clojure.core/map", "clojure.core/map"),
+            ("clojure.set/union", "union"),
+            // Required, not referred, no alias: left as written.
+            ("clojure.walk/postwalk", "clojure.walk/postwalk"),
+            // Not referred: the shorter of the two aliases.
+            ("clojure.string/join", "s/join"),
+            ("string/join", "s/join"),
+            ("no.such.ns/f", "no.such.ns/f"),
+        ] {
+            assert_eq!(tidied(&globals, qualified), shown, "{qualified}");
+        }
+    }
+
+    /// The law `tidy` exists to keep: whatever it prints for a var names that
+    /// same var when read back in the namespace. Checked for every interned
+    /// var of every loaded namespace.
+    #[test]
+    fn a_tidied_symbol_names_the_var_it_was_printed_for() {
+        let globals = law_globals();
+        let vars: Vec<(String, String)> = {
+            let namespaces = globals.namespaces.read().unwrap();
+            namespaces
+                .iter()
+                .flat_map(|(ns, ptr)| {
+                    let interns = ptr.get().interns.lock().unwrap();
+                    interns
+                        .keys()
+                        .map(|name| (ns.to_string(), name.to_string()))
+                        .collect::<Vec<_>>()
+                })
+                .collect()
+        };
+        assert!(vars.len() > 500, "expected the stdlib, got {}", vars.len());
+        let mut stripped = 0;
+        for (ns, name) in vars {
+            let shown = tidied(&globals, &format!("{ns}/{name}"));
+            stripped += usize::from(shown == name);
+            assert_eq!(
+                names_var(&globals, &shown),
+                Some((ns.clone(), name.clone())),
+                "{ns}/{name} was shown as {shown}"
+            );
+        }
+        assert!(stripped > 100, "core's refers should print bare");
+    }
+
+    /// A generated form: symbols, some qualified, under nested collections.
+    #[derive(Clone, Debug)]
+    enum Tree {
+        Symbol(Option<String>, String),
+        List(Vec<Tree>),
+        Vector(Vec<Tree>),
+        Quote(Box<Tree>),
+    }
+
+    impl Tree {
+        fn source(&self, qualified: bool) -> String {
+            let all = |items: &[Tree]| {
+                items
+                    .iter()
+                    .map(|item| item.source(qualified))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            };
+            match self {
+                Tree::Symbol(Some(qualifier), name) if qualified => format!("{qualifier}/{name}"),
+                Tree::Symbol(_, name) => name.clone(),
+                Tree::List(items) => format!("({})", all(items)),
+                Tree::Vector(items) => format!("[{}]", all(items)),
+                Tree::Quote(item) => format!("'{}", item.source(qualified)),
+            }
+        }
+    }
+
+    fn tree() -> impl Strategy<Value = Tree> {
+        // The `x` keeps a generated name from reading as `nil`, `true`, …
+        let symbol = (
+            proptest::option::of("[a-z]{1,3}(\\.[a-z]{1,3})?"),
+            "x[a-z]{0,3}",
+        )
+            .prop_map(|(qualifier, name)| Tree::Symbol(qualifier, name));
+        symbol.prop_recursive(4, 24, 4, |inner| {
+            prop_oneof![
+                proptest::collection::vec(inner.clone(), 0..4).prop_map(Tree::List),
+                proptest::collection::vec(inner.clone(), 0..4).prop_map(Tree::Vector),
+                inner.prop_map(|item| Tree::Quote(Box::new(item))),
+            ]
+        })
+    }
+
+    fn printed(form: &Form) -> String {
+        let value = cljrs_runtime::builtins::form::form_to_value(form).expect("form value");
+        format!("{value}")
+    }
+
+    /// Metadata is part of the form: both the metadata and what it annotates
+    /// are redisplayed.
+    #[test]
+    fn symbols_in_metadata_and_under_it_are_redisplayed() {
+        let mut form = parse("^{:tag a.b/T} c.d/x").remove(0);
+        redisplay_symbols(&mut form, &|_, name| Some(name.to_string()));
+        let FormKind::Meta(meta, annotated) = &form.kind else {
+            panic!("expected a metadata form, got {:?}", form.kind);
+        };
+        let _alloc_frame = cljrs_gc::push_alloc_frame();
+        assert_eq!(printed(meta), "{:tag T}");
+        assert_eq!(printed(annotated), "x");
+    }
+
+    proptest! {
+        /// `none` prints exactly the form with every qualifier erased, and a
+        /// second pass changes nothing.
+        #[test]
+        fn none_erases_every_qualifier_and_nothing_else(tree in tree()) {
+            let _alloc_frame = cljrs_gc::push_alloc_frame();
+            let mut form = parse(&tree.source(true)).remove(0);
+            let bare = parse(&tree.source(false)).remove(0);
+            let strip = |_: &str, name: &str| Some(name.to_string());
+            redisplay_symbols(&mut form, &strip);
+            prop_assert_eq!(printed(&form), printed(&bare));
+            redisplay_symbols(&mut form, &strip);
+            prop_assert_eq!(printed(&form), printed(&bare));
+        }
+
+        /// A display that answers `None` (what `tidy` does for a symbol it
+        /// cannot shorten) leaves the form as written.
+        #[test]
+        fn a_symbol_with_no_shorter_display_is_left_as_written(tree in tree()) {
+            let _alloc_frame = cljrs_gc::push_alloc_frame();
+            let original = parse(&tree.source(true)).remove(0);
+            let mut form = original.clone();
+            redisplay_symbols(&mut form, &|_, _| None);
+            prop_assert_eq!(printed(&form), printed(&original));
+        }
     }
 }

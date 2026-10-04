@@ -45,8 +45,19 @@ use std::thread::sleep;
 use std::time::Duration;
 // ── Output capture (for with-out-str) ─────────────────────────────────────────
 
+/// One entry of the capture stack: a buffer, plus an optional sink that
+/// receives the buffered text incrementally (streamed capture).
+struct OutputCapture {
+    buf: String,
+    sink: Option<Box<dyn FnMut(&str)>>,
+}
+
+/// A streamed capture flushes once its buffer holds this many bytes, even
+/// without a newline.
+const STREAM_FLUSH_THRESHOLD: usize = 1024;
+
 thread_local! {
-    static OUTPUT_CAPTURE: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+    static OUTPUT_CAPTURE: std::cell::RefCell<Vec<OutputCapture>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
 // BigDecimal precision
@@ -105,26 +116,87 @@ fn apply_precision_or_default(result: BigDecimal) -> ValueResult<BigDecimal> {
 
 /// Push a new capture buffer onto the stack.
 pub fn push_output_capture() {
-    OUTPUT_CAPTURE.with(|stack| stack.borrow_mut().push(String::new()));
+    OUTPUT_CAPTURE.with(|stack| {
+        stack.borrow_mut().push(OutputCapture {
+            buf: String::new(),
+            sink: None,
+        })
+    });
 }
 
-/// Pop the top capture buffer and return its contents.
+/// Push `buf` as the capture buffer, continuing a capture previously taken off
+/// the stack with [`pop_output_capture`]. The async evaluator uses this to keep
+/// a `with-out-str` buffer installed only while its own task is being polled.
+/// Only the plain (non-streamed) capture it pushed round-trips this way; a
+/// streamed capture below it on the stack is never popped by that evaluator.
+pub fn resume_output_capture(buf: String) {
+    OUTPUT_CAPTURE.with(|stack| stack.borrow_mut().push(OutputCapture { buf, sink: None }));
+}
+
+/// Push a *streamed* capture: output written while it is the top of the
+/// stack is handed to `sink` as it is produced — at each newline, once
+/// [`STREAM_FLUSH_THRESHOLD`] bytes are pending, and when the capture is
+/// popped. A nested [`push_output_capture`] (e.g. `with-out-str`) still
+/// captures its own output without streaming it.
+pub fn push_streaming_output_capture(sink: Box<dyn FnMut(&str)>) {
+    OUTPUT_CAPTURE.with(|stack| {
+        stack.borrow_mut().push(OutputCapture {
+            buf: String::new(),
+            sink: Some(sink),
+        })
+    });
+}
+
+/// Pop the top capture buffer and return its contents. For a streamed
+/// capture the pending text is flushed to its sink first and the returned
+/// string is empty.
 pub fn pop_output_capture() -> Option<String> {
-    OUTPUT_CAPTURE.with(|stack| stack.borrow_mut().pop())
+    let top = OUTPUT_CAPTURE.with(|stack| stack.borrow_mut().pop())?;
+    match top.sink {
+        None => Some(top.buf),
+        Some(mut sink) => {
+            if !top.buf.is_empty() {
+                sink(&top.buf);
+            }
+            Some(String::new())
+        }
+    }
 }
 
 /// Write to the current capture buffer if active, otherwise to stdout.
 /// Returns true if captured, false if written to stdout.
 fn capture_or_print(s: &str) -> bool {
-    OUTPUT_CAPTURE.with(|stack| {
+    // Take any chunk due for a streamed flush out of the stack, and call the
+    // sink with the stack unborrowed (the sink may run arbitrary code).
+    let due = OUTPUT_CAPTURE.with(|stack| {
         let mut stack = stack.borrow_mut();
-        if let Some(buf) = stack.last_mut() {
-            buf.push_str(s);
-            true
+        let top = stack.last_mut()?;
+        top.buf.push_str(s);
+        top.sink.as_ref()?;
+        let cut = if top.buf.len() >= STREAM_FLUSH_THRESHOLD {
+            top.buf.len()
         } else {
-            false
+            top.buf.rfind('\n').map(|i| i + 1)?
+        };
+        let rest = top.buf.split_off(cut);
+        let chunk = std::mem::replace(&mut top.buf, rest);
+        // Borrow the sink out while it runs.
+        let depth = stack.len();
+        let top = stack.last_mut()?;
+        top.sink.take().map(|sink| (chunk, sink, depth))
+    });
+    let Some((chunk, mut sink, depth)) = due else {
+        return OUTPUT_CAPTURE.with(|stack| !stack.borrow().is_empty());
+    };
+    sink(&chunk);
+    OUTPUT_CAPTURE.with(|stack| {
+        if let Some(entry) = stack.borrow_mut().get_mut(depth - 1)
+            && entry.sink.is_none()
+        {
+            entry.sink = Some(sink);
         }
-    })
+    });
+    true
 }
 
 // ── Docstrings ───────────────────────────────────────────────────────────────
@@ -375,6 +447,10 @@ const BUILTIN_DOCS: &[(&str, &str)] = &[
     ),
     ("satisfies?", "Returns true if x extends protocol."),
     ("extends?", "Returns true if atype extends protocol."),
+    (
+        "extenders",
+        "Returns a seq of the types extending protocol, or nil if none do.",
+    ),
     ("uuid?", "Returns true if x is a UUID."),
     (
         "native-object?",
@@ -1540,6 +1616,7 @@ pub fn register_all(globals: &Arc<GlobalEnv>, ns: &str) {
         ("extends?", Arity::Fixed(2), builtin_extends_q),
         ("multi-fn", Arity::Variadic { min: 2 }, builtin_multi_fn),
         ("add-method", Arity::Fixed(3), builtin_add_method),
+        ("extenders", Arity::Fixed(1), builtin_extenders),
         ("prefer-method", Arity::Fixed(3), builtin_prefer_method),
         ("remove-method", Arity::Fixed(2), builtin_remove_method),
         ("methods", Arity::Fixed(1), builtin_methods),
@@ -8012,6 +8089,46 @@ fn builtin_extends_q(args: &[Value]) -> ValueResult<Value> {
     };
     let impls = proto.get().impls.lock().unwrap();
     Ok(Value::Bool(impls.contains_key(type_tag.as_ref())))
+}
+
+/// `(extenders protocol)` — the types that extend `protocol`, as symbols.
+///
+/// Mirrors Clojure's `(keys (:impls protocol))`, including its `nil` for a
+/// protocol nothing has extended yet: `keys` of an empty map is `nil`, not an
+/// empty seq, and code that threads the result through `seq`/`when-let`
+/// depends on that.
+///
+/// The tags are sorted. The registry behind them is a `HashMap`, so the
+/// natural iteration order differs between runs of the same program, and a
+/// caller printing or diffing this would see spurious churn. Clojure promises
+/// no particular order either, which makes sorting free to choose and the only
+/// reproducible choice.
+///
+/// A type extended through `:extend-via-metadata` is deliberately absent: it
+/// never enters `impls`, and the metadata carrier is the value, not the type.
+/// Clojure's `extenders` reports the impls map only, for the same reason.
+fn builtin_extenders(args: &[Value]) -> ValueResult<Value> {
+    let proto = match &args[0] {
+        Value::Protocol(p) => p.clone(),
+        v => {
+            return Err(ValueError::WrongType {
+                expected: "protocol",
+                got: v.type_name().to_string(),
+            });
+        }
+    };
+    let mut tags: Vec<Arc<str>> = {
+        let impls = proto.get().impls.lock().unwrap();
+        impls.keys().cloned().collect()
+    };
+    if tags.is_empty() {
+        return Ok(Value::Nil);
+    }
+    tags.sort_unstable();
+    Ok(Value::List(GcPtr::new(PersistentList::from_iter(
+        tags.into_iter()
+            .map(|t| Value::symbol(Symbol::simple(t.as_ref()))),
+    ))))
 }
 
 fn builtin_prefer_method(args: &[Value]) -> ValueResult<Value> {

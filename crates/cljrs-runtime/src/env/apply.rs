@@ -242,6 +242,32 @@ pub fn type_tag_of(val: &Value) -> Arc<str> {
     }
 }
 
+/// What to add to a "No implementation" error when the method is registered
+/// under the unqualified name of the type being dispatched on.
+///
+/// A record's tag is `my.ns.Point`. An `extend-type` or `extend-protocol` that
+/// names `Point` from a namespace where the symbol does not resolve cannot tell
+/// it from a native type's tag, so it registers under bare `Point` and
+/// succeeds; the call is where that surfaces. Empty when there is no such
+/// registration.
+fn unqualified_impl_hint<V>(
+    impls: &std::collections::HashMap<Arc<str>, std::collections::HashMap<Arc<str>, V>>,
+    tag: &str,
+    method: &str,
+) -> String {
+    let Some((_, bare)) = tag.rsplit_once('.') else {
+        return String::new();
+    };
+    if !impls.get(bare).is_some_and(|m| m.contains_key(method)) {
+        return String::new();
+    }
+    format!(
+        " (an implementation is registered under the unqualified tag {bare}: \
+         where it was extended, {bare} did not resolve to {tag}; \
+         :import or :refer the type there)"
+    )
+}
+
 /// Allocation-free check that `val`'s protocol dispatch tag equals `tag`.
 ///
 /// Must agree exactly with [`type_tag_of`] — it exists so inline caches
@@ -390,9 +416,10 @@ pub fn apply_value(callee: &Value, args: Vec<Value>, env: &mut Env) -> EvalResul
                 .cloned()
                 .ok_or_else(|| {
                     EvalError::Runtime(format!(
-                        "No implementation of protocol {} for type {}",
+                        "No implementation of protocol {} for type {}{}",
                         pf_ref.protocol.get().name,
-                        tag
+                        tag,
+                        unqualified_impl_hint(&impls, &tag, &pf_ref.method_name)
                     ))
                 })?;
             drop(impls);
@@ -512,5 +539,57 @@ pub fn apply_value(callee: &Value, args: Vec<Value>, env: &mut Env) -> EvalResul
             "<{}> is not callable",
             other.type_name()
         ))),
+    }
+}
+
+#[cfg(test)]
+mod unqualified_impl_hint_tests {
+    use super::unqualified_impl_hint;
+    use proptest::prelude::*;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    proptest! {
+        /// A hint is given exactly when the dispatch tag is qualified and the
+        /// method called is registered under the tag's last segment; it then
+        /// names both tags. An impl of another method under the bare name, or
+        /// of this method under another tag, does not earn one.
+        #[test]
+        fn a_hint_is_given_iff_the_method_sits_under_the_bare_name(
+            ns in "[a-z]{1,4}(\\.[a-z]{1,4}){0,2}",
+            name in "[A-Z][a-z]{0,4}",
+            method in "[a-z]{1,4}",
+            qualified in any::<bool>(),
+            method_under_bare in any::<bool>(),
+            other_method_under_bare in any::<bool>(),
+            method_under_other_tag in any::<bool>(),
+        ) {
+            let mut impls: HashMap<Arc<str>, HashMap<Arc<str>, ()>> = HashMap::new();
+            let mut register = |tag: &str, method: &str| {
+                impls
+                    .entry(Arc::from(tag))
+                    .or_default()
+                    .insert(Arc::from(method), ());
+            };
+            if method_under_bare {
+                register(&name, &method);
+            }
+            if other_method_under_bare {
+                register(&name, &format!("{method}-other"));
+            }
+            if method_under_other_tag {
+                register(&format!("{name}Other"), &method);
+                register(&format!("other.{ns}.{name}"), &method);
+            }
+            let tag = if qualified { format!("{ns}.{name}") } else { name.clone() };
+
+            let hint = unqualified_impl_hint(&impls, &tag, &method);
+
+            prop_assert_eq!(!hint.is_empty(), qualified && method_under_bare, "{}", hint);
+            if !hint.is_empty() {
+                prop_assert!(hint.contains(&format!("unqualified tag {name}:")), "{}", hint);
+                prop_assert!(hint.contains(&format!("resolve to {tag};")), "{}", hint);
+            }
+        }
     }
 }
