@@ -24,7 +24,7 @@ pub fn builtin_transient(args: &[Value]) -> ValueResult<Value> {
             TransientVector::new_from_vector(v.get().inner()),
         ))),
         Value::TransientMap(_) | Value::TransientVector(_) | Value::TransientSet(_) => {
-            Ok(args[0].clone())
+            Err(ValueError::Other("value is already transient".into()))
         }
         v => Err(ValueError::WrongType {
             expected: "editable",
