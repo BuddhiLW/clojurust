@@ -5,6 +5,7 @@
 
 use std::ptr::NonNull;
 
+pub mod governor;
 pub mod region;
 pub mod stats;
 
@@ -18,7 +19,15 @@ pub mod alloc_ctx;
 #[cfg(feature = "no-gc")]
 pub mod static_arena;
 
-pub use stats::{CLJRS_GC_STATS_ENV, GC_STATS, GcStats, GcStatsSnapshot, dump_stats_from_env};
+pub use governor::{
+    IsolateAccount, IsolateControl, MemoryCharge, MemoryClass, MemoryConfig, MemoryConfigError,
+    MemoryLimitExceeded, MemorySnapshot, PressureLevel, ProcessMemoryGovernor, governor,
+    register_current_isolate,
+};
+pub use stats::{
+    CLJRS_GC_STATS_ENV, GC_STATS, GcStats, GcStatsSnapshot, dump_stats_from_env,
+    report as stats_report,
+};
 
 // ── Re-exports from active implementation ─────────────────────────────────────
 
@@ -600,11 +609,17 @@ mod gc_full {
                 std::env::var("CLJRS_GC_SOFT_LIMIT_MB").ok().as_deref(),
                 default_soft_limit,
             );
-            let hard_limit_mb = parse_limit_mb(
+            let mut hard_limit_mb = parse_limit_mb(
                 "CLJRS_GC_HARD_LIMIT_MB",
                 std::env::var("CLJRS_GC_HARD_LIMIT_MB").ok().as_deref(),
                 soft_limit_mb,
             );
+            if hard_limit_mb < soft_limit_mb {
+                eprintln!(
+                    "[gc] warning: CLJRS_GC_HARD_LIMIT_MB is below CLJRS_GC_SOFT_LIMIT_MB; using the soft limit for both"
+                );
+                hard_limit_mb = soft_limit_mb;
+            }
             self.set_config(Arc::new(GcConfig::with_limits(
                 soft_limit_mb,
                 hard_limit_mb,
@@ -652,6 +667,7 @@ mod gc_full {
             self.total_allocated_bytes
                 .fetch_add(obj_size, Ordering::Relaxed);
             crate::stats::GC_STATS.record_gc_alloc(obj_size);
+            crate::governor::with_current_account(|a| a.charge(obj_size));
             let current_usage =
                 self.memory_in_use.fetch_add(obj_size, Ordering::Relaxed) + obj_size;
 
@@ -751,12 +767,21 @@ mod gc_full {
             // accurate so GC fires again when the heap genuinely grows.
             self.memory_in_use.fetch_sub(freed_bytes, Ordering::Relaxed);
             let sweep_elapsed = sweep_start.elapsed();
+            let post_memory = self.memory_in_use.load(Ordering::Relaxed);
+            crate::governor::with_current_account(|a| {
+                a.release(freed_bytes);
+                a.record_collection(crate::governor::CollectionReport {
+                    bytes_before: pre_memory,
+                    bytes_after: post_memory,
+                    bytes_returned: freed_bytes,
+                    duration: mark_elapsed + sweep_elapsed,
+                });
+            });
             crate::stats::GC_STATS.record_gc_pause(
                 mark_elapsed + sweep_elapsed,
                 freed_count as u64,
                 freed_bytes as u64,
             );
-            let post_memory = self.memory_in_use.load(Ordering::Relaxed);
             tracing::debug!(
                 target: "gc",
                 "collection complete: freed {} (~{} bytes), {} remaining (~{} bytes), mark={:.2?} sweep={:.2?}",
@@ -946,6 +971,18 @@ mod nogc_stubs {
         }
         pub fn with_limits(_: usize, _: usize) -> Self {
             Self
+        }
+        pub fn with_soft_limit(_: usize) -> Self {
+            Self
+        }
+        pub fn try_with_limits(
+            soft_limit: usize,
+            hard_limit: usize,
+        ) -> Result<Self, crate::governor::MemoryConfigError> {
+            crate::governor::MemoryConfig::with_limits(soft_limit, hard_limit).map(|_| Self)
+        }
+        pub fn validate(&self) -> Result<(), crate::governor::MemoryConfigError> {
+            Ok(())
         }
     }
     impl Default for GcConfig {

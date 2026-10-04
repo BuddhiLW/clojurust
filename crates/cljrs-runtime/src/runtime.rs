@@ -188,6 +188,9 @@ impl RuntimeBuilder {
     /// itself always tree-walks, because nothing can be lowered before
     /// `clojure.core` exists.
     pub fn build(self) -> Result<Runtime, BuildError> {
+        // Register this thread with the process memory governor (under its
+        // thread name, unless already registered) before the first allocation.
+        let _ = cljrs_gc::governor::current_control();
         let globals = GlobalEnv::new(self.execution_mode);
 
         // Native clojure.core, then a `user` namespace referring it.

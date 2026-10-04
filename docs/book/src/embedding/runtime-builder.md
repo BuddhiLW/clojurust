@@ -62,7 +62,7 @@ use std::sync::Arc;
 use cljrs_gc::GcConfig;
 
 let runtime = Runtime::builder()
-    .gc_config_from_env(false)                       // ignore CLJRS_GC_* entirely
+    .gc_config_from_env(false)                       // heap ignores CLJRS_GC_*
     .gc_config(Arc::new(GcConfig::with_limits(
         64 * 1024 * 1024,                            // soft: 64 MB
         128 * 1024 * 1024,                           // hard: 128 MB
@@ -183,8 +183,13 @@ one. Clone it freely to hand to extension `install` functions.
 
 | Variable | Read by | Effect |
 |---|---|---|
-| `CLJRS_GC_SOFT_LIMIT_MB` | `build()`, when `gc_config_from_env` is on | Soft heap limit in MB (default: a third of system memory). |
-| `CLJRS_GC_HARD_LIMIT_MB` | same | Hard heap limit in MB (defaults to the soft limit). |
+| `CLJRS_GC_SOFT_LIMIT_MB` | `build()`, when `gc_config_from_env` is on | Per-isolate soft heap limit in MB (default: a third of system memory). Also a deprecated alias for `CLJRS_MEMORY_SOFT_LIMIT_MB`; the governor warns when it reads it. |
+| `CLJRS_GC_HARD_LIMIT_MB` | same | Per-isolate hard heap limit in MB (defaults to, and is never below, the soft limit; not enforced). Also a deprecated alias for `CLJRS_MEMORY_HARD_LIMIT_MB`. |
+| `CLJRS_MEMORY_SOFT_LIMIT_MB` | first allocation in the process | Process-wide managed-memory soft limit (default: 75% of the hard limit). |
+| `CLJRS_MEMORY_HARD_LIMIT_MB` | same | Process-wide managed-memory hard limit (default: the cgroup limit, else half of physical memory). Observed, not yet enforced. |
+| `CLJRS_MEMORY_CRITICAL_RESERVE_MB` | same | Reserve for runtime control operations (default: max(4 MiB, 1% of the hard limit), at most 256 MiB). |
+| `CLJRS_MEMORY_CREDIT_KB` | same | Isolate accounting chunk (default: 64). |
+| `CLJRS_ISOLATE_QUEUE_LIMIT_MB` | same | Default byte limit for one isolate channel (default: 64, at most the hard limit). Not yet applied. |
 | `CLJRS_NO_IR` | `build()` | Pins the runtime at `TierState::TreeWalk` regardless of the execution mode. |
 | `CLJRS_GC_STATS` | `cljrs_gc::dump_stats_from_env()` | Where to write a `GC_STATS` snapshot — unset does nothing, empty or `-` means stdout, anything else is a file path. Nothing reads it on its own; call `dump_stats_from_env()` at exit if you want the behaviour the CLI's `--gc-stats` flag gives. |
 

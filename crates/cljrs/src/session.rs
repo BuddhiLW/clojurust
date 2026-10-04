@@ -17,19 +17,35 @@ use cljrs_value::Value;
 use crate::native;
 
 /// Build GC config from CLI flags, or use defaults if not specified.
+///
+/// The limits apply to each isolate heap as a collection trigger, and any
+/// limit given on the command line also configures the process-wide memory
+/// governor (`cljrs_gc::governor`), which reports, but does not yet enforce,
+/// the hard limit.  A zero hard limit or a soft limit above the hard limit is
+/// rejected.
 pub fn build_gc_config(
     soft_limit_mb: Option<usize>,
     hard_limit_mb: Option<usize>,
-) -> Arc<GcConfig> {
-    match (soft_limit_mb, hard_limit_mb) {
-        (Some(soft), Some(hard)) => Arc::new(GcConfig::with_limits(
-            soft * 1024 * 1024,
-            hard * 1024 * 1024,
-        )),
-        (Some(soft), None) => Arc::new(GcConfig::with_hard_limit(soft * 1024 * 1024)),
-        (None, Some(hard)) => Arc::new(GcConfig::with_hard_limit(hard * 1024 * 1024)),
-        (None, None) => Arc::new(GcConfig::new()),
-    }
+) -> miette::Result<Arc<GcConfig>> {
+    let mb = |n: usize| n.saturating_mul(1024 * 1024);
+    let invalid = |e: cljrs_gc::MemoryConfigError| miette::miette!("invalid GC limits: {e}");
+    let config = match (soft_limit_mb, hard_limit_mb) {
+        (Some(soft), Some(hard)) => {
+            GcConfig::try_with_limits(mb(soft), mb(hard)).map_err(invalid)?
+        }
+        (Some(soft), None) => GcConfig::with_soft_limit(mb(soft)),
+        (None, Some(hard)) => {
+            let config = GcConfig::with_hard_limit(mb(hard));
+            config.validate().map_err(invalid)?;
+            config
+        }
+        (None, None) => return Ok(Arc::new(GcConfig::new())),
+    };
+    let memory =
+        cljrs_gc::MemoryConfig::from_optional_limits(soft_limit_mb.map(mb), hard_limit_mb.map(mb))
+            .map_err(invalid)?;
+    cljrs_gc::governor().configure(memory).map_err(invalid)?;
+    Ok(Arc::new(config))
 }
 
 /// CLI-level versioned-symbol policy flags, threaded into `setup_globals`.
@@ -469,5 +485,37 @@ pub fn format_eval_error(e: EvalError) -> miette::Report {
         EvalError::CommitSignatureVerificationFailed { commit, reason } => {
             miette::miette!("commit {commit:?} failed signature verification: {reason}")
         }
+    }
+}
+
+#[cfg(test)]
+mod gc_config_tests {
+    use super::build_gc_config;
+
+    const MB: usize = 1024 * 1024;
+
+    #[test]
+    fn soft_only_sets_the_soft_limit() {
+        let config = build_gc_config(Some(64), None).unwrap();
+        assert_eq!(config.soft_limit(), 64 * MB);
+        assert!(config.hard_limit() >= 64 * MB);
+    }
+
+    #[test]
+    fn both_limits_are_kept() {
+        let config = build_gc_config(Some(64), Some(128)).unwrap();
+        assert_eq!(config.soft_limit(), 64 * MB);
+        assert_eq!(config.hard_limit(), 128 * MB);
+    }
+
+    #[test]
+    fn soft_above_hard_is_rejected() {
+        assert!(build_gc_config(Some(256), Some(128)).is_err());
+    }
+
+    #[test]
+    fn zero_hard_limit_is_rejected() {
+        assert!(build_gc_config(None, Some(0)).is_err());
+        assert!(build_gc_config(Some(0), Some(0)).is_err());
     }
 }

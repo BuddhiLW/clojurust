@@ -32,13 +32,23 @@ after CLI paths.
 
 ### `--gc-soft-limit-mb <MB>`
 
-Soft memory limit for the GC in megabytes. When live heap exceeds this value,
-a collection is triggered at the next safepoint.
+Soft memory limit for the GC in megabytes. When one isolate's heap exceeds
+this value, a collection is triggered at the next safepoint. Each isolate heap
+applies the limit independently. The value also sets the process-wide memory
+governor's soft limit: when managed memory across all isolates reaches it, the
+governor asks the allocating isolate (and the largest heap) to collect.
+
+Given alone, it leaves the hard limit at its default (raised to the soft limit
+if the soft limit is larger).
 
 ### `--gc-hard-limit-mb <MB>`
 
-Hard memory limit for the GC in megabytes. When live heap exceeds this value,
-a collection is forced immediately.
+Process-wide managed-memory hard limit in megabytes. It is **not enforced
+yet**: the memory governor runs in observe-only mode, and allocations above the
+limit succeed. `--gc-stats` reports how many allocations went over it. Without
+`--gc-soft-limit-mb`, the soft limit is 75% of this value.
+
+A zero hard limit, or a soft limit above the hard limit, is rejected.
 
 ## Examples
 

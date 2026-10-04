@@ -196,6 +196,12 @@ impl fmt::Display for GcStatsSnapshot {
 /// Process-global GC statistics counters.
 pub static GC_STATS: GcStats = GcStats::new();
 
+/// The full `--gc-stats` report: the [`GC_STATS`] counters followed by the
+/// process governor's [`crate::governor::MemorySnapshot`].
+pub fn report() -> String {
+    format!("{}\n{}", GC_STATS.snapshot(), crate::governor::snapshot())
+}
+
 /// Environment variable consulted by [`dump_stats_from_env`].
 pub const CLJRS_GC_STATS_ENV: &str = "CLJRS_GC_STATS";
 
@@ -216,7 +222,7 @@ pub fn dump_stats_from_env() {
         Err(_) => return,
     };
 
-    let snapshot = GC_STATS.snapshot();
+    let snapshot = report();
     let result = if target.is_empty() || target == "-" {
         println!("{snapshot}");
         Ok(())

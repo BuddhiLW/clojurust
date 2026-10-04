@@ -1,6 +1,7 @@
 # Process-Wide Managed-Memory Governor
 
-Status: proposed
+Status: Phases 0 and 1 implemented (observe-only accounting). Phases 2 through 5 are open.
+See [Implementation status](#implementation-status).
 
 This document defines a process-wide governor for memory that clojurust manages.
 The governor preserves private isolate heaps and independent garbage collection.
@@ -575,6 +576,43 @@ Exact snapshot consistency is not required.
 Each snapshot field must represent a valid atomic observation.
 
 ## Implementation plan
+
+### Implementation status
+
+Phase 0 is complete:
+
+- `--gc-soft-limit-mb` alone sets the soft limit (`GcConfig::with_soft_limit`).
+- The CLI rejects a zero hard limit and a soft limit above the hard limit.
+- `CLJRS_GC_HARD_LIMIT_MB` below `CLJRS_GC_SOFT_LIMIT_MB` produces a warning and uses the soft limit.
+- `GcConfig`, the CLI help, and the book state that the hard limit is not enforced.
+- `crates/cljrs-gc/tests/governor.rs` shows two heaps that each stay under the soft limit while their sum exceeds it.
+
+Phase 1 is complete in `crates/cljrs-gc/src/governor.rs`:
+
+- `MemoryConfig` reads the `CLJRS_MEMORY_*` variables and the deprecated aliases, and it rejects the invalid states listed in [Configuration](#configuration).
+- The CLI limit flags configure the process governor.
+- `Runtime::build` and `Isolate::spawn` register the calling thread. A thread that allocates first is registered under its thread name.
+- `GcHeap::alloc` charges the thread's `IsolateAccount`. `GcHeap::collect` returns the freed header sizes and reports the collection.
+- The GC request flag moved to `IsolateControl`, so the governor can request collection across threads.
+- `--gc-stats` and `CLJRS_GC_STATS` print the `MemorySnapshot` after the GC counters.
+- Pressure transitions log under the `memory` tracing target.
+
+Phase 1 decisions that later phases must keep or replace:
+
+- An account publishes to the process counters after each credit chunk of growth and after each collection.
+  The normal allocation path uses only thread-local cells. Phase 2 replaces publication with granted credit.
+- Committed bytes equal used bytes, and `free_credit_bytes` is zero.
+- In observe-only mode, growth that ends above the hard limit increments `over_limit_events`.
+  It does not reject the allocation.
+- After each collection, the isolate gets a collection target.
+  For a collection that frees memory, the target is the remaining bytes plus the larger of half the remaining bytes or 16 credit chunks (at least 1 MiB).
+  For a zero-yield collection, the headroom is the larger of the remaining bytes or that minimum.
+  At `Yellow`, the governor requests collection only above this target. At `Red`, it ignores the target.
+  The governor makes at most one request per collection epoch in both cases.
+- The default hard limit is the cgroup memory limit, or half of physical memory if no cgroup limit applies.
+- Thread exit drops the account and returns its charge.
+  The heap objects remain allocated because the heap shutdown pass is not implemented yet.
+- The heap-local soft limit still triggers collection. Phase 2 replaces it with dynamic targets.
 
 ### Phase 0: correct the current limit behavior
 
