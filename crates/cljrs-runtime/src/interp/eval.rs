@@ -444,7 +444,7 @@ fn eval_tagged_literal(tag: &str, inner: &Form, env: &mut Env) -> EvalResult {
                 Value::Str(s) => {
                     let uuid = uuid::Uuid::parse_str(s.get())
                         .map_err(|e| EvalError::Runtime(format!("invalid UUID: {e}")))?;
-                    Ok(Value::Uuid(uuid.as_u128()))
+                    Ok(Value::uuid(uuid.as_u128()))
                 }
                 _ => Err(EvalError::Runtime(format!(
                     "#uuid expects a string, got {}",

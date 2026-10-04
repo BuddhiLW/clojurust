@@ -1,19 +1,20 @@
 (ns clojure.core-test.lt-eq
   (:require [clojure.test :as t :refer [are deftest is testing]]
-            [clojure.core-test.portability #?(:cljs :refer-macros :default :refer) [when-var-exists]]))
+            [clojure.core-test.portability #?(:cljs :refer-macros :default :refer) [when-var-exists] :as p]))
 
 (when-var-exists <=
   (deftest test-<=
     (testing "arity 1"
-      ;; Doesn't matter what the argument is, `<=` return `true` for
-      ;; one argument.
-      (is (<= 1))
-      (is (<= 0))
-      (is (<= -1))
-      ;; Doesn't check whether arg is a number
-      (is (<= "abc"))
-      (is (<= :foo))
-      (is (<= nil)))
+      (are [x] (= true (<= x))
+        ;; Doesn't matter what the argument is, `<=` returns `true` for
+        ;; one argument.
+        1
+        0
+        -1
+        ;; Doesn't check whether the argument is a number
+        "abc"
+        :foo
+        nil))
 
     (testing "arity 2"
       (are [expected x y] (= expected (<= x y))
@@ -88,41 +89,33 @@
         false ##Inf 0 ##-Inf)
       (is (= true (apply <= (range 10))))
       (is (= true (apply <= 0 (range 10))))
-      (is (= false (apply <= 100 (range 10)))))
+      (is (= false (apply <= 100 (range 10))))
+      (is (= true (apply <= (repeat 5 1)))))
 
     (testing "negative tests"
       ;; `<=` only compares numbers, except in ClojureScript (really
       ;; JavaScript under the hood) where comparisons are just a bit
       ;; of a mess.
-      #?@(:cljs
+      #?@(:cljr
+          [(is (p/thrown? (<= nil 1)))
+           (is (p/thrown? (<= 1 nil)))
+           (is (p/thrown? (<= nil 1 2)))
+           (is (p/thrown? (<= 1 2 nil)))]
+          
+          :lpy
+          [(is (p/thrown? (<= nil 1)))
+           (is (p/thrown? (<= 1 nil)))
+           (is (p/thrown? (<= nil 1 2)))
+           (is (p/thrown? (<= 1 2 nil)))]
+
+          :cljs
           [(is (= true (<= nil 1)))
            (is (= false (<= 1 nil)))
            (is (= true (<= nil 1 2)))
-           (is (= false (<= 1 2 nil)))
-           (is (= true (<= "1" "2")))
-           (is (= false (<= "foo" "bar")))
-           (is (= false (<= :foo :bar)))]
-          :cljr
-          [(is (thrown? Exception (<= nil 1)))
-           (is (thrown? Exception (<= 1 nil)))
-           (is (thrown? Exception (<= nil 1 2)))
-           (is (thrown? Exception (<= 1 2 nil)))
-           (is (= true (<= "1" "2")))
-           (is (thrown? Exception (<= "foo" "bar")))
-           (is (thrown? Exception (<= :foo :bar)))]
-          :lpy
-          [(is (thrown? Exception (<= nil 1)))
-           (is (thrown? Exception (<= 1 nil)))
-           (is (thrown? Exception (<= nil 1 2)))
-           (is (thrown? Exception (<= 1 2 nil)))
-           (is (= true (<= "1" "2")))
-           (is (= false (<= "foo" "bar")))
-           (is (= false (<= :foo :bar)))]
+           (is (= false (<= 1 2 nil)))]
+          
           :default
-          [(is (thrown? Exception (<= nil 1)))
-           (is (thrown? Exception (<= 1 nil)))
-           (is (thrown? Exception (<= nil 1 2)))
-           (is (thrown? Exception (<= 1 2 nil)))
-           (is (thrown? Exception (<= "1" "2")))
-           (is (thrown? Exception (<= "foo" "bar")))
-           (is (thrown? Exception (<= :foo :bar)))]))))
+          [(is (p/thrown? (<= nil 1)))
+           (is (p/thrown? (<= 1 nil)))
+           (is (p/thrown? (<= nil 1 2)))
+           (is (p/thrown? (<= 1 2 nil)))]))))

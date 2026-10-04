@@ -1,7 +1,7 @@
 (ns clojure.core-test.empty-qmark
   (:require clojure.core
             [clojure.test :as t :refer [deftest is testing]]
-            [clojure.core-test.portability #?(:cljs :refer-macros :default :refer) [when-var-exists]]))
+            [clojure.core-test.portability #?(:cljs :refer-macros :default :refer) [when-var-exists] :as p]))
 
 (when-var-exists empty?
   (deftest test-empty?
@@ -18,12 +18,12 @@
       (is (= false (empty? "abc")))
       (is (= false (empty? #{0 \space "a"})))
       (is (= false (empty? [(repeat (range))])))
-      #?@(:cljs [(is (= false (empty? \space)))
-                 (is (thrown? js/Error (empty? 0)))
-                 (is (thrown? js/Error (empty? 0.0)))]
-          :lpy [(is (= false (empty? \space)))
-                (is (thrown? Exception (empty? 0)))
-                (is (thrown? Exception (empty? 0.0)))]
-          :default [(is (thrown? Exception (empty? 0)))
-                    (is (thrown? Exception (empty? 0.0)))
-                    (is (thrown? Exception (empty? \space)))]))))
+      #?@(:lpy [(is (= false (empty? \space)))
+                (is (p/thrown? (empty? 0)))
+                (is (p/thrown? (empty? 0.0)))]
+          :cljs [(is (= false (empty? \space)))
+                 (is (p/thrown? (empty? 0)))
+                 (is (p/thrown? (empty? 0.0)))]
+          :default [(is (p/thrown? (empty? 0)))
+                    (is (p/thrown? (empty? 0.0)))
+                    (is (p/thrown? (empty? \space)))]))))

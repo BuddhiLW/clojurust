@@ -1912,6 +1912,10 @@ impl Iterator for ValueIter {
                     });
                     self.current = Value::List(GcPtr::new(PersistentList::from_iter(pairs)));
                 }
+                Value::Queue(q) => {
+                    let items = q.get().iter().cloned().collect::<Vec<_>>();
+                    self.current = Value::List(GcPtr::new(PersistentList::from_iter(items)));
+                }
                 Value::Str(s) => {
                     let chars: Vec<Value> = s.get().chars().map(Value::Char).collect();
                     self.current = Value::List(GcPtr::new(PersistentList::from_iter(chars)));
@@ -2015,12 +2019,13 @@ impl Iterator for ValueIter {
 
 // ── Helper: value to sequence vector (eager — use only when random access is needed) ──
 
-fn value_to_seq(v: &Value) -> ValueResult<Vec<Value>> {
+pub(crate) fn value_to_seq(v: &Value) -> ValueResult<Vec<Value>> {
     match v {
         Value::List(_)
         | Value::Map(_)
         | Value::Set(_)
         | Value::Vector(_)
+        | Value::Queue(_)
         | Value::Cons(_)
         | Value::LazySeq(_)
         | Value::ObjectArray(_)
@@ -2046,6 +2051,32 @@ fn value_to_seq(v: &Value) -> ValueResult<Vec<Value>> {
             expected: "seqable",
             got: v.type_name().to_string(),
         }),
+    }
+}
+
+fn is_seqable(v: &Value) -> bool {
+    match v {
+        Value::WithMeta(inner, _) => is_seqable(inner),
+        Value::Nil
+        | Value::List(_)
+        | Value::Map(_)
+        | Value::Set(_)
+        | Value::Vector(_)
+        | Value::Queue(_)
+        | Value::Cons(_)
+        | Value::LazySeq(_)
+        | Value::ObjectArray(_)
+        | Value::BooleanArray(_)
+        | Value::ByteArray(_)
+        | Value::ShortArray(_)
+        | Value::IntArray(_)
+        | Value::LongArray(_)
+        | Value::CharArray(_)
+        | Value::FloatArray(_)
+        | Value::DoubleArray(_)
+        | Value::Str(_)
+        | Value::TypeInstance(_) => true,
+        _ => false,
     }
 }
 
@@ -2104,7 +2135,8 @@ fn numeric_as_bigdecimal(v: &Value) -> ValueResult<BigDecimal> {
         Value::Long(n) => Ok(BigDecimal::from(*n)),
         Value::BigInt(n) => Ok(BigDecimal::from(n.get().clone())),
         Value::BigDecimal(d) => Ok(d.get().clone()),
-        Value::Double(f) => Ok(BigDecimal::try_from(*f).unwrap_or_else(|_| BigDecimal::from(0))),
+        Value::Double(f) => BigDecimal::try_from(*f)
+            .map_err(|_| ValueError::Other("cannot convert NaN or Infinity to BigDecimal".into())),
         Value::Ratio(r) => {
             let numer = BigDecimal::from(r.get().numer().clone());
             let denom = BigDecimal::from(r.get().denom().clone());
@@ -2254,32 +2286,21 @@ pub fn builtin_add(args: &[Value]) -> ValueResult<Value> {
     }
 }
 
-// Addition, with automatic promotion long->bigint, double->bigdecimal
+// Addition with automatic promotion from long to bigint on overflow. Floating
+// point operands retain the same IEEE-754 semantics as `+`.
 fn builtin_add_quote(args: &[Value]) -> ValueResult<Value> {
     let cat = widest_category(args)?;
     match cat {
-        NumCat::Double => {
-            let mut sum = BigDecimal::from(0);
-            for v in args {
-                sum += numeric_as_bigdecimal(v)?;
-            }
-            match sum.to_f64() {
-                Some(sum) => Ok(Value::Double(sum)),
-                None => Ok(Value::BigDecimal(GcPtr::new(apply_precision(sum)?))),
-            }
-        }
+        NumCat::Double => builtin_add(args),
         NumCat::Long => {
             // Do the sum as bigints, return long if it fits in i64
             let mut sum = BigInt::from(0);
             for v in args {
                 sum += numeric_as_bigint(v)?;
             }
-            if sum > BigInt::from(0x7f00000000000000i64)
-                || sum < BigInt::from(-0x8000000000000000i64)
-            {
-                Ok(Value::BigInt(GcPtr::new(sum)))
-            } else {
-                Ok(Value::Long(sum.to_i64().unwrap()))
+            match sum.to_i64() {
+                Some(sum) => Ok(Value::Long(sum)),
+                None => Ok(Value::BigInt(GcPtr::new(sum))),
             }
         }
         _ => builtin_add(args),
@@ -2363,34 +2384,15 @@ pub fn builtin_sub(args: &[Value]) -> ValueResult<Value> {
 fn builtin_sub_quote(args: &[Value]) -> ValueResult<Value> {
     let cat = widest_category(args)?;
     match cat {
-        NumCat::Double if !args.is_empty() => {
-            let mut sum = BigDecimal::from(0);
-            for v in args {
-                sum -= numeric_as_bigdecimal(v)?;
-            }
-            match sum.to_f64() {
-                // produces +Inf/-Inf on overflow
-                Some(f) => {
-                    if f.is_infinite() {
-                        Ok(Value::BigDecimal(GcPtr::new(sum)))
-                    } else {
-                        Ok(Value::Double(f))
-                    }
-                }
-                None => Ok(Value::BigDecimal(GcPtr::new(sum))),
-            }
-        }
+        NumCat::Double if !args.is_empty() => builtin_sub(args),
         NumCat::Long if !args.is_empty() => {
             let mut sum = numeric_as_bigint(&args[0])?;
             for v in args[1..].iter() {
                 sum -= numeric_as_bigint(v)?;
             }
-            if sum < BigInt::from(-0x8000000000000000i64)
-                || sum > BigInt::from(0x7f00000000000000i64)
-            {
-                Ok(Value::BigInt(GcPtr::new(sum)))
-            } else {
-                Ok(Value::Long(sum.to_i64().unwrap()))
+            match sum.to_i64() {
+                Some(sum) => Ok(Value::Long(sum)),
+                None => Ok(Value::BigInt(GcPtr::new(sum))),
             }
         }
         _ => builtin_sub(args),
@@ -2400,28 +2402,15 @@ fn builtin_sub_quote(args: &[Value]) -> ValueResult<Value> {
 fn builtin_mul_quote(args: &[Value]) -> ValueResult<Value> {
     let cat = widest_category(args)?;
     match cat {
-        NumCat::Double => {
-            let mut result = BigDecimal::from(1);
-            for v in args {
-                result *= numeric_as_bigdecimal(v)?;
-            }
-            match result.to_f64() {
-                Some(f) if f.is_infinite() => Ok(Value::BigDecimal(GcPtr::new(result))),
-                Some(f) => Ok(Value::Double(f)),
-                None => Ok(Value::BigDecimal(GcPtr::new(result))),
-            }
-        }
+        NumCat::Double => builtin_mul(args),
         NumCat::Long => {
             let mut result = BigInt::from(1);
             for v in args {
                 result *= numeric_as_bigint(v)?;
             }
-            if result < BigInt::from(-0x8000000000000000i64)
-                || result > BigInt::from(0x7f00000000000000i64)
-            {
-                Ok(Value::BigInt(GcPtr::new(result)))
-            } else {
-                Ok(Value::Long(result.to_i64().unwrap()))
+            match result.to_i64() {
+                Some(result) => Ok(Value::Long(result)),
+                None => Ok(Value::BigInt(GcPtr::new(result))),
             }
         }
         _ => builtin_mul(args),
@@ -3128,6 +3117,16 @@ fn builtin_lte(args: &[Value]) -> ValueResult<Value> {
 
 fn builtin_gte(args: &[Value]) -> ValueResult<Value> {
     for pair in args.windows(2) {
+        if let Value::Double(d) = pair[0]
+            && d.is_nan()
+        {
+            return Ok(Value::Bool(false));
+        }
+        if let Value::Double(d) = pair[1]
+            && d.is_nan()
+        {
+            return Ok(Value::Bool(false));
+        }
         if num_compare(&pair[0], &pair[1])? == Ordering::Less {
             return Ok(Value::Bool(false));
         }
@@ -3147,6 +3146,7 @@ fn builtin_identical(args: &[Value]) -> ValueResult<Value> {
         (Value::Long(a), Value::Long(b)) => a == b,
         (Value::Double(a), Value::Double(b)) => a.to_bits() == b.to_bits(),
         (Value::Char(a), Value::Char(b)) => a == b,
+        (Value::Uuid(a), Value::Uuid(b)) => peq!(a, b),
         (Value::BigInt(a), Value::BigInt(b)) => peq!(a, b),
         (Value::BigDecimal(a), Value::BigDecimal(b)) => peq!(a, b),
         (Value::Ratio(a), Value::Ratio(b)) => peq!(a, b),
@@ -3793,6 +3793,23 @@ fn builtin_get(args: &[Value]) -> ValueResult<Value> {
                 Ok(default)
             }
         }
+        Value::TransientVector(v) => {
+            if let Value::Long(idx) = &args[1]
+                && *idx >= 0
+            {
+                Ok(v.get().get(*idx as usize).unwrap_or(default))
+            } else {
+                Ok(default)
+            }
+        }
+        Value::TransientMap(m) => Ok(m.get().get(&args[1]).unwrap_or(default)),
+        Value::TransientSet(s) => {
+            if s.get().contains(&args[1]) {
+                Ok(args[1].clone())
+            } else {
+                Ok(default)
+            }
+        }
         Value::Set(s) => {
             if s.contains(&args[1]) {
                 Ok(args[1].clone())
@@ -4090,6 +4107,13 @@ fn builtin_seq(args: &[Value]) -> ValueResult<Value> {
                 Ok(cons_from_iter(s.get().chars().map(Value::Char)))
             }
         }
+        Value::Queue(q) => {
+            if q.get().is_empty() {
+                Ok(Value::Nil)
+            } else {
+                Ok(cons_from_iter(q.get().iter().cloned()))
+            }
+        }
         Value::ObjectArray(a) => {
             let array = a.get().0.lock().unwrap().clone();
             if array.is_empty() {
@@ -4218,10 +4242,10 @@ fn builtin_first(args: &[Value]) -> ValueResult<Value> {
                 Ok(Value::Nil)
             }
         }
-        _ => Err(ValueError::WrongType {
-            expected: "seqable",
-            got: args[0].type_name().to_string(),
-        }),
+        other => {
+            let seq = builtin_seq(std::slice::from_ref(other))?;
+            builtin_first(&[seq])
+        }
     }
 }
 
@@ -4266,10 +4290,10 @@ fn builtin_rest(args: &[Value]) -> ValueResult<Value> {
             let items: Vec<Value> = s.get().chars().skip(1).map(Value::Char).collect();
             Ok(Value::List(GcPtr::new(PersistentList::from_iter(items))))
         }
-        _ => Err(ValueError::WrongType {
-            expected: "seqable",
-            got: args[0].type_name().to_string(),
-        }),
+        other => {
+            let seq = builtin_seq(std::slice::from_ref(other))?;
+            builtin_rest(&[seq])
+        }
     }
 }
 
@@ -4329,6 +4353,9 @@ fn builtin_cons(args: &[Value]) -> ValueResult<Value> {
 fn builtin_nth(args: &[Value]) -> ValueResult<Value> {
     let raw = numeric_as_i64(&args[1])?;
     let default = args.get(2).cloned();
+    if matches!(args[0].unwrap_meta(), Value::Nil) {
+        return Ok(default.unwrap_or(Value::Nil));
+    }
     // A negative index is always out of range.  Handle it before the `as usize`
     // cast so the seq paths below don't walk a (possibly infinite) lazy seq up
     // to usize::MAX.  Matches Clojure: throw, or return the not-found default.
@@ -4345,19 +4372,18 @@ fn builtin_nth(args: &[Value]) -> ValueResult<Value> {
     match &args[0].unwrap_meta() {
         Value::LazySeq(_) | Value::Cons(_) => {
             let mut iter = ValueIter::new(args[0].clone());
-            let result = iter.nth(idx).or(default).unwrap_or(Value::Nil);
+            let result = iter.nth(idx);
             if let Some(err) = iter.take_error() {
                 return Err(ValueError::Other(err));
             }
-            Ok(result)
+            nth_or_not_found(result, default.as_ref(), idx, idx + 1)
         }
-        Value::List(l) => Ok(l
-            .get()
-            .iter()
-            .nth(idx)
-            .cloned()
-            .or(default)
-            .unwrap_or(Value::Nil)),
+        Value::List(l) => nth_or_not_found(
+            l.get().iter().nth(idx).cloned(),
+            default.as_ref(),
+            idx,
+            l.get().count(),
+        ),
         Value::Vector(v) => {
             if idx >= v.get().count() && default.is_none() {
                 Err(ValueError::IndexOutOfBounds {
@@ -4368,18 +4394,61 @@ fn builtin_nth(args: &[Value]) -> ValueResult<Value> {
                 Ok(v.get().nth(idx).cloned().or(default).unwrap_or(Value::Nil))
             }
         }
-        Value::Str(s) => Ok(s
-            .get()
-            .chars()
-            .nth(idx)
-            .map(Value::Char)
-            .or(default)
-            .unwrap_or(Value::Nil)),
-        Value::Nil => Ok(default.unwrap_or(Value::Nil)),
+        Value::TransientVector(v) => {
+            nth_or_not_found(v.get().get(idx), default.as_ref(), idx, v.get().count())
+        }
+        Value::Str(s) => nth_or_not_found(
+            s.get().chars().nth(idx).map(Value::Char),
+            default.as_ref(),
+            idx,
+            s.get().chars().count(),
+        ),
+        Value::Matcher(m) => {
+            let capture = m
+                .get()
+                .capture()
+                .ok_or_else(|| ValueError::Other("no match found".into()))?;
+            let count = capture.groups.len();
+            let result = capture.groups.get(idx).map(|group| match group {
+                Some(group) => Value::string(group.clone()),
+                None => Value::Nil,
+            });
+            nth_or_not_found(result, default.as_ref(), idx, count)
+        }
+        Value::ObjectArray(_)
+        | Value::BooleanArray(_)
+        | Value::ByteArray(_)
+        | Value::ShortArray(_)
+        | Value::IntArray(_)
+        | Value::LongArray(_)
+        | Value::CharArray(_)
+        | Value::FloatArray(_)
+        | Value::DoubleArray(_) => {
+            let values = value_to_seq(args[0].unwrap_meta())?;
+            nth_or_not_found(
+                values.get(idx).cloned(),
+                default.as_ref(),
+                idx,
+                values.len(),
+            )
+        }
         v => Err(ValueError::WrongType {
             expected: "sequential",
             got: v.type_name().to_string(),
         }),
+    }
+}
+
+fn nth_or_not_found(
+    value: Option<Value>,
+    default: Option<&Value>,
+    idx: usize,
+    count: usize,
+) -> ValueResult<Value> {
+    match (value, default) {
+        (Some(value), _) => Ok(value),
+        (None, Some(default)) => Ok(default.clone()),
+        (None, None) => Err(ValueError::IndexOutOfBounds { idx, count }),
     }
 }
 
@@ -4429,28 +4498,9 @@ fn builtin_concat(args: &[Value]) -> ValueResult<Value> {
 ///
 /// Returns a lazy-seq that walks through each collection in order,
 /// producing cons cells on demand.
-fn concat_lazy(mut colls: Vec<Value>) -> Value {
-    // Skip leading nils and empty collections eagerly to find the first element.
-    loop {
-        if colls.is_empty() {
-            return Value::List(GcPtr::new(PersistentList::empty()));
-        }
-        let first_coll = &colls[0];
-        // Check if the first collection is nil or empty without fully realizing it.
-        match first_coll {
-            Value::Nil => {
-                colls.remove(0);
-                continue;
-            }
-            Value::List(l) if l.get().is_empty() => {
-                colls.remove(0);
-                continue;
-            }
-            _ => break,
-        }
-    }
-
-    // Return a lazy-seq thunk that produces cons(first, concat_lazy(rest)).
+fn concat_lazy(colls: Vec<Value>) -> Value {
+    // Even the zero-arity and all-empty cases are lazy in Clojure. The thunk
+    // discovers emptiness when the result is first observed.
     Value::LazySeq(GcPtr::new(LazySeq::new(Box::new(ConcatThunk { colls }))))
 }
 
@@ -4672,7 +4722,16 @@ fn builtin_contains_q(args: &[Value]) -> ValueResult<Value> {
     Ok(Value::Bool(match args[0].unwrap_meta() {
         Value::Map(m) => m.contains_key(&args[1]),
         Value::Set(s) => s.contains(&args[1]),
+        Value::TransientMap(m) => m.get().contains_key(&args[1]),
+        Value::TransientSet(s) => s.get().contains(&args[1]),
         Value::Vector(v) => {
+            if let Value::Long(idx) = &args[1] {
+                *idx >= 0 && (*idx as usize) < v.get().count()
+            } else {
+                false
+            }
+        }
+        Value::TransientVector(v) => {
             if let Value::Long(idx) = &args[1] {
                 *idx >= 0 && (*idx as usize) < v.get().count()
             } else {
@@ -4796,6 +4855,12 @@ fn builtin_reduce(args: &[Value]) -> ValueResult<Value> {
     match args.len() {
         2 => {
             // (reduce f coll) — no init value
+            if !is_seqable(&args[1]) {
+                return Err(ValueError::WrongType {
+                    expected: "seqable",
+                    got: args[1].type_name().to_string(),
+                });
+            }
             let mut iter = ValueIter::new(args[1].clone());
             let Some(first) = iter.next() else {
                 // empty coll: call (f) for init
@@ -4815,6 +4880,12 @@ fn builtin_reduce(args: &[Value]) -> ValueResult<Value> {
         }
         3 => {
             // (reduce f init coll)
+            if !is_seqable(&args[2]) {
+                return Err(ValueError::WrongType {
+                    expected: "seqable",
+                    got: args[2].type_name().to_string(),
+                });
+            }
             let mut acc = args[1].clone();
             let mut iter = ValueIter::new(args[2].clone());
             for item in iter.by_ref() {
@@ -9204,7 +9275,7 @@ fn builtin_parse_uuid(args: &[Value]) -> ValueResult<Value> {
         Value::Str(s) => {
             let uuid = uuid::Uuid::parse_str(s.get());
             match uuid {
-                Ok(uuid) => Ok(Value::Uuid(uuid.as_u128())),
+                Ok(uuid) => Ok(Value::uuid(uuid.as_u128())),
                 Err(_) => Ok(Value::Nil),
             }
         }
@@ -9217,7 +9288,7 @@ fn builtin_parse_uuid(args: &[Value]) -> ValueResult<Value> {
 
 fn builtin_random_uuid(_args: &[Value]) -> ValueResult<Value> {
     let uuid = uuid::Uuid::new_v4();
-    Ok(Value::Uuid(uuid.as_u128()))
+    Ok(Value::uuid(uuid.as_u128()))
 }
 
 // ── Native objects (Phase 9 interop) ─────────────────────────────────────────
@@ -9332,6 +9403,54 @@ mod doc_tests {
         assert_bigint(
             builtin_dec(&[Value::Long(i64::MIN)]),
             "-9223372036854775809",
+        );
+    }
+
+    #[test]
+    fn promoting_arithmetic_preserves_floating_point_semantics() {
+        assert_eq!(
+            builtin_add_quote(&[Value::Long(1), Value::Double(f64::INFINITY)]).unwrap(),
+            Value::Double(f64::INFINITY)
+        );
+        assert!(matches!(
+            builtin_add_quote(&[Value::Long(1), Value::Double(f64::NAN)]).unwrap(),
+            Value::Double(value) if value.is_nan()
+        ));
+        assert!(matches!(
+            builtin_mul_quote(&[Value::Long(0), Value::Double(f64::INFINITY)]).unwrap(),
+            Value::Double(value) if value.is_nan()
+        ));
+        assert_eq!(
+            builtin_add_quote(&[Value::Long(i64::MAX), Value::Long(0)]).unwrap(),
+            Value::Long(i64::MAX)
+        );
+        assert!(matches!(
+            builtin_add_quote(&[Value::Long(i64::MAX), Value::Long(1)]).unwrap(),
+            Value::BigInt(_)
+        ));
+    }
+
+    #[test]
+    fn non_finite_numeric_edge_cases_match_clojure() {
+        for value in [f64::INFINITY, f64::NEG_INFINITY, f64::NAN] {
+            assert!(builtin_bigdec(&[Value::Double(value)]).is_err());
+        }
+        assert_eq!(
+            builtin_gte(&[Value::Double(f64::NAN), Value::Long(1)]).unwrap(),
+            Value::Bool(false)
+        );
+        assert_eq!(
+            builtin_gte(&[Value::Long(1), Value::Double(f64::NAN)]).unwrap(),
+            Value::Bool(false)
+        );
+    }
+
+    #[test]
+    fn identical_uuid_values_survive_value_cloning() {
+        let value = Value::uuid(0xf81d4fae_7dec_11d0_a765_00a0c91e6bf6);
+        assert_eq!(
+            builtin_identical(&[value.clone(), value]).unwrap(),
+            Value::Bool(true)
         );
     }
 

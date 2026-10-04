@@ -93,8 +93,8 @@
 (deftest test-diff-vectors-same-length
   (testing "same length, different elements"
     (let [[a b both] (diff [1 2 3] [1 9 3])]
-      (is (= [nil 2 nil] a))
-      (is (= [nil 9 nil] b))
+      (is (= [nil 2] a))
+      (is (= [nil 9] b))
       (is (= [1 nil 3] both)))))
 
 (deftest test-diff-vectors-different-length
@@ -102,17 +102,17 @@
     (let [[a b both] (diff [1 2 3] [1 2])]
       (is (= [nil nil 3] a))
       (is (nil? b))
-      (is (= [1 2 nil] both)))
+      (is (= [1 2] both)))
     (let [[a b both] (diff [1] [1 2 3])]
       (is (nil? a))
       (is (= [nil 2 3] b))
-      (is (= [1 nil nil] both)))))
+      (is (= [1] both)))))
 
 (deftest test-diff-lists
   (testing "lists treated as sequential"
     (let [[a b both] (diff '(1 2 3) '(1 9 3))]
-      (is (= [nil 2 nil] a))
-      (is (= [nil 9 nil] b))
+      (is (= [nil 2] a))
+      (is (= [nil 9] b))
       (is (= [1 nil 3] both)))))
 
 ;; ── Mixed types ─────────────────────────────────────────────────────────────

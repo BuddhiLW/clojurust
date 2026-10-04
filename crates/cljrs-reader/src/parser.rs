@@ -31,6 +31,7 @@ fn map_arity_is_statically_odd(forms: &[Form]) -> bool {
 pub struct Parser {
     lexer: Lexer,
     peeked: Option<(Token, Span)>,
+    discarded: Vec<Form>,
 }
 
 impl Parser {
@@ -38,6 +39,7 @@ impl Parser {
         Self {
             lexer: Lexer::new(source, file),
             peeked: None,
+            discarded: Vec::new(),
         }
     }
 
@@ -62,6 +64,15 @@ impl Parser {
             forms.push(form);
         }
         Ok(forms)
+    }
+
+    /// Remove and return the concrete forms consumed by `#_` while parsing.
+    ///
+    /// Most callers can ignore discarded forms. Strict data readers use them
+    /// to validate tagged literals and invoke configured tag handlers even
+    /// when the resulting value is discarded, matching Clojure's EDN reader.
+    pub fn take_discarded_forms(&mut self) -> Vec<Form> {
+        std::mem::take(&mut self.discarded)
     }
 
     // ── Lookahead helpers ─────────────────────────────────────────────────
@@ -340,7 +351,11 @@ impl Parser {
                 if matches!(self.peek_tok()?, Token::Eof) {
                     return Err(self.make_error("unexpected end of file after #_", span));
                 }
-                self.parse_raw()?; // consume & discard next form (may itself be None)
+                // A nested discard is not itself the form consumed by the
+                // outer discard. Keep reading until one concrete form has
+                // been consumed: `#_ #_ 2 3` discards both 2 and 3.
+                let discarded = self.require_form(span.clone(), "discarded form")?;
+                self.discarded.push(discarded);
                 Ok(None)
             }
 
@@ -849,11 +864,10 @@ mod tests {
 
     #[test]
     fn test_discard_chained() {
-        // #_ #_ 1 2 3  →  outer #_ discards (#_ 1), then 2 and 3 remain
+        // The inner #_ consumes 1; the outer #_ then consumes 2.
         let forms = parse_all("#_ #_ 1 2 3");
-        assert_eq!(forms.len(), 2);
-        assert_eq!(forms[0].kind, FormKind::Int(2));
-        assert_eq!(forms[1].kind, FormKind::Int(3));
+        assert_eq!(forms.len(), 1);
+        assert_eq!(forms[0].kind, FormKind::Int(3));
     }
 
     // ── Reader conditionals ───────────────────────────────────────────────────

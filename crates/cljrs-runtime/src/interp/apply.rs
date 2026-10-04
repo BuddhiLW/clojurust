@@ -349,6 +349,13 @@ pub fn dispatch_method(method: &str, target: &Value, args: &[Value]) -> EvalResu
             dispatch_seq_method(method, target, args)
         }
         Value::TypeInstance(ti) => {
+            if ti.get().type_tag.as_ref() == "java.util.Date"
+                && method == "getTime"
+                && args.is_empty()
+            {
+                let key = Value::keyword(cljrs_value::Keyword::simple("millis"));
+                return Ok(ti.get().fields.get(&key).unwrap_or(Value::Nil));
+            }
             // `.-field` reads a deftype/defrecord field. There are no host
             // methods to call on an interpreter instance, so a plain `.method`
             // is unsupported (protocol methods are called as `(proto-fn inst)`).
@@ -873,7 +880,8 @@ fn handle_apply_call(arg_forms: &[Form], env: &mut Env) -> EvalResult {
     let _last_root = crate::env::gc_roots::root_value(&last);
     let _evaled_root = crate::env::gc_roots::root_values(&evaled);
     // Spread last arg.
-    let spread = value_to_seq_vec(&last);
+    let spread =
+        crate::builtins::builtins::value_to_seq(&last).map_err(value_error_to_eval_error)?;
     evaled.extend(spread);
     crate::env::apply::apply_value(&f, evaled, env)
 }
@@ -1372,6 +1380,14 @@ pub fn eval_eval(args: Vec<Value>, env: &mut Env) -> EvalResult {
             got: args.len(),
         });
     };
+    // Runtime function objects are self-evaluating values. Converting them to
+    // syntax would manufacture a `#<fn>` symbol and then try to resolve it.
+    if matches!(
+        value.unwrap_meta(),
+        Value::NativeFunction(_) | Value::Fn(_) | Value::Macro(_) | Value::BoundFn(_)
+    ) {
+        return Ok(value.clone());
+    }
     let span = cljrs_types::span::Span::new(Arc::new("<eval>".to_string()), 0, 0, 1, 1);
     let form = crate::interp::macros::value_to_form(value, span)?;
     let mut top = Env::new(env.globals.clone(), &env.current_ns);
