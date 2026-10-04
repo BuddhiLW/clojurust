@@ -82,8 +82,9 @@
       [1 '(2 3 [4])] (list 1 [2 3 '(4)])))
 
   (testing "regex"
-    ;; Basilisp regex patterns compare equal and identical? (rust too I guess)
+    ;; Basilisp regex patterns compare equal and identical?
     #?(:lpy (is (eq #"my regex" #"my regex"))
+       :phel (is (eq #"my regex" #"my regex"))
        :rust (is (eq #"my regex" #"my regex"))
        ;; Value-equal regex are NOT eq, only identical?
        :default (is (not (eq #"my regex" #"my regex"))))
@@ -108,7 +109,7 @@
     (is (not (eq nil \a \a \a))))
 
   ;; Platform differences
-  #?(:clj (testing "jvm"
+  #?(:cljr (testing "clr"
             (are [in ex eq?] (identical? eq? (eq in ex))
               2 2.0 false
               (float 0.1) (double 0.1) false
@@ -116,19 +117,7 @@
               1M 1 false
               ;; ratios do not read in CLJS
               22/7 44/14 true
-              ;; https://clojure.org/guides/equality notes that sometimes 
-              ;; collections with ##NaN are eq
-              #?@(:bb [] ;; seems undefined behavior
-                  :default [(list ##NaN) (list ##NaN) true])))
-     :cljr (testing "clr"
-            (are [in ex eq?] (identical? eq? (eq in ex))
-              2 2.0 false
-              (float 0.1) (double 0.1) false
-              (float 0.5) (double 0.5) true
-              1M 1 false
-              ;; ratios do not read in CLJS
-              22/7 44/14 true
-              ;; https://clojure.org/guides/equality notes that sometimes 
+              ;; https://clojure.org/guides/equality notes that sometimes
               ;; collections with ##NaN are eq
               (list ##NaN) (list ##NaN) true))
 
@@ -139,7 +128,20 @@
                (float 0.5) (double 0.5) true
                1M 1 true
                (list ##NaN) (list ##NaN) false
-               ##NaN ##NaN false))))
+               ##NaN ##NaN false))
+
+     :clj (testing "jvm"
+            (are [in ex eq?] (identical? eq? (eq in ex))
+              2 2.0 false
+              (float 0.1) (double 0.1) false
+              (float 0.5) (double 0.5) true
+              1M 1 false
+              ;; ratios do not read in CLJS
+              22/7 44/14 true
+              ;; https://clojure.org/guides/equality notes that sometimes
+              ;; collections with ##NaN are eq
+              #?@(:bb [] ;; seems undefined behavior
+                  :default [(list ##NaN) (list ##NaN) true])))))
 
 (when-var-exists =
   (deftest test-eq

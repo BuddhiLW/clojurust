@@ -1,6 +1,6 @@
 (ns clojure.core-test.realized-qmark
   (:require [clojure.test :as t :refer [deftest is testing]]
-            [clojure.core-test.portability #?(:cljs :refer-macros :default :refer) [when-var-exists sleep]]))
+            [clojure.core-test.portability #?(:cljs :refer-macros :default :refer) [when-var-exists sleep] :as p]))
 
 ;; You realize the sun doesn't go down
 ;; It's just an illusion caused by the world spinning 'round
@@ -15,10 +15,7 @@
       ;;; Common cases
 
       (testing "What happens when the input is nil?"
-        (is (thrown?  #?(:cljs    :default
-                         :clj     java.lang.NullPointerException
-                         :default Exception)
-                      (realized? nil))))
+        (is (p/thrown? (realized? nil))))
 
       (testing "What happens if it's given all valid inputs?"
         ;; per docstring: "promise, delay, future or lazy sequence"
@@ -50,11 +47,11 @@
               (is (false? (realized? ftr2)))
               (future-cancel ftr2)
               (is (true? (realized? ftr2))))
-            (let [ftr3 (future (sleep 1))]
+            (let [ftr3 (future (sleep #?(:rust 100 :default 1)))]
               (is (false? (realized? ftr3)))
               (deref ftr3)
               (is (true? (realized? ftr3))))
-            (let [ftr4 (future (sleep 1))]
+            (let [ftr4 (future (sleep #?(:rust 100 :default 1)))]
               (is (false? (realized? ftr4)))
               (deref ftr4)
               (is (true? (realized? ftr4))))))
@@ -78,35 +75,22 @@
       (testing "Special case inputs"
         ;; the deref'd value is not a valid input
         (when-var-exists delay
-          (is (thrown? #?(:cljs :default :default Exception)
-                       (realized? (deref (delay :delay))))))
+          (is (p/thrown? (realized? (deref (delay :delay))))))
         (when-var-exists future
-          (is (thrown? #?(:cljs :default :default Exception)
-                       (realized? (deref (future :future)))))))
+          (is (p/thrown? (realized? (deref (future :future)))))))
 
       ;;; Edge cases
 
       (testing "What happens when the input is an incorrect shape?"
-        (is (thrown? #?(:cljs :default :default Exception)
-                     (realized? 1)))
-        (is (thrown? #?(:cljs :default :default Exception)
-                     (realized? :foo)))
-        (is (thrown? #?(:cljs :default :default Exception)
-                     (realized? "foo")))
-        (is (thrown? #?(:cljs :default :default Exception)
-                     (realized? \f)))
-        (is (thrown? #?(:cljs :default :default Exception)
-                     (realized? 'foo)))
-        (is (thrown? #?(:cljs :default :default Exception)
-                     (realized? ##NaN)))
+        (is (p/thrown? (realized? 1)))
+        (is (p/thrown? (realized? :foo)))
+        (is (p/thrown? (realized? "foo")))
+        (is (p/thrown? (realized? \f)))
+        (is (p/thrown? (realized? 'foo)))
+        (is (p/thrown? (realized? ##NaN)))
 
-        (is (thrown? #?(:cljs :default :default Exception)
-                     (realized? '())))
-        (is (thrown? #?(:cljs :default :default Exception)
-                     (realized? '(:foo :bar :baz))))
-        (is (thrown? #?(:cljs :default :default Exception)
-                     (realized? [])))
-        (is (thrown? #?(:cljs :default :default Exception)
-                     (realized? {})))
-        (is (thrown? #?(:cljs :default :default Exception)
-                     (realized? #{})))))))
+        (is (p/thrown? (realized? '())))
+        (is (p/thrown? (realized? '(:foo :bar :baz))))
+        (is (p/thrown? (realized? [])))
+        (is (p/thrown? (realized? {})))
+        (is (p/thrown? (realized? #{})))))))

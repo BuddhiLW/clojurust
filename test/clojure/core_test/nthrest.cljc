@@ -1,6 +1,6 @@
 (ns clojure.core-test.nthrest
   (:require [clojure.test :as t :refer [deftest is]]
-            [clojure.core-test.portability #?(:cljs :refer-macros :default :refer) [when-var-exists]]))
+            [clojure.core-test.portability #?(:cljs :refer-macros :default :refer) [when-var-exists] :as p]))
 
 (when-var-exists nthrest
   (deftest test-nthrest
@@ -15,24 +15,24 @@
     (is (= (range 3) (nthrest (range 3) -1))) ; if n < 1, returns collection unchanged
 
     (is (nil? (nthrest nil 0))) ; if n < 1 or (seq coll) = nil, returns collection unchanged
-    #?(:cljs
+    #?(:lpy
        (is (nil? (nthrest nil 100)))
-       :lpy
+       :cljs
        (is (nil? (nthrest nil 100)))
        :default
        (is (= '() (nthrest nil 100))))
 
     ;; Negative tests
-    #?@(:cljs
+    #?@(:lpy
+        [(is (p/thrown? (nthrest (range 0 10) nil)))
+         (is (p/thrown? (nthrest [0 1 2] nil)))
+         (is (nil? (nthrest nil nil)))]
+        :cljs
         ;; CLJS does some nil punning to 0
         [(is (= (range 0 10) (nthrest (range 0 10) nil)))
          (is (= '(0 1 2) (nthrest [0 1 2] nil)))
          (is (nil? (nthrest nil nil)))]
-        :lpy
-        [(is (thrown? Exception (nthrest (range 0 10) nil)))
-         (is (thrown? Exception (nthrest [0 1 2] nil)))
-         (is (nil? (nthrest nil nil)))]
         :default
-        [(is (thrown? Exception (nthrest (range 0 10) nil)))
-         (is (thrown? Exception (nthrest [0 1 2] nil)))
-         (is (thrown? Exception (nthrest nil nil)))])))
+        [(is (p/thrown? (nthrest (range 0 10) nil)))
+         (is (p/thrown? (nthrest [0 1 2] nil)))
+         (is (p/thrown? (nthrest nil nil)))])))

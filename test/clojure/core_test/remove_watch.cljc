@@ -97,14 +97,17 @@
                               {:key :key2 :ref #'watchable :old 0 :new 1 :watcher :watcher2}
                               {:key :key2 :ref #'watchable :old 1 :new 2 :watcher :watcher2}})))))
 
-    #?(:cljs
-       nil
-
-       ;; Basilisp does not implement refs.
+    #?(;; Basilisp does not implement refs.
        :lpy
        nil
 
-       ;; Rust doesn't have refs either yet.
+       :phel
+       nil
+
+       :cljs
+       nil
+
+       ;; Clojurust does not implement refs yet.
        :rust
        nil
 
@@ -151,11 +154,14 @@
                               {:key :key2 :ref watchable :old 0 :new 1 :watcher :watcher2}
                               {:key :key2 :ref watchable :old 1 :new 2 :watcher :watcher2}})))))
 
-    #?(:cljs
+    #?(;; Basilisp does not implement agents.
+       :lpy
        nil
 
-       ;; Basilisp does not implement agents.
-       :lpy
+       :phel
+       nil
+
+       :cljs
        nil
 
        :default
