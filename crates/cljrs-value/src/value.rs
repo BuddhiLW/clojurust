@@ -49,6 +49,17 @@ impl Trace for ObjectArray {
     }
 }
 
+/// Heap representation of a UUID's 128-bit value.
+///
+/// UUID equality is value-based, while `identical?` compares the containing
+/// `GcPtr`; keeping the bits in a traced leaf provides both semantics.
+#[derive(Debug)]
+pub struct UuidValue(pub u128);
+
+impl Trace for UuidValue {
+    fn trace(&self, _: &mut MarkVisitor) {}
+}
+
 /// The central runtime type: every Clojure value is a `Value`.
 ///
 /// Small scalars (`Nil`, `Bool`, `Long`, `Double`, `Char`) are stored inline.
@@ -65,7 +76,7 @@ pub enum Value {
     Ratio(GcPtr<num_rational::Ratio<BigInt>>),
     Char(char),
     Str(GcPtr<String>),
-    Uuid(u128),
+    Uuid(GcPtr<UuidValue>),
     Pattern(GcPtr<Pattern>),
     Matcher(GcPtr<Matcher>),
 
@@ -475,7 +486,7 @@ impl PartialEq for Value {
                 std::ptr::eq(a.get() as *const _, b.get() as *const _)
             }
             // UUID equality: same u128 value.
-            (Value::Uuid(a), Value::Uuid(b)) => a == b,
+            (Value::Uuid(a), Value::Uuid(b)) => a.get().0 == b.get().0,
             // Regex pattern equality: compare source string (matches Clojure JVM behavior
             // where two patterns are equal iff their source strings are equal).
             (Value::Pattern(a), Value::Pattern(b)) => a.get().as_str() == b.get().as_str(),
@@ -607,7 +618,7 @@ impl ClojureHash for Value {
             Value::Matcher(m) => hash_string(m.get().pattern.get().as_str()),
             Value::Keyword(k) => hash_string(&k.get().to_string()),
             Value::Symbol(s) => hash_string(&s.get().to_string()),
-            Value::Uuid(u) => hash_u128(*u),
+            Value::Uuid(u) => hash_u128(u.get().0),
             Value::NativeObject(obj) => {
                 let ptr = obj.get() as *const _ as usize;
                 hash_i64(ptr as i64)
@@ -888,7 +899,7 @@ pub fn pr_str(v: &Value, f: &mut fmt::Formatter<'_>, readably: bool) -> fmt::Res
         }
         Value::Ratio(r) => write!(f, "{}", r.get()),
         Value::Uuid(u) => {
-            let uuid = uuid::Uuid::from_u128(*u);
+            let uuid = uuid::Uuid::from_u128(u.get().0);
             if readably {
                 write!(f, "#uuid \"{}\"", uuid)
             } else {
@@ -1262,6 +1273,11 @@ impl Value {
         Value::Str(GcPtr::new(s.into()))
     }
 
+    /// Construct a UUID value with distinct object identity.
+    pub fn uuid(value: u128) -> Self {
+        Value::Uuid(GcPtr::new(UuidValue(value)))
+    }
+
     /// Convenience: build a `[key val]` map entry (a tagged 2-element vector).
     pub fn map_entry(key: Value, val: Value) -> Self {
         Value::Vector(GcPtr::new(PersistentVector::map_entry(key, val)))
@@ -1319,12 +1335,8 @@ impl cljrs_gc::Trace for Value {
                 inner.trace(visitor);
                 meta.trace(visitor);
             }
-            Value::Nil
-            | Value::Bool(_)
-            | Value::Long(_)
-            | Value::Double(_)
-            | Value::Char(_)
-            | Value::Uuid(_) => {}
+            Value::Nil | Value::Bool(_) | Value::Long(_) | Value::Double(_) | Value::Char(_) => {}
+            Value::Uuid(p) => visitor.visit(p),
             Value::BigInt(p) => visitor.visit(p),
             Value::BigDecimal(p) => visitor.visit(p),
             Value::Ratio(p) => visitor.visit(p),

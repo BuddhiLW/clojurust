@@ -8,24 +8,34 @@
     (testing "special symbols"
       (are [arg] (special-symbol? 'arg)
                  ;; Basilisp does not recognize these as special symbols.
-                 #?@(:lpy [catch
-                           finally
-                           deftype*
-                           letfn*]
-                     :rust [] ; rust has even fewer
+                 #?@(:lpy []
+                     :phel [&]
+                     :rust []
                      :default [&
                                case*
                                new])
-                 .
+                 ;; Phel does not recognize these as special symbols.
+                 #?@(:phel []
+                     :rust [.
+                            fn*
+                            let*
+                            loop*
+                            set!]
+                     :default [.
+                               deftype*
+                               fn*
+                               let*
+                               letfn*
+                               loop*
+                               set!])
+
+                 #?@(:rust [] :default [catch])
                  def
                  do
-                 fn*
+                 #?@(:rust [] :default [finally])
                  if
-                 let*
-                 loop*
                  quote
                  recur
-                 set!
                  throw
                  try
                  var))
@@ -34,8 +44,7 @@
       (are [arg] (not (special-symbol? arg))
                  'a-symbol
                  'a-ns/a-qualified-symbol
-                 #?@(:rust []
-                     :default ['defn])
+                 #?@(:rust [] :default ['defn])
                  'import
                  "not a symbol"
                  :k

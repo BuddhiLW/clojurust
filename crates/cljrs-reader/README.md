@@ -261,6 +261,9 @@ impl Parser {
 
     /// Parse all forms until EOF.
     pub fn parse_all(&mut self) -> CljxResult<Vec<Form>>
+
+    /// Remove and return concrete forms consumed by `#_`.
+    pub fn take_discarded_forms(&mut self) -> Vec<Form>
 }
 
 impl Iterator for Parser {
@@ -271,9 +274,9 @@ impl Iterator for Parser {
 
 #### `#_` discard semantics
 
-`#_` consumes itself plus the next form and produces nothing. Discards can be
-chained: `[#_ #_ 1 2 3]` → `[2, 3]` (outer `#_` discards the `#_ 1` group,
-leaving `2` and `3`).
+`#_` consumes itself plus the next concrete form and produces nothing. Discards
+can be chained: `[#_ #_ 1 2 3]` → `[3]` (the inner `#_` consumes `1`, then the
+outer `#_` consumes `2`).
 
 #### Reader conditionals
 

@@ -405,7 +405,7 @@ pub fn form_to_value(form: &Form) -> EvalResult<Value> {
                 if let FormKind::Str(s) = &inner.kind
                     && let Ok(u) = uuid::Uuid::parse_str(s)
                 {
-                    Value::Uuid(u.as_u128())
+                    Value::uuid(u.as_u128())
                 } else {
                     form_to_value(inner)?
                 }
@@ -1024,7 +1024,7 @@ mod tests {
         let got = quoted_value("#uuid \"f81d4fae-7dec-11d0-a765-00a0c91e6bf6\"").unwrap();
         assert_eq!(
             got,
-            Value::Uuid(0xf81d4fae_7dec_11d0_a765_00a0c91e6bf6_u128)
+            Value::uuid(0xf81d4fae_7dec_11d0_a765_00a0c91e6bf6_u128)
         );
     }
 

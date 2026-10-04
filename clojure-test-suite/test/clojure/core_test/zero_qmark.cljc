@@ -1,7 +1,7 @@
 (ns clojure.core-test.zero-qmark
   (:require [clojure.test :as t :refer [are deftest is]]
             [clojure.core-test.number-range :as r]
-            [clojure.core-test.portability #?(:cljs :refer-macros :default :refer) [when-var-exists]]))
+            [clojure.core-test.portability #?(:cljs :refer-macros :default :refer) [when-var-exists] :as p]))
 
 (when-var-exists zero?
   (deftest test-zero?
@@ -11,6 +11,7 @@
       true  0.0M
       true  0N
 
+      false 0.0000001
       false 1
       false -1
       false r/min-int
@@ -33,12 +34,12 @@
            false 1/2
            false -1/2]))
 
-    (is #?@(:cljs [(= false (zero? nil))]
-            :lpy [(= false (zero? nil))]
-            :default [(thrown? Exception (zero? nil))]))
-    (is #?@(:cljs [(= false (zero? false))]
-            :lpy [(= false (zero? false))]
-            :default [(thrown? Exception (zero? false))]))
-    (is #?@(:cljs [(= false (zero? true))]
-            :lpy [(= false (zero? true))]
-            :default [(thrown? Exception (zero? true))]))))
+    (is #?@(:lpy [(= false (zero? nil))]
+            :cljs [(= false (zero? nil))]
+            :default [(p/thrown? (zero? nil))]))
+    (is #?@(:lpy [(= false (zero? false))]
+            :cljs [(= false (zero? false))]
+            :default [(p/thrown? (zero? false))]))
+    (is #?@(:lpy [(= false (zero? true))]
+            :cljs [(= false (zero? true))]
+            :default [(p/thrown? (zero? true))]))))
