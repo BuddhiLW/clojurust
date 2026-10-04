@@ -590,7 +590,7 @@ Phase 0 is complete:
 Phase 1 is complete in `crates/cljrs-gc/src/governor.rs`:
 
 - `MemoryConfig` reads the `CLJRS_MEMORY_*` variables and the deprecated aliases, and it rejects the invalid states listed in [Configuration](#configuration).
-- The CLI limit flags configure the process governor.
+- `--gc-hard-limit-mb` configures the process governor (soft limit 75% of it). `--gc-soft-limit-mb` sets only the per-heap trigger, because N isolates each near a shared soft limit would hold the governor at `Yellow`.
 - `Runtime::build` and `Isolate::spawn` register the calling thread. A thread that allocates first is registered under its thread name.
 - `GcHeap::alloc` charges the thread's `IsolateAccount`. `GcHeap::collect` returns the freed header sizes and reports the collection.
 - The GC request flag moved to `IsolateControl`, so the governor can request collection across threads.

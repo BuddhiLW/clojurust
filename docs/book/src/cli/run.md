@@ -34,18 +34,14 @@ after CLI paths.
 
 Soft memory limit for the GC in megabytes. When one isolate's heap exceeds
 this value, a collection is triggered at the next safepoint. Each isolate heap
-applies the limit independently. The value also sets the process-wide memory
-governor's soft limit: when managed memory across all isolates reaches it, the
-governor asks the allocating isolate (and the largest heap) to collect.
+applies the limit independently, so *N* isolates can together hold about *N*
+times this value.
 
-Because one value serves both roles, a program running several isolates can
-keep the process at or above the governor's soft limit while every heap stays
-under its own trigger: *N* isolates each just under the limit total about *N*
-times it. The governor then stays at `Yellow` and keeps requesting
-collections (at most once per isolate per collection, and not while a heap is
-below its post-collection size). For multi-isolate programs, set the process
-budget separately with `CLJRS_MEMORY_SOFT_LIMIT_MB` and
-`CLJRS_MEMORY_HARD_LIMIT_MB`, and leave `--gc-soft-limit-mb` unset.
+The flag does not change the process-wide memory governor's soft limit. That
+limit comes from `--gc-hard-limit-mb` (75% of it), from
+`CLJRS_MEMORY_SOFT_LIMIT_MB`, or from the platform default. When managed
+memory across all isolates reaches it, the governor asks the allocating
+isolate (and the largest heap) to collect.
 
 Given alone, it leaves the hard limit at its default (raised to the soft limit
 if the soft limit is larger).
@@ -54,8 +50,9 @@ if the soft limit is larger).
 
 Process-wide managed-memory hard limit in megabytes. It is **not enforced
 yet**: the memory governor runs in observe-only mode, and allocations above the
-limit succeed. `--gc-stats` reports how many allocations went over it. Without
-`--gc-soft-limit-mb`, the soft limit is 75% of this value.
+limit succeed. `--gc-stats` reports how many allocations went over it. The
+governor's soft limit is 75% of this value. The flag takes precedence over
+`CLJRS_MEMORY_HARD_LIMIT_MB` and `CLJRS_MEMORY_SOFT_LIMIT_MB`.
 
 A zero hard limit, or a soft limit above the hard limit, is rejected.
 

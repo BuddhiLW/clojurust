@@ -18,10 +18,13 @@ use crate::native;
 
 /// Build GC config from CLI flags, or use defaults if not specified.
 ///
-/// The limits apply to each isolate heap as a collection trigger, and any
-/// limit given on the command line also configures the process-wide memory
-/// governor (`cljrs_gc::governor`), which reports, but does not yet enforce,
-/// the hard limit.  A zero hard limit or a soft limit above the hard limit is
+/// The limits apply to each isolate heap as a collection trigger.  The soft
+/// limit is only that per-heap trigger; it does not reach the process-wide
+/// memory governor (`cljrs_gc::governor`), whose soft limit would otherwise
+/// sit at Yellow whenever several isolates each approach it.  A hard limit
+/// also sets the governor's budget (soft limit 75% of it), which is
+/// reported, but not yet enforced.  Without a hard limit the governor keeps
+/// its `CLJRS_MEMORY_*` or platform defaults.  A zero hard limit or a soft limit above the hard limit is
 /// rejected.
 pub fn build_gc_config(
     soft_limit_mb: Option<usize>,
@@ -36,8 +39,8 @@ pub fn build_gc_config(
     Ok(Arc::new(config))
 }
 
-/// Validate CLI limits into a per-heap config and, when any limit was given,
-/// a process governor config.  Pure: does not touch the global governor.
+/// Validate CLI limits into a per-heap config and, when a hard limit was
+/// given, a process governor config.  Pure: does not touch the global governor.
 fn gc_limits(
     soft_limit_mb: Option<usize>,
     hard_limit_mb: Option<usize>,
@@ -56,10 +59,11 @@ fn gc_limits(
         }
         (None, None) => return Ok((GcConfig::new(), None)),
     };
-    let memory =
-        cljrs_gc::MemoryConfig::from_optional_limits(soft_limit_mb.map(mb), hard_limit_mb.map(mb))
-            .map_err(invalid)?;
-    Ok((config, Some(memory)))
+    let memory = hard_limit_mb
+        .map(|hard| cljrs_gc::MemoryConfig::from_optional_limits(None, Some(mb(hard))))
+        .transpose()
+        .map_err(invalid)?;
+    Ok((config, memory))
 }
 
 /// CLI-level versioned-symbol policy flags, threaded into `setup_globals`.
@@ -512,16 +516,27 @@ mod gc_config_tests {
 
     #[test]
     fn soft_only_sets_the_soft_limit() {
-        let (config, _) = gc_limits(Some(64), None).unwrap();
+        let (config, memory) = gc_limits(Some(64), None).unwrap();
         assert_eq!(config.soft_limit(), 64 * MB);
         assert!(config.hard_limit() >= 64 * MB);
+        assert!(
+            memory.is_none(),
+            "the soft limit does not configure the governor"
+        );
     }
 
     #[test]
     fn both_limits_are_kept() {
-        let (config, _) = gc_limits(Some(64), Some(128)).unwrap();
+        let (config, memory) = gc_limits(Some(64), Some(128)).unwrap();
         assert_eq!(config.soft_limit(), 64 * MB);
         assert_eq!(config.hard_limit(), 128 * MB);
+        let memory = memory.expect("a hard limit configures the governor");
+        assert_eq!(memory.hard_limit, 128 * MB);
+        assert_eq!(
+            memory.soft_limit,
+            96 * MB,
+            "governor soft limit is 75% of hard"
+        );
     }
 
     #[test]
