@@ -1,138 +1,139 @@
 (ns clojure.core-test.descendants
   (:require [clojure.test :refer [are deftest is testing use-fixtures]]
-            [clojure.core-test.portability #?(:cljs :refer-macros :default :refer) [when-var-exists]]))
+            [clojure.core-test.portability #?(:cljs :refer-macros :default :refer) [when-var-exists] :as p]))
 
-(when-var-exists descendants
-  #?@(:rust nil
-      :default
-      [; Some types for testing descendants by type
-       (defprotocol TestDescendantsProtocol)
-       (defrecord TestDescendantsRecord [] TestDescendantsProtocol)
-       (deftype TestDescendantsType [] TestDescendantsProtocol)
+#?(:rust nil
+   :default
+   (when-var-exists descendants
 
-       ; A global hierarchy for testing `descendants tag` and `descendants h tag`
-       (def global-hierarchy [[TestDescendantsRecord ::record]
-                              [::t ::p-1]
-                              [::t ::p-2]
-                              [::p-1 'ns/p-0]
-                              [::p-2 ::root]
-                              ['ns/p-0 ::root]])
+  ; Some types for testing descendants by type
+  (defprotocol TestDescendantsProtocol)
+  (defrecord TestDescendantsRecord [] TestDescendantsProtocol)
+  (deftype TestDescendantsType [] TestDescendantsProtocol)
 
-       (defn register-global-hierarchy []
-         (doseq [[tag parent] global-hierarchy]
-           (derive tag parent)))
+  ; A global hierarchy for testing `descendants tag` and `descendants h tag`
+  (def global-hierarchy [[TestDescendantsRecord ::record]
+                         [::t ::p-1]
+                         [::t ::p-2]
+                         [::p-1 'ns/p-0]
+                         [::p-2 ::root]
+                         ['ns/p-0 ::root]])
 
-       (defn unregister-global-hierarchy []
-         (doseq [[tag parent] global-hierarchy]
-           (underive tag parent)))
+  (defn register-global-hierarchy []
+    (doseq [[tag parent] global-hierarchy]
+      (derive tag parent)))
 
-       ;; Basilisp does not support clojure.test style fixtures right now
-       ;; https://github.com/basilisp-lang/basilisp/issues/1306
-       (defn with-global-hierarchy [#?@(:lpy [] :default [tests])]
-         (register-global-hierarchy)
-         #?(:lpy (yield) :default (tests))
-         (unregister-global-hierarchy))
+  (defn unregister-global-hierarchy []
+    (doseq [[tag parent] global-hierarchy]
+      (underive tag parent)))
 
-       (use-fixtures :once with-global-hierarchy)
+  ;; Basilisp does not support clojure.test style fixtures right now
+  ;; https://github.com/basilisp-lang/basilisp/issues/1306
+  (defn with-global-hierarchy [#?@(:lpy [] :default [tests])]
+    (register-global-hierarchy)
+    #?(:lpy (yield) :default (tests))
+    (unregister-global-hierarchy))
 
-       ; A hierarchy for testing `descendants h tag`
-       (def datatypes
-         (-> (make-hierarchy)
-             (derive TestDescendantsRecord ::datatype)
-             (derive TestDescendantsType ::datatype)
-             (derive TestDescendantsType ::mutable)))
+  (use-fixtures :once with-global-hierarchy)
 
-       ; Another hierarchy for testing `descendants h tag`
-       (def diamond
-         (-> (make-hierarchy)
-             (derive ::a ::root)
-             (derive ::b ::a)
-             (derive ::c ::a)
-             (derive ::d ::b)
-             (derive ::d ::c)))
+  ; A hierarchy for testing `descendants h tag`
+  (def datatypes
+    (-> (make-hierarchy)
+        (derive TestDescendantsRecord ::datatype)
+        (derive TestDescendantsType ::datatype)
+        (derive TestDescendantsType ::mutable)))
 
-       (deftest test-descendants
+  ; Another hierarchy for testing `descendants h tag`
+  (def diamond
+    (-> (make-hierarchy)
+        (derive ::a ::root)
+        (derive ::b ::a)
+        (derive ::c ::a)
+        (derive ::d ::b)
+        (derive ::d ::c)))
 
-         (testing "descendants tag"
+  (deftest test-descendants
 
-           (testing "returns descendants by relationship globally defined with derive"
-             (are [expected tag] (= expected (descendants tag))
-                                 nil ::t
-                                 #{::t ::p-1} 'ns/p-0
-                                 #{::t ::p-1 ::p-2 'ns/p-0} ::root
-                                 #{::t} ::p-2
-                                 #{#?(:bb 'clojure.core_test.descendants/TestDescendantsRecord :default TestDescendantsRecord)} ::record))
+    (testing "descendants tag"
 
-           (testing "cannot get descendants by type inheritance"
-             #?@(:cljs
-                 [(is (thrown? js/Error (descendants TestDescendantsProtocol)))
-                  (is (thrown? js/Error (descendants js/Object)))]
-                 :lpy
-                 [(is (nil? (descendants TestDescendantsProtocol)))
-                  (is (thrown? Exception (descendants python/object)))]
-                 :default
-                 [(is (nil? (descendants TestDescendantsProtocol)))
-                  (is (thrown? Exception (descendants Object)))]))
+      (testing "returns descendants by relationship globally defined with derive"
+        (are [expected tag] (= expected (descendants tag))
+                            nil ::t
+                            #{::t ::p-1} 'ns/p-0
+                            #{::t ::p-1 ::p-2 'ns/p-0} ::root
+                            #{::t} ::p-2
+                            #{#?(:bb 'clojure.core_test.descendants/TestDescendantsRecord :default TestDescendantsRecord)} ::record))
 
-           (testing "does not throw on invalid tag"
-             (are [tag] (nil? (descendants tag))
-                        nil
-                        "anything"
-                        42
-                        3.14
-                        true
-                        false
-                        []
-                        {}
-                        #{}
-                        '())))
+      (testing "cannot get descendants by type inheritance"
+        #?@(:lpy
+            [(is (nil? (descendants TestDescendantsProtocol)))
+             (is (p/thrown? (descendants python/object)))]
+            :cljs
+            [(is (p/thrown? (descendants TestDescendantsProtocol)))
+             (is (p/thrown? (descendants js/Object)))]
+            :default
+            [(is (nil? (descendants TestDescendantsProtocol)))
+             (is (p/thrown? (descendants Object)))]))
 
-         (testing "descendants h tag"
+      (testing "does not throw on invalid tag"
+        (are [tag] (nil? (descendants tag))
+                   nil
+                   "anything"
+                   42
+                   3.14
+                   true
+                   false
+                   []
+                   {}
+                   #{}
+                   '())))
 
-           (testing "returns only descendants declared in h, whether the tag is in global hierarchy or not"
-             (are [expected h tag] (= expected (descendants h tag))
+    (testing "descendants h tag"
 
-                                   ; tag in h and not in global hierarchy
-                                   nil diamond ::d
-                                   #{::d} diamond ::b
-                                   #{::b ::c ::d} diamond ::a
-                                   #?(:bb      #{'clojure.core_test.descendants/TestDescendantsRecord 'clojure.core_test.descendants/TestDescendantsType}
-                                      :default #{TestDescendantsRecord TestDescendantsType}) datatypes ::datatype
-                                   #?(:bb      #{'clojure.core_test.descendants/TestDescendantsType}
-                                      :default #{TestDescendantsType}) datatypes ::mutable
+      (testing "returns only descendants declared in h, whether the tag is in global hierarchy or not"
+        (are [expected h tag] (= expected (descendants h tag))
 
-                                   ; tag in both h and global hierarchy, only descendants in h are returned
-                                   #{::a ::b ::c ::d} diamond ::root
+                              ; tag in h and not in global hierarchy
+                              nil diamond ::d
+                              #{::d} diamond ::b
+                              #{::b ::c ::d} diamond ::a
+                              #?(:bb      #{'clojure.core_test.descendants/TestDescendantsRecord 'clojure.core_test.descendants/TestDescendantsType}
+                                 :default #{TestDescendantsRecord TestDescendantsType}) datatypes ::datatype
+                              #?(:bb      #{'clojure.core_test.descendants/TestDescendantsType}
+                                 :default #{TestDescendantsType}) datatypes ::mutable
 
-                                   ; tag not in h but in global hierarchy
-                                   nil datatypes ::root
-                                   nil datatypes ::p-1
-                                   nil datatypes ::p-2
+                              ; tag in both h and global hierarchy, only descendants in h are returned
+                              #{::a ::b ::c ::d} diamond ::root
 
-                                   ; tag neither in h nor in global hierarchy
-                                   nil datatypes ::d
-                                   nil datatypes ::b
-                                   nil datatypes ::a))
+                              ; tag not in h but in global hierarchy
+                              nil datatypes ::root
+                              nil datatypes ::p-1
+                              nil datatypes ::p-2
 
-           (testing "cannot get descendants by type inheritance, whether the tag is in h or not"
-             (are [h] #?(:cljs    (thrown? js/Error (descendants h js/Object))
-                         :lpy     (thrown? Exception (descendants h python/object))
-                         :default (thrown? Exception (descendants h Object)))
-                      ; tag in h
-                      (derive (make-hierarchy) #?(:cljs js/Object :lpy python/object :default Object) ::object)
-                      ; tag not in h
-                      diamond
-                      datatypes))
+                              ; tag neither in h nor in global hierarchy
+                              nil datatypes ::d
+                              nil datatypes ::b
+                              nil datatypes ::a))
 
-           (testing "does not throw on invalid tag or hierarchy"
-             (are [invalid] (nil? (descendants invalid invalid))
-                            nil
-                            "anything"
-                            42
-                            3.14
-                            true
-                            false
-                            []
-                            {}
-                            #{}
-                            '()))))]))
+      (testing "cannot get descendants by type inheritance, whether the tag is in h or not"
+        (are [h] #?(:lpy     (p/thrown? (descendants h python/object))
+                    :cljs    (p/thrown? (descendants h js/Object))
+                    :default (p/thrown? (descendants h Object)))
+                 ; tag in h
+                 (derive (make-hierarchy) #?(:lpy python/object :cljs js/Object :default Object) ::object)
+                 ; tag not in h
+                 diamond
+                 datatypes))
+
+      (testing "does not throw on invalid tag or hierarchy"
+        (are [invalid] (nil? (descendants invalid invalid))
+                       nil
+                       "anything"
+                       42
+                       3.14
+                       true
+                       false
+                       []
+                       {}
+                       #{}
+                       '()))))))
