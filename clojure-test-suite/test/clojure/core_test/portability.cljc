@@ -44,7 +44,11 @@
      :lpy (instance? basilisp.lang.seq/LazySeq x)
      :phel (phel.core/lazy-seq? x)
      :jank (cpp/== (.get_type x) cpp/jank.runtime.object_type.lazy_sequence)
-     :rust false
+     :rust (and (= 'List (type x))
+                (try
+                  (realized? x)
+                  true
+                  (catch Exception _ false)))
      :default (instance? clojure.lang.LazySeq x)))
 
 ;; --- Portable exception multimethod. ---

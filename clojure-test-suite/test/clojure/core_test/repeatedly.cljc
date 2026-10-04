@@ -18,7 +18,7 @@
           (is (= #?(;; phel doesn't seem to handle mid failures gracefully
                     :phel    0
                     :default 1)
-                 @state))))))
+                 @state)))))
 
     (testing "Single argument"
       (is (= 0 (first (repeatedly +))))
@@ -67,4 +67,4 @@
           {}
           #{}
           '()
-          []))))
+          [])))))
