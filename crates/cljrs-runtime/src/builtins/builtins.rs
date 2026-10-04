@@ -4243,7 +4243,7 @@ fn builtin_first(args: &[Value]) -> ValueResult<Value> {
             }
         }
         other => {
-            let seq = builtin_seq(&[other.clone()])?;
+            let seq = builtin_seq(std::slice::from_ref(other))?;
             builtin_first(&[seq])
         }
     }
@@ -4291,7 +4291,7 @@ fn builtin_rest(args: &[Value]) -> ValueResult<Value> {
             Ok(Value::List(GcPtr::new(PersistentList::from_iter(items))))
         }
         other => {
-            let seq = builtin_seq(&[other.clone()])?;
+            let seq = builtin_seq(std::slice::from_ref(other))?;
             builtin_rest(&[seq])
         }
     }
