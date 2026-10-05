@@ -4,17 +4,20 @@
 //! heap and collects it independently; the governor owns only counters,
 //! pressure policy, and thread-safe [`IsolateControl`] handles.
 //!
-//! **Status: Phase 1 (observe-only).**  The governor accounts GC heap bytes per
-//! isolate, derives a process [`PressureLevel`], and requests collection from
-//! isolates at `Yellow`/`Red`.  It never rejects an allocation: when committed
-//! bytes pass the hard limit it records a *would-reject* event instead (see
-//! [`MemorySnapshot::over_limit_events`]).
+//! **Status: Phase 2 (chunked credit, observe-only).**  Each isolate
+//! allocates from local credit that the governor grants in chunks of
+//! [`MemoryConfig::credit_chunk`]; granted credit counts as committed memory.
+//! The governor derives a process [`PressureLevel`] from committed bytes and
+//! requests collection from isolates at `Yellow`/`Red`.  It never rejects a
+//! grant: a grant that leaves committed bytes above the hard limit is recorded
+//! as a *would-reject* event (see [`MemorySnapshot::over_limit_events`]).
 //!
 //! The hot path ([`IsolateAccount::charge`]) touches only thread-local `Cell`s.
-//! An account publishes its byte count to the process counters once it has
-//! drifted by one credit chunk ([`MemoryConfig::credit_chunk`]) from the last
-//! published value, and after every collection.  Process totals therefore lag
-//! each isolate by less than one chunk.
+//! It contacts the governor only when local credit runs out.  A refill is the
+//! one point where an isolate publishes its used bytes and checks its
+//! collection target, so per-isolate metrics lag by less than one chunk.
+//! Committed bytes are exact: they change only when credit is granted or
+//! returned.
 
 use std::cell::{Cell, OnceCell};
 use std::fmt;
@@ -25,8 +28,15 @@ use std::time::Duration;
 const KIB: usize = 1024;
 const MIB: usize = 1024 * 1024;
 
-/// Default isolate publication granularity (the future credit chunk).
+/// Default isolate credit chunk.
 pub const DEFAULT_CREDIT_CHUNK: usize = 64 * KIB;
+/// Default number of unused credit chunks an isolate keeps after a
+/// collection at `Green` pressure.
+pub const DEFAULT_RETAINED_CREDIT_CHUNKS: usize = 2;
+/// Granularity of a large credit request (one that exceeds a chunk).
+pub const ACCOUNTING_UNIT: usize = 4 * KIB;
+/// Floor for the growth an isolate heap is allowed between collections.
+pub const MIN_COLLECTION_HEADROOM: usize = 4 * MIB;
 /// Floor for the default critical reserve.
 pub const MIN_DEFAULT_CRITICAL_RESERVE: usize = 4 * MIB;
 /// Ceiling for the default critical reserve.
@@ -156,8 +166,11 @@ pub struct MemoryConfig {
     pub hard_limit: usize,
     /// Capacity reserved for collection, shutdown, and error reporting.
     pub critical_reserve: usize,
-    /// Isolate credit chunk (Phase 1: publication granularity).
+    /// Normal isolate credit chunk.
     pub credit_chunk: usize,
+    /// Unused credit chunks an isolate keeps after a collection at `Green`.
+    /// `Yellow` keeps at most one and `Red` keeps none.
+    pub retained_credit_chunks: usize,
     /// Default byte limit for one isolate channel.
     pub queue_limit: usize,
 }
@@ -232,6 +245,7 @@ impl MemoryConfig {
             hard_limit,
             critical_reserve: default_critical_reserve(hard_limit),
             credit_chunk: DEFAULT_CREDIT_CHUNK,
+            retained_credit_chunks: DEFAULT_RETAINED_CREDIT_CHUNKS,
             queue_limit: DEFAULT_QUEUE_LIMIT.min(hard_limit),
         };
         config.validate()?;
@@ -373,10 +387,6 @@ pub fn default_critical_reserve(hard_limit: usize) -> usize {
 ///
 /// Uses the cgroup memory limit when one applies (Linux), otherwise half of
 /// physical memory.  `wasm32` uses a fixed 256 MiB.
-///
-/// This is the process-wide budget.  It is distinct from the per-heap
-/// default in `config.rs` (¼ of RAM, at least 256 MiB), which only sets each
-/// isolate heap's unenforced hard limit, so the two may differ.
 pub fn default_hard_limit() -> usize {
     #[cfg(target_arch = "wasm32")]
     {
@@ -429,21 +439,29 @@ pub type IsolateId = u64;
 /// Thread-safe control data for one registered isolate.
 ///
 /// The governor holds weak references to these in its registry; it can
-/// request collection, but it cannot trace or sweep another isolate's heap.
+/// request collection or a credit recall, but it cannot trace or sweep
+/// another isolate's heap.
 pub struct IsolateControl {
     id: IsolateId,
     name: Mutex<Arc<str>>,
     gc_requested: AtomicBool,
+    /// The governor asks the isolate to return its unused credit.
+    recall_requested: AtomicBool,
     used_bytes: AtomicUsize,
     peak_used_bytes: AtomicUsize,
+    free_credit_bytes: AtomicUsize,
     /// Number of completed collections; the collection epoch.
     last_collection_epoch: AtomicU64,
     /// Epoch at which the governor last requested collection (`u64::MAX`: never).
     requested_epoch: AtomicU64,
-    /// Used bytes below which the governor does not request collection at
-    /// `Yellow` (set from the last collection's result).
+    /// Used bytes at which the isolate requests its own collection (a copy
+    /// of the account's target, for diagnostics).
     collection_target: AtomicUsize,
+    /// Used bytes below which the governor does not request collection at
+    /// `Yellow`: the last collection's survivors plus the minimum headroom.
+    pressure_target: AtomicUsize,
     collection_requests: AtomicU64,
+    credit_refills: AtomicU64,
     zero_yield_collections: AtomicU64,
     last_bytes_before: AtomicUsize,
     last_bytes_after: AtomicUsize,
@@ -451,17 +469,21 @@ pub struct IsolateControl {
 }
 
 impl IsolateControl {
-    fn new(id: IsolateId, name: Arc<str>) -> Self {
+    fn new(id: IsolateId, name: Arc<str>, initial_target: usize) -> Self {
         Self {
             id,
             name: Mutex::new(name),
             gc_requested: AtomicBool::new(false),
+            recall_requested: AtomicBool::new(false),
             used_bytes: AtomicUsize::new(0),
             peak_used_bytes: AtomicUsize::new(0),
+            free_credit_bytes: AtomicUsize::new(0),
             last_collection_epoch: AtomicU64::new(0),
             requested_epoch: AtomicU64::new(u64::MAX),
-            collection_target: AtomicUsize::new(0),
+            collection_target: AtomicUsize::new(initial_target),
+            pressure_target: AtomicUsize::new(0),
             collection_requests: AtomicU64::new(0),
+            credit_refills: AtomicU64::new(0),
             zero_yield_collections: AtomicU64::new(0),
             last_bytes_before: AtomicUsize::new(0),
             last_bytes_after: AtomicUsize::new(0),
@@ -501,9 +523,30 @@ impl IsolateControl {
         self.gc_requested.swap(false, Ordering::AcqRel)
     }
 
+    /// Ask the isolate to return its unused credit at its next runtime
+    /// service poll ([`IsolateAccount::poll`]).
+    pub fn request_recall(&self) {
+        self.recall_requested.store(true, Ordering::Release);
+    }
+
+    /// Whether a credit recall is pending.
+    pub fn recall_requested(&self) -> bool {
+        self.recall_requested.load(Ordering::Acquire)
+    }
+
     /// Last published used bytes.
     pub fn used_bytes(&self) -> usize {
         self.used_bytes.load(Ordering::Relaxed)
+    }
+
+    /// Last published unused credit.
+    pub fn free_credit_bytes(&self) -> usize {
+        self.free_credit_bytes.load(Ordering::Relaxed)
+    }
+
+    /// Used bytes at which the isolate requests its own collection.
+    pub fn collection_target(&self) -> usize {
+        self.collection_target.load(Ordering::Relaxed)
     }
 
     /// Number of completed collections.
@@ -516,10 +559,15 @@ impl IsolateControl {
         self.collection_requests.load(Ordering::Relaxed)
     }
 
+    /// Credit refills this isolate has requested.
+    pub fn credit_refills(&self) -> u64 {
+        self.credit_refills.load(Ordering::Relaxed)
+    }
+
     /// Request collection on the governor's behalf, at most once per
-    /// collection epoch.  Below `Red`, also skip the request while the heap
-    /// is under its post-collection target.  Returns whether a request was
-    /// made.
+    /// collection epoch.  At `Yellow`, also skip the request until the heap
+    /// has grown by the minimum headroom since its last collection.  Returns
+    /// whether a request was made.
     fn governor_request(&self, level: PressureLevel) -> bool {
         let epoch = self.collection_epoch();
         let prev = self.requested_epoch.load(Ordering::Relaxed);
@@ -527,11 +575,11 @@ impl IsolateControl {
             return false;
         }
         if level < PressureLevel::Red
-            && self.used_bytes() < self.collection_target.load(Ordering::Relaxed)
+            && self.used_bytes() < self.pressure_target.load(Ordering::Relaxed)
         {
             return false;
         }
-        // `evaluate` can run on several publishing threads at once; only the
+        // `evaluate` can run on several refilling threads at once; only the
         // thread that claims this epoch counts the request.
         if self
             .requested_epoch
@@ -550,9 +598,12 @@ impl IsolateControl {
             id: self.id,
             name: self.name(),
             used_bytes: self.used_bytes(),
+            free_credit_bytes: self.free_credit_bytes(),
             peak_used_bytes: self.peak_used_bytes.load(Ordering::Relaxed),
+            collection_target: self.collection_target(),
             collections: self.collection_epoch(),
             collection_requests: self.collection_requests(),
+            credit_refills: self.credit_refills(),
             zero_yield_collections: self.zero_yield_collections.load(Ordering::Relaxed),
             last_bytes_before: self.last_bytes_before.load(Ordering::Relaxed),
             last_bytes_after: self.last_bytes_after.load(Ordering::Relaxed),
@@ -567,6 +618,7 @@ impl fmt::Debug for IsolateControl {
             .field("id", &self.id)
             .field("name", &self.name())
             .field("used_bytes", &self.used_bytes())
+            .field("free_credit_bytes", &self.free_credit_bytes())
             .finish()
     }
 }
@@ -578,7 +630,8 @@ pub struct CollectionReport {
     pub bytes_before: usize,
     /// Heap bytes after collection.
     pub bytes_after: usize,
-    /// Bytes freed by sweep and returned to the governor.
+    /// Bytes freed by sweep.  They become free credit, and the account
+    /// returns the credit above its retained limit to the governor.
     pub bytes_returned: usize,
     /// Mark plus sweep time.
     pub duration: Duration,
@@ -588,18 +641,30 @@ pub struct CollectionReport {
 
 /// One isolate's single-threaded view of the governor.
 ///
+/// The account holds `used` bytes (live objects and retained garbage) and
+/// `credit` (committed capacity it has not used yet).  Their sum is exactly
+/// what the governor has committed for this isolate.
+///
 /// The counters are `Cell`s, so the account is `!Sync`: only one thread
 /// uses it at a time.  It is `Send`, so nothing stops moving it to another
 /// thread; the runtime keeps it in a thread-local for the isolate's thread.
 ///
 /// Created by [`ProcessMemoryGovernor::register_isolate`].  Dropping the
-/// account returns its charge and unregisters it.
+/// account returns its used bytes and free credit and unregisters it.
 pub struct IsolateAccount {
     governor: &'static ProcessMemoryGovernor,
     control: Arc<IsolateControl>,
     used: Cell<usize>,
-    published: Cell<usize>,
-    publish_step: Cell<usize>,
+    credit: Cell<usize>,
+    /// Free credit last added to the governor's free-credit counter.
+    published_credit: Cell<usize>,
+    /// Used bytes at which the isolate requests its own collection.
+    target: Cell<usize>,
+    /// Growth allowed after the last collection (doubles on zero yield).
+    headroom: Cell<usize>,
+    /// Allocations not yet added to [`crate::stats::GC_STATS`].
+    pending_allocs: Cell<u64>,
+    pending_alloc_bytes: Cell<u64>,
 }
 
 impl IsolateAccount {
@@ -613,21 +678,67 @@ impl IsolateAccount {
         self.used.get()
     }
 
-    /// Account `bytes` of new heap allocation.  Thread-local unless the local
-    /// value has drifted one credit chunk from the published value.
+    /// Exact local unused credit.
+    pub fn free_credit_bytes(&self) -> usize {
+        self.credit.get()
+    }
+
+    /// Bytes the governor has committed for this isolate: used plus free
+    /// credit.
+    pub fn committed_bytes(&self) -> usize {
+        self.used.get() + self.credit.get()
+    }
+
+    /// Used bytes at which this isolate requests its own collection.
+    pub fn collection_target(&self) -> usize {
+        self.target.get()
+    }
+
+    /// Account `bytes` of new heap allocation.  Thread-local unless local
+    /// credit is insufficient, in which case the account refills from the
+    /// governor.
     #[inline]
     pub fn charge(&self, bytes: usize) {
-        let used = self.used.get() + bytes;
-        self.used.set(used);
-        // Drift since the last publish.  `published` can exceed `used`
-        // between a sweep's releases and the next publish; `min` keeps the
-        // subtraction from underflowing in that window.
-        if used - self.published.get().min(used) >= self.publish_step.get() {
-            self.publish();
+        self.used.set(self.used.get() + bytes);
+        self.pending_allocs.set(self.pending_allocs.get() + 1);
+        self.pending_alloc_bytes
+            .set(self.pending_alloc_bytes.get() + bytes as u64);
+        match self.credit.get().checked_sub(bytes) {
+            Some(rest) => self.credit.set(rest),
+            None => self.refill(bytes),
         }
     }
 
-    /// Return `bytes` freed by sweep.
+    /// Slow path of [`Self::charge`]: obtain credit for the part of `bytes`
+    /// that local credit does not cover.  A shortfall up to one chunk gets a
+    /// normal chunk; a larger one gets its own size, rounded up to
+    /// [`ACCOUNTING_UNIT`].
+    #[cold]
+    #[inline(never)]
+    fn refill(&self, bytes: usize) {
+        let credit = self.credit.get();
+        let shortfall = bytes - credit;
+        let chunk = self.governor.credit_chunk();
+        let grant = if shortfall > chunk {
+            shortfall.div_ceil(ACCOUNTING_UNIT) * ACCOUNTING_UNIT
+        } else {
+            chunk
+        };
+        self.governor.grant(grant);
+        self.control.credit_refills.fetch_add(1, Ordering::Relaxed);
+        self.credit.set(credit + grant - bytes);
+        if self.control.recall_requested() {
+            self.service_recall();
+        }
+        self.sync();
+        if self.used.get() >= self.target.get() {
+            self.control.request_collection();
+        }
+        self.governor.evaluate(Some(&self.control), true);
+    }
+
+    /// Return `bytes` freed by sweep.  They become free credit until the
+    /// collection report trims it.
     #[inline]
     pub fn release(&self, bytes: usize) {
         let used = self.used.get();
@@ -636,29 +747,87 @@ impl IsolateAccount {
             "isolate {} released {bytes} bytes with only {used} charged",
             self.control.id
         );
-        self.used.set(used.saturating_sub(bytes));
+        let bytes = bytes.min(used);
+        self.used.set(used - bytes);
+        self.credit.set(self.credit.get() + bytes);
     }
 
-    /// Push the local byte count to the process counters and re-evaluate
-    /// pressure.
+    /// Publish the local counters and re-evaluate pressure.  Normal
+    /// operation publishes at each refill and collection; this is for
+    /// metrics polls.
     pub fn publish(&self) {
+        self.sync();
+        self.governor.evaluate(Some(&self.control), false);
+    }
+
+    /// Runtime service poll: return credit if the governor recalled it,
+    /// and report whether a collection is requested.  Called from the
+    /// safepoint check, so it must stay cheap when nothing is pending.
+    #[inline]
+    pub fn poll(&self) -> bool {
+        if self.control.recall_requested() {
+            self.service_recall();
+            self.sync();
+            self.governor.evaluate(None, false);
+        }
+        self.control.collection_requested()
+    }
+
+    fn service_recall(&self) {
+        self.control
+            .recall_requested
+            .store(false, Ordering::Release);
+        self.trim_credit();
+    }
+
+    /// Return the free credit above the retained limit for the current
+    /// pressure level.
+    fn trim_credit(&self) {
+        let limit = self.governor.retained_credit(self.governor.pressure());
+        let credit = self.credit.get();
+        if credit > limit {
+            self.credit.set(limit);
+            self.governor.return_credit(credit - limit);
+        }
+    }
+
+    /// Copy the local counters to the control handle and the governor's
+    /// free-credit counter, and flush pending allocation statistics.
+    fn sync(&self) {
         let used = self.used.get();
-        let prev = self.published.replace(used);
+        let credit = self.credit.get();
         self.control.used_bytes.store(used, Ordering::Relaxed);
         self.control
             .peak_used_bytes
             .fetch_max(used, Ordering::Relaxed);
-        self.publish_step.set(self.governor.credit_chunk());
-        if used >= prev {
-            self.governor.add(MemoryClass::GcHeap, used - prev);
+        self.control
+            .free_credit_bytes
+            .store(credit, Ordering::Relaxed);
+        let prev = self.published_credit.replace(credit);
+        if credit >= prev {
+            self.governor.add_free_credit(credit - prev);
         } else {
-            self.governor.sub(MemoryClass::GcHeap, prev - used);
+            self.governor.sub_free_credit(prev - credit);
         }
-        self.governor.evaluate(Some(&self.control), used > prev);
+        self.flush_alloc_stats();
+    }
+
+    fn flush_alloc_stats(&self) {
+        let allocs = self.pending_allocs.replace(0);
+        let bytes = self.pending_alloc_bytes.replace(0);
+        if allocs > 0 {
+            crate::stats::GC_STATS.record_gc_allocs(allocs, bytes);
+        }
     }
 
     /// Record a completed collection: bump the epoch, set the next
-    /// collection target, and publish.
+    /// collection target, return excess free credit, and publish.
+    ///
+    /// The target is the surviving bytes plus a headroom of the larger of
+    /// the surviving bytes or [`ProcessMemoryGovernor::min_headroom`].  A
+    /// collection that frees nothing doubles the previous headroom instead,
+    /// capped at the larger of the base headroom or a quarter of the
+    /// process soft limit.
     pub fn record_collection(&self, report: CollectionReport) {
         let c = &self.control;
         c.last_collection_epoch.fetch_add(1, Ordering::Relaxed);
@@ -670,29 +839,39 @@ impl IsolateAccount {
             report.duration.as_nanos().min(u64::MAX as u128) as u64,
             Ordering::Relaxed,
         );
-        let min_headroom = self.governor.credit_chunk().saturating_mul(16).max(MIB);
+        let min = self.governor.min_headroom();
+        let after = report.bytes_after;
+        let base = after.max(min);
         let headroom = if report.bytes_returned == 0 {
             c.zero_yield_collections.fetch_add(1, Ordering::Relaxed);
-            report.bytes_after.max(min_headroom)
+            let cap = base.max(self.governor.soft_limit() / 4);
+            self.headroom.get().saturating_mul(2).clamp(base, cap)
         } else {
-            (report.bytes_after / 2).max(min_headroom)
+            base
         };
-        c.collection_target.store(
-            report.bytes_after.saturating_add(headroom),
-            Ordering::Relaxed,
-        );
-        self.publish();
+        self.headroom.set(headroom);
+        let target = after.saturating_add(headroom);
+        self.target.set(target);
+        c.collection_target.store(target, Ordering::Relaxed);
+        c.pressure_target
+            .store(after.saturating_add(min), Ordering::Relaxed);
+        self.service_recall();
+        self.sync();
+        self.governor.evaluate(Some(c), false);
     }
 }
 
 impl Drop for IsolateAccount {
     fn drop(&mut self) {
-        // Phase 1: the isolate heap is not torn down at thread exit, so this
+        // The isolate heap is not torn down at thread exit yet, so this
         // stops counting bytes that remain allocated until process exit.
-        let published = self.published.replace(0);
-        self.used.set(0);
+        let committed = self.used.replace(0) + self.credit.replace(0);
+        let published = self.published_credit.replace(0);
         self.control.used_bytes.store(0, Ordering::Relaxed);
-        self.governor.sub(MemoryClass::GcHeap, published);
+        self.control.free_credit_bytes.store(0, Ordering::Relaxed);
+        self.flush_alloc_stats();
+        self.governor.sub_free_credit(published);
+        self.governor.return_credit(committed);
         self.governor.unregister(&self.control);
         self.governor.evaluate(None, false);
     }
@@ -775,11 +954,20 @@ pub struct ProcessMemoryGovernor {
     soft_limit: AtomicUsize,
     hard_limit: AtomicUsize,
     credit_chunk: AtomicUsize,
+    retained_credit_chunks: AtomicUsize,
+    /// Total committed bytes; the sum of `class_bytes`.
+    committed: AtomicUsize,
     class_bytes: [AtomicUsize; CLASS_COUNT],
+    /// Unused isolate credit, as last published by each isolate.
+    free_credit: AtomicUsize,
     peak_committed: AtomicUsize,
+    peak_used: AtomicUsize,
     pressure: AtomicU8,
     pressure_transitions: AtomicU64,
     collection_requests: AtomicU64,
+    credit_refills: AtomicU64,
+    credit_returned_bytes: AtomicU64,
+    credit_recalls: AtomicU64,
     over_limit_events: AtomicU64,
     over_limit_bytes: AtomicU64,
     registry: Mutex<Vec<Weak<IsolateControl>>>,
@@ -796,11 +984,18 @@ impl ProcessMemoryGovernor {
             soft_limit: AtomicUsize::new(usize::MAX),
             hard_limit: AtomicUsize::new(usize::MAX),
             credit_chunk: AtomicUsize::new(DEFAULT_CREDIT_CHUNK),
+            retained_credit_chunks: AtomicUsize::new(DEFAULT_RETAINED_CREDIT_CHUNKS),
+            committed: AtomicUsize::new(0),
             class_bytes: [const { AtomicUsize::new(0) }; CLASS_COUNT],
+            free_credit: AtomicUsize::new(0),
             peak_committed: AtomicUsize::new(0),
+            peak_used: AtomicUsize::new(0),
             pressure: AtomicU8::new(PressureLevel::Green as u8),
             pressure_transitions: AtomicU64::new(0),
             collection_requests: AtomicU64::new(0),
+            credit_refills: AtomicU64::new(0),
+            credit_returned_bytes: AtomicU64::new(0),
+            credit_recalls: AtomicU64::new(0),
             over_limit_events: AtomicU64::new(0),
             over_limit_bytes: AtomicU64::new(0),
             registry: Mutex::new(Vec::new()),
@@ -832,6 +1027,8 @@ impl ProcessMemoryGovernor {
         self.hard_limit.store(config.hard_limit, Ordering::Relaxed);
         self.credit_chunk
             .store(config.credit_chunk, Ordering::Relaxed);
+        self.retained_credit_chunks
+            .store(config.retained_credit_chunks, Ordering::Relaxed);
         self.configured.store(true, Ordering::Release);
     }
 
@@ -866,10 +1063,36 @@ impl ProcessMemoryGovernor {
         self.credit_chunk.load(Ordering::Relaxed)
     }
 
+    fn soft_limit(&self) -> usize {
+        self.ensure_configured();
+        self.soft_limit.load(Ordering::Relaxed)
+    }
+
+    /// Smallest growth an isolate heap is allowed between collections: the
+    /// larger of 16 credit chunks or [`MIN_COLLECTION_HEADROOM`].  This is
+    /// also an isolate's collection target before its first collection.
+    pub fn min_headroom(&self) -> usize {
+        self.credit_chunk()
+            .saturating_mul(16)
+            .max(MIN_COLLECTION_HEADROOM)
+    }
+
+    /// Free credit an isolate keeps after a collection or recall at `level`.
+    fn retained_credit(&self, level: PressureLevel) -> usize {
+        let chunks = self.retained_credit_chunks.load(Ordering::Relaxed);
+        let chunks = match level {
+            PressureLevel::Green => chunks,
+            PressureLevel::Yellow => chunks.min(1),
+            PressureLevel::Red => 0,
+        };
+        self.credit_chunk().saturating_mul(chunks)
+    }
+
     /// Register an isolate.  The returned account is single-threaded (`!Sync`).
     pub fn register_isolate(&'static self, name: impl Into<Arc<str>>) -> IsolateAccount {
         let id = self.next_isolate_id.fetch_add(1, Ordering::Relaxed);
-        let control = Arc::new(IsolateControl::new(id, name.into()));
+        let target = self.min_headroom();
+        let control = Arc::new(IsolateControl::new(id, name.into(), target));
         {
             let mut reg = self.registry.lock().unwrap_or_else(PoisonError::into_inner);
             reg.retain(|w| w.strong_count() > 0);
@@ -880,8 +1103,12 @@ impl ProcessMemoryGovernor {
             governor: self,
             control,
             used: Cell::new(0),
-            published: Cell::new(0),
-            publish_step: Cell::new(self.credit_chunk()),
+            credit: Cell::new(0),
+            published_credit: Cell::new(0),
+            target: Cell::new(target),
+            headroom: Cell::new(target),
+            pending_allocs: Cell::new(0),
+            pending_alloc_bytes: Cell::new(0),
         }
     }
 
@@ -891,8 +1118,8 @@ impl ProcessMemoryGovernor {
     }
 
     /// Reserve `bytes` of `class` for an allocation with an independent
-    /// lifetime.  Phase 1 is observe-only: the reservation always succeeds
-    /// and an over-limit reservation is recorded as a would-reject event.
+    /// lifetime.  Observe-only: the reservation always succeeds, and an
+    /// over-limit reservation is recorded as a would-reject event.
     pub fn reserve_shared(
         &'static self,
         class: MemoryClass,
@@ -907,9 +1134,25 @@ impl ProcessMemoryGovernor {
         })
     }
 
+    /// Commit `bytes` of isolate credit.  Observe-only: never refused.
+    fn grant(&self, bytes: usize) {
+        self.add(MemoryClass::GcHeap, bytes);
+        self.credit_refills.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Uncommit `bytes` of isolate credit or used heap bytes.
+    fn return_credit(&self, bytes: usize) {
+        if bytes > 0 {
+            self.sub(MemoryClass::GcHeap, bytes);
+            self.credit_returned_bytes
+                .fetch_add(bytes as u64, Ordering::Relaxed);
+        }
+    }
+
     fn add(&self, class: MemoryClass, bytes: usize) {
         if bytes > 0 {
             self.class_bytes[class.index()].fetch_add(bytes, Ordering::Relaxed);
+            self.committed.fetch_add(bytes, Ordering::Relaxed);
         }
     }
 
@@ -917,18 +1160,19 @@ impl ProcessMemoryGovernor {
         if bytes == 0 {
             return;
         }
-        let prev = self.class_bytes[class.index()].fetch_sub(bytes, Ordering::Relaxed);
-        if prev < bytes {
-            // Restore the counter before reporting, so release builds keep
-            // a sane (zero) value rather than a wrapped one.  Not atomic with
-            // the `fetch_sub`: a concurrent `add` in between can still lose
-            // bytes.  Underflow is a bug, and this repair is best-effort.
-            self.class_bytes[class.index()].fetch_add(bytes - prev, Ordering::Relaxed);
-            debug_assert!(
-                false,
-                "{} counter underflow: released {bytes} with {prev} committed",
-                class.name()
-            );
+        checked_sub(&self.class_bytes[class.index()], bytes, class.name());
+        checked_sub(&self.committed, bytes, "committed");
+    }
+
+    fn add_free_credit(&self, bytes: usize) {
+        if bytes > 0 {
+            self.free_credit.fetch_add(bytes, Ordering::Relaxed);
+        }
+    }
+
+    fn sub_free_credit(&self, bytes: usize) {
+        if bytes > 0 {
+            checked_sub(&self.free_credit, bytes, "free-credit");
         }
     }
 
@@ -937,11 +1181,16 @@ impl ProcessMemoryGovernor {
         self.class_bytes[class.index()].load(Ordering::Relaxed)
     }
 
-    /// Total committed bytes (Phase 1: equal to used bytes).
+    /// Total committed bytes: used bytes plus unused isolate credit.
     pub fn committed_bytes(&self) -> usize {
-        self.class_bytes.iter().fold(0usize, |acc, c| {
-            acc.saturating_add(c.load(Ordering::Relaxed))
-        })
+        self.committed.load(Ordering::Relaxed)
+    }
+
+    /// Unused isolate credit, as last published by each isolate.
+    pub fn free_credit_bytes(&self) -> usize {
+        self.free_credit
+            .load(Ordering::Relaxed)
+            .min(self.committed_bytes())
     }
 
     /// Current pressure level.
@@ -949,16 +1198,25 @@ impl ProcessMemoryGovernor {
         PressureLevel::from_u8(self.pressure.load(Ordering::Acquire))
     }
 
-    /// Recompute pressure; request collection at `Yellow`/`Red`.
+    /// Recompute pressure; on a rise, recall unused credit; request
+    /// collection at `Yellow`/`Red`.
     fn evaluate(&self, requester: Option<&IsolateControl>, grew: bool) {
         self.ensure_configured();
         let committed = self.committed_bytes();
-        self.peak_committed.fetch_max(committed, Ordering::Relaxed);
+        let free = self.free_credit.load(Ordering::Relaxed).min(committed);
+        raise_peak(&self.peak_committed, committed);
+        raise_peak(&self.peak_used, committed - free);
         let soft = self.soft_limit.load(Ordering::Relaxed);
         let hard = self.hard_limit.load(Ordering::Relaxed);
         let level = PressureLevel::classify(committed, soft, hard);
-        let prev = PressureLevel::from_u8(self.pressure.swap(level as u8, Ordering::AcqRel));
-        if prev != level {
+        let prev = self.pressure();
+        // Only a change writes the shared pressure word.
+        if prev != level
+            && self
+                .pressure
+                .compare_exchange(prev as u8, level as u8, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+        {
             self.pressure_transitions.fetch_add(1, Ordering::Relaxed);
             tracing::info!(
                 target: "memory",
@@ -969,6 +1227,9 @@ impl ProcessMemoryGovernor {
                 hard_limit = hard,
                 "memory pressure transition"
             );
+            if level > prev {
+                self.recall_credit();
+            }
         }
         if level == PressureLevel::Red && grew {
             self.over_limit_events.fetch_add(1, Ordering::Relaxed);
@@ -998,6 +1259,18 @@ impl ProcessMemoryGovernor {
         }
     }
 
+    /// Ask every registered isolate to return its unused credit.  Each one
+    /// does so at its next refill, collection, or runtime service poll; an
+    /// isolate that never polls keeps at most its retained chunks.
+    fn recall_credit(&self) {
+        let reg = self.registry.lock().unwrap_or_else(PoisonError::into_inner);
+        for control in reg.iter().filter_map(Weak::upgrade) {
+            control.request_recall();
+        }
+        drop(reg);
+        self.credit_recalls.fetch_add(1, Ordering::Relaxed);
+    }
+
     fn largest_isolate(&self) -> Option<Arc<IsolateControl>> {
         let reg = self.registry.lock().unwrap_or_else(PoisonError::into_inner);
         reg.iter()
@@ -1012,9 +1285,8 @@ impl ProcessMemoryGovernor {
         for (slot, c) in class_bytes.iter_mut().zip(self.class_bytes.iter()) {
             *slot = c.load(Ordering::Relaxed);
         }
-        let committed = class_bytes
-            .iter()
-            .fold(0usize, |acc, &b| acc.saturating_add(b));
+        let committed = self.committed_bytes();
+        let free = self.free_credit_bytes();
         let mut isolates: Vec<IsolateSnapshot> = {
             let reg = self.registry.lock().unwrap_or_else(PoisonError::into_inner);
             reg.iter()
@@ -1030,17 +1302,45 @@ impl ProcessMemoryGovernor {
             credit_chunk: config.credit_chunk,
             pressure: self.pressure(),
             committed_bytes: committed,
-            used_bytes: committed,
-            free_credit_bytes: 0,
+            used_bytes: committed - free,
+            free_credit_bytes: free,
             peak_committed_bytes: self.peak_committed.load(Ordering::Relaxed),
+            peak_used_bytes: self.peak_used.load(Ordering::Relaxed),
             class_bytes,
             isolates,
             isolates_registered: self.isolates_registered.load(Ordering::Relaxed),
             pressure_transitions: self.pressure_transitions.load(Ordering::Relaxed),
             collection_requests: self.collection_requests.load(Ordering::Relaxed),
+            credit_refills: self.credit_refills.load(Ordering::Relaxed),
+            credit_returned_bytes: self.credit_returned_bytes.load(Ordering::Relaxed),
+            credit_recalls: self.credit_recalls.load(Ordering::Relaxed),
             over_limit_events: self.over_limit_events.load(Ordering::Relaxed),
             over_limit_bytes: self.over_limit_bytes.load(Ordering::Relaxed),
         }
+    }
+}
+
+/// Raise `peak` to `value`.  Reads first, so the common no-change case does
+/// not write the shared cache line.
+fn raise_peak(peak: &AtomicUsize, value: usize) {
+    if value > peak.load(Ordering::Relaxed) {
+        peak.fetch_max(value, Ordering::Relaxed);
+    }
+}
+
+/// Subtract `bytes` from `counter`, reporting underflow in debug builds.
+fn checked_sub(counter: &AtomicUsize, bytes: usize, what: &str) {
+    let prev = counter.fetch_sub(bytes, Ordering::Relaxed);
+    if prev < bytes {
+        // Restore the counter before reporting, so release builds keep a
+        // sane (zero) value rather than a wrapped one.  Not atomic with the
+        // `fetch_sub`: a concurrent `add` in between can still lose bytes.
+        // Underflow is a bug, and this repair is best-effort.
+        counter.fetch_add(bytes - prev, Ordering::Relaxed);
+        debug_assert!(
+            false,
+            "{what} counter underflow: released {bytes} with {prev} committed"
+        );
     }
 }
 
@@ -1065,9 +1365,13 @@ pub struct IsolateSnapshot {
     pub id: IsolateId,
     pub name: Arc<str>,
     pub used_bytes: usize,
+    pub free_credit_bytes: usize,
     pub peak_used_bytes: usize,
+    /// Used bytes at which the isolate requests its own collection.
+    pub collection_target: usize,
     pub collections: u64,
     pub collection_requests: u64,
+    pub credit_refills: u64,
     pub zero_yield_collections: u64,
     pub last_bytes_before: usize,
     pub last_bytes_after: usize,
@@ -1083,11 +1387,16 @@ pub struct MemorySnapshot {
     pub critical_reserve: usize,
     pub credit_chunk: usize,
     pub pressure: PressureLevel,
+    /// Used bytes plus unused isolate credit.  Exact.
     pub committed_bytes: usize,
+    /// Committed bytes minus free credit.
     pub used_bytes: usize,
-    /// Always 0 until chunked credit (Phase 2).
+    /// Unused isolate credit as of each isolate's last refill, collection,
+    /// or poll; it can overstate current free credit by up to one chunk per
+    /// isolate.
     pub free_credit_bytes: usize,
     pub peak_committed_bytes: usize,
+    pub peak_used_bytes: usize,
     class_bytes: [usize; CLASS_COUNT],
     /// Live registered isolates.
     pub isolates: Vec<IsolateSnapshot>,
@@ -1095,7 +1404,13 @@ pub struct MemorySnapshot {
     pub isolates_registered: u64,
     pub pressure_transitions: u64,
     pub collection_requests: u64,
-    /// Growth events that ended above the hard limit.  Strict mode would
+    /// Credit grants to isolates (each one is a governor round trip).
+    pub credit_refills: u64,
+    /// Bytes of credit and used heap returned by isolates.
+    pub credit_returned_bytes: u64,
+    /// Pressure rises that recalled unused credit from every isolate.
+    pub credit_recalls: u64,
+    /// Grants that ended above the hard limit.  Strict mode would
     /// have rejected each one.
     pub over_limit_events: u64,
     /// Sum of the overage at each over-limit event.
@@ -1123,6 +1438,11 @@ impl fmt::Display for MemorySnapshot {
             "  Committed:             {} bytes (peak {})",
             self.committed_bytes, self.peak_committed_bytes
         )?;
+        writeln!(
+            f,
+            "  Used:                  {} bytes (peak {}), {} bytes free credit",
+            self.used_bytes, self.peak_used_bytes, self.free_credit_bytes
+        )?;
         for class in MemoryClass::ALL {
             let bytes = self.class_bytes(class);
             if bytes > 0 {
@@ -1138,17 +1458,25 @@ impl fmt::Display for MemorySnapshot {
         for iso in &self.isolates {
             writeln!(
                 f,
-                "    #{} {}: {} bytes (peak {}), {} collections, {} requested",
+                "    #{} {}: {} bytes (peak {}, target {}), {} free credit, {} refills, {} collections, {} requested",
                 iso.id,
                 iso.name,
                 iso.used_bytes,
                 iso.peak_used_bytes,
+                iso.collection_target,
+                iso.free_credit_bytes,
+                iso.credit_refills,
                 iso.collections,
                 iso.collection_requests
             )?;
         }
         writeln!(f, "  Pressure transitions:  {}", self.pressure_transitions)?;
         writeln!(f, "  Collection requests:   {}", self.collection_requests)?;
+        writeln!(
+            f,
+            "  Credit:                {} refills, {} bytes returned, {} recalls",
+            self.credit_refills, self.credit_returned_bytes, self.credit_recalls
+        )?;
         write!(
             f,
             "  Over hard limit:       {} events ({} bytes over)",
@@ -1336,45 +1664,94 @@ mod tests {
     }
 
     #[test]
-    fn charge_publishes_once_per_chunk() {
+    fn charge_refills_one_chunk_at_a_time() {
         let g = leaked(10 * MIB, 20 * MIB, 4 * KIB);
         let acc = g.register_isolate("a");
         acc.charge(KIB);
         assert_eq!(
-            g.class_bytes(MemoryClass::GcHeap),
-            0,
-            "below one chunk stays local"
+            g.committed_bytes(),
+            4 * KIB,
+            "the first charge takes a chunk"
         );
+        assert_eq!(acc.used_bytes(), KIB);
+        assert_eq!(acc.free_credit_bytes(), 3 * KIB);
         acc.charge(3 * KIB);
-        assert_eq!(g.class_bytes(MemoryClass::GcHeap), 4 * KIB);
-        assert_eq!(acc.control().used_bytes(), 4 * KIB);
-        acc.release(4 * KIB);
-        acc.publish();
-        assert_eq!(g.class_bytes(MemoryClass::GcHeap), 0);
+        assert_eq!(g.committed_bytes(), 4 * KIB, "exact fit stays local");
+        assert_eq!(acc.control().credit_refills(), 1);
+        acc.charge(1);
+        assert_eq!(g.committed_bytes(), 8 * KIB);
+        assert_eq!(acc.control().credit_refills(), 2);
+        assert_eq!(acc.control().used_bytes(), 4 * KIB + 1, "refill publishes");
+        assert_eq!(acc.committed_bytes(), g.committed_bytes());
     }
 
     #[test]
-    fn sweep_returns_exact_bytes() {
+    fn common_path_does_not_contact_the_governor() {
+        let g = leaked(10 * MIB, 20 * MIB, 64 * KIB);
+        let acc = g.register_isolate("a");
+        for _ in 0..64 {
+            acc.charge(KIB);
+        }
+        assert_eq!(g.snapshot().credit_refills, 1, "64 allocations, one refill");
+        assert_eq!(g.committed_bytes(), 64 * KIB);
+    }
+
+    #[test]
+    fn large_allocation_requests_its_own_size() {
+        let g = leaked(10 * MIB, 20 * MIB, 4 * KIB);
+        let acc = g.register_isolate("a");
+        acc.charge(100 * KIB + 1);
+        assert_eq!(
+            g.committed_bytes(),
+            104 * KIB,
+            "rounded to the accounting unit"
+        );
+        assert_eq!(acc.free_credit_bytes(), 4 * KIB - 1);
+        assert_eq!(acc.control().credit_refills(), 1);
+    }
+
+    #[test]
+    fn sweep_returns_exact_bytes_and_trims_credit() {
         let g = leaked(10 * MIB, 20 * MIB, KIB);
         let acc = g.register_isolate("a");
         for _ in 0..100 {
             acc.charge(48);
         }
+        assert_eq!(g.committed_bytes(), 5 * KIB);
         acc.release(48 * 60);
-        acc.record_collection(report(4800, 4800 - 48 * 60));
-        assert_eq!(g.class_bytes(MemoryClass::GcHeap), 48 * 40);
+        assert_eq!(acc.used_bytes(), 48 * 40);
+        assert_eq!(acc.free_credit_bytes(), 5 * KIB - 48 * 40);
+        acc.record_collection(report(4800, 48 * 40));
         assert_eq!(acc.control().collection_epoch(), 1);
+        assert_eq!(
+            acc.free_credit_bytes(),
+            2 * KIB,
+            "keeps the retained chunks only"
+        );
+        let snap = g.snapshot();
+        assert_eq!(snap.committed_bytes, 48 * 40 + 2 * KIB);
+        assert_eq!(snap.class_bytes(MemoryClass::GcHeap), 48 * 40 + 2 * KIB);
+        assert_eq!(snap.free_credit_bytes, 2 * KIB);
+        assert_eq!(snap.used_bytes, 48 * 40);
+        assert_eq!(
+            snap.credit_returned_bytes,
+            (5 * KIB - 48 * 40 - 2 * KIB) as u64
+        );
     }
 
     #[test]
-    fn shutdown_returns_all_bytes_and_unregisters() {
+    fn shutdown_returns_used_bytes_and_free_credit() {
         let g = leaked(10 * MIB, 20 * MIB, KIB);
         let acc = g.register_isolate("a");
-        acc.charge(10 * KIB);
+        acc.charge(10 * KIB + 100);
+        acc.release(KIB);
+        acc.publish();
+        assert!(g.free_credit_bytes() > 0);
         assert_eq!(g.snapshot().isolates.len(), 1);
         drop(acc);
         let snap = g.snapshot();
         assert_eq!(snap.committed_bytes, 0);
+        assert_eq!(snap.free_credit_bytes, 0);
         assert!(snap.isolates.is_empty());
         assert_eq!(snap.isolates_registered, 1);
     }
@@ -1385,54 +1762,106 @@ mod tests {
         let charge = Arc::new(g.reserve_shared(MemoryClass::SharedValue, 1000).unwrap());
         let clone = charge.clone();
         assert_eq!(g.class_bytes(MemoryClass::SharedValue), 1000);
+        assert_eq!(g.committed_bytes(), 1000);
         drop(charge);
         assert_eq!(g.class_bytes(MemoryClass::SharedValue), 1000);
         drop(clone);
         assert_eq!(g.class_bytes(MemoryClass::SharedValue), 0);
+        assert_eq!(g.committed_bytes(), 0);
     }
 
     #[test]
-    fn pressure_transitions_and_requests() {
-        let g = leaked(4 * MIB, 8 * MIB, 64 * KIB);
+    fn green_target_requests_collection() {
+        let g = leaked(64 * MIB, 128 * MIB, 64 * KIB);
+        let acc = g.register_isolate("a");
+        let min = g.min_headroom();
+        assert_eq!(min, MIN_COLLECTION_HEADROOM);
+        assert_eq!(acc.collection_target(), min, "initial target");
+        while acc.used_bytes() + 64 * KIB < min {
+            acc.charge(64 * KIB);
+        }
+        assert!(!acc.control().collection_requested());
+        acc.charge(64 * KIB);
+        assert_eq!(g.pressure(), PressureLevel::Green);
+        assert!(acc.control().take_collection_request());
+        assert_eq!(
+            acc.control().collection_requests(),
+            0,
+            "not a governor request"
+        );
+
+        // Survivors plus the larger of the survivors or the minimum headroom.
+        acc.release(acc.used_bytes() - MIB);
+        acc.record_collection(report(min, MIB));
+        assert_eq!(acc.collection_target(), MIB + min);
+        acc.release(MIB);
+        acc.record_collection(report(MIB, 0));
+        acc.charge(10 * MIB);
+        acc.release(2 * MIB);
+        acc.record_collection(report(10 * MIB, 8 * MIB));
+        assert_eq!(acc.collection_target(), 16 * MIB);
+    }
+
+    #[test]
+    fn zero_yield_doubles_headroom_up_to_a_cap() {
+        let g = leaked(64 * MIB, 128 * MIB, 64 * KIB);
+        let acc = g.register_isolate("a");
+        acc.charge(MIB);
+        let zero = |acc: &IsolateAccount| {
+            let used = acc.used_bytes();
+            acc.record_collection(report(used, used));
+            acc.collection_target() - used
+        };
+        assert_eq!(zero(&acc), 8 * MIB);
+        assert_eq!(zero(&acc), 16 * MIB, "cap is a quarter of the soft limit");
+        assert_eq!(zero(&acc), 16 * MIB);
+        acc.release(MIB);
+        acc.record_collection(report(MIB, 0));
+        assert_eq!(
+            acc.collection_target(),
+            MIN_COLLECTION_HEADROOM,
+            "yield resets"
+        );
+    }
+
+    #[test]
+    fn yellow_requests_once_per_epoch_and_red_overrides() {
+        // A soft limit below the initial target separates the governor's
+        // request from the isolate's own.
+        let g = leaked(2 * MIB, 16 * MIB, 64 * KIB);
         let acc = g.register_isolate("a");
         acc.charge(MIB);
         assert_eq!(g.pressure(), PressureLevel::Green);
         assert!(!acc.control().collection_requested());
 
-        acc.charge(3 * MIB);
+        acc.charge(MIB);
         assert_eq!(g.pressure(), PressureLevel::Yellow);
-        assert!(
-            acc.control().take_collection_request(),
-            "Yellow requests collection"
-        );
+        assert!(acc.control().take_collection_request());
+        assert_eq!(acc.control().collection_requests(), 1);
 
         // Rate limit: no second request in the same collection epoch.
         acc.charge(64 * KIB);
         assert!(!acc.control().collection_requested());
 
-        // After a zero-yield collection the next request waits for growth.
-        acc.record_collection(CollectionReport {
-            bytes_before: acc.used_bytes(),
-            bytes_after: acc.used_bytes(),
-            bytes_returned: 0,
-            duration: Duration::ZERO,
-        });
+        // After a collection, Yellow waits for the minimum headroom of growth.
+        let used = acc.used_bytes();
+        acc.record_collection(report(used, used));
         acc.charge(64 * KIB);
-        assert!(
-            !acc.control().collection_requested(),
-            "Yellow honours the target"
-        );
+        assert!(!acc.control().collection_requested());
 
-        // Red overrides the target.
-        acc.charge(5 * MIB);
+        // Red overrides the wait.
+        acc.charge(14 * MIB);
         assert_eq!(g.pressure(), PressureLevel::Red);
         assert!(acc.control().take_collection_request());
+        assert_eq!(acc.control().collection_requests(), 2);
         let snap = g.snapshot();
         assert!(snap.over_limit_events >= 1);
         assert!(snap.pressure_transitions >= 2);
 
         acc.release(acc.used_bytes());
-        acc.publish();
+        acc.record_collection(report(16 * MIB, 0));
+        assert_eq!(acc.free_credit_bytes(), 0, "Red retains no credit");
+        assert_eq!(g.committed_bytes(), 0);
         assert_eq!(g.pressure(), PressureLevel::Green);
     }
 
@@ -1453,27 +1882,71 @@ mod tests {
     }
 
     #[test]
-    fn isolates_share_one_budget_across_threads() {
-        let g = leaked(64 * MIB, 128 * MIB, 4 * KIB);
+    fn rising_pressure_recalls_free_credit() {
+        let g = leaked(4 * MIB, 64 * MIB, 64 * KIB);
+        let idle = g.register_isolate("idle");
+        idle.charge(10 * 64 * KIB);
+        idle.release(10 * 64 * KIB);
+        idle.record_collection(report(10 * 64 * KIB, 0));
+        assert_eq!(
+            idle.free_credit_bytes(),
+            2 * 64 * KIB,
+            "Green keeps two chunks"
+        );
+        assert_eq!(g.committed_bytes(), 2 * 64 * KIB);
+
+        let busy = g.register_isolate("busy");
+        busy.charge(4 * MIB);
+        assert_eq!(g.pressure(), PressureLevel::Yellow);
+        assert!(idle.control().recall_requested());
+        idle.poll();
+        assert!(!idle.control().recall_requested());
+        assert_eq!(idle.free_credit_bytes(), 64 * KIB, "Yellow keeps one chunk");
+
+        busy.charge(60 * MIB);
+        assert_eq!(g.pressure(), PressureLevel::Red);
+        idle.poll();
+        assert_eq!(idle.free_credit_bytes(), 0, "Red keeps none");
+        assert!(g.snapshot().credit_recalls >= 2);
+    }
+
+    #[test]
+    fn committed_equals_account_totals_across_threads() {
+        use std::sync::Barrier;
+        let g = leaked(512 * MIB, 1024 * MIB, 4 * KIB);
+        let barrier = Arc::new(Barrier::new(9));
         let threads: Vec<_> = (0..8)
             .map(|i| {
+                let barrier = barrier.clone();
                 std::thread::spawn(move || {
                     let acc = g.register_isolate(format!("iso-{i}"));
-                    for _ in 0..1000 {
-                        acc.charge(1000);
+                    for n in 0..2000usize {
+                        // Mix small charges with an occasional large one.
+                        acc.charge(if n % 97 == 0 {
+                            20 * KIB + n
+                        } else {
+                            40 + n % 200
+                        });
+                        if n % 500 == 499 {
+                            acc.release(acc.used_bytes() / 2);
+                            let used = acc.used_bytes();
+                            acc.record_collection(report(used * 2, used));
+                        }
                     }
-                    acc.publish();
-                    let peak = g.committed_bytes();
-                    acc.release(acc.used_bytes());
-                    acc.publish();
-                    peak
+                    let committed = acc.committed_bytes();
+                    barrier.wait(); // every account is quiescent
+                    barrier.wait(); // main thread has read the governor
+                    committed
                 })
             })
             .collect();
-        for t in threads {
-            assert!(t.join().unwrap() >= 1_000_000);
-        }
-        assert_eq!(g.committed_bytes(), 0, "no counter leaks");
-        assert!(g.snapshot().peak_committed_bytes >= 1_000_000);
+        barrier.wait();
+        let governor_committed = g.committed_bytes();
+        barrier.wait();
+        let sum: usize = threads.into_iter().map(|t| t.join().unwrap()).sum();
+        assert_eq!(governor_committed, sum, "committed = used + free credit");
+        assert_eq!(g.committed_bytes(), 0, "thread exit returns everything");
+        assert_eq!(g.free_credit_bytes(), 0);
+        assert!(g.snapshot().peak_committed_bytes >= sum);
     }
 }

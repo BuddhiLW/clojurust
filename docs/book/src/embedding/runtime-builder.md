@@ -26,8 +26,8 @@ namespace roots registered.
 |---|---|---|
 | `execution_mode(ExecutionMode)` | `Tiered` | Which call path the runtime uses, and which tier it is promoted to. See [Execution modes](execution-modes.md). |
 | `source_paths(Vec<PathBuf>)` | empty | Directories searched when `require` resolves a namespace to a file on disk. |
-| `gc_config(Arc<GcConfig>)` | none | Explicit soft/hard heap limits. Applied *after* the environment defaults, so it wins. |
-| `gc_config_from_env(bool)` | `true` | Whether to apply `CLJRS_GC_SOFT_LIMIT_MB` / `CLJRS_GC_HARD_LIMIT_MB` (and their system-derived defaults) to the heap. |
+| `gc_config(Arc<GcConfig>)` | none | A fixed per-heap collection trigger. Without it the heap collects at the memory governor's dynamic target. |
+| `gc_config_from_env(bool)` | `true` | Whether to clear a fixed trigger already set on the building thread's heap before applying `gc_config`. No environment variable is read per heap. |
 | `register_gc_roots(bool)` | `true` | Whether this runtime's namespace table is registered as a GC root set. |
 | `builtin_source(ns, &'static str)` | none | Embed a namespace's Clojure source in the binary so `require` resolves it without a file. Repeatable. |
 | `eager_clojure_test(bool)` | `false` | Evaluate `clojure.test` during construction instead of on first `require`. |
@@ -54,15 +54,22 @@ Paths can also be appended after construction through
 
 ### `gc_config` and `gc_config_from_env`
 
-`GcConfig` carries two numbers: a **soft limit** that triggers a collection when
-exceeded, and a **hard limit** that forces one.
+Without a `GcConfig`, a heap collects when it grows past a **dynamic
+collection target** that the process memory governor sets: 4 MiB before the
+first collection, then the surviving bytes plus the larger of the surviving
+bytes or 4 MiB. The governor also asks heaps to collect when managed memory
+across the process reaches its soft limit (see the `CLJRS_MEMORY_*` variables
+below).
+
+A `GcConfig` adds a fixed per-heap trigger: a **soft limit** that requests a
+collection when the heap exceeds it. Its **hard limit** is validated against the
+soft limit but not enforced.
 
 ```rust
 use std::sync::Arc;
 use cljrs_gc::GcConfig;
 
 let runtime = Runtime::builder()
-    .gc_config_from_env(false)                       // heap ignores CLJRS_GC_*
     .gc_config(Arc::new(GcConfig::with_limits(
         64 * 1024 * 1024,                            // soft: 64 MB
         128 * 1024 * 1024,                           // hard: 128 MB
@@ -70,15 +77,14 @@ let runtime = Runtime::builder()
     .build()?;
 ```
 
-Constructors: `GcConfig::new()` (hard limit derived from system memory, soft at
-75% of it), `GcConfig::with_hard_limit(bytes)` (soft at 75% of it), and
-`GcConfig::with_limits(soft, hard)`.
+Constructors: `GcConfig::new()` (no fixed trigger),
+`GcConfig::with_soft_limit(bytes)`, `GcConfig::with_hard_limit(bytes)` (soft at
+75% of it), and `GcConfig::with_limits(soft, hard)`.
 
-The two options compose in a fixed order: environment settings are applied
-first, then any explicit `gc_config` overwrites them. Leave
-`gc_config_from_env` on if you want operators to be able to tune the heap
-without a rebuild; turn it off if your host must be the only thing that decides
-its own memory budget.
+`gc_config_from_env(true)` clears any fixed trigger already set on the
+building thread's heap, then any explicit `gc_config` is applied. Process-wide
+limits come from the `CLJRS_MEMORY_*` variables, which the governor reads once
+per process.
 
 The heap those limits configure is **per thread**, not per process — each
 thread that runs a runtime owns an independent heap and collects it
@@ -183,12 +189,12 @@ one. Clone it freely to hand to extension `install` functions.
 
 | Variable | Read by | Effect |
 |---|---|---|
-| `CLJRS_GC_SOFT_LIMIT_MB` | `build()`, when `gc_config_from_env` is on | Per-isolate soft heap limit in MB (default: a third of system memory). Also a deprecated alias for `CLJRS_MEMORY_SOFT_LIMIT_MB`; the governor warns when it reads it. |
-| `CLJRS_GC_HARD_LIMIT_MB` | same | Per-isolate hard heap limit in MB (defaults to, and is never below, the soft limit; not enforced). Also a deprecated alias for `CLJRS_MEMORY_HARD_LIMIT_MB`. |
 | `CLJRS_MEMORY_SOFT_LIMIT_MB` | first allocation in the process | Process-wide managed-memory soft limit (default: 75% of the hard limit). |
 | `CLJRS_MEMORY_HARD_LIMIT_MB` | same | Process-wide managed-memory hard limit (default: the cgroup limit, else half of physical memory). Observed, not yet enforced. |
 | `CLJRS_MEMORY_CRITICAL_RESERVE_MB` | same | Reserve for runtime control operations (default: max(4 MiB, 1% of the hard limit), at most 256 MiB). |
-| `CLJRS_MEMORY_CREDIT_KB` | same | Isolate accounting chunk (default: 64). |
+| `CLJRS_MEMORY_CREDIT_KB` | same | Allocation credit chunk an isolate takes from the governor at a time (default: 64). |
+| `CLJRS_GC_SOFT_LIMIT_MB` | same | Deprecated alias for `CLJRS_MEMORY_SOFT_LIMIT_MB`; the governor warns when it reads it. It sets the process-wide limit, not a per-heap one. |
+| `CLJRS_GC_HARD_LIMIT_MB` | same | Deprecated alias for `CLJRS_MEMORY_HARD_LIMIT_MB`. |
 | `CLJRS_ISOLATE_QUEUE_LIMIT_MB` | same | Default byte limit for one isolate channel (default: 64, at most the hard limit). Not yet applied. |
 | `CLJRS_NO_IR` | `build()` | Pins the runtime at `TierState::TreeWalk` regardless of the execution mode. |
 | `CLJRS_GC_STATS` | `cljrs_gc::dump_stats_from_env()` | Where to write a `GC_STATS` snapshot — unset does nothing, empty or `-` means stdout, anything else is a file path. Nothing reads it on its own; call `dump_stats_from_env()` at exit if you want the behaviour the CLI's `--gc-stats` flag gives. |

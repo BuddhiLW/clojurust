@@ -1,6 +1,6 @@
 # Process-Wide Managed-Memory Governor
 
-Status: Phases 0 and 1 implemented (observe-only accounting). Phases 2 through 5 are open.
+Status: Phases 0 through 2 implemented (observe-only accounting with chunked allocation credit). Phases 3 through 5 are open.
 See [Implementation status](#implementation-status).
 
 This document defines a process-wide governor for memory that clojurust manages.
@@ -599,20 +599,60 @@ Phase 1 is complete in `crates/cljrs-gc/src/governor.rs`:
 
 Phase 1 decisions that later phases must keep or replace:
 
-- An account publishes to the process counters after each credit chunk of growth and after each collection.
-  The normal allocation path uses only thread-local cells. Phase 2 replaces publication with granted credit.
-- Committed bytes equal used bytes, and `free_credit_bytes` is zero.
+- ~~An account publishes to the process counters after each credit chunk of growth and after each collection.~~
+  Replaced in Phase 2 by granted credit.
+- ~~Committed bytes equal used bytes, and `free_credit_bytes` is zero.~~
+  Replaced in Phase 2: committed bytes include free credit.
 - In observe-only mode, growth that ends above the hard limit increments `over_limit_events`.
-  It does not reject the allocation.
-- After each collection, the isolate gets a collection target.
-  For a collection that frees memory, the target is the remaining bytes plus the larger of half the remaining bytes or 16 credit chunks (at least 1 MiB).
-  For a zero-yield collection, the headroom is the larger of the remaining bytes or that minimum.
-  At `Yellow`, the governor requests collection only above this target. At `Red`, it ignores the target.
-  The governor makes at most one request per collection epoch in both cases.
+  It does not reject the allocation. In Phase 2, the growth event is a credit grant.
+- ~~After each collection, the isolate gets a collection target that applies only at `Yellow`.~~
+  Replaced in Phase 2 by dynamic targets that apply at every pressure level.
 - The default hard limit is the cgroup memory limit, or half of physical memory if no cgroup limit applies.
-- Thread exit drops the account and returns its charge.
+- Thread exit drops the account and returns its used bytes and free credit.
   The heap objects remain allocated because the heap shutdown pass is not implemented yet.
-- The heap-local soft limit still triggers collection. Phase 2 replaces it with dynamic targets.
+- ~~The heap-local soft limit still triggers collection.~~
+  Replaced in Phase 2: a heap has a fixed trigger only when one is configured explicitly.
+
+Phase 2 is complete in `crates/cljrs-gc/src/governor.rs`:
+
+- `IsolateAccount` holds local used bytes and free credit.
+  `charge` subtracts from local credit and touches only thread-local cells.
+- When credit runs out, the account asks the governor for one credit chunk.
+  A shortfall larger than one chunk gets its own size, rounded up to a 4 KiB accounting unit.
+  The governor adds the grant to committed bytes.
+- `committed_bytes` is one process atomic, changed only by grants, returns, and direct reservations.
+  It equals the sum of every account's used bytes and free credit plus direct reservations.
+- Sweep moves freed bytes from used bytes to free credit.
+  After a collection, the account keeps at most `retained_credit_chunks` (default 2) of free credit at `Green`, one chunk at `Yellow`, and none at `Red`.
+  It returns the rest to the governor.
+- When pressure rises, the governor sets a recall flag on every registered isolate.
+  Each isolate returns its excess free credit at its next refill, collection, or safepoint poll (`gc_requested`).
+- Thread exit returns the account's used bytes and free credit.
+- Each isolate has a dynamic collection target, checked at each refill.
+  The first target is the minimum headroom: the larger of 16 credit chunks or 4 MiB.
+  After a collection, the target is the surviving bytes plus the larger of the surviving bytes or the minimum headroom.
+  After a zero-yield collection, the headroom doubles, up to the larger of that base or a quarter of the process soft limit.
+- At `Yellow`, the governor requests collection from the allocating isolate and the largest heap once each has grown by the minimum headroom since its last collection.
+  At `Red`, it requests collection without that condition. Both make at most one request per collection epoch.
+- `GcConfig::new()` sets no fixed per-heap trigger.
+  `HEAP.set_config_from_env()` clears the fixed trigger and reads no environment variable.
+  `Isolate::spawn` no longer calls it. `--gc-hard-limit-mb` configures only the governor.
+  `--gc-soft-limit-mb` and an explicit `GcConfig` soft limit still add a fixed per-heap trigger.
+- `GC_STATS` allocation counters are batched in the account and flushed at each refill, collection, metrics poll, and thread exit.
+  The normal allocation path therefore performs no process-wide atomic operation.
+- `MemorySnapshot` reports used bytes, free credit, peak used bytes, credit refills, returned credit, and recalls.
+  `IsolateSnapshot` adds free credit, the collection target, and refills.
+- `crates/cljrs-gc/examples/credit_bench.rs` measures allocation time and refill rate for several chunk sizes.
+
+Phase 2 decisions that later phases must keep or replace:
+
+- The governor never refuses a grant. Phase 4 adds strict admission at `ProcessMemoryGovernor::grant`.
+- A recall does not wake an idle isolate. Such an isolate keeps at most its retained chunks until it polls.
+- The governor's free-credit counter is the sum of each isolate's last published value.
+  It can overstate current free credit by up to one chunk per isolate.
+- The default credit chunk stays 64 KiB until `credit_bench` results on an idle machine are recorded here.
+- The heap shutdown pass is not assigned to a phase yet.
+  Completion criterion 7 requires it.
 
 ### Phase 0: correct the current limit behavior
 

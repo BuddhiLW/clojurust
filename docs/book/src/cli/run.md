@@ -32,10 +32,14 @@ after CLI paths.
 
 ### `--gc-soft-limit-mb <MB>`
 
-Soft memory limit for the GC in megabytes. When one isolate's heap exceeds
+Fixed per-heap collection trigger in megabytes. When one isolate's heap exceeds
 this value, a collection is triggered at the next safepoint. Each isolate heap
 applies the limit independently, so *N* isolates can together hold about *N*
 times this value.
+
+Without this flag, each heap collects at a dynamic target that the memory
+governor sets from the heap's size: 4 MiB before the first collection, then
+the surviving bytes plus the larger of the surviving bytes or 4 MiB.
 
 The flag does not change the process-wide memory governor's soft limit. That
 limit comes from `--gc-hard-limit-mb` (75% of it), from
@@ -43,8 +47,7 @@ limit comes from `--gc-hard-limit-mb` (75% of it), from
 memory across all isolates reaches it, the governor asks the allocating
 isolate (and the largest heap) to collect.
 
-Given alone, it leaves the hard limit at its default (raised to the soft limit
-if the soft limit is larger).
+
 
 ### `--gc-hard-limit-mb <MB>`
 
@@ -52,7 +55,8 @@ Process-wide managed-memory hard limit in megabytes. It is **not enforced
 yet**: the memory governor runs in observe-only mode, and allocations above the
 limit succeed. `--gc-stats` reports how many allocations went over it. The
 governor's soft limit is 75% of this value. The flag takes precedence over
-`CLJRS_MEMORY_HARD_LIMIT_MB` and `CLJRS_MEMORY_SOFT_LIMIT_MB`.
+`CLJRS_MEMORY_HARD_LIMIT_MB` and `CLJRS_MEMORY_SOFT_LIMIT_MB`. It is not
+applied to individual heaps.
 
 A zero hard limit, or a soft limit above the hard limit, is rejected.
 

@@ -18,14 +18,15 @@ use crate::native;
 
 /// Build GC config from CLI flags, or use defaults if not specified.
 ///
-/// The limits apply to each isolate heap as a collection trigger.  The soft
-/// limit is only that per-heap trigger; it does not reach the process-wide
-/// memory governor (`cljrs_gc::governor`), whose soft limit would otherwise
-/// sit at Yellow whenever several isolates each approach it.  A hard limit
-/// also sets the governor's budget (soft limit 75% of it), which is
-/// reported, but not yet enforced.  Without a hard limit the governor keeps
-/// its `CLJRS_MEMORY_*` or platform defaults.  A zero hard limit or a soft limit above the hard limit is
-/// rejected.
+/// A soft limit is a fixed per-heap collection trigger; it does not reach the
+/// process-wide memory governor (`cljrs_gc::governor`), whose soft limit
+/// would otherwise sit at Yellow whenever several isolates each approach it.
+/// Without a soft limit the heap has no fixed trigger and collects at the
+/// governor's dynamic target.  A hard limit sets the governor's budget (soft
+/// limit 75% of it), which is reported, but not yet enforced; it is not
+/// applied per heap.  Without a hard limit the governor keeps its
+/// `CLJRS_MEMORY_*` or platform defaults.  A zero hard limit or a soft limit
+/// above the hard limit is rejected.
 pub fn build_gc_config(
     soft_limit_mb: Option<usize>,
     hard_limit_mb: Option<usize>,
@@ -52,11 +53,7 @@ fn gc_limits(
             GcConfig::try_with_limits(mb(soft), mb(hard)).map_err(invalid)?
         }
         (Some(soft), None) => GcConfig::with_soft_limit(mb(soft)),
-        (None, Some(hard)) => {
-            let config = GcConfig::with_hard_limit(mb(hard));
-            config.validate().map_err(invalid)?;
-            config
-        }
+        (None, Some(_)) => GcConfig::new(),
         (None, None) => return Ok((GcConfig::new(), None)),
     };
     let memory = hard_limit_mb

@@ -11,19 +11,19 @@ takes a different execution profile.
 
 ## Memory
 
-Each thread's heap is bounded by a [`GcConfig`](runtime-builder.md#gc_config-and-gc_config_from_env):
-a soft limit that triggers collection and a hard limit that forces one.
+A [`GcConfig`](runtime-builder.md#gc_config-and-gc_config_from_env) gives each
+thread's heap a fixed soft limit that triggers collection. Its hard limit is
+not enforced, so it caps garbage, not live data.
 
 ```rust
 use cljrs_gc::GcConfig;
 
 Runtime::builder()
-    .gc_config_from_env(false)                    // operators can't widen it
     .gc_config(Arc::new(GcConfig::with_limits(32 << 20, 64 << 20)))
     .build()?
 ```
 
-This bounds the *managed* heap — GC-allocated Clojure values. It is not an RSS
+This affects the *managed* heap — GC-allocated Clojure values. It is not an RSS
 ceiling: ordinary Rust allocations made by native functions are not charged
 against it. If you need a hard address-space limit against adversarial code, it
 has to come from outside the process (a container limit, `setrlimit`, a WASM

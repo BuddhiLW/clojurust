@@ -221,8 +221,8 @@ pub fn tier_state(&self) -> TierState;
 ```rust
 pub fn execution_mode(self, mode: ExecutionMode) -> Self;   // default Tiered
 pub fn source_paths(self, paths: Vec<PathBuf>) -> Self;
-pub fn gc_config(self, config: Arc<GcConfig>) -> Self;
-pub fn gc_config_from_env(self, enabled: bool) -> Self;     // default true
+pub fn gc_config(self, config: Arc<GcConfig>) -> Self;      // fixed per-heap trigger
+pub fn gc_config_from_env(self, enabled: bool) -> Self;     // default true; clears a fixed trigger
 pub fn register_gc_roots(self, enabled: bool) -> Self;      // default true
 pub fn builtin_source(self, ns: impl Into<String>, src: &'static str) -> Self;
 pub fn eager_clojure_test(self, enabled: bool) -> Self;     // default false

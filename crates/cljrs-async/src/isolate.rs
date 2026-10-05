@@ -29,7 +29,6 @@ impl Isolate {
     /// The isolate thread automatically:
     /// - registers with the process memory governor under the isolate's name
     /// - calls [`cljrs_gc::register_mutator`] to initialize per-isolate GC state
-    /// - calls [`cljrs_gc::HEAP.set_config_from_env`] with env-configured limits
     /// - builds a `current_thread` Tokio runtime + `LocalSet`
     /// - runs the `LocalSet` until `f()` completes, then exits
     #[cfg(not(target_arch = "wasm32"))]
@@ -45,7 +44,6 @@ impl Isolate {
                 // `GcPtr` allocation on this thread.
                 cljrs_gc::register_current_isolate(&self.name);
                 let _mutator = cljrs_gc::register_mutator();
-                cljrs_gc::HEAP.set_config_from_env();
                 let rt = tokio::runtime::Builder::new_current_thread()
                     .enable_all()
                     .build()

@@ -2,41 +2,42 @@
 
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-/// Per-heap GC configuration with soft and hard memory limits.
+/// Per-heap GC configuration: an optional fixed collection trigger.
 ///
-/// The soft limit is a collection trigger: when one isolate's heap passes it,
-/// the allocator requests a collection at the next safepoint.  Every isolate
-/// heap applies the limit independently, so N isolates can together hold N
-/// times the soft limit.  Process-wide limits belong to
+/// By default ([`GcConfig::new`]) a heap has no fixed trigger.  It collects
+/// when its isolate account passes the dynamic collection target that the
+/// process governor sets after each collection (see
+/// [`crate::governor::IsolateAccount::record_collection`]), and when the
+/// governor requests collection under process pressure.
+///
+/// An explicit soft limit adds a fixed trigger: when this heap passes it, the
+/// allocator also requests a collection at the next safepoint.  Every isolate
+/// heap applies its soft limit independently, so N isolates can together hold
+/// N times the soft limit.  Process-wide limits belong to
 /// [`crate::governor::MemoryConfig`].
 ///
 /// The hard limit is **not enforced**: no allocation path checks it.  It is
-/// validated and reported, and the CLI forwards it to the process governor,
-/// which observes (but does not yet reject) allocations above it.
-///
-/// Default values:
-/// - Hard limit: 1/4 of available RAM (or 256MB minimum)
-/// - Soft limit: 75% of hard limit
+/// only validated against the soft limit.
 #[derive(Debug, Clone)]
 pub struct GcConfig {
-    /// Hard memory limit in bytes. GC will be forced when exceeded.
+    /// Hard memory limit in bytes.  Validated, not enforced.
     hard_limit: usize,
-    /// Soft memory limit in bytes. GC is triggered when exceeded.
+    /// Soft memory limit in bytes.  GC is triggered when exceeded.
     soft_limit: usize,
 }
 
 impl GcConfig {
-    /// Create a new GC config with default limits.
+    /// A config with no fixed trigger: the heap follows the governor's
+    /// dynamic collection target.
     pub fn new() -> Self {
-        let hard_limit = default_hard_limit();
-        let soft_limit = (hard_limit as f64 * 0.75) as usize;
         Self {
-            hard_limit,
-            soft_limit,
+            hard_limit: usize::MAX,
+            soft_limit: usize::MAX,
         }
     }
 
-    /// Create a new GC config with a custom hard limit.
+    /// Create a new GC config with a custom hard limit and a soft limit of
+    /// 75% of it.
     pub fn with_hard_limit(hard_limit: usize) -> Self {
         let soft_limit = (hard_limit as f64 * 0.75) as usize;
         Self {
@@ -45,11 +46,10 @@ impl GcConfig {
         }
     }
 
-    /// Create a new GC config with a custom soft limit.  The hard limit is
-    /// the default, raised to `soft_limit` if that is larger.
+    /// Create a new GC config with a custom soft limit and no hard limit.
     pub fn with_soft_limit(soft_limit: usize) -> Self {
         Self {
-            hard_limit: default_hard_limit().max(soft_limit),
+            hard_limit: usize::MAX,
             soft_limit,
         }
     }
@@ -89,12 +89,12 @@ impl GcConfig {
         Ok(())
     }
 
-    /// Get the hard memory limit in bytes.
+    /// Get the hard memory limit in bytes (`usize::MAX`: none).
     pub fn hard_limit(&self) -> usize {
         self.hard_limit
     }
 
-    /// Get the soft memory limit in bytes.
+    /// Get the soft memory limit in bytes (`usize::MAX`: no fixed trigger).
     pub fn soft_limit(&self) -> usize {
         self.soft_limit
     }
@@ -103,107 +103,12 @@ impl GcConfig {
     pub fn soft_limit_exceeded(&self, used: usize) -> bool {
         used > self.soft_limit
     }
-
-    /// Check if memory usage has exceeded the hard limit.  No allocation path
-    /// calls this; the hard limit is not enforced.
-    pub fn hard_limit_exceeded(&self, used: usize) -> bool {
-        used > self.hard_limit
-    }
 }
 
 impl Default for GcConfig {
     fn default() -> Self {
         Self::new()
     }
-}
-
-/// Get default hard limit: 1/4 of available RAM or 256MB minimum.
-///
-/// This is the per-heap default, which is not enforced.  The process-wide
-/// budget has its own default (`governor::default_hard_limit`: cgroup limit,
-/// else ½ of RAM), so the two can differ for the same run.
-fn default_hard_limit() -> usize {
-    // Try to get total RAM from system info
-    #[cfg(target_os = "linux")]
-    fn get_total_ram() -> Option<usize> {
-        // Read /proc/meminfo
-        std::fs::read_to_string("/proc/meminfo")
-            .ok()
-            .and_then(|content| {
-                for line in content.lines() {
-                    if line.starts_with("MemTotal:") {
-                        let parts: Vec<&str> = line.split_whitespace().collect();
-                        if parts.len() >= 2 {
-                            // Value is in kB
-                            return parts[1].parse::<usize>().ok().map(|kb| kb * 1024);
-                        }
-                    }
-                }
-                None
-            })
-    }
-
-    #[cfg(target_os = "macos")]
-    fn get_total_ram() -> Option<usize> {
-        // Use sysctl
-        use std::ffi::CStr;
-
-        let total: u64 = 0;
-        let mut size = std::mem::size_of::<u64>();
-
-        let name_cstr = {
-            let bytes = b"hw.memsize\0";
-            CStr::from_bytes_with_nul(bytes).ok()?
-        };
-
-        let ret = unsafe {
-            let name = name_cstr.as_ptr();
-            let addr = &total as *const u64 as *mut std::ffi::c_void;
-            let oldlenp = &mut size as *mut usize;
-            sysctlbyname(name, addr, oldlenp, std::ptr::null_mut(), 0)
-        };
-
-        if ret == 0 { Some(total as usize) } else { None }
-    }
-
-    #[cfg(target_os = "windows")]
-    fn get_total_ram() -> Option<usize> {
-        // Use GlobalMemoryStatusEx
-        use std::mem::size_of;
-        use windows::Win32::System::SystemInformation::GlobalMemoryStatusEx;
-        use windows::Win32::System::SystemInformation::MEMORYSTATUSEX;
-
-        let mut mem_status = MEMORYSTATUSEX::default();
-        mem_status.dwLength = size_of::<MEMORYSTATUSEX>() as u32;
-
-        if unsafe { GlobalMemoryStatusEx(&mut mem_status) }.is_ok() {
-            Some(mem_status.ullTotalPhys as usize)
-        } else {
-            None
-        }
-    }
-
-    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
-    fn get_total_ram() -> Option<usize> {
-        None
-    }
-
-    // Fallback to 256MB if we can't determine system RAM
-    let total_ram = get_total_ram().unwrap_or(256 * 1024 * 1024);
-    std::cmp::max(total_ram / 4, 256 * 1024 * 1024)
-}
-
-// sysctlbyname for macOS
-#[cfg(target_os = "macos")]
-#[link(name = "System")]
-unsafe extern "C" {
-    fn sysctlbyname(
-        name: *const std::os::raw::c_char,
-        oldp: *mut std::ffi::c_void,
-        oldlenp: *mut usize,
-        newp: *mut std::ffi::c_void,
-        newlen: usize,
-    ) -> std::os::raw::c_int;
 }
 
 /// Per-isolate coordination state for stop-the-world GC.
@@ -289,9 +194,9 @@ impl IsolateCancellation {
     }
 
     fn gc_requested(&self) -> bool {
+        // `poll` also returns credit the governor has recalled.
         self.gc_requested.load(Ordering::SeqCst)
-            || crate::governor::with_current_account(|a| a.control().collection_requested())
-                .unwrap_or(false)
+            || crate::governor::with_current_account(|a| a.poll()).unwrap_or(false)
     }
 }
 
