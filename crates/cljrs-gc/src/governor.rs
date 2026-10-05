@@ -1802,7 +1802,11 @@ mod tests {
         acc.charge(50 * MIB);
         acc.release(10 * MIB);
         acc.record_collection(report(50 * MIB, 40 * MIB));
-        assert_eq!(acc.collection_target(), 80 * MIB, "survivors above the floor");
+        assert_eq!(
+            acc.collection_target(),
+            80 * MIB,
+            "survivors above the floor"
+        );
     }
 
     #[test]

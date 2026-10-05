@@ -20,6 +20,7 @@ const BATCH: usize = 100_000;
 const BATCHES: usize = 20;
 
 /// A small object, typical of a boxed numeric or a short list cell.
+#[allow(dead_code)] // the payload only gives the object its size
 struct Cell([u64; 3]);
 
 impl Trace for Cell {
