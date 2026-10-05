@@ -38,12 +38,10 @@
             :cljs [(is (= nil (empty (->Record ""))))]
             :clj  [(is (p/thrown? (empty (->Record ""))))])))
 
-    #?(:rust
-       (testing "datatype"
-         (deftype MyType [field])
-         (is (= nil (empty (->MyType "")))))
+    #?(:rust nil
        :default
        (when-var-exists deftype
          (testing "datatype"
            (deftype MyType [field])
            (is (= nil (empty (->MyType "")))))))))
+

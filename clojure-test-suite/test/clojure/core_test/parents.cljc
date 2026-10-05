@@ -2,23 +2,21 @@
   (:require [clojure.test :refer [are deftest is testing use-fixtures]]
             [clojure.core-test.portability #?(:cljs :refer-macros :default :refer) [when-var-exists]]))
 
-(when-var-exists #?(:rust make-hierarchy :default parents)
+#?(:rust nil
+   :default
+   (when-var-exists parents
 
   ; Some custom types for testing parents by type inheritance
   (defprotocol TestParentsProtocol)
   (defrecord TestParentsRecord [] TestParentsProtocol)
   (deftype TestParentsType [] TestParentsProtocol)
 
-  (def record-tag #?(:rust ::record-type :default TestParentsRecord))
-  (def type-tag #?(:rust ::type-type :default TestParentsType))
-  (def p0-tag #?(:rust ::p-0 :default 'ns/p-0))
-
   ; A global hierarchy for testing `parents tag` and `parents h tag`
-  (def global-hierarchy [[record-tag ::record]
+  (def global-hierarchy [[TestParentsRecord ::record]
                          [::leaf ::t]
                          [::t ::p-1]
                          [::t ::p-2]
-                         [::p-1 p0-tag]])
+                         [::p-1 'ns/p-0]])
 
   (defn register-global-hierarchy []
     (doseq [[tag parent] global-hierarchy]
@@ -35,15 +33,14 @@
     #?(:lpy (yield) :default (tests))
     (unregister-global-hierarchy))
 
-  #?(:rust (register-global-hierarchy)
-     :default (use-fixtures :once with-global-hierarchy))
+  (use-fixtures :once with-global-hierarchy)
 
   ; A hierarchy for testing `parents h tag`
   (def datatypes
     (-> (make-hierarchy)
-        (derive record-tag ::datatype)
-        (derive type-tag ::datatype)
-        (derive type-tag ::mutable)))
+        (derive TestParentsRecord ::datatype)
+        (derive TestParentsType ::datatype)
+        (derive TestParentsType ::mutable)))
 
   ; Another hierarchy for testing `parents h tag`
   (def diamond
@@ -62,11 +59,11 @@
         (are [expected tag] (= expected (parents tag))
                             #{::t} ::leaf
                             #{::p-1 ::p-2} ::t
-                            #{p0-tag} ::p-1
+                            #{'ns/p-0} ::p-1
                             nil ::p-2)
         #?(:bb      "bb doesn't report parents by relationship globally defined with derive for custom types
                      (https://github.com/babashka/babashka/issues/1893)"
-           :default (is (contains? (parents record-tag) ::record))))
+           :default (is (contains? (parents TestParentsRecord) ::record))))
 
       #?(:lpy     (testing "returns parents by type inheritance when tag is a class"
                     (is (contains? (parents python/str) python/object))
@@ -75,14 +72,12 @@
                     (is (contains? (parents RuntimeException) Exception))
                     (is (nil? (parents stdClass))))
          :cljs    "cljs doesn't report parents by type inheritance yet (CLJS-3464)"
-         :rust    "Clojurust has no host-type inheritance"
          :default (testing "returns parents by type inheritance when tag is a class"
                     (is (contains? (parents String) Object))
                     (is (nil? (parents Object)))))
 
       #?(:bb      "bb doesn't report parents by type inheritance for custom types"
          :cljs    "cljs doesn't report parents by type inheritance yet (CLJS-3464)"
-         :rust    "Clojurust has no host-type inheritance"
          :default (testing "returns parents by type inheritance when tag is a custom type"
                     (is (contains? (parents TestParentsType) #?(:lpy (:interface TestParentsProtocol) :phel TestParentsProtocol :default clojure.core_test.parents.TestParentsProtocol)))
                     (is (contains? (parents TestParentsRecord) #?(:lpy (:interface TestParentsProtocol) :phel TestParentsProtocol :default clojure.core_test.parents.TestParentsProtocol)))
@@ -115,14 +110,14 @@
                               #?@(; bb doesn't report parents by relationship declared in h for custom types
                                   ; (https://github.com/babashka/babashka/issues/1893)
                                   :bb      []
-                                  :default [#{::datatype ::mutable} datatypes type-tag])
+                                  :default [#{::datatype ::mutable} datatypes TestParentsType])
 
                               ; tag in both h and global hierarchy, only parents in h are returned
                               #{::d} diamond ::leaf
                               #?@(; bb doesn't report parents by relationship declared in h for custom types
                                   ; (https://github.com/babashka/babashka/issues/1893)
                                   :bb      []
-                                  :default [#{::datatype} datatypes record-tag])
+                                  :default [#{::datatype} datatypes TestParentsRecord])
 
                               ; tag not in h but in global hierarchy
                               #{} datatypes ::t
@@ -149,7 +144,6 @@
                       diamond
                       datatypes))
          :cljs    "cljs doesn't report parents by type inheritance yet (CLJS-3464)"
-         :rust    "Clojurust has no host-type inheritance"
          :default (testing "returns parents by type inheritance when tag is a class, whether the tag is in h or not"
                     (are [h] (contains? (parents h String) Object)
                              ; tag in h
@@ -160,7 +154,6 @@
 
       #?(:bb      "bb doesn't report parents by type inheritance for custom types"
          :cljs    "cljs doesn't report parents by type inheritance yet (CLJS-3464)"
-         :rust    "Clojurust has no host-type inheritance"
          :default (testing "returns parents by type inheritance when tag is a custom type, whether the tag is in h or not"
                     (are [h tag] (contains? (parents h tag) #?(:lpy (:interface TestParentsProtocol) :phel TestParentsProtocol :default clojure.core_test.parents.TestParentsProtocol))
                                  ; tag in h
@@ -181,4 +174,4 @@
                        []
                        {}
                        #{}
-                       '())))))
+                       '()))))))

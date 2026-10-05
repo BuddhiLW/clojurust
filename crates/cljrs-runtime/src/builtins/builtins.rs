@@ -3493,7 +3493,7 @@ fn builtin_sorted_q(args: &[Value]) -> ValueResult<Value> {
 fn builtin_special_symbol_q(args: &[Value]) -> ValueResult<Value> {
     let is_special = match &args[0] {
         Value::Symbol(sym) if sym.get().namespace.is_none() => {
-            crate::builtins::special::CLOJURE_SPECIAL_SYMBOLS.contains(&sym.get().name.as_ref())
+            crate::builtins::SPECIAL_FORMS.contains(&sym.get().name.as_ref())
         }
         _ => false,
     };

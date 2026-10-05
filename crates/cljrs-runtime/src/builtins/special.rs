@@ -34,35 +34,3 @@ pub const SPECIAL_FORMS: &[&str] = &[
     "with-out-str",
     "await",
 ];
-
-/// Symbols reported by Clojure's public `special-symbol?` predicate.
-///
-/// This intentionally differs from [`SPECIAL_FORMS`], which is Clojurust's
-/// internal evaluator dispatch table and also contains forms implemented as
-/// evaluator primitives for this runtime (for example `defn` and `require`).
-pub const CLOJURE_SPECIAL_SYMBOLS: &[&str] = &[
-    "&",
-    ".",
-    "case*",
-    "catch",
-    "def",
-    "deftype*",
-    "do",
-    "finally",
-    "fn*",
-    "if",
-    "import*",
-    "let*",
-    "letfn*",
-    "loop*",
-    "monitor-enter",
-    "monitor-exit",
-    "new",
-    "quote",
-    "recur",
-    "reify*",
-    "set!",
-    "throw",
-    "try",
-    "var",
-];
