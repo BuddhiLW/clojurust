@@ -55,9 +55,9 @@ Paths can also be appended after construction through
 ### `gc_config` and `gc_config_from_env`
 
 Without a `GcConfig`, a heap collects when it grows past a **dynamic
-collection target** that the process memory governor sets: 4 MiB before the
+collection target** that the process memory governor sets: 32 MiB before the
 first collection, then the surviving bytes plus the larger of the surviving
-bytes or 4 MiB. The governor also asks heaps to collect when managed memory
+bytes or 32 MiB. The governor also asks heaps to collect when managed memory
 across the process reaches its soft limit (see the `CLJRS_MEMORY_*` variables
 below).
 

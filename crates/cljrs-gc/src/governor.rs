@@ -36,7 +36,10 @@ pub const DEFAULT_RETAINED_CREDIT_CHUNKS: usize = 2;
 /// Granularity of a large credit request (one that exceeds a chunk).
 pub const ACCOUNTING_UNIT: usize = 4 * KIB;
 /// Floor for the growth an isolate heap is allowed between collections.
-pub const MIN_COLLECTION_HEADROOM: usize = 4 * MIB;
+///
+/// Each collection marks the whole runtime (namespaces, vars, code), so a
+/// small floor makes small programs collect often for little gain.
+pub const MIN_COLLECTION_HEADROOM: usize = 32 * MIB;
 /// Floor for the default critical reserve.
 pub const MIN_DEFAULT_CRITICAL_RESERVE: usize = 4 * MIB;
 /// Ceiling for the default critical reserve.
@@ -1796,15 +1799,15 @@ mod tests {
         assert_eq!(acc.collection_target(), MIB + min);
         acc.release(MIB);
         acc.record_collection(report(MIB, 0));
-        acc.charge(10 * MIB);
-        acc.release(2 * MIB);
-        acc.record_collection(report(10 * MIB, 8 * MIB));
-        assert_eq!(acc.collection_target(), 16 * MIB);
+        acc.charge(50 * MIB);
+        acc.release(10 * MIB);
+        acc.record_collection(report(50 * MIB, 40 * MIB));
+        assert_eq!(acc.collection_target(), 80 * MIB, "survivors above the floor");
     }
 
     #[test]
     fn zero_yield_doubles_headroom_up_to_a_cap() {
-        let g = leaked(64 * MIB, 128 * MIB, 64 * KIB);
+        let g = leaked(512 * MIB, 1024 * MIB, 64 * KIB);
         let acc = g.register_isolate("a");
         acc.charge(MIB);
         let zero = |acc: &IsolateAccount| {
@@ -1812,9 +1815,9 @@ mod tests {
             acc.record_collection(report(used, used));
             acc.collection_target() - used
         };
-        assert_eq!(zero(&acc), 8 * MIB);
-        assert_eq!(zero(&acc), 16 * MIB, "cap is a quarter of the soft limit");
-        assert_eq!(zero(&acc), 16 * MIB);
+        assert_eq!(zero(&acc), 64 * MIB);
+        assert_eq!(zero(&acc), 128 * MIB, "cap is a quarter of the soft limit");
+        assert_eq!(zero(&acc), 128 * MIB);
         acc.release(MIB);
         acc.record_collection(report(MIB, 0));
         assert_eq!(

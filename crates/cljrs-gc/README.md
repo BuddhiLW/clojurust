@@ -335,7 +335,7 @@ pub enum PressureLevel { Green, Yellow, Red }   // < soft, >= soft, > hard
 pub const DEFAULT_CREDIT_CHUNK: usize;             // 64 KiB
 pub const DEFAULT_RETAINED_CREDIT_CHUNKS: usize;   // 2
 pub const ACCOUNTING_UNIT: usize;                  // 4 KiB; rounding for large grants
-pub const MIN_COLLECTION_HEADROOM: usize;          // 4 MiB
+pub const MIN_COLLECTION_HEADROOM: usize;          // 32 MiB
 
 pub struct MemoryConfig { pub soft_limit, pub hard_limit, pub critical_reserve,
                           pub credit_chunk, pub retained_credit_chunks,

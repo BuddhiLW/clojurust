@@ -38,8 +38,8 @@ applies the limit independently, so *N* isolates can together hold about *N*
 times this value.
 
 Without this flag, each heap collects at a dynamic target that the memory
-governor sets from the heap's size: 4 MiB before the first collection, then
-the surviving bytes plus the larger of the surviving bytes or 4 MiB.
+governor sets from the heap's size: 32 MiB before the first collection, then
+the surviving bytes plus the larger of the surviving bytes or 32 MiB.
 
 The flag does not change the process-wide memory governor's soft limit. That
 limit comes from `--gc-hard-limit-mb` (75% of it), from

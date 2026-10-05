@@ -629,7 +629,7 @@ Phase 2 is complete in `crates/cljrs-gc/src/governor.rs`:
   Each isolate returns its excess free credit at its next refill, collection, or safepoint poll (`gc_requested`).
 - Thread exit returns the account's used bytes and free credit.
 - Each isolate has a dynamic collection target, checked at each refill.
-  The first target is the minimum headroom: the larger of 16 credit chunks or 4 MiB.
+  The first target is the minimum headroom: the larger of 16 credit chunks or 32 MiB.
   After a collection, the target is the surviving bytes plus the larger of the surviving bytes or the minimum headroom.
   After a zero-yield collection, the headroom doubles, up to the larger of that base or a quarter of the process soft limit.
 - At `Yellow`, the governor requests collection from the allocating isolate and the largest heap once each has grown by the minimum headroom since its last collection.
@@ -650,9 +650,49 @@ Phase 2 decisions that later phases must keep or replace:
 - A recall does not wake an idle isolate. Such an isolate keeps at most its retained chunks until it polls.
 - The governor's free-credit counter is the sum of each isolate's last published value.
   It can overstate current free credit by up to one chunk per isolate.
-- The default credit chunk stays 64 KiB until `credit_bench` results on an idle machine are recorded here.
+- The default credit chunk stays 64 KiB. See [Phase 2 benchmark](#phase-2-benchmark).
 - The heap shutdown pass is not assigned to a phase yet.
   Completion criterion 7 requires it.
+
+#### Phase 2 benchmark
+
+Measured on a 4-core Linux container, release builds, Phase 1 (`main` at `80cde63`) against Phase 2.
+
+`crates/cljrs-gc/examples/credit_bench.rs` allocates 2 million 64-byte objects per thread:
+
+| Chunk | Phase 1, 1 thread | Phase 2, 1 thread | Phase 1, 8 threads | Phase 2, 8 threads | Refills per MiB |
+|---|---|---|---|---|---|
+| 4 KiB | 92 ns | 79 ns | 728 ns | 173 ns | 256 |
+| 16 KiB | 90 ns | 77 ns | 850 ns | 177 ns | 64 |
+| 64 KiB | 88 ns | 73 ns | 813 ns | 146 ns | 16 |
+| 256 KiB | 109 ns | 77 ns | 814 ns | 167 ns | 3.8 |
+| 1 MiB | 88 ns | 82 ns | 797 ns | 153 ns | 0.8 |
+
+Values are nanoseconds per allocation (8 threads oversubscribe 4 cores).
+Phase 1 updated two process-wide `GC_STATS` atomics on every allocation.
+Phase 2 removes them from the allocation path, which explains the multi-thread difference.
+Chunk size has no measurable effect on throughput, so 64 KiB stays the default.
+At 64 KiB, an idle isolate holds at most 128 KiB of free credit.
+
+End-to-end interpreter runs (`cljrs run`, median of three) show the cost of dynamic collection targets:
+
+| Workload | Phase 1 | Phase 2 | Collections (Phase 1 / Phase 2) | Peak RSS (Phase 1 / Phase 2) |
+|---|---|---|---|---|
+| `cljrs eval 1` | 0.06 s | 0.06 s | 0 / 0 | 12 MB / 9 MB |
+| 1M two-element vectors | 1.53 s | 2.03 s | 0 / 3 | — |
+| 400k `assoc` on a 1000-key map | 3.80 s | 4.83 s | 34 / 167 | 55 MB / 30 MB |
+| 1.6M `assoc` on a 1000-key map | 18.5 s | 24.7 s | 138 / 353 | — |
+
+With collection effectively disabled in both builds, the 400k-`assoc` run takes 3.3–3.6 s in Phase 1 and 3.2 s in Phase 2.
+The mutator path therefore has no regression; the difference is collection policy.
+Phase 1 without an explicit soft limit collected only near a third of physical memory.
+Phase 2 collects at twice the surviving bytes, with a 32 MiB floor.
+Each collection marks the whole runtime, and more frequent collections also slow the mutator (more time in `malloc` and in persistent-map inserts between collections).
+
+Floors from 1 MiB to 256 MiB were measured.
+Floors below 32 MiB make small programs collect several times for little gain.
+Larger floors did not speed up the `assoc` workload.
+Phase 5 owns target selection from heap size and allocation rate; this result is its input.
 
 ### Phase 0: correct the current limit behavior
 
