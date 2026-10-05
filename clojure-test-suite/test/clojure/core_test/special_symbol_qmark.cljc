@@ -10,15 +10,19 @@
                  ;; Basilisp does not recognize these as special symbols.
                  #?@(:lpy []
                      :phel [&]
-                     :rust []
+                     :rust [&
+                            case*
+                            new]
                      :default [&
                                case*
                                new])
                  ;; Phel does not recognize these as special symbols.
                  #?@(:phel []
                      :rust [.
+                            deftype*
                             fn*
                             let*
+                            letfn*
                             loop*
                             set!]
                      :default [.
@@ -29,10 +33,10 @@
                                loop*
                                set!])
 
-                 #?@(:rust [] :default [catch])
+                 catch
                  def
                  do
-                 #?@(:rust [] :default [finally])
+                 finally
                  if
                  quote
                  recur
@@ -44,7 +48,7 @@
       (are [arg] (not (special-symbol? arg))
                  'a-symbol
                  'a-ns/a-qualified-symbol
-                 #?@(:rust [] :default ['defn])
+                 'defn
                  'import
                  "not a symbol"
                  :k
