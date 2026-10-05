@@ -309,7 +309,14 @@ pub fn eval_call(func_form: &Form, arg_forms: &[Form], env: &mut Env) -> EvalRes
         crate::env::policy::check_native(&name)?;
         if is_form_intercepted(&name) {
             let args = eval_args(&name, arg_forms, env)?;
-            let _args_root = crate::env::gc_roots::root_values(&args);
+            // The native takes the Vec by value and may shrink or free it
+            // (`alter-meta!` does both before it calls `f`), so a root into
+            // that Vec would dangle and the next collection would trace freed
+            // memory. Root a copy this frame owns instead: it keeps every
+            // argument alive for the whole call, whatever the native does
+            // with its own.
+            let rooted = args.clone();
+            let _args_root = crate::env::gc_roots::root_values(&rooted);
             return dispatch_intercepted(&name, args, env).unwrap_or_else(|| {
                 Err(EvalError::Runtime(format!(
                     "internal: {name} is intercepted but has no dispatch arm"
