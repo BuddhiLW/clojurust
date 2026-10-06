@@ -148,39 +148,53 @@ fn governor_request_crosses_threads() {
     assert_eq!(worker.join().unwrap(), (true, true, false));
 }
 
-/// Without a fixed per-heap trigger, a heap requests its own collection when
-/// it passes the governor's dynamic target, while the process is `Green`.
-/// After the collection, the account keeps at most the retained credit.
+/// Credit returns to the process pool through the real heap: a collection
+/// returns everything above the retained chunks, and thread exit returns
+/// the rest.
 #[test]
-fn heap_without_fixed_trigger_collects_at_dynamic_target() {
+fn heap_collection_and_thread_exit_return_credit() {
     let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
     governor::governor()
         .configure(MemoryConfig::with_limits(512 * MIB, 1024 * MIB).unwrap())
         .unwrap();
-    std::thread::spawn(|| {
-        let control = cljrs_gc::register_current_isolate("dynamic-target").unwrap();
-        let target = control.collection_target();
-        assert_eq!(target, governor::governor().min_headroom());
-        let below = allocate_mib(target / MIB - 1);
-        assert!(!cljrs_gc::gc_requested(), "below the target");
-        let above = allocate_mib(2);
-        assert!(cljrs_gc::take_gc_request(), "past the target");
-        assert_eq!(governor::governor().pressure(), PressureLevel::Green);
+    let g = governor::governor();
+    let before = g.committed_bytes();
+    let returned_before = g.snapshot().credit_returned_bytes;
+    std::thread::spawn(move || {
+        cljrs_gc::register_current_isolate("credit-return");
+        let live = allocate_mib(8);
+        let peak = g.committed_bytes() - before;
+        let account = || {
+            governor::with_current_account(|a| {
+                (a.used_bytes(), a.free_credit_bytes(), a.committed_bytes())
+            })
+            .unwrap()
+        };
+        assert_eq!(peak, account().2, "process counter matches the account");
+        assert!(peak >= 8 * MIB);
 
-        drop((below, above));
+        drop(live);
         HEAP.collect(|_| {});
         HEAP.collect(|_| {});
-        let (used, free, committed) = governor::with_current_account(|a| {
-            (a.used_bytes(), a.free_credit_bytes(), a.committed_bytes())
-        })
-        .unwrap();
+        let (used, free, committed) = account();
         assert_eq!(used, HEAP.memory_in_use());
-        let config = governor::governor().config();
+        assert_eq!(used, 0);
+        let config = g.config();
         assert!(free <= config.retained_credit_chunks * config.credit_chunk);
         assert_eq!(committed, used + free);
+        assert_eq!(g.committed_bytes() - before, committed, "excess went back");
+        assert!(g.snapshot().credit_returned_bytes - returned_before >= (peak - committed) as u64);
     })
     .join()
     .unwrap();
+    assert_eq!(g.committed_bytes(), before, "thread exit returns the rest");
+    assert!(
+        g.snapshot()
+            .isolates
+            .iter()
+            .all(|i| &*i.name != "credit-return"),
+        "isolate unregistered"
+    );
 }
 
 /// Eight isolates share one budget with no fixed partition: one active

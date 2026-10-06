@@ -141,17 +141,15 @@ impl RuntimeBuilder {
         self
     }
 
-    /// Explicit per-heap GC limits.  Without this the heap has no fixed
-    /// trigger and collects at the process governor's dynamic target.
+    /// Explicit GC limits.  Without this the heap is configured from the
+    /// environment (`CLJRS_GC_*`), unless [`Self::gc_config_from_env`] is off.
     pub fn gc_config(mut self, config: Arc<GcConfig>) -> Self {
         self.gc_config = Some(config);
         self
     }
 
-    /// Whether to clear a fixed trigger already set on this thread's heap
-    /// before applying [`Self::gc_config`].  On by default.  The process
-    /// limits (`CLJRS_MEMORY_*_MB`, and the deprecated `CLJRS_GC_*_LIMIT_MB`
-    /// aliases) are read once by the governor, not per heap.
+    /// Whether to apply `CLJRS_GC_*` environment settings to the heap.
+    /// On by default; an explicit [`Self::gc_config`] is applied after it.
     pub fn gc_config_from_env(mut self, enabled: bool) -> Self {
         self.gc_config_from_env = enabled;
         self

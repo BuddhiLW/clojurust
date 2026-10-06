@@ -4,8 +4,8 @@ Non-moving, stop-the-world mark-and-sweep garbage collector for clojurust;
 or, with the `no-gc` Cargo feature, a region-based allocator with no GC pauses.
 
 On `wasm32` targets the `system-memory` crate is excluded (it brings in `errno`,
-which does not build for `wasm32-unknown-unknown`).  The process governor's
-default hard limit is a fixed **256 MiB** instead of a fraction of system RAM.
+which does not build for `wasm32-unknown-unknown`).  The GC heap defaults to a
+fixed **64 MB** soft limit instead of consulting total system RAM.
 
 **Phase:** 8.1 (GcVisitor + Trace infrastructure) + 8.2 (GcBox/GcHeap
 raw-pointer implementation) — implemented.  `no-gc` mode (Phases 1–8 of
@@ -87,8 +87,9 @@ src/
 tests/
   governor.rs     — (GC mode) governor integration tests: per-isolate limit
                     multiplication, exact sweep accounting, cross-thread
-                    collection requests, dynamic collection target, idle
-                    capacity borrowed by an active isolate
+                    collection requests, credit returned by collection
+                    and thread exit, idle capacity borrowed by an active
+                    isolate
   no_gc_alloc.rs  — (no-gc mode) integration tests for the allocation context stack:
                     ScratchGuard, StaticCtxGuard, InvocationGuard,
                     pop_for_return protocol, nested guards, destructor ordering
@@ -233,7 +234,7 @@ pub struct HeapProxy;   // zero-sized; all state in ISOLATE_HEAP thread-local
 impl HeapProxy {
     pub fn alloc<T: Trace + 'static>(&self, value: T) -> GcPtr<T>
     pub fn set_config(&self, config: Arc<GcConfig>)
-    pub fn set_config_from_env(&self)   // clears the fixed trigger; reads no env vars
+    pub fn set_config_from_env(&self)
     pub fn register_root_tracer(&self, tracer: impl Fn(&mut MarkVisitor) + 'static)
     pub fn trace_registered_roots(&self, visitor: &mut MarkVisitor)
     pub fn memory_in_use(&self) -> usize
@@ -335,7 +336,7 @@ pub enum PressureLevel { Green, Yellow, Red }   // < soft, >= soft, > hard
 pub const DEFAULT_CREDIT_CHUNK: usize;             // 64 KiB
 pub const DEFAULT_RETAINED_CREDIT_CHUNKS: usize;   // 2
 pub const ACCOUNTING_UNIT: usize;                  // 4 KiB; rounding for large grants
-pub const MIN_COLLECTION_HEADROOM: usize;          // 32 MiB
+pub const MIN_COLLECTION_HEADROOM: usize;          // 1 MiB
 
 pub struct MemoryConfig { pub soft_limit, pub hard_limit, pub critical_reserve,
                           pub credit_chunk, pub retained_credit_chunks,
@@ -383,7 +384,6 @@ impl IsolateAccount {
     pub fn used_bytes(&self) -> usize;
     pub fn free_credit_bytes(&self) -> usize;
     pub fn committed_bytes(&self) -> usize;
-    pub fn collection_target(&self) -> usize;
     pub fn control(&self) -> &Arc<IsolateControl>;
 }
 pub struct IsolateControl { /* atomics */ }
@@ -424,24 +424,23 @@ registering is registered lazily under its thread name.
 Credit: a charge subtracts from local credit.  When credit runs out, the
 account asks the governor for one chunk, or for the shortfall rounded up to
 `ACCOUNTING_UNIT` when it exceeds a chunk.  A refill is the only time an
-isolate publishes its used bytes and checks its collection target.  After a
+isolate publishes its used bytes.  After a
 collection, an isolate keeps at most `retained_credit_chunks` of free credit
 at `Green`, one chunk at `Yellow`, and none at `Red`; it returns the rest.
 When pressure rises, the governor recalls credit from every isolate, and each
 returns its excess at its next refill, collection, or safepoint poll
 (`gc_requested`).
 
-Collection targets: an isolate requests its own collection when its used
-bytes pass its target.  The first target is `min_headroom()`.  After each
-collection the target is the surviving bytes plus the larger of the surviving
-bytes or `min_headroom()`; a zero-yield collection doubles the previous
-headroom instead, up to the larger of that base or a quarter of the process
-soft limit.  At `Yellow` the governor also requests collection from the
-allocating isolate and from the largest heap once each has grown by
-`min_headroom()` since its last collection; at `Red` it requests regardless.
-Either way it requests at most once per collection epoch.  Pressure
-transitions log at `info` and over-limit events at `debug` under the `memory`
-tracing target.
+Collection: each heap's own trigger is its `GcConfig` soft limit, as in
+Phase 1.  The flag behind `request_gc` / `gc_requested` / `take_gc_request`
+lives on the thread's `IsolateControl`, so the governor can request a
+collection from another thread.  At `Yellow` the governor requests collection
+from the allocating isolate and from the largest heap, at most once per
+collection epoch and only above the isolate's post-collection target (the
+surviving bytes plus the larger of half of them or `min_headroom()`; after a
+zero-yield collection, the larger of all of them or `min_headroom()`); at
+`Red` the target is ignored.  Pressure transitions log at `info` and
+over-limit events at `debug` under the `memory` tracing target.
 
 Gaps: the isolate heap is not torn down at thread exit, so
 `IsolateAccount::drop` stops counting bytes that stay allocated until process
@@ -451,12 +450,9 @@ its retained chunks.
 
 ### `GcConfig`
 
-Optional fixed per-heap collection trigger.  `GcConfig::new()` (and `Default`)
-sets none, so the heap follows its dynamic collection target.
-`with_soft_limit(soft)` adds a trigger at `soft` with no hard limit;
-`with_hard_limit(hard)` uses 75% of `hard`.  `try_with_limits` / `validate`
-reject a zero hard limit and a soft limit above the hard limit.  The hard
-limit is not enforced.
+Per-heap collection trigger.  `with_soft_limit(soft)` keeps the default hard
+limit (raised to `soft`); `try_with_limits` / `validate` reject a zero hard
+limit and a soft limit above the hard limit.  The hard limit is not enforced.
 
 ### `stats::GcStats` and `GC_STATS`
 
@@ -522,8 +518,8 @@ programs and the AOT test harness call it once at exit.
   decremented by the same value when the object is freed.  Types that own
   significant out-of-line heap (Form AST trees in `CljxFn`, String capacity)
   override `gc_size_extra` so the GC threshold fires before the process OOMs.
-- **Fixed-headroom GC suppression** (explicit `GcConfig` soft limit only):
-  after a zero-yield collection (nothing freed), GC is suppressed until `memory_in_use` grows by another `soft_limit/10` bytes
+- **Fixed-headroom GC suppression**: after a zero-yield collection (nothing freed),
+  GC is suppressed until `memory_in_use` grows by another `soft_limit/10` bytes
   (a fixed additive headroom, not a percentage of current memory).  Using a
   percentage of current memory as headroom would compound across consecutive
   zero-yield cycles (e.g. during deep recursion where all objects are live),

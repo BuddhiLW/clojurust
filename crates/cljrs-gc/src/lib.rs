@@ -561,6 +561,25 @@ mod gc_full {
         }
     }
 
+    /// Parse a megabyte limit from a (raw) environment value into a byte count,
+    /// falling back to `default` (and warning) on malformed input rather than
+    /// panicking on user misconfiguration. `value` is `None` when the variable
+    /// is unset. Saturates instead of overflowing on absurdly large values.
+    pub(crate) fn parse_limit_mb(var: &str, value: Option<&str>, default: usize) -> usize {
+        match value {
+            Some(s) => match s.trim().parse::<usize>() {
+                Ok(mb) => mb.saturating_mul(1024 * 1024),
+                Err(_) => {
+                    eprintln!(
+                        "[gc] warning: ignoring invalid {var}={s:?} (expected a number of megabytes)"
+                    );
+                    default
+                }
+            },
+            None => default,
+        }
+    }
+
     impl GcHeap {
         pub const fn new() -> Self {
             Self {
@@ -579,12 +598,32 @@ mod gc_full {
             *self.config.lock().unwrap() = Some(config);
         }
 
-        /// Remove any fixed per-heap trigger, so the heap collects at the
-        /// governor's dynamic target.  The process limits
-        /// (`CLJRS_MEMORY_*_MB` and the deprecated `CLJRS_GC_*_LIMIT_MB`
-        /// aliases) are read once by the governor, not per heap.
         pub fn set_config_from_env(&self) {
-            *self.config.lock().unwrap() = None;
+            #[cfg(not(target_arch = "wasm32"))]
+            let default_soft_limit: usize = (system_memory::total() / 3) as usize;
+            #[cfg(target_arch = "wasm32")]
+            let default_soft_limit: usize = 64 * 1024 * 1024;
+
+            let soft_limit_mb = parse_limit_mb(
+                "CLJRS_GC_SOFT_LIMIT_MB",
+                std::env::var("CLJRS_GC_SOFT_LIMIT_MB").ok().as_deref(),
+                default_soft_limit,
+            );
+            let mut hard_limit_mb = parse_limit_mb(
+                "CLJRS_GC_HARD_LIMIT_MB",
+                std::env::var("CLJRS_GC_HARD_LIMIT_MB").ok().as_deref(),
+                soft_limit_mb,
+            );
+            if hard_limit_mb < soft_limit_mb {
+                eprintln!(
+                    "[gc] warning: CLJRS_GC_HARD_LIMIT_MB is below CLJRS_GC_SOFT_LIMIT_MB; using the soft limit for both"
+                );
+                hard_limit_mb = soft_limit_mb;
+            }
+            self.set_config(Arc::new(GcConfig::with_limits(
+                soft_limit_mb,
+                hard_limit_mb,
+            )));
         }
 
         pub fn register_root_tracer(&self, tracer: impl Fn(&mut MarkVisitor) + 'static) {
@@ -784,7 +823,7 @@ mod gc_full {
                 };
                 self.zero_yield_headroom.store(headroom, Ordering::Relaxed);
                 self.suppressed_threshold
-                    .store(post_memory.saturating_add(headroom), Ordering::Relaxed);
+                    .store(post_memory + headroom, Ordering::Relaxed);
                 self.gc_suppressed.store(true, Ordering::Relaxed);
             } else {
                 // GC freed something: reset exponential backoff.
@@ -1102,6 +1141,28 @@ mod tests {
         let p = heap.alloc(99i64);
         let q = p.clone();
         assert!(GcPtr::ptr_eq(&p, &q));
+    }
+
+    #[test]
+    fn parse_limit_mb_handles_valid_unset_and_malformed() {
+        // Valid: converts megabytes to bytes.
+        assert_eq!(gc_full::parse_limit_mb("X", Some("4"), 7), 4 * 1024 * 1024);
+        // Surrounding whitespace is tolerated.
+        assert_eq!(
+            gc_full::parse_limit_mb("X", Some(" 4 "), 7),
+            4 * 1024 * 1024
+        );
+        // Unset: falls back to the default.
+        assert_eq!(gc_full::parse_limit_mb("X", None, 7), 7);
+        // Malformed must NOT panic — it falls back to the default.
+        assert_eq!(gc_full::parse_limit_mb("X", Some("foo"), 7), 7);
+        assert_eq!(gc_full::parse_limit_mb("X", Some(""), 7), 7);
+        assert_eq!(gc_full::parse_limit_mb("X", Some("-1"), 7), 7);
+        // Absurdly large value saturates rather than overflowing.
+        assert_eq!(
+            gc_full::parse_limit_mb("X", Some(&usize::MAX.to_string()), 7),
+            usize::MAX
+        );
     }
 
     #[test]

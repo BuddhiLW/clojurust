@@ -14,8 +14,8 @@
 //!
 //! The hot path ([`IsolateAccount::charge`]) touches only thread-local `Cell`s.
 //! It contacts the governor only when local credit runs out.  A refill is the
-//! one point where an isolate publishes its used bytes and checks its
-//! collection target, so per-isolate metrics lag by less than one chunk.
+//! one point where an isolate publishes its used bytes, so per-isolate
+//! metrics lag by less than one chunk.
 //! Committed bytes are exact: they change only when credit is granted or
 //! returned.
 
@@ -35,11 +35,9 @@ pub const DEFAULT_CREDIT_CHUNK: usize = 64 * KIB;
 pub const DEFAULT_RETAINED_CREDIT_CHUNKS: usize = 2;
 /// Granularity of a large credit request (one that exceeds a chunk).
 pub const ACCOUNTING_UNIT: usize = 4 * KIB;
-/// Floor for the growth an isolate heap is allowed between collections.
-///
-/// Each collection marks the whole runtime (namespaces, vars, code), so a
-/// small floor makes small programs collect often for little gain.
-pub const MIN_COLLECTION_HEADROOM: usize = 32 * MIB;
+/// Floor for the post-collection headroom below which the governor does not
+/// request collection at `Yellow`.
+pub const MIN_COLLECTION_HEADROOM: usize = MIB;
 /// Floor for the default critical reserve.
 pub const MIN_DEFAULT_CRITICAL_RESERVE: usize = 4 * MIB;
 /// Ceiling for the default critical reserve.
@@ -457,12 +455,9 @@ pub struct IsolateControl {
     last_collection_epoch: AtomicU64,
     /// Epoch at which the governor last requested collection (`u64::MAX`: never).
     requested_epoch: AtomicU64,
-    /// Used bytes at which the isolate requests its own collection (a copy
-    /// of the account's target, for diagnostics).
-    collection_target: AtomicUsize,
     /// Used bytes below which the governor does not request collection at
-    /// `Yellow`: the last collection's survivors plus the minimum headroom.
-    pressure_target: AtomicUsize,
+    /// `Yellow` (set from the last collection's result).
+    collection_target: AtomicUsize,
     collection_requests: AtomicU64,
     credit_refills: AtomicU64,
     zero_yield_collections: AtomicU64,
@@ -472,7 +467,7 @@ pub struct IsolateControl {
 }
 
 impl IsolateControl {
-    fn new(id: IsolateId, name: Arc<str>, initial_target: usize) -> Self {
+    fn new(id: IsolateId, name: Arc<str>) -> Self {
         Self {
             id,
             name: Mutex::new(name),
@@ -483,8 +478,7 @@ impl IsolateControl {
             free_credit_bytes: AtomicUsize::new(0),
             last_collection_epoch: AtomicU64::new(0),
             requested_epoch: AtomicU64::new(u64::MAX),
-            collection_target: AtomicUsize::new(initial_target),
-            pressure_target: AtomicUsize::new(0),
+            collection_target: AtomicUsize::new(0),
             collection_requests: AtomicU64::new(0),
             credit_refills: AtomicU64::new(0),
             zero_yield_collections: AtomicU64::new(0),
@@ -547,7 +541,8 @@ impl IsolateControl {
         self.free_credit_bytes.load(Ordering::Relaxed)
     }
 
-    /// Used bytes at which the isolate requests its own collection.
+    /// Used bytes below which the governor does not request collection at
+    /// `Yellow`.
     pub fn collection_target(&self) -> usize {
         self.collection_target.load(Ordering::Relaxed)
     }
@@ -568,18 +563,16 @@ impl IsolateControl {
     }
 
     /// Request collection on the governor's behalf, at most once per
-    /// collection epoch.  At `Yellow`, also skip the request until the heap
-    /// has grown by the minimum headroom since its last collection.  Returns
-    /// whether a request was made.
+    /// collection epoch.  Below `Red`, also skip the request while the heap
+    /// is under its post-collection target.  Returns whether a request was
+    /// made.
     fn governor_request(&self, level: PressureLevel) -> bool {
         let epoch = self.collection_epoch();
         let prev = self.requested_epoch.load(Ordering::Relaxed);
         if prev == epoch {
             return false;
         }
-        if level < PressureLevel::Red
-            && self.used_bytes() < self.pressure_target.load(Ordering::Relaxed)
-        {
+        if level < PressureLevel::Red && self.used_bytes() < self.collection_target() {
             return false;
         }
         // `evaluate` can run on several refilling threads at once; only the
@@ -661,10 +654,6 @@ pub struct IsolateAccount {
     credit: Cell<usize>,
     /// Free credit last added to the governor's free-credit counter.
     published_credit: Cell<usize>,
-    /// Used bytes at which the isolate requests its own collection.
-    target: Cell<usize>,
-    /// Growth allowed after the last collection (doubles on zero yield).
-    headroom: Cell<usize>,
     /// Allocations not yet added to [`crate::stats::GC_STATS`].
     pending_allocs: Cell<u64>,
     pending_alloc_bytes: Cell<u64>,
@@ -690,11 +679,6 @@ impl IsolateAccount {
     /// credit.
     pub fn committed_bytes(&self) -> usize {
         self.used.get() + self.credit.get()
-    }
-
-    /// Used bytes at which this isolate requests its own collection.
-    pub fn collection_target(&self) -> usize {
-        self.target.get()
     }
 
     /// Account `bytes` of new heap allocation.  Thread-local unless local
@@ -734,9 +718,6 @@ impl IsolateAccount {
             self.service_recall();
         }
         self.sync();
-        if self.used.get() >= self.target.get() {
-            self.control.request_collection();
-        }
         self.governor.evaluate(Some(&self.control), true);
     }
 
@@ -826,11 +807,11 @@ impl IsolateAccount {
     /// Record a completed collection: bump the epoch, set the next
     /// collection target, return excess free credit, and publish.
     ///
-    /// The target is the surviving bytes plus a headroom of the larger of
-    /// the surviving bytes or [`ProcessMemoryGovernor::min_headroom`].  A
-    /// collection that frees nothing doubles the previous headroom instead,
-    /// capped at the larger of the base headroom or a quarter of the
-    /// process soft limit.
+    /// The target, which gates governor requests at `Yellow`, is the
+    /// surviving bytes plus the larger of half the surviving bytes or
+    /// [`ProcessMemoryGovernor::min_headroom`].  After a collection that
+    /// frees nothing, the headroom is the larger of the surviving bytes or
+    /// that minimum.  The heap's own collection trigger is its `GcConfig`.
     pub fn record_collection(&self, report: CollectionReport) {
         let c = &self.control;
         c.last_collection_epoch.fetch_add(1, Ordering::Relaxed);
@@ -844,20 +825,14 @@ impl IsolateAccount {
         );
         let min = self.governor.min_headroom();
         let after = report.bytes_after;
-        let base = after.max(min);
         let headroom = if report.bytes_returned == 0 {
             c.zero_yield_collections.fetch_add(1, Ordering::Relaxed);
-            let cap = base.max(self.governor.soft_limit() / 4);
-            self.headroom.get().saturating_mul(2).clamp(base, cap)
+            after.max(min)
         } else {
-            base
+            (after / 2).max(min)
         };
-        self.headroom.set(headroom);
-        let target = after.saturating_add(headroom);
-        self.target.set(target);
-        c.collection_target.store(target, Ordering::Relaxed);
-        c.pressure_target
-            .store(after.saturating_add(min), Ordering::Relaxed);
+        c.collection_target
+            .store(after.saturating_add(headroom), Ordering::Relaxed);
         self.service_recall();
         self.sync();
         self.governor.evaluate(Some(c), false);
@@ -1066,14 +1041,8 @@ impl ProcessMemoryGovernor {
         self.credit_chunk.load(Ordering::Relaxed)
     }
 
-    fn soft_limit(&self) -> usize {
-        self.ensure_configured();
-        self.soft_limit.load(Ordering::Relaxed)
-    }
-
-    /// Smallest growth an isolate heap is allowed between collections: the
-    /// larger of 16 credit chunks or [`MIN_COLLECTION_HEADROOM`].  This is
-    /// also an isolate's collection target before its first collection.
+    /// Smallest post-collection headroom: the larger of 16 credit chunks or
+    /// [`MIN_COLLECTION_HEADROOM`].
     pub fn min_headroom(&self) -> usize {
         self.credit_chunk()
             .saturating_mul(16)
@@ -1094,8 +1063,7 @@ impl ProcessMemoryGovernor {
     /// Register an isolate.  The returned account is single-threaded (`!Sync`).
     pub fn register_isolate(&'static self, name: impl Into<Arc<str>>) -> IsolateAccount {
         let id = self.next_isolate_id.fetch_add(1, Ordering::Relaxed);
-        let target = self.min_headroom();
-        let control = Arc::new(IsolateControl::new(id, name.into(), target));
+        let control = Arc::new(IsolateControl::new(id, name.into()));
         {
             let mut reg = self.registry.lock().unwrap_or_else(PoisonError::into_inner);
             reg.retain(|w| w.strong_count() > 0);
@@ -1108,8 +1076,6 @@ impl ProcessMemoryGovernor {
             used: Cell::new(0),
             credit: Cell::new(0),
             published_credit: Cell::new(0),
-            target: Cell::new(target),
-            headroom: Cell::new(target),
             pending_allocs: Cell::new(0),
             pending_alloc_bytes: Cell::new(0),
         }
@@ -1774,99 +1740,57 @@ mod tests {
     }
 
     #[test]
-    fn green_target_requests_collection() {
+    fn green_does_not_request_collection() {
         let g = leaked(64 * MIB, 128 * MIB, 64 * KIB);
         let acc = g.register_isolate("a");
-        let min = g.min_headroom();
-        assert_eq!(min, MIN_COLLECTION_HEADROOM);
-        assert_eq!(acc.collection_target(), min, "initial target");
-        while acc.used_bytes() + 64 * KIB < min {
-            acc.charge(64 * KIB);
-        }
-        assert!(!acc.control().collection_requested());
-        acc.charge(64 * KIB);
+        acc.charge(32 * MIB);
         assert_eq!(g.pressure(), PressureLevel::Green);
-        assert!(acc.control().take_collection_request());
-        assert_eq!(
-            acc.control().collection_requests(),
-            0,
-            "not a governor request"
+        assert!(
+            !acc.control().collection_requested(),
+            "GcConfig owns the heap trigger"
         );
-
-        // Survivors plus the larger of the survivors or the minimum headroom.
-        acc.release(acc.used_bytes() - MIB);
-        acc.record_collection(report(min, MIB));
-        assert_eq!(acc.collection_target(), MIB + min);
-        acc.release(MIB);
-        acc.record_collection(report(MIB, 0));
-        acc.charge(50 * MIB);
-        acc.release(10 * MIB);
-        acc.record_collection(report(50 * MIB, 40 * MIB));
-        assert_eq!(
-            acc.collection_target(),
-            80 * MIB,
-            "survivors above the floor"
-        );
+        assert_eq!(acc.control().collection_requests(), 0);
     }
 
     #[test]
-    fn zero_yield_doubles_headroom_up_to_a_cap() {
-        let g = leaked(512 * MIB, 1024 * MIB, 64 * KIB);
-        let acc = g.register_isolate("a");
-        acc.charge(MIB);
-        let zero = |acc: &IsolateAccount| {
-            let used = acc.used_bytes();
-            acc.record_collection(report(used, used));
-            acc.collection_target() - used
-        };
-        assert_eq!(zero(&acc), 64 * MIB);
-        assert_eq!(zero(&acc), 128 * MIB, "cap is a quarter of the soft limit");
-        assert_eq!(zero(&acc), 128 * MIB);
-        acc.release(MIB);
-        acc.record_collection(report(MIB, 0));
-        assert_eq!(
-            acc.collection_target(),
-            MIN_COLLECTION_HEADROOM,
-            "yield resets"
-        );
-    }
-
-    #[test]
-    fn yellow_requests_once_per_epoch_and_red_overrides() {
-        // A soft limit below the initial target separates the governor's
-        // request from the isolate's own.
-        let g = leaked(2 * MIB, 16 * MIB, 64 * KIB);
+    fn pressure_transitions_and_requests() {
+        let g = leaked(4 * MIB, 8 * MIB, 64 * KIB);
         let acc = g.register_isolate("a");
         acc.charge(MIB);
         assert_eq!(g.pressure(), PressureLevel::Green);
         assert!(!acc.control().collection_requested());
 
-        acc.charge(MIB);
+        acc.charge(3 * MIB);
         assert_eq!(g.pressure(), PressureLevel::Yellow);
-        assert!(acc.control().take_collection_request());
-        assert_eq!(acc.control().collection_requests(), 1);
+        assert!(
+            acc.control().take_collection_request(),
+            "Yellow requests collection"
+        );
 
         // Rate limit: no second request in the same collection epoch.
         acc.charge(64 * KIB);
         assert!(!acc.control().collection_requested());
 
-        // After a collection, Yellow waits for the minimum headroom of growth.
+        // After a zero-yield collection the next request waits for growth.
         let used = acc.used_bytes();
         acc.record_collection(report(used, used));
+        assert_eq!(acc.control().collection_target(), 2 * used);
         acc.charge(64 * KIB);
-        assert!(!acc.control().collection_requested());
+        assert!(
+            !acc.control().collection_requested(),
+            "Yellow honours the target"
+        );
 
-        // Red overrides the wait.
-        acc.charge(14 * MIB);
+        // Red overrides the target.
+        acc.charge(5 * MIB);
         assert_eq!(g.pressure(), PressureLevel::Red);
         assert!(acc.control().take_collection_request());
-        assert_eq!(acc.control().collection_requests(), 2);
         let snap = g.snapshot();
         assert!(snap.over_limit_events >= 1);
         assert!(snap.pressure_transitions >= 2);
 
         acc.release(acc.used_bytes());
-        acc.record_collection(report(16 * MIB, 0));
+        acc.record_collection(report(9 * MIB, 0));
         assert_eq!(acc.free_credit_bytes(), 0, "Red retains no credit");
         assert_eq!(g.committed_bytes(), 0);
         assert_eq!(g.pressure(), PressureLevel::Green);

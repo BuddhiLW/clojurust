@@ -605,13 +605,14 @@ Phase 1 decisions that later phases must keep or replace:
   Replaced in Phase 2: committed bytes include free credit.
 - In observe-only mode, growth that ends above the hard limit increments `over_limit_events`.
   It does not reject the allocation. In Phase 2, the growth event is a credit grant.
-- ~~After each collection, the isolate gets a collection target that applies only at `Yellow`.~~
-  Replaced in Phase 2 by dynamic targets that apply at every pressure level.
+- After each collection, the isolate gets a collection target that applies only at `Yellow`.
+  For a collection that frees memory, the target is the remaining bytes plus the larger of half the remaining bytes or 16 credit chunks (at least 1 MiB).
+  For a zero-yield collection, the headroom is the larger of the remaining bytes or that minimum.
+  At `Red`, the governor ignores the target. It makes at most one request per collection epoch in both cases.
 - The default hard limit is the cgroup memory limit, or half of physical memory if no cgroup limit applies.
 - Thread exit drops the account and returns its used bytes and free credit.
   The heap objects remain allocated because the heap shutdown pass is not implemented yet.
-- ~~The heap-local soft limit still triggers collection.~~
-  Replaced in Phase 2: a heap has a fixed trigger only when one is configured explicitly.
+- The heap-local soft limit still triggers collection, and Phase 2 keeps it. See [Phase 2 benchmark](#phase-2-benchmark).
 
 Phase 2 is complete in `crates/cljrs-gc/src/governor.rs`:
 
@@ -628,16 +629,7 @@ Phase 2 is complete in `crates/cljrs-gc/src/governor.rs`:
 - When pressure rises, the governor sets a recall flag on every registered isolate.
   Each isolate returns its excess free credit at its next refill, collection, or safepoint poll (`gc_requested`).
 - Thread exit returns the account's used bytes and free credit.
-- Each isolate has a dynamic collection target, checked at each refill.
-  The first target is the minimum headroom: the larger of 16 credit chunks or 32 MiB.
-  After a collection, the target is the surviving bytes plus the larger of the surviving bytes or the minimum headroom.
-  After a zero-yield collection, the headroom doubles, up to the larger of that base or a quarter of the process soft limit.
-- At `Yellow`, the governor requests collection from the allocating isolate and the largest heap once each has grown by the minimum headroom since its last collection.
-  At `Red`, it requests collection without that condition. Both make at most one request per collection epoch.
-- `GcConfig::new()` sets no fixed per-heap trigger.
-  `HEAP.set_config_from_env()` clears the fixed trigger and reads no environment variable.
-  `Isolate::spawn` no longer calls it. `--gc-hard-limit-mb` configures only the governor.
-  `--gc-soft-limit-mb` and an explicit `GcConfig` soft limit still add a fixed per-heap trigger.
+- Collection triggers are unchanged from Phase 1: the per-heap `GcConfig` soft limit, and governor requests at `Yellow` and `Red`.
 - `GC_STATS` allocation counters are batched in the account and flushed at each refill, collection, metrics poll, and thread exit.
   The normal allocation path therefore performs no process-wide atomic operation.
 - `MemorySnapshot` reports used bytes, free credit, peak used bytes, credit refills, returned credit, and recalls.
@@ -651,6 +643,8 @@ Phase 2 decisions that later phases must keep or replace:
 - The governor's free-credit counter is the sum of each isolate's last published value.
   It can overstate current free credit by up to one chunk per isolate.
 - The default credit chunk stays 64 KiB. See [Phase 2 benchmark](#phase-2-benchmark).
+- The Phase 2 item "Replace per-isolate process-sized thresholds with dynamic collection targets" is deferred to Phase 5.
+  A dynamic-target implementation was measured and reverted; see [Phase 2 benchmark](#phase-2-benchmark).
 - The heap shutdown pass is not assigned to a phase yet.
   Completion criterion 7 requires it.
 
@@ -674,24 +668,25 @@ Phase 2 removes them from the allocation path, which explains the multi-thread d
 Chunk size has no measurable effect on throughput, so 64 KiB stays the default.
 At 64 KiB, an idle isolate holds at most 128 KiB of free credit.
 
-End-to-end interpreter runs (`cljrs run`, median of three) show the cost of dynamic collection targets:
+A dynamic-target variant replaced the per-heap soft limit with a target of twice the surviving bytes and a 32 MiB floor.
+End-to-end interpreter runs (`cljrs run`, median of three) of that variant:
 
-| Workload | Phase 1 | Phase 2 | Collections (Phase 1 / Phase 2) | Peak RSS (Phase 1 / Phase 2) |
+| Workload | Phase 1 | Dynamic targets | Collections (Phase 1 / dynamic) | Peak RSS (Phase 1 / dynamic) |
 |---|---|---|---|---|
 | `cljrs eval 1` | 0.06 s | 0.06 s | 0 / 0 | 12 MB / 9 MB |
 | 1M two-element vectors | 1.53 s | 2.03 s | 0 / 3 | — |
 | 400k `assoc` on a 1000-key map | 3.80 s | 4.83 s | 34 / 167 | 55 MB / 30 MB |
 | 1.6M `assoc` on a 1000-key map | 18.5 s | 24.7 s | 138 / 353 | — |
 
-With collection effectively disabled in both builds, the 400k-`assoc` run takes 3.3–3.6 s in Phase 1 and 3.2 s in Phase 2.
+With collection effectively disabled in both builds, the 400k-`assoc` run takes 3.3–3.6 s in Phase 1 and 3.2 s with chunked credit.
 The mutator path therefore has no regression; the difference is collection policy.
 Phase 1 without an explicit soft limit collected only near a third of physical memory.
-Phase 2 collects at twice the surviving bytes, with a 32 MiB floor.
 Each collection marks the whole runtime, and more frequent collections also slow the mutator (more time in `malloc` and in persistent-map inserts between collections).
 
 Floors from 1 MiB to 256 MiB were measured.
 Floors below 32 MiB make small programs collect several times for little gain.
 Larger floors did not speed up the `assoc` workload.
+Phase 2 therefore keeps the Phase 1 collection triggers.
 Phase 5 owns target selection from heap size and allocation rate; this result is its input.
 
 ### Phase 0: correct the current limit behavior
@@ -719,7 +714,7 @@ This phase measures policy before it rejects work.
 - Add local credit to each isolate account.
 - Refill credit from the process governor.
 - Return excess credit after collection and shutdown.
-- Replace per-isolate process-sized thresholds with dynamic collection targets.
+- Replace per-isolate process-sized thresholds with dynamic collection targets (deferred to Phase 5).
 - Benchmark credit chunk sizes.
 
 This phase must keep the common path free of global synchronization.
@@ -749,7 +744,7 @@ This phase makes the hard limit enforceable for governed allocations.
 
 ### Phase 5: policy and platform pressure
 
-- Select collection targets from heap size and allocation rate.
+- Replace per-isolate process-sized thresholds with collection targets selected from heap size and allocation rate (moved from Phase 2).
 - Add rate limits for cross-isolate collection requests.
 - Read cgroup and job-object limits where the platform provides them.
 - Add optional RSS pressure as an emergency signal.
