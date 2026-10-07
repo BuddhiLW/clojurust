@@ -187,7 +187,11 @@ mod tests {
     #[cfg(unix)]
     fn fixture(cfg: &str) -> (tempfile::TempDir, libloading::Library) {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("libnative_abi_fixture.so");
+        let path = dir.path().join(if cfg!(target_os = "macos") {
+            "libnative_abi_fixture.dylib"
+        } else {
+            "libnative_abi_fixture.so"
+        });
         let mut cmd = std::process::Command::new("rustc");
         cmd.args(["--crate-type", "cdylib", "--edition", "2024"])
             .arg(concat!(
