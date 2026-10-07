@@ -70,8 +70,11 @@ pub fn eval(form: &Form, env: &mut Env) -> EvalResult {
             let forms = expand_reader_conds_cow(forms);
             let mut vals: Vec<Value> = Vec::with_capacity(forms.len());
             for f in forms.iter() {
-                let _root = crate::env::gc_roots::root_values(&vals);
-                vals.push(eval(f, env)?);
+                let val = {
+                    let _root = crate::env::gc_roots::root_values(&vals);
+                    eval(f, env)?
+                };
+                vals.push(val);
             }
             Ok(Value::Vector(GcPtr::new(PersistentVector::from_iter(vals))))
         }
@@ -81,8 +84,11 @@ pub fn eval(form: &Form, env: &mut Env) -> EvalResult {
             })?;
             let mut pairs: Vec<Value> = Vec::with_capacity(forms.len());
             for f in forms.iter() {
-                let _root = crate::env::gc_roots::root_values(&pairs);
-                pairs.push(eval(f, env)?);
+                let val = {
+                    let _root = crate::env::gc_roots::root_values(&pairs);
+                    eval(f, env)?
+                };
+                pairs.push(val);
             }
             let kv_pairs: Vec<(Value, Value)> = pairs
                 .chunks(2)
@@ -94,8 +100,11 @@ pub fn eval(form: &Form, env: &mut Env) -> EvalResult {
             let forms = expand_reader_conds_cow(forms);
             let mut vals: Vec<Value> = Vec::with_capacity(forms.len());
             for f in forms.iter() {
-                let _root = crate::env::gc_roots::root_values(&vals);
-                vals.push(eval(f, env)?);
+                let val = {
+                    let _root = crate::env::gc_roots::root_values(&vals);
+                    eval(f, env)?
+                };
+                vals.push(val);
             }
             Ok(Value::Set(SetValue::Hash(GcPtr::new(
                 PersistentHashSet::from_iter(vals),

@@ -23,6 +23,7 @@ members = [
     "crates/cljrs-nrepl",
     "crates/cljrs-base64",
     "crates/cljrs-json",
+    "crates/cljrs-ffi",
     "crates/cljrs-tx",
 ]
 resolver = "2"
@@ -64,6 +65,7 @@ cljrs-nrepl        = { path = "crates/cljrs-nrepl",        version = "0.1.0", de
 cljrs-base64       = { path = "crates/cljrs-base64",       version = "0.1.0", default-features = false }
 cljrs-blake3       = { path = "crates/cljrs-blake3",       version = "0.1.0", default-features = false }
 cljrs-json         = { path = "crates/cljrs-json",         version = "0.1.0", default-features = false }
+cljrs-ffi          = { path = "crates/cljrs-ffi",          version = "0.1.0", default-features = false }
 cljrs-tx           = { path = "crates/cljrs-tx",           version = "0.1.0", default-features = false }
 
 tracing            = "0.1.44"
@@ -92,7 +94,9 @@ regex        = "1.12.3"
 # size, no DFA/SIMD, no Unicode character classes.
 regex-lite   = "0.1.9"
 serde        = "1.0.228"
-postcard     = "1.1.3"
+# Without its default features: those pull in heapless 0.7, which no crate
+# here uses.  Each user names the features it needs.
+postcard     = { version = "1.1.3", default-features = false }
 rustyline    = "18.0.0"
 libloading   = "0.8"
 arc-swap     = "1"
