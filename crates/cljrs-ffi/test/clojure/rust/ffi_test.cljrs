@@ -1,0 +1,117 @@
+(ns clojure.rust.ffi-test
+  (:require [clojure.test :refer [deftest is testing]]
+            [clojure.data.json :as json]
+            [clojure.rust.ffi :as ffi]))
+
+(def fixture (System/getenv "CLJRS_FFI_FIXTURE"))
+
+(defn- ffi-error
+  "The ex-data of what `thunk` throws, or :no-throw."
+  [thunk]
+  (try (thunk) :no-throw
+       (catch :default e (ex-data e))))
+
+;; ── scalar calls ────────────────────────────────────────────────────────────
+
+(deftest test-integer-and-double-calls
+  (let [lib (ffi/open fixture)]
+    (testing ":int args and return"
+      (is (= 5 ((ffi/function lib "add_i" [:int :int] :int) 2 3)))
+      (is (= -7 (ffi/call lib "neg" [] :int)) "the return is sign-extended from 32 bits")
+      (is (= 1 (ffi/call lib "add_i" [:int :int] :int 0x100000000 1)) "args truncate to 32 bits"))
+    (testing ":long"
+      (is (= 5000000000 (ffi/call lib "add_l" [:long :long] :long 4999999999 1))))
+    (testing ":double return and a long beside it"
+      (is (= 7.5 (ffi/call lib "scale" [:double :long] :double 2.5 3))))
+    (testing "interleaved classes keep their order within each register file"
+      (is (= 654321 (ffi/call lib "mixed" [:long :double :long :double :long :double] :long
+                              1 2.0 3 4.0 5 6.0))))
+    (testing "the maximum arity of each class"
+      (is (= 654321 (ffi/call lib "six_ints" (vec (repeat 6 :long)) :long 1 2 3 4 5 6)))
+      (is (= 87654321.0 (ffi/call lib "eight_doubles" (vec (repeat 8 :double)) :double
+                                  1.0 2.0 3.0 4.0 5.0 6.0 7.0 8.0))))
+    (testing "a bound function is an ordinary fn"
+      (let [add (ffi/function lib "add_l" [:long :long] :long)]
+        (is (= [11 22 33] (map add [1 2 3] [10 20 30])))
+        (is (= 3 (apply add [1 2])))))
+    (ffi/close lib)))
+
+;; ── strings, pointers, bytes ────────────────────────────────────────────────
+
+(deftest test-strings-pointers-bytes
+  (let [lib (ffi/open fixture)]
+    (testing ":string arg and return copy"
+      (is (= "hi rust" (ffi/call lib "greet" [:string] :string "rust")))
+      (is (= 1 (ffi/call lib "is_null" [:string] :int nil)) "nil passes NULL"))
+    (testing "a callee-allocated string: :pointer + string + the library's own free"
+      (let [p (ffi/call lib "dup_upper" [:string] :pointer "shout")]
+        (is (pos? p))
+        (is (= "SHOUT" (ffi/string p)))
+        (is (nil? (ffi/call lib "fixture_free" [:pointer] :void p)))))
+    (testing "NULL pointers"
+      (is (= 0 (ffi/call lib "null_ptr" [] :pointer)))
+      (is (nil? (ffi/string 0)))
+      (is (nil? (ffi/string nil))))
+    (testing ":bytes arg is a copy of the array"
+      (is (= 510 (ffi/call lib "sum_bytes" [:bytes :long] :long (byte-array [1 2 -1 -4]) 4))))
+    (testing "bytes copies n bytes at an address"
+      (let [p (ffi/call lib "raw_bytes" [] :pointer)]
+        (is (= [1 2 -2 -1] (vec (ffi/bytes p 4))))
+        (is (= [] (vec (ffi/bytes p 0))))))
+    (testing "sym is the address function resolves"
+      (is (pos? (ffi/sym lib "add_i"))))
+    (ffi/close lib)))
+
+;; ── error paths ─────────────────────────────────────────────────────────────
+
+(deftest test-errors
+  (testing "a path that does not load"
+    (let [d (ffi-error #(ffi/open "/nonexistent/libnope.so"))]
+      (is (= :open (:ffi/error d)))
+      (is (= "/nonexistent/libnope.so" (:path d)))
+      (is (string? (:reason d)))))
+  (let [lib (ffi/open fixture)]
+    (testing "a missing symbol"
+      (is (= {:ffi/error :symbol :symbol "no_such_fn"}
+             (ffi-error #(ffi/sym lib "no_such_fn"))))
+      (is (= :symbol (:ffi/error (ffi-error #(ffi/function lib "no_such_fn" [] :int))))))
+    (testing "signatures are refused at creation"
+      (is (= :signature (:ffi/error (ffi-error #(ffi/function lib "add_i" [:float] :int)))))
+      (is (= :signature (:ffi/error (ffi-error #(ffi/function lib "add_i" [] :struct)))))
+      (is (= :signature (:ffi/error (ffi-error #(ffi/function lib "six_ints" (vec (repeat 7 :long)) :long)))))
+      (is (= :signature (:ffi/error (ffi-error #(ffi/function lib "add_i" [:void] :int))))))
+    (testing "arity and value type are checked at the call"
+      (let [add (ffi/function lib "add_i" [:int :int] :int)]
+        (is (= {:ffi/error :arity :expected 2 :got 1} (ffi-error #(add 1))))
+        (is (= {:ffi/error :arg-type :index 1 :type :int} (ffi-error #(add 1 "2"))))))
+    (testing "a closed library"
+      (let [add (ffi/function lib "add_i" [:int :int] :int)]
+        (is (nil? (ffi/close lib)))
+        (is (nil? (ffi/close lib)) "close is idempotent")
+        (is (= {:ffi/error :closed} (ffi-error #(add 1 2))))
+        (is (= {:ffi/error :closed} (ffi-error #(ffi/sym lib "add_i"))))
+        (is (= {:ffi/error :closed} (ffi-error #(ffi/call lib "neg" [] :int))))))))
+
+;; ── live: the hive C ABI ────────────────────────────────────────────────────
+
+(defn- native-dir []
+  (or (System/getenv "HIVE_POLYGLOT_NATIVE")
+      (some-> (System/getenv "HOME") (str "/PP/hive/hive-polyglot/native"))))
+
+(defn- hive-call
+  "Call hive_call(op, json), decode the envelope, free the result."
+  [lib op arg]
+  (let [p (ffi/call lib "hive_call" [:string :string] :pointer op (json/write-str arg))
+        s (ffi/string p)]
+    (ffi/call lib "hive_free" [:pointer] :void p)
+    (json/read-str s)))
+
+(deftest test-live-hive-c-abi
+  (doseq [so ["libvectorcraft.so" "libautopdf.so"]]
+    (let [path (str (native-dir) "/" so)
+          lib (try (ffi/open path) (catch :default _ nil))]
+      (if (nil? lib)
+        (println "SKIP live hive C ABI:" path "is absent")
+        (let [env (hive-call lib "ops" {})]
+          (is (contains? env "ok") (str so " answers a JSON envelope"))
+          (ffi/close lib))))))

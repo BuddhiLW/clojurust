@@ -127,6 +127,8 @@ pub fn setup_globals(
     cljrs_base64::init(&globals);
     #[cfg(feature = "json")]
     cljrs_json::init(&globals);
+    #[cfg(feature = "ffi")]
+    cljrs_ffi::init(&globals);
     globals
 }
 
