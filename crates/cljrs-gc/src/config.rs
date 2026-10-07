@@ -289,9 +289,9 @@ impl IsolateCancellation {
     }
 
     fn gc_requested(&self) -> bool {
+        // `poll` also returns credit the governor has recalled.
         self.gc_requested.load(Ordering::SeqCst)
-            || crate::governor::with_current_account(|a| a.control().collection_requested())
-                .unwrap_or(false)
+            || crate::governor::with_current_account(|a| a.poll()).unwrap_or(false)
     }
 }
 

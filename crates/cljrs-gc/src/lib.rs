@@ -666,8 +666,11 @@ mod gc_full {
             }
             self.total_allocated_bytes
                 .fetch_add(obj_size, Ordering::Relaxed);
-            crate::stats::GC_STATS.record_gc_alloc(obj_size);
-            crate::governor::with_current_account(|a| a.charge(obj_size));
+            // The account batches the allocation statistics; record them
+            // directly only during thread-local teardown.
+            if crate::governor::with_current_account(|a| a.charge(obj_size)).is_none() {
+                crate::stats::GC_STATS.record_gc_alloc(obj_size);
+            }
             let current_usage =
                 self.memory_in_use.fetch_add(obj_size, Ordering::Relaxed) + obj_size;
 

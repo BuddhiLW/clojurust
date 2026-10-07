@@ -1,6 +1,6 @@
 # Process-Wide Managed-Memory Governor
 
-Status: Phases 0 and 1 implemented (observe-only accounting). Phases 2 through 5 are open.
+Status: Phases 0 through 2 implemented (observe-only accounting with chunked allocation credit). Phases 3 through 5 are open.
 See [Implementation status](#implementation-status).
 
 This document defines a process-wide governor for memory that clojurust manages.
@@ -599,20 +599,95 @@ Phase 1 is complete in `crates/cljrs-gc/src/governor.rs`:
 
 Phase 1 decisions that later phases must keep or replace:
 
-- An account publishes to the process counters after each credit chunk of growth and after each collection.
-  The normal allocation path uses only thread-local cells. Phase 2 replaces publication with granted credit.
-- Committed bytes equal used bytes, and `free_credit_bytes` is zero.
+- ~~An account publishes to the process counters after each credit chunk of growth and after each collection.~~
+  Replaced in Phase 2 by granted credit.
+- ~~Committed bytes equal used bytes, and `free_credit_bytes` is zero.~~
+  Replaced in Phase 2: committed bytes include free credit.
 - In observe-only mode, growth that ends above the hard limit increments `over_limit_events`.
-  It does not reject the allocation.
-- After each collection, the isolate gets a collection target.
+  It does not reject the allocation. In Phase 2, the growth event is a credit grant.
+- After each collection, the isolate gets a collection target that applies only at `Yellow`.
   For a collection that frees memory, the target is the remaining bytes plus the larger of half the remaining bytes or 16 credit chunks (at least 1 MiB).
   For a zero-yield collection, the headroom is the larger of the remaining bytes or that minimum.
-  At `Yellow`, the governor requests collection only above this target. At `Red`, it ignores the target.
-  The governor makes at most one request per collection epoch in both cases.
+  At `Red`, the governor ignores the target. It makes at most one request per collection epoch in both cases.
 - The default hard limit is the cgroup memory limit, or half of physical memory if no cgroup limit applies.
-- Thread exit drops the account and returns its charge.
+- Thread exit drops the account and returns its used bytes and free credit.
   The heap objects remain allocated because the heap shutdown pass is not implemented yet.
-- The heap-local soft limit still triggers collection. Phase 2 replaces it with dynamic targets.
+- The heap-local soft limit still triggers collection, and Phase 2 keeps it. See [Phase 2 benchmark](#phase-2-benchmark).
+
+Phase 2 is complete in `crates/cljrs-gc/src/governor.rs`:
+
+- `IsolateAccount` holds local used bytes and free credit.
+  `charge` subtracts from local credit and touches only thread-local cells.
+- When credit runs out, the account asks the governor for one credit chunk.
+  A shortfall larger than one chunk gets its own size, rounded up to a 4 KiB accounting unit.
+  The governor adds the grant to committed bytes.
+- `committed_bytes` is one process atomic, changed only by grants, returns, and direct reservations.
+  It equals the sum of every account's used bytes and free credit plus direct reservations.
+- Sweep moves freed bytes from used bytes to free credit.
+  After a collection, the account keeps at most `retained_credit_chunks` (default 2) of free credit at `Green`, one chunk at `Yellow`, and none at `Red`.
+  It returns the rest to the governor.
+- When pressure rises, the governor sets a recall flag on every registered isolate.
+  Each isolate returns its excess free credit at its next refill, collection, or safepoint poll (`gc_requested`).
+- Thread exit returns the account's used bytes and free credit.
+- Collection triggers are unchanged from Phase 1: the per-heap `GcConfig` soft limit, and governor requests at `Yellow` and `Red`.
+- `GC_STATS` allocation counters are batched in the account and flushed at each refill, collection, metrics poll, and thread exit.
+  The normal allocation path therefore performs no process-wide atomic operation.
+- `MemorySnapshot` reports used bytes, free credit, peak used bytes, credit refills, returned credit, and recalls.
+  `IsolateSnapshot` adds free credit, the collection target, and refills.
+- `crates/cljrs-gc/examples/credit_bench.rs` measures allocation time and refill rate for several chunk sizes.
+
+Phase 2 decisions that later phases must keep or replace:
+
+- The governor never refuses a grant. Phase 4 adds strict admission at `ProcessMemoryGovernor::grant`.
+- A recall does not wake an idle isolate. Such an isolate keeps at most its retained chunks until it polls.
+- The governor's free-credit counter is the sum of each isolate's last published value.
+  It can overstate current free credit by up to one chunk per isolate.
+- The default credit chunk stays 64 KiB. See [Phase 2 benchmark](#phase-2-benchmark).
+- The Phase 2 item "Replace per-isolate process-sized thresholds with dynamic collection targets" is deferred to Phase 5.
+  A dynamic-target implementation was measured and reverted; see [Phase 2 benchmark](#phase-2-benchmark).
+- The heap shutdown pass is not assigned to a phase yet.
+  Completion criterion 7 requires it.
+
+#### Phase 2 benchmark
+
+Measured on a 4-core Linux container, release builds, Phase 1 (`main` at `80cde63`) against Phase 2.
+
+`crates/cljrs-gc/examples/credit_bench.rs` allocates 2 million 64-byte objects per thread:
+
+| Chunk | Phase 1, 1 thread | Phase 2, 1 thread | Phase 1, 8 threads | Phase 2, 8 threads | Refills per MiB |
+|---|---|---|---|---|---|
+| 4 KiB | 92 ns | 79 ns | 728 ns | 173 ns | 256 |
+| 16 KiB | 90 ns | 77 ns | 850 ns | 177 ns | 64 |
+| 64 KiB | 88 ns | 73 ns | 813 ns | 146 ns | 16 |
+| 256 KiB | 109 ns | 77 ns | 814 ns | 167 ns | 3.8 |
+| 1 MiB | 88 ns | 82 ns | 797 ns | 153 ns | 0.8 |
+
+Values are nanoseconds per allocation (8 threads oversubscribe 4 cores).
+Phase 1 updated two process-wide `GC_STATS` atomics on every allocation.
+Phase 2 removes them from the allocation path, which explains the multi-thread difference.
+Chunk size has no measurable effect on throughput, so 64 KiB stays the default.
+At 64 KiB, an idle isolate holds at most 128 KiB of free credit.
+
+A dynamic-target variant replaced the per-heap soft limit with a target of twice the surviving bytes and a 32 MiB floor.
+End-to-end interpreter runs (`cljrs run`, median of three) of that variant:
+
+| Workload | Phase 1 | Dynamic targets | Collections (Phase 1 / dynamic) | Peak RSS (Phase 1 / dynamic) |
+|---|---|---|---|---|
+| `cljrs eval 1` | 0.06 s | 0.06 s | 0 / 0 | 12 MB / 9 MB |
+| 1M two-element vectors | 1.53 s | 2.03 s | 0 / 3 | — |
+| 400k `assoc` on a 1000-key map | 3.80 s | 4.83 s | 34 / 167 | 55 MB / 30 MB |
+| 1.6M `assoc` on a 1000-key map | 18.5 s | 24.7 s | 138 / 353 | — |
+
+With collection effectively disabled in both builds, the 400k-`assoc` run takes 3.3–3.6 s in Phase 1 and 3.2 s with chunked credit.
+The mutator path therefore has no regression; the difference is collection policy.
+Phase 1 without an explicit soft limit collected only near a third of physical memory.
+Each collection marks the whole runtime, and more frequent collections also slow the mutator (more time in `malloc` and in persistent-map inserts between collections).
+
+Floors from 1 MiB to 256 MiB were measured.
+Floors below 32 MiB make small programs collect several times for little gain.
+Larger floors did not speed up the `assoc` workload.
+Phase 2 therefore keeps the Phase 1 collection triggers.
+Phase 5 owns target selection from heap size and allocation rate; this result is its input.
 
 ### Phase 0: correct the current limit behavior
 
@@ -639,7 +714,7 @@ This phase measures policy before it rejects work.
 - Add local credit to each isolate account.
 - Refill credit from the process governor.
 - Return excess credit after collection and shutdown.
-- Replace per-isolate process-sized thresholds with dynamic collection targets.
+- Replace per-isolate process-sized thresholds with dynamic collection targets (deferred to Phase 5).
 - Benchmark credit chunk sizes.
 
 This phase must keep the common path free of global synchronization.
@@ -669,7 +744,7 @@ This phase makes the hard limit enforceable for governed allocations.
 
 ### Phase 5: policy and platform pressure
 
-- Select collection targets from heap size and allocation rate.
+- Replace per-isolate process-sized thresholds with collection targets selected from heap size and allocation rate (moved from Phase 2).
 - Add rate limits for cross-isolate collection requests.
 - Read cgroup and job-object limits where the platform provides them.
 - Add optional RSS pressure as an emergency signal.

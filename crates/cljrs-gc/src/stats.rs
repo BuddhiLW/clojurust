@@ -3,7 +3,10 @@
 //! Tracks three classes of events:
 //!
 //! 1. **GC heap allocations** — every object allocated through `GcHeap::alloc`
-//!    (default build) bumps `gc_allocations` and `gc_alloc_bytes`.
+//!    (default build) bumps `gc_allocations` and `gc_alloc_bytes`.  The
+//!    isolate account batches these and flushes them at each credit refill,
+//!    collection, metrics poll, and thread exit, so a reading can lag each
+//!    thread by up to one credit chunk of allocations.
 //! 2. **Region (bump) allocations** — every object allocated through
 //!    [`crate::region::Region::alloc`] bumps `region_allocations` and
 //!    `region_alloc_bytes`.  These represent cases where the bump allocator
@@ -66,6 +69,15 @@ impl GcStats {
         self.gc_allocations.fetch_add(1, Ordering::Relaxed);
         self.gc_alloc_bytes
             .fetch_add(bytes as u64, Ordering::Relaxed);
+    }
+
+    /// Record `count` GC heap allocations totalling `bytes`.  Isolate
+    /// accounts batch their allocations and flush them here at each credit
+    /// refill, so the allocation path does not touch these shared counters.
+    #[inline]
+    pub fn record_gc_allocs(&self, count: u64, bytes: u64) {
+        self.gc_allocations.fetch_add(count, Ordering::Relaxed);
+        self.gc_alloc_bytes.fetch_add(bytes, Ordering::Relaxed);
     }
 
     /// Record one allocation through a bump region (instead of the GC heap).
@@ -199,7 +211,9 @@ pub static GC_STATS: GcStats = GcStats::new();
 /// The full `--gc-stats` report: the [`GC_STATS`] counters followed by the
 /// process governor's [`crate::governor::MemorySnapshot`].
 pub fn report() -> String {
-    format!("{}\n{}", GC_STATS.snapshot(), crate::governor::snapshot())
+    // The governor snapshot flushes this thread's batched allocation counts.
+    let memory = crate::governor::snapshot();
+    format!("{}\n{memory}", GC_STATS.snapshot())
 }
 
 /// Environment variable consulted by [`dump_stats_from_env`].

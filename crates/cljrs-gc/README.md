@@ -11,8 +11,8 @@ fixed **64 MB** soft limit instead of consulting total system RAM.
 raw-pointer implementation) — implemented.  `no-gc` mode (Phases 1–8 of
 `docs/archive/no-gc-plan.md`) — implemented.  B3 (`StaticGcPtr`, `static_alloc`) —
 implemented.  Process memory governor
-(`docs/managed-memory-governor-plan.md`) — Phases 0–1 (observe-only
-accounting) implemented.
+(`docs/managed-memory-governor-plan.md`) — Phases 0–2 (observe-only
+accounting with chunked allocation credit) implemented.
 
 ---
 
@@ -87,10 +87,16 @@ src/
 tests/
   governor.rs     — (GC mode) governor integration tests: per-isolate limit
                     multiplication, exact sweep accounting, cross-thread
-                    collection requests
+                    collection requests, credit returned by collection
+                    and thread exit, idle capacity borrowed by an active
+                    isolate
   no_gc_alloc.rs  — (no-gc mode) integration tests for the allocation context stack:
                     ScratchGuard, StaticCtxGuard, InvocationGuard,
                     pop_for_return protocol, nested guards, destructor ordering
+examples/
+  credit_bench.rs — allocation throughput and credit-refill rate for several
+                    credit chunk sizes (`cargo run --release -p cljrs-gc
+                    --example credit_bench`)
 ```
 
 ---
@@ -318,15 +324,23 @@ dangle; `GcHeap::collect` traces them as roots alongside the active stack.
 ### `governor` — process memory governor
 
 Every isolate keeps its private heap; the governor owns counters, pressure
-policy, and thread-safe control handles.  **Observe-only:** no allocation is
-rejected; growth above the hard limit is counted as an over-limit event.
+policy, and thread-safe control handles.  Each isolate allocates from local
+credit that the governor grants in chunks; granted credit counts as committed.
+**Observe-only:** no grant is refused; a grant that ends above the hard limit
+is counted as an over-limit event.
 
 ```rust
 pub enum MemoryClass { GcHeap, Region, SharedValue, MessageQueue, Static, Code, Runtime }
 pub enum PressureLevel { Green, Yellow, Red }   // < soft, >= soft, > hard
 
+pub const DEFAULT_CREDIT_CHUNK: usize;             // 64 KiB
+pub const DEFAULT_RETAINED_CREDIT_CHUNKS: usize;   // 2
+pub const ACCOUNTING_UNIT: usize;                  // 4 KiB; rounding for large grants
+pub const MIN_COLLECTION_HEADROOM: usize;          // 1 MiB
+
 pub struct MemoryConfig { pub soft_limit, pub hard_limit, pub critical_reserve,
-                          pub credit_chunk, pub queue_limit }   // bytes
+                          pub credit_chunk, pub retained_credit_chunks,
+                          pub queue_limit }   // bytes, except the chunk count
 impl MemoryConfig {
     pub fn with_limits(soft: usize, hard: usize) -> Result<Self, MemoryConfigError>;
     pub fn from_optional_limits(soft: Option<usize>, hard: Option<usize>)
@@ -351,19 +365,25 @@ impl ProcessMemoryGovernor {
     pub fn reserve_shared(&'static self, class: MemoryClass, bytes: usize)
         -> Result<MemoryCharge, MemoryLimitExceeded>;   // never Err while observe-only
     pub fn class_bytes(&self, class: MemoryClass) -> usize;
-    pub fn committed_bytes(&self) -> usize;
+    pub fn committed_bytes(&self) -> usize;     // exact: used + free credit
+    pub fn free_credit_bytes(&self) -> usize;   // as last published by each isolate
+    pub fn min_headroom(&self) -> usize;        // max(16 chunks, MIN_COLLECTION_HEADROOM)
     pub fn pressure(&self) -> PressureLevel;
     pub fn snapshot(&self) -> MemorySnapshot;
 }
 pub fn governor() -> &'static ProcessMemoryGovernor;   // the process instance
 
-pub struct IsolateAccount { /* single-threaded (!Sync) Cells */ }   // Drop: return charge, unregister
+pub struct IsolateAccount { /* single-threaded (!Sync) Cells */ }
+// Drop: returns used bytes and free credit, unregisters.
 impl IsolateAccount {
-    pub fn charge(&self, bytes: usize);   // thread-local; publishes per credit_chunk of growth
-    pub fn release(&self, bytes: usize);  // sweep
-    pub fn publish(&self);
-    pub fn record_collection(&self, r: CollectionReport);   // epoch, next target, publish
+    pub fn charge(&self, bytes: usize);   // thread-local until credit runs out, then refills
+    pub fn release(&self, bytes: usize);  // sweep: used bytes become free credit
+    pub fn publish(&self);                // metrics poll
+    pub fn poll(&self) -> bool;           // safepoint: serve a recall; collection requested?
+    pub fn record_collection(&self, r: CollectionReport);   // epoch, next target, trim credit
     pub fn used_bytes(&self) -> usize;
+    pub fn free_credit_bytes(&self) -> usize;
+    pub fn committed_bytes(&self) -> usize;
     pub fn control(&self) -> &Arc<IsolateControl>;
 }
 pub struct IsolateControl { /* atomics */ }
@@ -373,15 +393,21 @@ impl IsolateControl {
     pub fn request_collection(&self);
     pub fn collection_requested(&self) -> bool;
     pub fn take_collection_request(&self) -> bool;
+    pub fn request_recall(&self);
+    pub fn recall_requested(&self) -> bool;
     pub fn used_bytes(&self) -> usize;
+    pub fn free_credit_bytes(&self) -> usize;
+    pub fn collection_target(&self) -> usize;
     pub fn collection_epoch(&self) -> u64;
     pub fn collection_requests(&self) -> u64;
+    pub fn credit_refills(&self) -> u64;
 }
 pub struct CollectionReport { pub bytes_before, pub bytes_after, pub bytes_returned, pub duration }
 pub struct MemoryCharge;   // RAII; Drop returns its bytes once
 pub struct MemoryLimitExceeded { pub class, pub requested, pub committed, pub hard_limit }
-pub struct MemorySnapshot { /* limits, pressure, committed/used, per class, per isolate,
-                               transitions, requests, over-limit events */ }
+pub struct MemorySnapshot { /* limits, pressure, committed/used/free credit and peaks,
+                               per class, per isolate, transitions, requests,
+                               refills, returned credit, recalls, over-limit events */ }
 pub struct IsolateSnapshot { /* per-isolate counters */ }
 
 // Calling thread:
@@ -393,18 +419,34 @@ pub fn snapshot() -> MemorySnapshot;   // flushes this thread's account first
 
 `GcHeap::alloc` charges the thread's account; `GcHeap::collect` releases the
 freed bytes and calls `record_collection`.  A thread that allocates without
-registering is registered lazily under its thread name.  The flag behind
-`request_gc` / `gc_requested` / `take_gc_request` lives on the thread's
-`IsolateControl`, so the governor can request a collection from another
-thread.  At `Yellow` the governor requests collection from the allocating
-isolate and from the largest heap, at most once per collection epoch and only
-above the isolate's post-collection target; at `Red` the target is ignored.
-Pressure transitions log at `info` and over-limit events at `debug` under the
-`memory` tracing target.
+registering is registered lazily under its thread name.
 
-Phase 1 gaps: the isolate heap is not torn down at thread exit, so
+Credit: a charge subtracts from local credit.  When credit runs out, the
+account asks the governor for one chunk, or for the shortfall rounded up to
+`ACCOUNTING_UNIT` when it exceeds a chunk.  A refill is the only time an
+isolate publishes its used bytes.  After a
+collection, an isolate keeps at most `retained_credit_chunks` of free credit
+at `Green`, one chunk at `Yellow`, and none at `Red`; it returns the rest.
+When pressure rises, the governor recalls credit from every isolate, and each
+returns its excess at its next refill, collection, or safepoint poll
+(`gc_requested`).
+
+Collection: each heap's own trigger is its `GcConfig` soft limit, as in
+Phase 1.  The flag behind `request_gc` / `gc_requested` / `take_gc_request`
+lives on the thread's `IsolateControl`, so the governor can request a
+collection from another thread.  At `Yellow` the governor requests collection
+from the allocating isolate and from the largest heap, at most once per
+collection epoch and only above the isolate's post-collection target (the
+surviving bytes plus the larger of half of them or `min_headroom()`; after a
+zero-yield collection, the larger of all of them or `min_headroom()`); at
+`Red` the target is ignored.  Pressure transitions log at `info` and
+over-limit events at `debug` under the `memory` tracing target.
+
+Gaps: the isolate heap is not torn down at thread exit, so
 `IsolateAccount::drop` stops counting bytes that stay allocated until process
-exit; regions, shared values, queues, static data, and code are not charged.
+exit; regions, shared values, queues, static data, and code are not charged;
+an idle isolate that never polls is not woken by a recall, so it keeps up to
+its retained chunks.
 
 ### `GcConfig`
 
@@ -420,6 +462,7 @@ pub struct GcStats { /* AtomicU64 counters */ }
 impl GcStats {
     pub const fn new() -> Self
     pub fn record_gc_alloc(&self, bytes: usize)
+    pub fn record_gc_allocs(&self, count: u64, bytes: u64)   // batched by isolate accounts
     pub fn record_region_alloc(&self, bytes: usize)
     pub fn record_region_poison(&self)
     pub fn record_gc_pause(&self, pause: Duration, freed_objects: u64, freed_bytes: u64)
@@ -442,7 +485,10 @@ pub fn report() -> String;   // GC_STATS + governor snapshot; re-exported as sta
 ```
 
 Process-global counters updated automatically by `GcHeap::alloc`,
-`GcHeap::collect`, and `Region::alloc`.  The `cljrs --gc-stats [FILE]` CLI
+`GcHeap::collect`, and `Region::alloc`.  GC heap allocations are batched in
+each isolate account and flushed at every credit refill, collection, metrics
+poll, and thread exit, so the allocation path does not touch these shared
+atomics; a reading can lag each thread by up to one chunk of allocations.  The `cljrs --gc-stats [FILE]` CLI
 flag prints a snapshot of these counters at program exit.
 
 `record_boundary_crossing` is the **metered isolate-boundary seam** required by
