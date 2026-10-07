@@ -126,6 +126,11 @@ pub fn load_project_lib(rust_config: &cljrs_project::config::RustConfig, globals
                 }
             };
 
+        if let Err(message) = check_project_abi(&lib, std::env::var("CLJRS_NATIVE_STRICT").as_deref() == Ok("1")) {
+            eprintln!("cljrs: {message}");
+            return;
+        }
+
         let mut registry = cljrs_interop::Registry::new(globals.clone());
         init(&mut registry as *mut _);
 
@@ -138,6 +143,30 @@ pub fn load_project_lib(rust_config: &cljrs_project::config::RustConfig, globals
         lib_path.display(),
         sym_name
     );
+}
+
+/// Verify a project's Rust ABI before touching its Registry pointer.
+/// Legacy crates are accepted only when strict mode is disabled.
+unsafe fn check_project_abi(lib: &libloading::Library, strict: bool) -> Result<(), String> {
+    let abi: libloading::Symbol<unsafe extern "C" fn() -> *const std::os::raw::c_char> =
+        match unsafe { lib.get(pinned::ABI_SYMBOL) } {
+            Ok(abi) => abi,
+            Err(_) if strict => return Err("native library has no cljrs_dylib_abi symbol; CLJRS_NATIVE_STRICT=1 refuses unverified Rust ABI; rebuild with `cljrs build-native`".into()),
+            Err(_) => {
+                eprintln!("cljrs: warning: native library has no cljrs_dylib_abi symbol; unverified Rust ABI may crash; rebuild with `cljrs build-native`");
+                return Ok(());
+            }
+        };
+    let ptr = unsafe { abi() };
+    if ptr.is_null() {
+        return Err("native library returned a null ABI fingerprint; rebuild with `cljrs build-native`".into());
+    }
+    let got = unsafe { std::ffi::CStr::from_ptr(ptr) }.to_string_lossy();
+    let expected = pinned::abi_fingerprint();
+    if got != expected {
+        return Err(format!("native ABI fingerprint mismatch: library was built as `{got}` but this binary expects `{expected}`; rebuild with `cljrs build-native`"));
+    }
+    Ok(())
 }
 
 #[cfg(test)]

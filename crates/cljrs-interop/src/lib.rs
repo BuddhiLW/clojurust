@@ -38,3 +38,40 @@ pub use cljrs_export_macro::export;
 // path resolves correctly inside user crates.
 #[doc(hidden)]
 pub use inventory;
+
+/// Fingerprint shared with the pinned-package ABI handshake. The interop crate
+/// is built in the extension's graph, so these values describe that graph's
+/// cljrs version, compiler, and profile rather than the host process's.
+pub fn abi_fingerprint() -> &'static str {
+    if cfg!(debug_assertions) {
+        concat!("cljrs ", env!("CARGO_PKG_VERSION"), "; ", env!("CLJRS_DYLIB_RUSTC"), "; debug")
+    } else {
+        concat!("cljrs ", env!("CARGO_PKG_VERSION"), "; ", env!("CLJRS_DYLIB_RUSTC"), "; release")
+    }
+}
+
+/// Export a project init function together with the pinned-loader ABI symbol.
+///
+/// `export_init!(cljrs_init_my_crate, |registry: &mut cljrs_interop::Registry| {
+///     // Register native functions here.
+/// });`
+/// The body runs only after the host checks the fingerprint. Use one invocation
+/// per cdylib; the ABI symbol has a fixed name.
+#[macro_export]
+macro_rules! export_init {
+    ($name:ident, $init:expr) => {
+        #[unsafe(no_mangle)]
+        pub extern "C" fn cljrs_dylib_abi() -> *const ::std::os::raw::c_char {
+            static ABI: ::std::sync::OnceLock<::std::ffi::CString> = ::std::sync::OnceLock::new();
+            ABI.get_or_init(|| ::std::ffi::CString::new($crate::abi_fingerprint()).expect("ABI fingerprint contains NUL"))
+                .as_ptr()
+        }
+
+        #[unsafe(no_mangle)]
+        pub extern "C" fn $name(registry: *mut $crate::Registry) {
+            // SAFETY: the host verifies cljrs_dylib_abi before invoking this symbol.
+            let registry = unsafe { &mut *registry };
+            ($init)(registry);
+        }
+    };
+}
