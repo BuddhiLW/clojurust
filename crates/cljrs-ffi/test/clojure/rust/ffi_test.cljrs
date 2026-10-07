@@ -22,7 +22,9 @@
     (testing ":long"
       (is (= 5000000000 (ffi/call lib "add_l" [:long :long] :long 4999999999 1))))
     (testing ":double return and a long beside it"
-      (is (= 7.5 (ffi/call lib "scale" [:double :long] :double 2.5 3))))
+      (is (= 7.5 (ffi/call lib "scale" [:double :long] :double 2.5 3)))
+      (is (= 6.0 (ffi/call lib "scale" [:double :long] :double 2 3))
+          "an integer is accepted as a :double argument"))
     (testing "interleaved classes keep their order within each register file"
       (is (= 654321 (ffi/call lib "mixed" [:long :double :long :double :long :double] :long
                               1 2.0 3 4.0 5 6.0))))
@@ -51,7 +53,11 @@
     (testing "NULL pointers"
       (is (= 0 (ffi/call lib "null_ptr" [] :pointer)))
       (is (nil? (ffi/string 0)))
-      (is (nil? (ffi/string nil))))
+      (is (nil? (ffi/string nil)))
+      (is (nil? (ffi/bytes 0 4)))
+      (is (nil? (ffi/bytes nil 4)))
+      (is (= 1 (ffi/call lib "is_null" [:pointer] :int nil)))
+      (is (= 1 (ffi/call lib "is_null" [:bytes] :int nil))))
     (testing ":bytes arg is a copy of the array"
       (is (= 510 (ffi/call lib "sum_bytes" [:bytes :long] :long (byte-array [1 2 -1 -4]) 4))))
     (testing "bytes copies n bytes at an address"
@@ -70,16 +76,33 @@
       (is (= :open (:ffi/error d)))
       (is (= "/nonexistent/libnope.so" (:path d)))
       (is (string? (:reason d)))))
+  (testing "every library operation rejects a non-handle with ex-data"
+    (doseq [op [#(ffi/close %) #(ffi/sym % "neg")
+                #(ffi/function % "neg" [] :int) #(ffi/call % "neg" [] :int)]
+            bad [nil "not a library" 0]]
+      (is (= {:ffi/error :arg-type :index 0 :type :library}
+             (ffi-error #(op bad))))))
   (let [lib (ffi/open fixture)]
     (testing "a missing symbol"
       (is (= {:ffi/error :symbol :symbol "no_such_fn"}
              (ffi-error #(ffi/sym lib "no_such_fn"))))
       (is (= :symbol (:ffi/error (ffi-error #(ffi/function lib "no_such_fn" [] :int))))))
-    (testing "signatures are refused at creation"
-      (is (= :signature (:ffi/error (ffi-error #(ffi/function lib "add_i" [:float] :int)))))
-      (is (= :signature (:ffi/error (ffi-error #(ffi/function lib "add_i" [] :struct)))))
-      (is (= :signature (:ffi/error (ffi-error #(ffi/function lib "six_ints" (vec (repeat 7 :long)) :long)))))
-      (is (= :signature (:ffi/error (ffi-error #(ffi/function lib "add_i" [:void] :int))))))
+    (testing "signatures are refused at creation with the C symbol and a reason"
+      (doseq [[symbol args ret] [["add_i" [:float] :int]
+                                 ["add_i" [] :struct]
+                                 ["six_ints" (vec (repeat 7 :long)) :long]
+                                 ["eight_doubles" (vec (repeat 9 :double)) :double]
+                                 ["add_i" [:void] :int]
+                                 ["add_i" [] :bytes]
+                                 ["add_i" 42 :int]]]
+        (let [d (ffi-error #(ffi/function lib symbol args ret))]
+          (is (= :signature (:ffi/error d)))
+          (is (= symbol (:symbol d)))
+          (is (string? (:reason d)))))
+      (let [d (ffi-error #(ffi/call lib "add_i" [:float] :int 1))]
+        (is (= :signature (:ffi/error d)))
+        (is (= "add_i" (:symbol d)))
+        (is (string? (:reason d)))))
     (testing "arity and value type are checked at the call"
       (let [add (ffi/function lib "add_i" [:int :int] :int)]
         (is (= {:ffi/error :arity :expected 2 :got 1} (ffi-error #(add 1))))
