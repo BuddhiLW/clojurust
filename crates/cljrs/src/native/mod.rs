@@ -81,12 +81,13 @@ fn target_dir_from_metadata(json: &str) -> Option<PathBuf> {
 /// A missing library emits a warning and returns — callers of unregistered
 /// functions will get a runtime error rather than a startup crash, which is
 /// friendlier during development.
-pub fn load_project_lib(rust_config: &cljrs_project::config::RustConfig, globals: &Arc<GlobalEnv>) {
+/// An ABI mismatch instead returns an error: startup must stop before calling init.
+pub fn load_project_lib(rust_config: &cljrs_project::config::RustConfig, globals: &Arc<GlobalEnv>) -> Result<(), String> {
     let Some(init_fn) = rust_config.init_fn.as_deref() else {
-        return;
+        return Ok(());
     };
     let Some(crate_name) = rust_config.crate_name() else {
-        return;
+        return Ok(());
     };
     // Symbol name is the last segment of the Rust path, e.g. "cljrs_init_my_project".
     let sym_name = init_fn.rsplit("::").next().unwrap_or(init_fn);
@@ -97,7 +98,7 @@ pub fn load_project_lib(rust_config: &cljrs_project::config::RustConfig, globals
             "cljrs: native library not found at {} — run `cljrs build-native` first",
             lib_path.display()
         );
-        return;
+        return Ok(());
     }
 
     // SAFETY: we own the process and are responsible for ensuring the library
@@ -107,7 +108,7 @@ pub fn load_project_lib(rust_config: &cljrs_project::config::RustConfig, globals
             Ok(l) => l,
             Err(e) => {
                 eprintln!("cljrs: could not load {}: {e}", lib_path.display());
-                return;
+                return Ok(());
             }
         };
 
@@ -122,14 +123,11 @@ pub fn load_project_lib(rust_config: &cljrs_project::config::RustConfig, globals
                         "cljrs: could not find symbol {sym_name} in {}: {e}",
                         lib_path.display()
                     );
-                    return;
+                    return Ok(());
                 }
             };
 
-        if let Err(message) = check_project_abi(&lib, std::env::var("CLJRS_NATIVE_STRICT").as_deref() == Ok("1")) {
-            eprintln!("cljrs: {message}");
-            return;
-        }
+        check_project_abi(&lib, std::env::var("CLJRS_NATIVE_STRICT").as_deref() == Ok("1"))?;
 
         let mut registry = cljrs_interop::Registry::new(globals.clone());
         init(&mut registry as *mut _);
@@ -143,6 +141,7 @@ pub fn load_project_lib(rust_config: &cljrs_project::config::RustConfig, globals
         lib_path.display(),
         sym_name
     );
+    Ok(())
 }
 
 /// Verify a project's Rust ABI before touching its Registry pointer.
@@ -172,6 +171,67 @@ unsafe fn check_project_abi(lib: &libloading::Library, strict: bool) -> Result<(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Compile real cdylibs to exercise symbol resolution, not just a string comparator.
+    #[cfg(unix)]
+    fn fixture(cfg: &str) -> (tempfile::TempDir, libloading::Library) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("libnative_abi_fixture.so");
+        let mut cmd = std::process::Command::new("rustc");
+        cmd.args(["--crate-type", "cdylib", "--edition", "2024"])
+            .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/native_abi.rs"))
+            .args(["-o"]).arg(&path)
+            .env("CLJRS_TEST_ABI", pinned::abi_fingerprint());
+        if !cfg.is_empty() {
+            cmd.args(["--cfg", cfg]);
+        }
+        assert!(cmd.status().unwrap().success());
+        let lib = unsafe { libloading::Library::new(path).unwrap() };
+        (dir, lib)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn matching_fingerprint_allows_init() {
+        let (_dir, lib) = fixture("matching");
+        unsafe {
+            check_project_abi(&lib, false).unwrap();
+            let init = lib.get::<unsafe extern "C" fn(*mut ())>(b"cljrs_init_abi_fixture\0").unwrap();
+            let count = lib.get::<unsafe extern "C" fn() -> usize>(b"test_init_calls\0").unwrap();
+            init(std::ptr::null_mut());
+            assert_eq!(count(), 1);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn mismatched_fingerprint_refuses_without_calling_init() {
+        let (_dir, lib) = fixture("");
+        unsafe {
+            let err = check_project_abi(&lib, false).unwrap_err();
+            assert!(err.contains("cljrs incompatible; rustc other; debug"), "{err}");
+            assert!(err.contains(&pinned::abi_fingerprint()), "{err}");
+            assert!(err.contains("rebuild with `cljrs build-native`"), "{err}");
+            let count = lib.get::<unsafe extern "C" fn() -> usize>(b"test_init_calls\0").unwrap();
+            assert_eq!(count(), 0);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn legacy_fingerprint_warns_and_strict_refuses() {
+        let (_dir, lib) = fixture("legacy");
+        unsafe {
+            check_project_abi(&lib, false).unwrap();
+            let err = check_project_abi(&lib, true).unwrap_err();
+            assert!(err.contains("CLJRS_NATIVE_STRICT=1"), "{err}");
+            let count = lib.get::<unsafe extern "C" fn() -> usize>(b"test_init_calls\0").unwrap();
+            assert_eq!(count(), 0);
+            let init = lib.get::<unsafe extern "C" fn(*mut ())>(b"cljrs_init_abi_fixture\0").unwrap();
+            init(std::ptr::null_mut());
+            assert_eq!(count(), 1);
+        }
+    }
 
     /// The shape cargo emits today: one compact line.
     #[test]
