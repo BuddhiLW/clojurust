@@ -12,6 +12,8 @@ pub mod stats;
 pub mod cancellation;
 #[cfg(not(feature = "no-gc"))]
 pub mod config;
+#[cfg(all(not(feature = "no-gc"), not(target_arch = "wasm32")))]
+mod sysmem;
 
 #[cfg(feature = "no-gc")]
 pub mod alloc_ctx;
@@ -591,7 +593,7 @@ mod gc_full {
 
         pub fn set_config_from_env(&self) {
             #[cfg(not(target_arch = "wasm32"))]
-            let default_soft_limit: usize = (system_memory::total() / 3) as usize;
+            let default_soft_limit: usize = (crate::sysmem::total() / 3) as usize;
             #[cfg(target_arch = "wasm32")]
             let default_soft_limit: usize = 64 * 1024 * 1024;
 

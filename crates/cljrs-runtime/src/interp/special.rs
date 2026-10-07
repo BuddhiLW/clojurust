@@ -756,12 +756,18 @@ pub fn eval_loop(args: &[Form], env: &mut Env) -> EvalResult {
 
     // Evaluate initial values.
     for i in (1..bindings.len()).step_by(2) {
-        current_vals.push(eval(&bindings[i], env)?);
+        // The values already evaluated are in no Env frame yet, so root them
+        // while a later init expression runs.
+        let val = {
+            let _vals_root = crate::env::gc_roots::root_values(&current_vals);
+            eval(&bindings[i], env)?
+        };
+        current_vals.push(val);
     }
 
     loop {
         // Root current_vals so they survive GC — they're not yet bound in env.
-        let _vals_root = crate::env::gc_roots::root_values(&current_vals);
+        let vals_root = crate::env::gc_roots::root_values(&current_vals);
 
         // GC safepoint on every loop iteration so tight recur loops
         // don't starve the collector.
@@ -802,6 +808,8 @@ pub fn eval_loop(args: &[Form], env: &mut Env) -> EvalResult {
         let result = eval_body_with_scratch_loop(body, &mut scratch, env);
 
         env.pop_frame();
+        // The body is done with these values; a `recur` below replaces them.
+        drop(vals_root);
         // scratch / _iter_frame drop at the end of the iteration (after the
         // match below), freeing this iteration's intermediates.
 
