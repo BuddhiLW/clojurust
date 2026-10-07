@@ -1,0 +1,36 @@
+;; Call the hive C ABI (hive_call / hive_free) through clojure.rust.ffi.
+;;
+;;   HIVE_POLYGLOT_NATIVE=/path/to/native cljrs run examples/ffi/hive_call.cljrs
+;;
+;; Falls back to $HOME/PP/hive/hive-polyglot/native. Prints each library's
+;; envelope head and the median wall time of 20 calls.
+(ns examples.ffi.hive-call
+  (:require [clojure.rust.ffi :as ffi]
+            [clojure.data.json :as json]))
+
+(defn native-dir []
+  (or (System/getenv "HIVE_POLYGLOT_NATIVE")
+      (str (System/getenv "HOME") "/PP/hive/hive-polyglot/native")))
+
+(defn hive-call
+  "Call hive_call(op, json) and decode its envelope; the result string is
+  allocated by the library, so it is freed with the library's hive_free."
+  [lib op arg]
+  (let [p (ffi/call lib "hive_call" [:string :string] :pointer op (json/write-str arg))]
+    (try (json/read-str (ffi/string p))
+         (finally (ffi/call lib "hive_free" [:pointer] :void p)))))
+
+(defn median-ms [f n]
+  (let [times (sort (for [_ (range n)]
+                      (let [t0 (System/nanoTime)]
+                        (f)
+                        (/ (- (System/nanoTime) t0) 1e6))))]
+    (nth times (quot n 2))))
+
+(doseq [so ["libvectorcraft.so" "libautopdf.so"]]
+  (let [lib (ffi/open (str (native-dir) "/" so))
+        envelope (hive-call lib "ops" {})
+        head (subs (json/write-str envelope) 0 (min 160 (count (json/write-str envelope))))]
+    (println so "->" head)
+    (println so "median ms over 20:" (median-ms #(hive-call lib "ops" {}) 20))
+    (ffi/close lib)))

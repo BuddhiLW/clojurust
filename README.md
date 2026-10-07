@@ -120,6 +120,7 @@ See [`TODO.md`](TODO.md) for the full itemised roadmap.
 | [`cljrs-export-macro`](crates/cljrs-export-macro) | Proc-macro backing `#[cljrs_interop::export]` (re-exported by `cljrs-interop`) | complete |
 | [`cljrs-base64`](crates/cljrs-base64) | Base64 encode/decode exposed as Clojure native functions (interop example) | implemented |
 | [`cljrs-blake3`](crates/cljrs-blake3) | BLAKE3 hashing exposed as Clojure native functions (interop example) | implemented |
+| [`cljrs-ffi`](crates/cljrs-ffi) | `clojure.rust.ffi`: dlopen a C ABI shared library and call its symbols (no libffi; x86_64/aarch64, non-Windows) | implemented |
 
 `cljrs-base64` and `cljrs-blake3` are here as *examples of the interop layer*.
 An extension that is a real application subsystem belongs in its own project
@@ -320,6 +321,7 @@ crates/
   cljrs-export-macro/    # #[export] proc-macro
   cljrs-base64/          # base64 interop library
   cljrs-blake3/          # BLAKE3 interop library
+  cljrs-ffi/             # clojure.rust.ffi: C ABI calls (no libffi)
   # async, I/O & networking
   cljrs-async/           # clojure.core.async
   cljrs-io/              # async file I/O
