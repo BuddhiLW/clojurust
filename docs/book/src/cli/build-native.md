@@ -49,3 +49,12 @@ cljrs run src/main.cljrs
 ```
 
 See [Rust Interop](../rust-interop/index.md) for a complete walkthrough.
+
+The command also prints the built artifact's ABI fingerprint to stderr. For
+new crates, use `cljrs_interop::export_init!` to export both the init and ABI
+symbols (see [Project Setup](../rust-interop/project-setup.md)). A mismatched
+fingerprint stops startup before init and asks you to rebuild with `cljrs
+build-native`. Legacy crates without the symbol warn when loaded; set
+`CLJRS_NATIVE_STRICT=1` to refuse them until rebuilt with the macro. The
+`--release` artifact has a release fingerprint; the loader normally reads
+the debug artifact, so run a matching-profile host for release artifacts.

@@ -127,3 +127,36 @@ as `my.project/greet`. No `require` is needed unless you want a namespace alias:
 
 The namespace `my.project` is created automatically when the init function runs;
 you do not need to create or load a Clojure file for it.
+
+## ABI-checked project crates
+
+For new crates, use `cljrs_interop::export_init!` instead of the manual
+`#[no_mangle]` init above. The macro exports both the uniquely named init
+symbol and `cljrs_dylib_abi`, with the same cljrs-version, rustc-version,
+and debug/release profile fingerprint checked by the pinned-package loader:
+
+```rust
+cljrs_interop::export_init!(cljrs_init_my_project, |r: &mut cljrs_interop::Registry| {
+    cljrs_interop::register_exports(r);
+});
+```
+
+Keep `:rust :init` set to `"my_project::cljrs_init_my_project"`. Include
+`cljrs-interop` as a dependency in `Cargo.toml`; its build script captures
+`rustc -V` when compiling the crate. Only call the macro once per cdylib.
+`cljrs build-native` prints the artifact's fingerprint to stderr (or reports
+that the symbol is absent) and prints the library path to stdout.
+
+If the library's fingerprint differs from the running CLI, startup stops
+before calling init, with both fingerprints and `rebuild with \`cljrs
+build-native\`` in the error. Rebuild using the *same* cljrs version, rustc,
+and profile as the binary. Old libraries without `cljrs_dylib_abi` still load
+but warn once per load that their unchecked Rust ABI may crash. Set
+`CLJRS_NATIVE_STRICT=1` to refuse them instead; rebuild with the macro to
+safely enable strict mode. A fingerprint is not a complete crate-graph check:
+keep your dependency lockfile aligned with the binary, especially `archery`
+and `rpds`.
+
+There is no `cljrs new` command or generated Cargo manifest today; create a
+crate as above and pin `archery = "=1.2.2"` and `rpds = "=1.2.1"` if you use
+them directly, matching the workspace lockfile.
