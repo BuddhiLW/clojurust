@@ -44,11 +44,21 @@ impl GasMeter {
     // toolchains; kept so older toolchains still build.
     #[allow(deprecated)]
     pub fn charge(&self, cost: u64) -> bool {
-        self.remaining
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |remaining| {
-                remaining.checked_sub(cost)
-            })
-            .is_ok()
+        let mut remaining = self.remaining.load(Ordering::Relaxed);
+        loop {
+            let Some(left) = remaining.checked_sub(cost) else {
+                return false;
+            };
+            match self.remaining.compare_exchange_weak(
+                remaining,
+                left,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => return true,
+                Err(current) => remaining = current,
+            }
+        }
     }
 }
 
