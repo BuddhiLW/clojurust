@@ -101,7 +101,10 @@ pub fn check_native(name: &str) -> EvalResult<()> {
         // effect no retry can undo.
         "System/exit",
     ];
-    if DENIED.contains(&name) {
+    // Whole namespaces whose every function is a host effect. `clojure.rust.ffi`
+    // loads native code and calls into it: nothing it does can be retried.
+    const DENIED_NAMESPACES: &[&str] = &["clojure.rust.ffi/"];
+    if DENIED.contains(&name) || DENIED_NAMESPACES.iter().any(|ns| name.starts_with(ns)) {
         Err(forbidden(name))
     } else {
         Ok(())
