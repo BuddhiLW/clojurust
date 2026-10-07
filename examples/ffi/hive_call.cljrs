@@ -21,16 +21,16 @@
          (finally (ffi/call lib "hive_free" [:pointer] :void p)))))
 
 (defn median-ms [f n]
-  (let [times (sort (for [_ (range n)]
-                      (let [t0 (System/nanoTime)]
-                        (f)
-                        (/ (- (System/nanoTime) t0) 1e6))))]
+  ;; `vec` before `nth`: an AOT build answers nil for `nth` over a sorted seq.
+  (let [times (vec (sort (for [_ (range n)]
+                           (let [t0 (System/nanoTime)]
+                             (f)
+                             (/ (- (System/nanoTime) t0) 1e6)))))]
     (nth times (quot n 2))))
 
 (doseq [so ["libvectorcraft.so" "libautopdf.so"]]
   (let [lib (ffi/open (str (native-dir) "/" so))
-        envelope (hive-call lib "ops" {})
-        head (subs (json/write-str envelope) 0 (min 160 (count (json/write-str envelope))))]
-    (println so "->" head)
+        envelope (json/write-str (hive-call lib "ops" {}))]
+    (println so "->" (subs envelope 0 (min 160 (count envelope))))
     (println so "median ms over 20:" (median-ms #(hive-call lib "ops" {}) 20))
     (ffi/close lib)))
