@@ -40,6 +40,9 @@ impl GasMeter {
 
     /// Consume `cost` credits, returning false without partially charging when
     /// the budget cannot cover the whole checkpoint.
+    // `fetch_update` is deprecated in favour of `try_update` on newer stable
+    // toolchains; kept so older toolchains still build.
+    #[allow(deprecated)]
     pub fn charge(&self, cost: u64) -> bool {
         self.remaining
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |remaining| {
