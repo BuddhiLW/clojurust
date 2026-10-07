@@ -25,6 +25,7 @@ num-rational = { workspace = true }
 num-traits   = { workspace = true }
 bigdecimal   = { workspace = true }
 thiserror    = { workspace = true }
+archery      = { workspace = true }
 rpds         = { workspace = true }
 uuid         = { workspace = true }
 regex        = { workspace = true, optional = true }

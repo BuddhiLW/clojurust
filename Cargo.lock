@@ -1065,6 +1065,7 @@ name = "cljrs-value"
 version = "0.1.0"
 dependencies = [
  "arc-swap",
+ "archery",
  "bigdecimal",
  "cljrs-gc",
  "cljrs-reader",

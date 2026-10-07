@@ -44,9 +44,21 @@ pub use inventory;
 /// cljrs version, compiler, and profile rather than the host process's.
 pub fn abi_fingerprint() -> &'static str {
     if cfg!(debug_assertions) {
-        concat!("cljrs ", env!("CARGO_PKG_VERSION"), "; ", env!("CLJRS_DYLIB_RUSTC"), "; debug")
+        concat!(
+            "cljrs ",
+            env!("CARGO_PKG_VERSION"),
+            "; ",
+            env!("CLJRS_DYLIB_RUSTC"),
+            "; debug"
+        )
     } else {
-        concat!("cljrs ", env!("CARGO_PKG_VERSION"), "; ", env!("CLJRS_DYLIB_RUSTC"), "; release")
+        concat!(
+            "cljrs ",
+            env!("CARGO_PKG_VERSION"),
+            "; ",
+            env!("CLJRS_DYLIB_RUSTC"),
+            "; release"
+        )
     }
 }
 
@@ -63,8 +75,11 @@ macro_rules! export_init {
         #[unsafe(no_mangle)]
         pub extern "C" fn cljrs_dylib_abi() -> *const ::std::os::raw::c_char {
             static ABI: ::std::sync::OnceLock<::std::ffi::CString> = ::std::sync::OnceLock::new();
-            ABI.get_or_init(|| ::std::ffi::CString::new($crate::abi_fingerprint()).expect("ABI fingerprint contains NUL"))
-                .as_ptr()
+            ABI.get_or_init(|| {
+                ::std::ffi::CString::new($crate::abi_fingerprint())
+                    .expect("ABI fingerprint contains NUL")
+            })
+            .as_ptr()
         }
 
         #[unsafe(no_mangle)]
@@ -74,4 +89,16 @@ macro_rules! export_init {
             ($init)(registry);
         }
     };
+}
+
+#[cfg(test)]
+mod abi_tests {
+    crate::export_init!(cljrs_init_macro_test, |_registry: &mut crate::Registry| {});
+
+    #[test]
+    fn macro_exports_matching_fingerprint() {
+        let got = unsafe { std::ffi::CStr::from_ptr(cljrs_dylib_abi()) };
+        assert_eq!(got.to_str().unwrap(), crate::abi_fingerprint());
+        let _init: extern "C" fn(*mut crate::Registry) = cljrs_init_macro_test;
+    }
 }

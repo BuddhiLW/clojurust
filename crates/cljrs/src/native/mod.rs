@@ -82,7 +82,10 @@ fn target_dir_from_metadata(json: &str) -> Option<PathBuf> {
 /// functions will get a runtime error rather than a startup crash, which is
 /// friendlier during development.
 /// An ABI mismatch instead returns an error: startup must stop before calling init.
-pub fn load_project_lib(rust_config: &cljrs_project::config::RustConfig, globals: &Arc<GlobalEnv>) -> Result<(), String> {
+pub fn load_project_lib(
+    rust_config: &cljrs_project::config::RustConfig,
+    globals: &Arc<GlobalEnv>,
+) -> Result<(), String> {
     let Some(init_fn) = rust_config.init_fn.as_deref() else {
         return Ok(());
     };
@@ -127,7 +130,10 @@ pub fn load_project_lib(rust_config: &cljrs_project::config::RustConfig, globals
                 }
             };
 
-        check_project_abi(&lib, std::env::var("CLJRS_NATIVE_STRICT").as_deref() == Ok("1"))?;
+        check_project_abi(
+            &lib,
+            std::env::var("CLJRS_NATIVE_STRICT").as_deref() == Ok("1"),
+        )?;
 
         let mut registry = cljrs_interop::Registry::new(globals.clone());
         init(&mut registry as *mut _);
@@ -158,12 +164,17 @@ unsafe fn check_project_abi(lib: &libloading::Library, strict: bool) -> Result<(
         };
     let ptr = unsafe { abi() };
     if ptr.is_null() {
-        return Err("native library returned a null ABI fingerprint; rebuild with `cljrs build-native`".into());
+        return Err(
+            "native library returned a null ABI fingerprint; rebuild with `cljrs build-native`"
+                .into(),
+        );
     }
     let got = unsafe { std::ffi::CStr::from_ptr(ptr) }.to_string_lossy();
     let expected = pinned::abi_fingerprint();
     if got != expected {
-        return Err(format!("native ABI fingerprint mismatch: library was built as `{got}` but this binary expects `{expected}`; rebuild with `cljrs build-native`"));
+        return Err(format!(
+            "native ABI fingerprint mismatch: library was built as `{got}` but this binary expects `{expected}`; rebuild with `cljrs build-native`"
+        ));
     }
     Ok(())
 }
@@ -179,8 +190,12 @@ mod tests {
         let path = dir.path().join("libnative_abi_fixture.so");
         let mut cmd = std::process::Command::new("rustc");
         cmd.args(["--crate-type", "cdylib", "--edition", "2024"])
-            .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/native_abi.rs"))
-            .args(["-o"]).arg(&path)
+            .arg(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/fixtures/native_abi.rs"
+            ))
+            .args(["-o"])
+            .arg(&path)
             .env("CLJRS_TEST_ABI", pinned::abi_fingerprint());
         if !cfg.is_empty() {
             cmd.args(["--cfg", cfg]);
@@ -196,8 +211,12 @@ mod tests {
         let (_dir, lib) = fixture("matching");
         unsafe {
             check_project_abi(&lib, false).unwrap();
-            let init = lib.get::<unsafe extern "C" fn(*mut ())>(b"cljrs_init_abi_fixture\0").unwrap();
-            let count = lib.get::<unsafe extern "C" fn() -> usize>(b"test_init_calls\0").unwrap();
+            let init = lib
+                .get::<unsafe extern "C" fn(*mut ())>(b"cljrs_init_abi_fixture\0")
+                .unwrap();
+            let count = lib
+                .get::<unsafe extern "C" fn() -> usize>(b"test_init_calls\0")
+                .unwrap();
             init(std::ptr::null_mut());
             assert_eq!(count(), 1);
         }
@@ -209,10 +228,15 @@ mod tests {
         let (_dir, lib) = fixture("");
         unsafe {
             let err = check_project_abi(&lib, false).unwrap_err();
-            assert!(err.contains("cljrs incompatible; rustc other; debug"), "{err}");
+            assert!(
+                err.contains("cljrs incompatible; rustc other; debug"),
+                "{err}"
+            );
             assert!(err.contains(&pinned::abi_fingerprint()), "{err}");
             assert!(err.contains("rebuild with `cljrs build-native`"), "{err}");
-            let count = lib.get::<unsafe extern "C" fn() -> usize>(b"test_init_calls\0").unwrap();
+            let count = lib
+                .get::<unsafe extern "C" fn() -> usize>(b"test_init_calls\0")
+                .unwrap();
             assert_eq!(count(), 0);
         }
     }
@@ -225,9 +249,13 @@ mod tests {
             check_project_abi(&lib, false).unwrap();
             let err = check_project_abi(&lib, true).unwrap_err();
             assert!(err.contains("CLJRS_NATIVE_STRICT=1"), "{err}");
-            let count = lib.get::<unsafe extern "C" fn() -> usize>(b"test_init_calls\0").unwrap();
+            let count = lib
+                .get::<unsafe extern "C" fn() -> usize>(b"test_init_calls\0")
+                .unwrap();
             assert_eq!(count(), 0);
-            let init = lib.get::<unsafe extern "C" fn(*mut ())>(b"cljrs_init_abi_fixture\0").unwrap();
+            let init = lib
+                .get::<unsafe extern "C" fn(*mut ())>(b"cljrs_init_abi_fixture\0")
+                .unwrap();
             init(std::ptr::null_mut());
             assert_eq!(count(), 1);
         }

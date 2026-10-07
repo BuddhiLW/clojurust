@@ -162,7 +162,10 @@ fn apply_deps_config(globals: &Arc<GlobalEnv>, cwd: &Path) {
             // Load the native shared library (if :rust is configured) so that
             // native functions are registered before any Clojure code runs.
             if let Some(rust_config) = &config.rust {
-                native::load_project_lib(rust_config, globals).unwrap_or_else(|message| { eprintln!("cljrs: {message}"); std::process::exit(1) });
+                native::load_project_lib(rust_config, globals).unwrap_or_else(|message| {
+                    eprintln!("cljrs: {message}");
+                    std::process::exit(1)
+                });
             }
             *globals.deps_config.write().unwrap() = Some(Arc::new(config));
         }

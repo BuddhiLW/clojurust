@@ -53,15 +53,24 @@ pub fn run(args: Args) -> miette::Result<i32> {
     // different profile from the running CLI, and old crates lack the symbol.
     unsafe {
         let lib = libloading::Library::new(&lib_path).into_diagnostic()?;
-        match lib.get::<unsafe extern "C" fn() -> *const std::os::raw::c_char>(native::pinned::ABI_SYMBOL) {
+        match lib.get::<unsafe extern "C" fn() -> *const std::os::raw::c_char>(
+            native::pinned::ABI_SYMBOL,
+        ) {
             Ok(abi) => {
                 let ptr = abi();
                 if ptr.is_null() {
-                    return Err(miette::miette!("native library returned a null ABI fingerprint"));
+                    return Err(miette::miette!(
+                        "native library returned a null ABI fingerprint"
+                    ));
                 }
-                eprintln!("[build-native] ABI fingerprint: {}", std::ffi::CStr::from_ptr(ptr).to_string_lossy());
+                eprintln!(
+                    "[build-native] ABI fingerprint: {}",
+                    std::ffi::CStr::from_ptr(ptr).to_string_lossy()
+                );
             }
-            Err(_) => eprintln!("[build-native] ABI fingerprint: absent (legacy crate; use cljrs_interop::export_init!)"),
+            Err(_) => eprintln!(
+                "[build-native] ABI fingerprint: absent (legacy crate; use cljrs_interop::export_init!)"
+            ),
         }
     }
     println!("{}", lib_path.display());
