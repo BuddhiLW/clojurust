@@ -446,18 +446,17 @@ fn map_literal_arity_error() -> EvalError {
     EvalError::Runtime("map literal must have an even number of forms".into())
 }
 
-/// Resolve a `#?(...)` reader conditional to the selected branch form, or
-/// `None` if no `:rust` or `:default` clause is present.
+/// Resolve a `#?(...)` reader conditional in textual order.
+/// `:cljrs` is the platform feature; `:rust` is an accepted alias.
+/// `:default` also matches; `:clj` and `:cljs` do not match.
 pub fn select_reader_cond(clauses: &[Form]) -> Option<&Form> {
-    let mut default: Option<&Form> = None;
     for [feature, branch] in clauses.as_chunks::<2>().0 {
-        match &feature.kind {
-            FormKind::Keyword(k) if k == "rust" => return Some(branch),
-            FormKind::Keyword(k) if k == "default" => default = Some(branch),
-            _ => {}
+        if matches!(&feature.kind, FormKind::Keyword(k) if k == "cljrs" || k == "rust" || k == "default")
+        {
+            return Some(branch);
         }
     }
-    default
+    None
 }
 
 /// Expand reader conditionals in a flat slice of forms.
@@ -670,6 +669,20 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn cljrs_feature_and_alias_follow_textual_order() {
+        for (src, expected) in [
+            ("[#?(:cljrs :c :clj :j)]", "[:c]"),
+            ("[#?(:clj :j :rust :r)]", "[:r]"),
+            ("[#?(:clj :j :default :d)]", "[:d]"),
+            ("[#?(:clj :j :cljs :s)]", "[]"),
+            ("[#?(:default :d :cljrs :c)]", "[:d]"),
+            ("[#?@(:clj [:j] :cljrs [:a :b])]", "[:a :b]"),
+        ] {
+            assert_eq!(expand_src(src), kinds(&vec_elems(expected)), "{src}");
+        }
+    }
+
     fn kw_list(names: &[String]) -> String {
         names
             .iter()
@@ -683,6 +696,7 @@ mod tests {
     // both how to render itself as source and what it must contribute after
     // expansion under the `:rust` selection rule - an independent reimplementation
     // of `select_reader_cond` the production code is checked against.
+    // The model also accepts :cljrs and :default in textual order.
 
     #[derive(Clone, Debug)]
     enum Item {
@@ -692,16 +706,10 @@ mod tests {
     }
 
     fn select_model<T>(branches: &[(String, T)]) -> Option<&T> {
-        let mut default = None;
-        for (k, v) in branches {
-            if k == "rust" {
-                return Some(v);
-            }
-            if k == "default" {
-                default = Some(v);
-            }
-        }
-        default
+        branches
+            .iter()
+            .find(|(k, _)| k == "cljrs" || k == "rust" || k == "default")
+            .map(|(_, v)| v)
     }
 
     fn item_src(it: &Item) -> String {
@@ -736,6 +744,7 @@ mod tests {
 
     fn key_strat() -> impl proptest::strategy::Strategy<Value = String> {
         proptest::prop_oneof![
+            proptest::strategy::Just("cljrs".to_string()),
             proptest::strategy::Just("rust".to_string()),
             proptest::strategy::Just("clj".to_string()),
             proptest::strategy::Just("cljs".to_string()),
