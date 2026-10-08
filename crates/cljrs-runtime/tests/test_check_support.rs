@@ -63,6 +63,19 @@ fn proxy_thread_local() {
     );
 }
 
+/// clojure.test.check.generators excludes `let` and binds with `core/let`.
+#[test]
+fn aliased_core_special_form() {
+    assert_eq!(
+        eval_pr(
+            "(ns foo.bar (:refer-clojure :exclude [let]) (:require [clojure.core :as core]))
+             (defn f [coll] (core/let [v (vec coll)] (clojure.core/let [w v] (count w))))
+             (f [1 2 3])"
+        ),
+        "3"
+    );
+}
+
 /// clojure.test.check.random / generators use these JVM numeric statics.
 #[test]
 fn jvm_numeric_statics() {

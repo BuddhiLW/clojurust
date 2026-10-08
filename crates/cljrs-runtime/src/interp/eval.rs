@@ -227,6 +227,14 @@ fn eval_list(forms: &[Form], env: &mut Env) -> EvalResult {
     {
         return eval_special(s, &forms[1..], env);
     }
+    // `core/let`, `clojure.core/fn`: a special form qualified with a namespace
+    // that resolves to clojure.core (test.check excludes `let` and calls
+    // `core/let`). Its name is the special form.
+    if let Some(s) = forms[0].as_symbol()
+        && let Some(name) = crate::interp::core_alias::qualified_core_special(s, env)
+    {
+        return eval_special(name, &forms[1..], env);
+    }
 
     eval_call(&forms[0], &forms[1..], env)
 }
