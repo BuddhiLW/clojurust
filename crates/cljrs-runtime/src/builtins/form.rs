@@ -447,21 +447,17 @@ fn map_literal_arity_error() -> EvalError {
 }
 
 /// Resolve a `#?(...)` reader conditional to the selected branch form, or
-/// Native cljrs falls back to JVM `:clj` for portable .cljc libraries.
-/// `:rust` wins over `:clj`, which wins over `:default`, regardless of order.
 /// `None` if no `:rust` or `:default` clause is present.
 pub fn select_reader_cond(clauses: &[Form]) -> Option<&Form> {
-    let mut clj: Option<&Form> = None;
     let mut default: Option<&Form> = None;
     for [feature, branch] in clauses.as_chunks::<2>().0 {
         match &feature.kind {
             FormKind::Keyword(k) if k == "rust" => return Some(branch),
-            FormKind::Keyword(k) if k == "clj" => clj = Some(branch),
             FormKind::Keyword(k) if k == "default" => default = Some(branch),
             _ => {}
         }
     }
-    clj.or(default)
+    default
 }
 
 /// Expand reader conditionals in a flat slice of forms.
@@ -632,27 +628,11 @@ mod tests {
 
     #[test]
     fn splice_with_no_matching_branch_is_removed_not_nil() {
-        // `:cljs` does not match under cljrs; the splice contributes nothing.
+        // `:clj` does not match under cljrs; the splice contributes nothing.
         // Regression: eval'ing the conditional on its own used to leave a `nil`.
         assert_eq!(
-            expand_src("[:x #?@(:cljs [:a :b]) :y]"),
+            expand_src("[:x #?@(:clj [:a :b]) :y]"),
             kinds(&vec_elems("[:x :y]"))
-        );
-    }
-
-    #[test]
-    fn clj_fallback_keeps_jvm_only_fields_and_rust_takes_priority() {
-        assert_eq!(
-            expand_src("[#?(:clj [^long size] :cljs [])]"),
-            kinds(&vec_elems("[[^long size]]"))
-        );
-        assert_eq!(
-            expand_src("[#?(:clj :jvm :rust :native :default :other)]"),
-            kinds(&vec_elems("[:native]"))
-        );
-        assert_eq!(
-            expand_src("[#?(:default :other :clj :jvm)]"),
-            kinds(&vec_elems("[:jvm]"))
         );
     }
 
@@ -712,20 +692,16 @@ mod tests {
     }
 
     fn select_model<T>(branches: &[(String, T)]) -> Option<&T> {
-        let mut clj = None;
         let mut default = None;
         for (k, v) in branches {
             if k == "rust" {
                 return Some(v);
             }
-            if k == "clj" {
-                clj = Some(v);
-            }
             if k == "default" {
                 default = Some(v);
             }
         }
-        clj.or(default)
+        default
     }
 
     fn item_src(it: &Item) -> String {
@@ -905,7 +881,7 @@ mod tests {
                 }
                 Slot::NonSplice { matches } => {
                     let k = name();
-                    let key = if matches { "rust" } else { "cljs" };
+                    let key = if matches { "rust" } else { "clj" };
                     written.push(format!("#?(:{key} {k})"));
                     if matches {
                         inlined.push(k);
@@ -913,7 +889,7 @@ mod tests {
                 }
                 Slot::Splice { matches, n } => {
                     let ks: Vec<String> = (0..n).map(|_| name()).collect();
-                    let key = if matches { "rust" } else { "cljs" };
+                    let key = if matches { "rust" } else { "clj" };
                     written.push(format!("#?@(:{key} [{}])", ks.join(" ")));
                     if matches {
                         inlined.extend(ks);

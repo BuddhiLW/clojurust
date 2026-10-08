@@ -421,7 +421,7 @@ mod reader_cond_macro_tests {
     fn unmatched_splice_supplies_no_macro_arguments() {
         let runtime = crate::Runtime::builder().build().unwrap();
         let mut env = runtime.env("user");
-        let source = "(defmacro args [& xs] (cons 'vector xs)) (args #?@(:cljs [1 2]))";
+        let source = "(defmacro args [& xs] (cons 'vector xs)) (args #?@(:clj [1 2]))";
         let mut parser = Parser::new(source.into(), "<test>".into());
         let mut result = Value::Nil;
         for form in parser.parse_all().unwrap() {
