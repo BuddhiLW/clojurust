@@ -433,6 +433,25 @@
   [bindings & body]
   (list 'if-let bindings (cons 'do body)))
 
+(defmacro if-some
+  "bindings => binding-form test. If test is not nil, evaluates then with
+  binding-form bound to the value of test, otherwise else."
+  ([bindings then] (list 'if-some bindings then nil))
+  ([bindings then else]
+   (let [form (nth bindings 0)
+         tst  (nth bindings 1)
+         temp (gensym "if_some__")]
+     (list 'let (vector temp tst)
+           (list 'if (list 'nil? temp)
+                 else
+                 (list 'let (vector form temp) then))))))
+
+(defmacro when-some
+  "bindings => binding-form test. When test is not nil, evaluates body with
+  binding-form bound to the value of test."
+  [bindings & body]
+  (list 'if-some bindings (cons 'do body)))
+
 (defmacro cond
   "Takes a set of test/expr pairs. Evaluates each test one at a time. If a
   test returns logical true, evaluates and returns the value of the
