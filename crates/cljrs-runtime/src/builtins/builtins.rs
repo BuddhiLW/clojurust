@@ -1788,6 +1788,7 @@ pub fn register_all(globals: &Arc<GlobalEnv>, ns: &str) {
         Value::Double(std::f64::consts::PI),
     );
     globals.intern(ns, Arc::from("Math/E"), Value::Double(std::f64::consts::E));
+    crate::builtins::jvm_statics::register(globals, ns);
 }
 
 /// Intern `fns` into `ns`, attaching the `:doc` meta named in `docs`.

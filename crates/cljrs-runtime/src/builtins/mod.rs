@@ -9,6 +9,7 @@ mod bitops;
 #[allow(clippy::module_inception)]
 pub mod builtins;
 pub mod form;
+mod jvm_statics;
 mod new;
 mod process;
 mod records;
