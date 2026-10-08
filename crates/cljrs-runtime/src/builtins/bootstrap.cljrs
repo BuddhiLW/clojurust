@@ -1545,6 +1545,9 @@
 (def ^:dynamic *out* nil)
 (def ^:dynamic *err* nil)
 (def ^:dynamic *assert* true)
+
+(def ^:dynamic *unchecked-math* false)
+(def ^:dynamic *warn-on-reflection* false)
 (def ^:dynamic *print-dup* false)
 (def ^:dynamic *print-readably* true)
 (def ^:dynamic *print-length* nil)
