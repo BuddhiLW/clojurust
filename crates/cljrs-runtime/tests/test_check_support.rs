@@ -109,3 +109,12 @@ fn as_thread_macro_binds_name_per_form() {
     assert_eq!(eval_pr("(-> 5 (as-> z (cond-> z (> 24 z) (inc))))"), "6");
     assert_eq!(eval_pr("(as-> 5 z)"), "5");
 }
+
+/// test.check's `call-gen` destructures its Generator record: `[{h :gen} rnd size]`.
+#[test]
+fn map_destructuring_reads_record_fields() {
+    assert_eq!(
+        eval_pr("(defrecord G [gen]) (let [{f :gen :keys [gen]} (->G inc)] [(f 1) (gen 2)])"),
+        "[2 3]"
+    );
+}

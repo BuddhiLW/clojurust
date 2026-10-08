@@ -186,6 +186,9 @@ pub fn bind_associative(pattern: &[Form], val: &Value, env: &mut Env) -> EvalRes
     let get_val = |key: &Value| -> Value {
         match val.unwrap_meta() {
             Value::Map(m) => m.get(key).unwrap_or(Value::Nil),
+            // Records destructure like maps: `{f :gen}` on a defrecord
+            // instance reads its field, as `get` does.
+            Value::TypeInstance(ti) => ti.get().fields.get(key).unwrap_or(Value::Nil),
             _ => Value::Nil,
         }
     };
