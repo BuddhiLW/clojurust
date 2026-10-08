@@ -70,10 +70,10 @@ fn namespace_slot_resolves_a_reader_conditional() {
 #[test]
 fn default_branch_is_taken_when_no_platform_key_matches() {
     let result = eval_fresh(
-        "(ns t.b (:require [#?(:clj clojure.set :cljs cljs.core :default clojure.core) :as core])) \
+        "(ns t.b (:require [#?(:cljs cljs.core :default clojure.core) :as core])) \
          (core/inc 41)",
     )
-    .expect("the :default branch should be selected on :rust");
+    .expect("the :default branch should be selected without :rust or :clj");
     assert_marker(result);
 }
 
@@ -102,11 +102,12 @@ fn plain_namespace_slot_is_unaffected() {
 /// message must name the real cause: `#?(:clj … :cljs …)` with no `:default`
 /// is unloadable on this runtime, and the caller needs to know it is the
 /// missing branch and not their spelling. `clojure.test.check` is exactly
+/// The negative fixture uses :bb/:cljs to avoid the native :clj fallback.
 /// this shape.
 #[test]
 fn no_matching_branch_is_reported_as_such() {
-    let err = eval_fresh("(ns t.e (:require [#?(:clj clojure.core :cljs cljs.core) :as core]))")
-        .expect_err("no branch matches :rust");
+    let err = eval_fresh("(ns t.e (:require [#?(:bb clojure.core :cljs cljs.core) :as core]))")
+        .expect_err("no branch matches :rust or :clj");
     assert!(
         err.contains("no reader-conditional branch matched"),
         "message should name the real cause, got: {err}"

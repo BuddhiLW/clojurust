@@ -449,22 +449,7 @@ pub fn eval_body(forms: &[Form], env: &mut Env) -> EvalResult {
 // ── reader cond ───────────────────────────────────────────────────────────────
 
 fn eval_reader_cond(clauses: &[Form], env: &mut Env) -> EvalResult {
-    // clauses = [kw form kw form ...]
-    let mut i = 0;
-    let mut default: Option<&Form> = None;
-    while i + 1 < clauses.len() {
-        match &clauses[i].kind {
-            FormKind::Keyword(k) if k == "rust" => {
-                return eval(&clauses[i + 1], env);
-            }
-            FormKind::Keyword(k) if k == "default" => {
-                default = Some(&clauses[i + 1]);
-            }
-            _ => {}
-        }
-        i += 2;
-    }
-    match default {
+    match crate::builtins::form::select_reader_cond(clauses) {
         Some(f) => eval(f, env),
         None => Ok(Value::Nil),
     }
@@ -832,12 +817,12 @@ mod tests {
                 .unwrap();
         assert_eq!(v, kw_caught, "reader cond resolves to :default");
 
-        // A reader conditional with no :rust branch must NOT catch the exception.
+        // A reader conditional without a native branch must NOT catch the exception.
         let result =
-            eval_str(r#"(try (throw (ex-info "boom" {})) (catch #?(:clj Throwable) e :caught))"#);
+            eval_str(r#"(try (throw (ex-info "boom" {})) (catch #?(:cljs Throwable) e :caught))"#);
         assert!(
             result.is_err(),
-            "no matching :rust branch must let exception escape"
+            "no matching native branch must let exception escape"
         );
     }
 
@@ -913,8 +898,9 @@ mod tests {
 
     #[test]
     fn test_reader_cond_default() {
-        // No :rust; fall through to :default.
-        assert_eq!(eval_str("#?(:clj 2 :default 99)").unwrap(), long(99));
+        // Without :rust or :clj, fall through to :default.
+        assert_eq!(eval_str("#?(:cljs 2 :default 99)").unwrap(), long(99));
+        assert_eq!(eval_str("#?(:clj 2 :default 99)").unwrap(), long(2));
     }
 
     #[test]
@@ -952,7 +938,7 @@ mod tests {
     #[test]
     fn test_reader_cond_splice_no_match_removed() {
         assert_eq!(
-            eval_str("[1 #?@(:clj [:a :b]) 2]").unwrap(),
+            eval_str("[1 #?@(:cljs [:a :b]) 2]").unwrap(),
             eval_str("[1 2]").unwrap()
         );
     }
@@ -1039,7 +1025,7 @@ mod tests {
                 Slot::NonSplice { matches } => {
                     let u = unit(next);
                     next += 1;
-                    let key = if matches { "rust" } else { "clj" };
+                    let key = if matches { "rust" } else { "cljs" };
                     written.push(format!("#?(:{key} {u})"));
                     if matches {
                         inlined.push(u);
@@ -1053,7 +1039,7 @@ mod tests {
                             u
                         })
                         .collect();
-                    let key = if matches { "rust" } else { "clj" };
+                    let key = if matches { "rust" } else { "cljs" };
                     written.push(format!("#?@(:{key} [{}])", us.join(" ")));
                     if matches {
                         inlined.extend(us);
@@ -1172,7 +1158,7 @@ mod tests {
     fn map_literal_with_only_an_unmatched_conditional_reads_as_empty() {
         // The written parity is odd, the expansion is empty - the reader must
         // defer rather than reject.
-        assert_eq!(eval_str("{#?(:clj :a)}").unwrap(), eval_str("{}").unwrap());
+        assert_eq!(eval_str("{#?(:cljs :a)}").unwrap(), eval_str("{}").unwrap());
     }
 
     #[test]
