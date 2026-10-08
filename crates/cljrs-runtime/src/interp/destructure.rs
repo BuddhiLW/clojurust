@@ -136,6 +136,7 @@ pub fn value_to_seq_vec(val: &Value) -> Vec<Value> {
             });
             result
         }
+        Value::ObjectArray(a) => a.get().0.lock().unwrap().clone(),
         _ => vec![],
     }
 }

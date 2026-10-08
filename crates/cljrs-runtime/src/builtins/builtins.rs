@@ -4068,6 +4068,7 @@ fn builtin_count(args: &[Value]) -> ValueResult<Value> {
         Value::TransientVector(v) => v.get().count(),
         Value::TransientMap(m) => m.get().count(),
         Value::TransientSet(s) => s.get().count(),
+        Value::ObjectArray(a) => a.get().0.lock().unwrap().len(),
         _ => {
             return Err(ValueError::WrongType {
                 expected: "collection",
