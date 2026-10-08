@@ -334,11 +334,13 @@ fn eval_symbol(s: &str, env: &mut Env) -> EvalResult {
 /// `clojure.lang.PersistentQueue/EMPTY` is the reason the function exists —
 /// it is how Clojure source spells an empty queue literal, so `.cljc` shared
 /// with the JVM cannot use cljrs's own `(queue)` instead.
+/// Portable schema libraries use `Long/MAX_VALUE` as an unbounded size.
 fn jvm_static_member(class: &str, member: &str) -> Option<Value> {
     match (class, member) {
         ("clojure.lang.PersistentQueue", "EMPTY") => Some(Value::Queue(GcPtr::new(
             cljrs_value::PersistentQueue::empty(),
         ))),
+        ("Long" | "java.lang.Long", "MAX_VALUE") => Some(Value::Long(i64::MAX)),
         _ => None,
     }
 }
@@ -916,6 +918,15 @@ mod tests {
         assert_eq!(
             eval_str("#{1 #?@(:rust [2 3]) 4}").unwrap(),
             eval_str("#{1 2 3 4}").unwrap()
+        );
+    }
+
+    #[test]
+    fn long_max_value_static_field_matches_i64_limit() {
+        assert_eq!(eval_str("Long/MAX_VALUE").unwrap(), Value::Long(i64::MAX));
+        assert_eq!(
+            eval_str("java.lang.Long/MAX_VALUE").unwrap(),
+            Value::Long(i64::MAX)
         );
     }
 
