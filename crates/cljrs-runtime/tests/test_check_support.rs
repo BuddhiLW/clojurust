@@ -125,3 +125,12 @@ fn take_infinite_count() {
     assert_eq!(eval_pr("(take Double/POSITIVE_INFINITY [1 2 3])"), "(1 2 3)");
     assert_eq!(eval_pr("(take 2.0 [1 2 3])"), "(1 2)");
 }
+
+/// `gen/double*` builds its exponent table with `reductions`.
+#[test]
+fn reductions_intermediate_values() {
+    assert_eq!(eval_pr("(reductions + [1 2 3])"), "(1 3 6)");
+    assert_eq!(eval_pr("(reductions + 10 [1 2])"), "(10 11 13)");
+    assert_eq!(eval_pr("(reductions + [])"), "(0)");
+    assert_eq!(eval_pr("(take 3 (reductions + (range)))"), "(0 1 3)");
+}
