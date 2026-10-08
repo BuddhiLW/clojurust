@@ -1951,6 +1951,8 @@
          ~(if (seq mut)
             `(make-type-instance-mut (str ~tsym) ~immm ~mutm)
             `(make-type-instance (str ~tsym) ~immm)))
+       ;; `(T. args)` constructor sugar, as on the JVM: an alias of `->T`.
+       (def ~(symbol (str tsym ".")) ~ctor)
        ~tsym)))
 
 ;; defrecord: like deftype but fields are always immutable and it also gets the
@@ -1967,6 +1969,8 @@
        (def ~tsym (symbol (deftype* ~tsym ~plain ~@impls)))
        (defn ~pos [~@plain] (make-record-instance (str ~tsym) ~fmap))
        (defn ~mapc [m#] (make-record-instance (str ~tsym) m#))
+       ;; `(T. args)` constructor sugar, as on the JVM: an alias of `->T`.
+       (def ~(symbol (str tsym ".")) ~pos)
        ~tsym)))
 
 ;; reify: an anonymous, field-less instance whose methods close over the

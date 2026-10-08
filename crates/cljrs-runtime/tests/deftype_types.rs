@@ -303,3 +303,18 @@ fn an_ordinary_fn_arity_error_is_unchanged() {
         "non-macro arity reporting must be untouched, got: {err}"
     );
 }
+
+/// `(T. args)` is the JVM constructor sugar; malli's regex drivers build
+/// their deftypes this way (`(CheckDriver. false stack cache)`). The macros
+/// def `T.` beside `->T`, for a private type too, and for defrecord.
+#[test]
+fn trailing_dot_constructor_sugar() {
+    assert_eq!(
+        eval_pr("(deftype ^:private A [^:unsynchronized-mutable x y]) (pr-str (.-y (A. 1 2)))"),
+        "2"
+    );
+    assert_eq!(
+        eval_pr("(defrecord R [a b]) (pr-str (:b (R. 1 2)))"),
+        "2"
+    );
+}
