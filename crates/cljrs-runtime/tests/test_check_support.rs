@@ -76,6 +76,19 @@ fn aliased_core_special_form() {
     );
 }
 
+/// clojure.test.check.generators defines its own `let` macro.
+#[test]
+fn fn_named_after_special_form() {
+    assert_eq!(
+        eval_pr(
+            "(ns foo.m (:refer-clojure :exclude [let]) (:require [clojure.core :as core]))
+             (defmacro let [bindings & body] `(core/let ~bindings ~@body))
+             [((fn let [x] x) 1) (let [a 2] a)]"
+        ),
+        "[1 2]"
+    );
+}
+
 /// clojure.test.check.random / generators use these JVM numeric statics.
 #[test]
 fn jvm_numeric_statics() {

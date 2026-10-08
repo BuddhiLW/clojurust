@@ -11,7 +11,7 @@ use crate::env::env::{Env, RequireRefer, RequireSpec};
 use crate::env::error::{EvalError, EvalResult};
 use crate::env::loader::load_ns;
 use crate::interp::destructure::bind_pattern;
-use crate::interp::eval::{eval, eval_body, is_special_form};
+use crate::interp::eval::{eval, eval_body};
 use cljrs_gc::GcPtr;
 use cljrs_reader::Form;
 use cljrs_reader::form::FormKind;
@@ -222,10 +222,10 @@ fn eval_fn(args: &[Form], env: &mut Env) -> EvalResult {
     let mut idx = 0;
     let mut name: Option<Arc<str>> = None;
 
-    // Optional name.
-    if let Some(FormKind::Symbol(s)) = args.first().map(|f| &f.kind)
-        && !is_special_form(s)
-    {
+    // Optional name. Any symbol here is the name, special-form names included:
+    // `(defmacro let ...)` (clojure.test.check.generators) expands to
+    // `(fn let [...] ...)`.
+    if let Some(FormKind::Symbol(s)) = args.first().map(|f| &f.kind) {
         name = Some(Arc::from(s.as_str()));
         idx = 1;
     }
