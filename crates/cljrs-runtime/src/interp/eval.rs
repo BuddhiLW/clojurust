@@ -451,23 +451,8 @@ pub fn eval_body(forms: &[Form], env: &mut Env) -> EvalResult {
 // ── reader cond ───────────────────────────────────────────────────────────────
 
 fn eval_reader_cond(clauses: &[Form], env: &mut Env) -> EvalResult {
-    // clauses = [kw form kw form ...]
-    let mut i = 0;
-    let mut default: Option<&Form> = None;
-    while i + 1 < clauses.len() {
-        match &clauses[i].kind {
-            FormKind::Keyword(k) if k == "rust" => {
-                return eval(&clauses[i + 1], env);
-            }
-            FormKind::Keyword(k) if k == "default" => {
-                default = Some(&clauses[i + 1]);
-            }
-            _ => {}
-        }
-        i += 2;
-    }
-    match default {
-        Some(f) => eval(f, env),
+    match crate::builtins::form::select_reader_cond(clauses) {
+        Some(form) => eval(form, env),
         None => Ok(Value::Nil),
     }
 }
