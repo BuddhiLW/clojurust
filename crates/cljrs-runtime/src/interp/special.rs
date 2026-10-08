@@ -2206,9 +2206,12 @@ fn build_impl_fn(
     };
     let arity = parse_arity(params_form, body)?;
     let (closed_over_names, closed_over_vals) = env.all_local_bindings();
-    let fn_name: Option<Arc<str>> = parts[0].as_symbol().map(Arc::from);
+    // A protocol method impl must NOT be a named fn: a name binds itself inside
+    // its own body, so `(-s [_ t] (-s inner t))` would call itself instead of the
+    // protocol function of the same name and recurse forever (malli's registries
+    // delegate this way).
     let cljrs_fn = CljxFn::new(
-        fn_name,
+        None,
         vec![arity],
         closed_over_names,
         closed_over_vals,
