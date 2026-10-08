@@ -134,3 +134,10 @@ fn reductions_intermediate_values() {
     assert_eq!(eval_pr("(reductions + [])"), "(0)");
     assert_eq!(eval_pr("(take 3 (reductions + (range)))"), "(0 1 3)");
 }
+
+/// `gen/elements` maps a vector over a rose tree: vectors are IFn.
+#[test]
+fn vector_invoked_as_fn() {
+    assert_eq!(eval_pr("[([5 6] 1) (mapv [:a :b] [1 0]) (apply [7] [0])]"), "[6 [:b :a] 7]");
+    assert_eq!(eval_pr("(try ([1] 3) (catch Exception _ :oob))"), ":oob");
+}
