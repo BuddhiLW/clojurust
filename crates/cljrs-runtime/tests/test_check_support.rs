@@ -101,3 +101,11 @@ fn jvm_numeric_statics() {
         "[8 -9223372036854775808 -9223372036854775808 12.0 3 true true true true]"
     );
 }
+
+/// `as->` threads the name through every form (random/mix-gamma uses it inside `->`).
+#[test]
+fn as_thread_macro_binds_name_per_form() {
+    assert_eq!(eval_pr("(as-> 5 z (inc z) (* z 2))"), "12");
+    assert_eq!(eval_pr("(-> 5 (as-> z (cond-> z (> 24 z) (inc))))"), "6");
+    assert_eq!(eval_pr("(as-> 5 z)"), "5");
+}

@@ -553,9 +553,10 @@
   that binding, then binds name to that result, repeating for each
   successive form, returning the result of the last form."
   [expr name & forms]
-  (list 'let (vector name expr)
+  (list 'let (vec (concat [name expr]
+                          (interleave (repeat name) (butlast forms))))
         (if (seq forms)
-          (list* 'as-> name forms)
+          (last forms)
           name)))
 
 (defmacro doto
