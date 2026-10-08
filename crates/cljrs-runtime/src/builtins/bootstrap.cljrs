@@ -825,6 +825,15 @@
 (defn associative?
   "Returns true if coll implements the associative interface (map, vector)."
   [x] (or (map? x) (vector? x)))
+(defn indexed?
+  "Returns true if coll implements Indexed, indicating efficient access by index."
+  [x] (vector? x))
+(defn uri?
+  "Returns true if x is a java.net.URI. cljrs has no URI type, so this is always false."
+  [x] false)
+(defn inst?
+  "Returns true if x satisfies Inst. cljrs has no instant type, so this is always false."
+  [x] false)
 
 ;; meta and vary-meta are native builtins (see builtins.rs)
 
