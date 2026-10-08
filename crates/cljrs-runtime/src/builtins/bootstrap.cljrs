@@ -256,7 +256,9 @@
               (ensure-reduced result)
               result)))))))
   ([n coll]
-   (let [n (int n)]
+   ;; ##Inf is a valid count (test.check's rose-tree unchunk takes
+   ;; Double/POSITIVE_INFINITY); it has no int, so keep it as is.
+   (let [n (if (== n ##Inf) n (int n))]
      (cond (pos? n)
            (when (pos? n)
              (lazy-seq

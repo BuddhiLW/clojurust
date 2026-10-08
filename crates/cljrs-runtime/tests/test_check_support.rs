@@ -118,3 +118,10 @@ fn map_destructuring_reads_record_fields() {
         "[2 3]"
     );
 }
+
+/// rose-tree's `unchunk` is `(take Double/POSITIVE_INFINITY s)`.
+#[test]
+fn take_infinite_count() {
+    assert_eq!(eval_pr("(take Double/POSITIVE_INFINITY [1 2 3])"), "(1 2 3)");
+    assert_eq!(eval_pr("(take 2.0 [1 2 3])"), "(1 2)");
+}
