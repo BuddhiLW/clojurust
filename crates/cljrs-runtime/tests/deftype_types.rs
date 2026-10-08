@@ -318,3 +318,17 @@ fn trailing_dot_constructor_sugar() {
         "2"
     );
 }
+
+/// `hash-combine` (cljs core) mixes two hashes deterministically without
+/// overflowing; malli's regex cache keys on it.
+#[test]
+fn hash_combine_is_deterministic_and_wraps() {
+    assert_eq!(
+        eval_pr("(pr-str (= (hash-combine 7 11) (hash-combine 7 11)))"),
+        "true"
+    );
+    assert_eq!(
+        eval_pr("(pr-str (integer? (hash-combine 9223372036854775807 9223372036854775807)))"),
+        "true"
+    );
+}

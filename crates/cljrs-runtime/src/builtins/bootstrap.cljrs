@@ -1910,6 +1910,15 @@
                  ret
                  (recur (isa? h (nth child i) (nth parent i)) (inc i)))))))))
 
+(defn hash-combine
+  "Mixes hash value h into seed (the ClojureScript / boost hash_combine
+  recipe). Neither argument is hashed; callers pass hashes."
+  [seed h]
+  (bit-xor seed
+           (unchecked-add (unchecked-add h 2654435769)
+                          (unchecked-add (bit-shift-left seed 6)
+                                         (bit-shift-right seed 2)))))
+
 (defn parents
   "Returns the immediate parents of tag, or nil if it has none."
   ([tag] (parents global-hierarchy tag))
