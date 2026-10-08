@@ -42,7 +42,7 @@ fn lib_of(v: &Value) -> ValueResult<Arc<LibInner>> {
     {
         return Ok(h.0.clone());
     }
-    Err(wrong_type("an ffi library handle", v))
+    Err(arg_type_error(0, "library", v))
 }
 
 fn name_of(v: &Value) -> ValueResult<String> {
@@ -86,7 +86,8 @@ fn builtin_sym(args: &[Value]) -> ValueResult<Value> {
 fn bind(args: &[Value]) -> ValueResult<NativeFn> {
     let lib = lib_of(&args[0])?;
     let name = name_of(&args[1])?;
-    let sig = Signature::resolve(&args[2], &args[3])?;
+    let sig = Signature::resolve(&args[2], &args[3])
+        .map_err(|e| error::with_signature_symbol(e, &name))?;
     let addr = lib.symbol(&name)?;
     let fn_name = format!("{NS}/function:{name}");
     Ok(NativeFn::with_closure(
@@ -125,8 +126,8 @@ fn builtin_bytes(args: &[Value]) -> ValueResult<Value> {
         Value::Long(n) if *n >= 0 => *n as usize,
         other => return Err(arg_type_error(1, "long", other)),
     };
-    if addr == 0 && n > 0 {
-        return Err(arg_type_error(0, "pointer", &args[0]));
+    if addr == 0 {
+        return Ok(Value::Nil);
     }
     // SAFETY: the caller asserts `addr` points at `n` readable bytes.
     let data = unsafe { invoke::c_bytes(addr, n) };

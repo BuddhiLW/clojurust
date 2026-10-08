@@ -37,7 +37,7 @@ adapter needs one reader conditional:
 | `(function lib name arg-types ret-type)` | An ordinary Clojure fn calling the C symbol. Types and the symbol are resolved once, here. |
 | `(call lib name arg-types ret-type & args)` | `((function lib name arg-types ret-type) args...)`. |
 | `(string ptr)` | A copy of the NUL-terminated UTF-8 string at `ptr`; `nil` for 0 or `nil`. |
-| `(bytes ptr n)` | A byte array holding a copy of the `n` bytes at `ptr`. |
+| `(bytes ptr n)` | A byte array holding a copy of the `n` bytes at `ptr`; `nil` for 0 or `nil` pointers. |
 
 ## Types
 
@@ -49,7 +49,7 @@ adapter needs one reader conditional:
 | `:double` | `double`; an integer is converted | double |
 | `:pointer` | an address integer; `nil` passes NULL | the address; NULL is `0` |
 | `:string` | a NUL-terminated UTF-8 copy, valid during the call; `nil` passes NULL | a copy of the C string; NULL is `nil`. Never freed. |
-| `:bytes` | a pointer to a copy of a byte array, valid during the call | refused |
+| `:bytes` | a pointer to a copy of a byte array, valid during the call; `nil` passes NULL | refused |
 
 When the callee allocates the string it returns, declare the return `:pointer`,
 copy it with `string`, then call the library's own free function on the pointer.
@@ -62,9 +62,9 @@ Every failure is an `ex-info` whose data carries `:ffi/error`:
 |---|---|---|
 | `:open` | the library does not load | `:path`, `:reason` (the loader's message) |
 | `:symbol` | the symbol is not exported | `:symbol` |
-| `:signature` | at `function`: unknown type, `:void` argument, `:bytes` return, too many arguments | `:reason`, sometimes `:type` |
+| `:signature` | at `function`: unknown type, `:void` argument, `:bytes` return, too many arguments | `:symbol` (C symbol name), `:reason` (string), sometimes `:type` |
 | `:arity` | a call with the wrong argument count | `:expected`, `:got` |
-| `:arg-type` | an argument of the wrong kind | `:index`, `:type` |
+| `:arg-type` | an argument of the wrong kind, including a non-library first argument to `close`, `sym`, `function`, or `call` | `:index`, `:type` (`:library` for a non-handle) |
 | `:closed` | any use after `close` | |
 
 All of `clojure.rust.ffi` is denied inside a transaction function: loading and
