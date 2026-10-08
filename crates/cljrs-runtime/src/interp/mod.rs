@@ -10,6 +10,7 @@ pub mod apply;
 pub mod arity;
 pub mod destructure;
 pub mod eval;
+pub mod host_methods;
 pub mod macros;
 pub mod special;
 pub mod syntax_quote;

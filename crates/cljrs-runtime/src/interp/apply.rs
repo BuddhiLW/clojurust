@@ -377,6 +377,18 @@ fn eval_method_call(method: &str, arg_forms: &[Form], env: &mut Env) -> EvalResu
         .map(|f| eval(f, env))
         .collect::<EvalResult<_>>()?;
 
+    // A host-interface method a deftype/reify/proxy body defined (`.get` on a
+    // ThreadLocal proxy, `.toString` on Object): call it with `this` first.
+    if let Value::TypeInstance(ti) = &target
+        && let Some(f) =
+            crate::interp::host_methods::lookup(&env.globals, &ti.get().type_tag, method)
+    {
+        let mut call_args = Vec::with_capacity(args.len() + 1);
+        call_args.push(target.clone());
+        call_args.extend(args);
+        return crate::env::apply::apply_value(&f, call_args, env);
+    }
+
     dispatch_method(method, &target, &args)
 }
 

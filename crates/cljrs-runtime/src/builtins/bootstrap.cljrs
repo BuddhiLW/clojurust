@@ -1989,3 +1989,20 @@
 (defmacro reify [& impls]
   `(make-reify-instance (deftype* ~(gensym "reify__") [] ~@impls) {}))
 
+;; proxy: a reify whose method bodies see an implicit `this`. Superclass
+;; constructor args are ignored (there are no host classes). A ThreadLocal
+;; proxy gets `.get` / `.set` over one cell, seeded by its `initialValue`;
+;; clojure.test.check.random keeps its RNG that way.
+(defmacro proxy [classes _args & methods]
+  (let [ms   (map (fn [[n params & body]] (list* n (vec (cons 'this params)) body)) methods)
+        tl?  (some #{'ThreadLocal 'java.lang.ThreadLocal} classes)
+        cell (gensym "cell")]
+    (if tl?
+      `(let [~cell (atom ::unset)]
+         (reify ~@classes ~@ms
+           (~'get [this#]
+            (when (= ::unset (deref ~cell)) (reset! ~cell (~'.initialValue this#)))
+            (deref ~cell))
+           (~'set [_# v#] (reset! ~cell v#) nil)))
+      `(reify ~@classes ~@ms))))
+

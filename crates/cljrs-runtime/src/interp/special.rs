@@ -2395,11 +2395,18 @@ fn register_impls_for_tag(
     env: &mut Env,
 ) -> EvalResult<()> {
     let mut current_proto: Option<GcPtr<cljrs_value::Protocol>> = None;
+    let mut seen: HashSet<(Arc<str>, Arc<str>)> = HashSet::new();
 
     for form in forms {
         match &form.unmeta().kind {
             FormKind::Symbol(s) => match resolve_protocol_sym(env, s) {
                 Some(p) => current_proto = Some(p),
+                // A host interface (`Object`, `clojure.lang.Indexed`,
+                // `ThreadLocal`, ...): its methods are reachable through
+                // `.method` interop and the host hooks (`nth`).
+                None if crate::interp::host_methods::is_host_interface(s) => {
+                    current_proto = Some(crate::interp::host_methods::table(&env.globals));
+                }
                 None => {
                     return Err(EvalError::Runtime(format!(
                         "reify/defrecord: {} is not a protocol",
@@ -2418,12 +2425,22 @@ fn register_impls_for_tag(
                     Some(s) => Arc::from(s),
                     None => continue,
                 };
-                let fn_val = build_impl_fn(parts, fields, mutable_fields, env)?;
+                let mut fn_val = build_impl_fn(parts, fields, mutable_fields, env)?;
                 let mut impls = proto.get().impls.lock().unwrap();
-                impls
-                    .entry(type_tag.clone())
-                    .or_default()
-                    .insert(method_name, fn_val);
+                let methods = impls.entry(type_tag.clone()).or_default();
+                // Two bodies of one method in this form are overloads by arity
+                // (`(nth [this i] ..) (nth [this i nf] ..)`): merge them into
+                // one fn. A redefinition of the type starts afresh.
+                let overload_key = (proto.get().name.clone(), method_name.clone());
+                if !seen.insert(overload_key)
+                    && let (Some(Value::Fn(prev)), Value::Fn(new)) =
+                        (methods.get(&method_name), &fn_val)
+                {
+                    let mut merged = prev.get().clone();
+                    merged.arities.extend(new.get().arities.iter().cloned());
+                    fn_val = Value::Fn(GcPtr::new(merged));
+                }
+                methods.insert(method_name, fn_val);
                 drop(impls);
                 cljrs_value::bump_protocol_generation();
             }

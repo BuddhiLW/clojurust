@@ -4476,6 +4476,16 @@ fn builtin_nth(args: &[Value]) -> ValueResult<Value> {
         | Value::BooleanArray(_)
         | Value::CharArray(_)) => nth_walked(value_to_seq(coll)?, idx, default),
         Value::Nil => Ok(default.unwrap_or(Value::Nil)),
+        // A deftype implementing clojure.lang.Indexed.
+        Value::TypeInstance(ti) => {
+            match crate::interp::host_methods::lookup_in_context(&ti.get().type_tag, "nth") {
+                Some(f) => crate::env::callback::invoke(&f, args.to_vec()),
+                None => Err(ValueError::WrongType {
+                    expected: "sequential",
+                    got: args[0].type_name().to_string(),
+                }),
+            }
+        }
         v => Err(ValueError::WrongType {
             expected: "sequential",
             got: v.type_name().to_string(),

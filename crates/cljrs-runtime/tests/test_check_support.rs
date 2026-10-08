@@ -26,6 +26,43 @@ fn eval_pr(src: &str) -> String {
     }
 }
 
+/// clojure.test.check.rose-tree/RoseTree implements clojure.lang.Indexed.
+#[test]
+fn deftype_implements_indexed_for_nth() {
+    assert_eq!(
+        eval_pr(
+            "(deftype R [root children]
+               clojure.lang.Indexed
+               (nth [this i] (case i 0 root 1 children))
+               (nth [this i nf] (case i 0 root 1 children nf)))
+             (let [r (R. 1 [2])] [(nth r 0) (nth r 1) (nth r 5 :nf) (.-root r)])"
+        ),
+        "[1 [2] :nf 1]"
+    );
+}
+
+/// `.method` reaches an Object method a reify body defined.
+#[test]
+fn reify_object_method_via_interop() {
+    assert_eq!(
+        eval_pr("(.describe (reify Object (describe [_ x] (str \"d\" x))) 7)"),
+        "\"d7\""
+    );
+}
+
+/// clojure.test.check.random keeps its RNG in a ThreadLocal proxy.
+#[test]
+fn proxy_thread_local() {
+    assert_eq!(
+        eval_pr(
+            "(let [n (atom 0)
+                   tl (proxy [ThreadLocal] [] (initialValue [] (swap! n inc) :init))]
+               [(.get tl) (.get tl) (do (.set tl :x) (.get tl)) @n])"
+        ),
+        "[:init :init :x 1]"
+    );
+}
+
 /// clojure.test.check.random / generators use these JVM numeric statics.
 #[test]
 fn jvm_numeric_statics() {
