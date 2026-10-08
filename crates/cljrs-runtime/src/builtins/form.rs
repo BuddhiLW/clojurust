@@ -387,7 +387,10 @@ pub fn form_to_value(form: &Form) -> EvalResult<Value> {
         FormKind::SyntaxQuote(inner) => reader_form_value("syntax-quote", inner)?,
         FormKind::Unquote(inner) => reader_form_value("unquote", inner)?,
         FormKind::UnquoteSplice(inner) => reader_form_value("unquote-splicing", inner)?,
-        FormKind::Deref(inner) => reader_form_value("deref", inner)?,
+        // `@x` reads as `(clojure.core/deref x)`, fully qualified as on the
+        // JVM, so a namespace that excludes and redefines `deref` cannot
+        // capture the sugar once a macro hands the form back as data.
+        FormKind::Deref(inner) => reader_form_value("clojure.core/deref", inner)?,
         FormKind::Var(inner) => reader_form_value("var", inner)?,
         FormKind::Meta(meta, inner) => {
             let value = form_to_value(inner)?;
@@ -437,7 +440,7 @@ fn forms_to_values(forms: &[Form]) -> EvalResult<Vec<Value>> {
 /// `(<sym> <inner>)` — the list encoding of a reader-sugar form as data.
 fn reader_form_value(sym: &str, inner: &Form) -> EvalResult<Value> {
     Ok(Value::List(GcPtr::new(PersistentList::from_iter([
-        Value::symbol(Symbol::simple(sym)),
+        Value::symbol(Symbol::parse(sym)),
         form_to_value(inner)?,
     ]))))
 }
