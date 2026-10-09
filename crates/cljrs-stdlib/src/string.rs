@@ -300,7 +300,18 @@ fn byte_to_char(s: &str, b: usize) -> usize {
 
 #[cfg(test)]
 mod char_index_tests {
-    use super::{byte_to_char, char_to_byte};
+    use super::{byte_to_char, char_to_byte, last_index_from};
+
+    #[test]
+    fn last_index_from_never_starts_past_from() {
+        // "b€" ends inside the multibyte char after from = 0; it starts at 1.
+        assert_eq!(last_index_from("ab€", "b€", 0), None);
+        assert_eq!(last_index_from("ab€", "b€", 1), Some(1));
+        assert_eq!(last_index_from("héllo=x=y", "=", 6), Some(5));
+        assert_eq!(last_index_from("héllo=x=y", "=", 99), Some(7));
+        assert_eq!(last_index_from("abc", "a", -1), None);
+        assert_eq!(last_index_from("abc", "", 99), Some(3));
+    }
 
     #[test]
     fn non_ascii_offsets_are_char_indices() {
@@ -337,26 +348,31 @@ fn index_of(args: &[Value]) -> ValueResult<Value> {
 fn last_index_of(args: &[Value]) -> ValueResult<Value> {
     let s = get_str(&args[0])?;
     let needle = get_str(&args[1])?;
-    let haystack = if args.len() >= 3 {
-        match &args[2] {
-            // `from` is the last char index a match may START at.
-            Value::Long(n) => {
-                let start = char_to_byte(s.as_ref(), (*n).max(0) as usize);
-                let end = (start + needle.len()).min(s.len());
-                let end = (end..=s.len())
-                    .find(|&e| s.is_char_boundary(e))
-                    .unwrap_or(s.len());
-                &s[..end]
-            }
-            _ => s.as_ref(),
-        }
-    } else {
-        s.as_ref()
+    let hit = match args.get(2) {
+        Some(Value::Long(n)) => last_index_from(s.as_ref(), needle.as_ref(), *n),
+        _ => s
+            .rfind(needle.as_ref())
+            .map(|idx| byte_to_char(s.as_ref(), idx)),
     };
-    match haystack.rfind(needle.as_ref()) {
-        Some(idx) => Ok(Value::Long(byte_to_char(s.as_ref(), idx) as i64)),
-        None => Ok(Value::Nil),
+    Ok(hit.map_or(Value::Nil, |ci| Value::Long(ci as i64)))
+}
+
+/// Char index of the last occurrence of `needle` in `s` that STARTS at or
+/// before char index `from`, like `String.lastIndexOf(str, from)`: a
+/// negative `from` finds nothing, one past the end searches the whole string.
+fn last_index_from(s: &str, needle: &str, from: i64) -> Option<usize> {
+    if from < 0 {
+        return None;
     }
+    let from = from as usize;
+    s.char_indices()
+        .map(|(b, _)| b)
+        .chain(std::iter::once(s.len()))
+        .enumerate()
+        .take_while(|&(ci, _)| ci <= from)
+        .filter(|&(_, b)| s[b..].starts_with(needle))
+        .last()
+        .map(|(ci, _)| ci)
 }
 
 fn string_reverse(args: &[Value]) -> ValueResult<Value> {
