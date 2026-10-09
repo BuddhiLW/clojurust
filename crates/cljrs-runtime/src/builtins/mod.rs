@@ -10,7 +10,7 @@ mod bitops;
 pub mod builtins;
 pub mod form;
 mod jvm_statics;
-mod new;
+pub(crate) mod new;
 mod process;
 mod records;
 mod regex;

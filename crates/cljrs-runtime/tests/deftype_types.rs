@@ -319,6 +319,25 @@ fn trailing_dot_constructor_sugar() {
     );
 }
 
+/// `(new T args)` is the special-form spelling of `(T. args)`. `T` evaluates
+/// to the type's qualified symbol, so `new` must resolve it to the type's
+/// constructor rather than only know host classes. `Exception` still works.
+#[test]
+fn new_constructs_deftype_and_defrecord() {
+    assert_eq!(
+        eval_pr("(deftype A [x y]) (pr-str (.-y (new A 1 2)))"),
+        "2"
+    );
+    assert_eq!(
+        eval_pr("(defrecord R [a b]) (pr-str (:b (new R 1 2)))"),
+        "2"
+    );
+    assert_eq!(
+        eval_pr("(pr-str (ex-message (new Exception \"boom\")))"),
+        "\"boom\""
+    );
+}
+
 /// `hash-combine` (cljs core) mixes two hashes deterministically without
 /// overflowing; malli's regex cache keys on it.
 #[test]

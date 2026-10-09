@@ -220,6 +220,7 @@ pub fn intercepted_native(name: &str) -> Option<InterceptedFn> {
         "resolve" => eval_resolve,
         "intern" => eval_intern,
         "bound-fn*" => eval_bound_fn_star,
+        "new" => crate::builtins::new::eval_new,
         _ => return None,
     })
 }
@@ -1301,7 +1302,7 @@ fn the_ns(v: &Value, env: &Env) -> Result<GcPtr<cljrs_value::Namespace>, EvalErr
 /// Get the namespace name from `*ns*` (dynamic var), falling back to `env.current_ns`.
 /// This is important for `resolve` inside macros, where `env.current_ns` is the
 /// macro's defining namespace but `*ns*` is the caller's namespace.
-fn resolve_current_ns(env: &Env) -> Arc<str> {
+pub(crate) fn resolve_current_ns(env: &Env) -> Arc<str> {
     if let Some(var) = env.globals.lookup_var("clojure.core", "*ns*") {
         let val = crate::env::dynamics::deref_var(&var);
         if let Some(Value::Namespace(ns_ptr)) = val {
