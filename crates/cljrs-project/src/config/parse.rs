@@ -366,10 +366,8 @@ mod tests {
 
     #[test]
     fn dep_rust_init_without_a_crate_segment_is_refused() {
-        let err = parse(
-            r#"{:deps {my.lib {:local/root "../lib" :rust/init "cljrs_init"}}}"#,
-        )
-        .expect_err("bare :rust/init");
+        let err = parse(r#"{:deps {my.lib {:local/root "../lib" :rust/init "cljrs_init"}}}"#)
+            .expect_err("bare :rust/init");
         assert!(err.contains("rust/init"), "{err}");
     }
 
