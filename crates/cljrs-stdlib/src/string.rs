@@ -287,25 +287,48 @@ fn join(args: &[Value]) -> ValueResult<Value> {
     Ok(make_str(result))
 }
 
+/// Byte offset of the `n`th char of `s`, clamped to `s.len()`.
+/// `index-of` and friends speak char indices, like `count` and `subs`.
+fn char_to_byte(s: &str, n: usize) -> usize {
+    s.char_indices().nth(n).map_or(s.len(), |(b, _)| b)
+}
+
+/// Char index of byte offset `b` in `s` (`b` must be a char boundary).
+fn byte_to_char(s: &str, b: usize) -> usize {
+    s[..b].chars().count()
+}
+
+#[cfg(test)]
+mod char_index_tests {
+    use super::{byte_to_char, char_to_byte};
+
+    #[test]
+    fn non_ascii_offsets_are_char_indices() {
+        let s = "héllo=x";
+        let b = s.find('=').unwrap();
+        assert_eq!(b, 6);
+        assert_eq!(byte_to_char(s, b), 5);
+        assert_eq!(char_to_byte(s, 5), 6);
+        assert_eq!(char_to_byte(s, 99), s.len());
+    }
+}
+
 /// `(index-of s substr)` or `(index-of s substr from)`.
 fn index_of(args: &[Value]) -> ValueResult<Value> {
     let s = get_str(&args[0])?;
     let needle = get_str(&args[1])?;
     let from = if args.len() >= 3 {
         match &args[2] {
-            Value::Long(n) => *n as usize,
+            Value::Long(n) => (*n).max(0) as usize,
             _ => 0,
         }
     } else {
         0
     };
-    let haystack = if from == 0 {
-        s.as_ref()
-    } else {
-        &s[from.min(s.len())..]
-    };
+    let from_byte = char_to_byte(s.as_ref(), from);
+    let haystack = &s[from_byte..];
     match haystack.find(needle.as_ref()) {
-        Some(idx) => Ok(Value::Long((idx + from) as i64)),
+        Some(idx) => Ok(Value::Long(byte_to_char(s.as_ref(), idx + from_byte) as i64)),
         None => Ok(Value::Nil),
     }
 }
@@ -316,14 +339,22 @@ fn last_index_of(args: &[Value]) -> ValueResult<Value> {
     let needle = get_str(&args[1])?;
     let haystack = if args.len() >= 3 {
         match &args[2] {
-            Value::Long(n) => &s[..(*n as usize).min(s.len())],
+            // `from` is the last char index a match may START at.
+            Value::Long(n) => {
+                let start = char_to_byte(s.as_ref(), (*n).max(0) as usize);
+                let end = (start + needle.len()).min(s.len());
+                let end = (end..=s.len())
+                    .find(|&e| s.is_char_boundary(e))
+                    .unwrap_or(s.len());
+                &s[..end]
+            }
             _ => s.as_ref(),
         }
     } else {
         s.as_ref()
     };
     match haystack.rfind(needle.as_ref()) {
-        Some(idx) => Ok(Value::Long(idx as i64)),
+        Some(idx) => Ok(Value::Long(byte_to_char(s.as_ref(), idx) as i64)),
         None => Ok(Value::Nil),
     }
 }
