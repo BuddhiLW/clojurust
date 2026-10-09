@@ -446,13 +446,21 @@ fn map_literal_arity_error() -> EvalError {
     EvalError::Runtime("map literal must have an even number of forms".into())
 }
 
+/// The reader-conditional feature keys this runtime answers to. `:rust` is
+/// the historical key; `:cljrs` is the dialect's own name, the one portable
+/// libraries write alongside `:clj`, `:cljs`, `:cljr` and `:lpy` (malli keys
+/// its branches `:cljrs`). Both select the same platform branch.
+pub fn is_platform_feature(k: &str) -> bool {
+    k == "rust" || k == "cljrs"
+}
+
 /// Resolve a `#?(...)` reader conditional to the selected branch form, or
-/// `None` if no `:rust` or `:default` clause is present.
+/// `None` if no platform (`:rust` / `:cljrs`) or `:default` clause is present.
 pub fn select_reader_cond(clauses: &[Form]) -> Option<&Form> {
     let mut default: Option<&Form> = None;
     for [feature, branch] in clauses.as_chunks::<2>().0 {
         match &feature.kind {
-            FormKind::Keyword(k) if k == "rust" => return Some(branch),
+            FormKind::Keyword(k) if is_platform_feature(k) => return Some(branch),
             FormKind::Keyword(k) if k == "default" => default = Some(branch),
             _ => {}
         }
@@ -694,7 +702,7 @@ mod tests {
     fn select_model<T>(branches: &[(String, T)]) -> Option<&T> {
         let mut default = None;
         for (k, v) in branches {
-            if k == "rust" {
+            if k == "rust" || k == "cljrs" {
                 return Some(v);
             }
             if k == "default" {

@@ -418,7 +418,7 @@ fn eval_reader_cond(clauses: &[Form], env: &mut Env) -> EvalResult {
     let mut default: Option<&Form> = None;
     while i + 1 < clauses.len() {
         match &clauses[i].kind {
-            FormKind::Keyword(k) if k == "rust" => {
+            FormKind::Keyword(k) if crate::builtins::form::is_platform_feature(k) => {
                 return eval(&clauses[i + 1], env);
             }
             FormKind::Keyword(k) if k == "default" => {
