@@ -456,16 +456,19 @@ pub fn is_platform_feature(k: &str) -> bool {
 
 /// Resolve a `#?(...)` reader conditional to the selected branch form, or
 /// `None` if no platform (`:rust` / `:cljrs`) or `:default` clause is present.
+///
+/// Clauses are tried in source order and the first match wins, as in
+/// Clojure: `:default` always matches, so `#?(:default :a :cljrs :b)` selects
+/// `:a`. This is the single selection rule; every evaluator path calls it.
 pub fn select_reader_cond(clauses: &[Form]) -> Option<&Form> {
-    let mut default: Option<&Form> = None;
-    for [feature, branch] in clauses.as_chunks::<2>().0 {
-        match &feature.kind {
-            FormKind::Keyword(k) if is_platform_feature(k) => return Some(branch),
-            FormKind::Keyword(k) if k == "default" => default = Some(branch),
-            _ => {}
-        }
-    }
-    default
+    clauses
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .find(|[feature, _]| {
+            matches!(&feature.kind, FormKind::Keyword(k) if is_platform_feature(k) || k == "default")
+        })
+        .map(|[_, branch]| branch)
 }
 
 /// Expand reader conditionals in a flat slice of forms.
@@ -699,17 +702,12 @@ mod tests {
         Splice(Vec<(String, Vec<String>)>),
     }
 
+    // First matching clause in source order wins; `:default` always matches.
     fn select_model<T>(branches: &[(String, T)]) -> Option<&T> {
-        let mut default = None;
-        for (k, v) in branches {
-            if k == "rust" || k == "cljrs" {
-                return Some(v);
-            }
-            if k == "default" {
-                default = Some(v);
-            }
-        }
-        default
+        branches
+            .iter()
+            .find(|(k, _)| is_platform_feature(k) || k == "default")
+            .map(|(_, v)| v)
     }
 
     fn item_src(it: &Item) -> String {
@@ -745,6 +743,7 @@ mod tests {
     fn key_strat() -> impl proptest::strategy::Strategy<Value = String> {
         proptest::prop_oneof![
             proptest::strategy::Just("rust".to_string()),
+            proptest::strategy::Just("cljrs".to_string()),
             proptest::strategy::Just("clj".to_string()),
             proptest::strategy::Just("cljs".to_string()),
             proptest::strategy::Just("default".to_string()),
