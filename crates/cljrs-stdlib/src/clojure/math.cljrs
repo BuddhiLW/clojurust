@@ -1,0 +1,57 @@
+(ns clojure.math
+  "A subset of clojure.math (Clojure 1.11), over the java.lang.Math statics
+  cljrs provides. Functions whose Math static is not available here are
+  written in Clojure (rint, signum, cbrt, floor-div, floor-mod).")
+
+(def E Math/E)
+(def PI Math/PI)
+
+(defn sin [a] (Math/sin a))
+(defn cos [a] (Math/cos a))
+(defn tan [a] (Math/tan a))
+(defn atan2 [y x] (Math/atan2 y x))
+(defn exp [a] (Math/exp a))
+(defn log [a] (Math/log a))
+(defn log10 [a] (Math/log10 a))
+(defn sqrt [a] (Math/sqrt a))
+(defn pow [a b] (Math/pow a b))
+(defn hypot [x y] (Math/hypot x y))
+(defn ceil [a] (Math/ceil a))
+(defn floor [a] (Math/floor a))
+
+(defn round
+  "Closest long to a, ties rounding toward positive infinity."
+  [a]
+  (Math/round a))
+
+(defn rint
+  "Closest integer-valued double to a, ties to even."
+  [a]
+  (let [a (double a)
+        f (Math/floor a)
+        d (- a f)]
+    (cond (< d 0.5) f
+          (> d 0.5) (+ f 1.0)
+          (even? (long f)) f
+          :else (+ f 1.0))))
+
+(defn signum
+  "-1.0, 0.0 or 1.0 by the sign of d."
+  [d]
+  (let [d (double d)]
+    (cond (pos? d) 1.0 (neg? d) -1.0 :else d)))
+
+(defn cbrt [a]
+  (let [a (double a)]
+    (if (neg? a) (- (Math/pow (- a) (/ 1.0 3.0))) (Math/pow a (/ 1.0 3.0)))))
+
+(defn floor-div
+  "Integer division rounding toward negative infinity."
+  [x y]
+  (let [q (quot x y)]
+    (if (and (not= (neg? x) (neg? y)) (not= (* q y) x)) (dec q) q)))
+
+(defn floor-mod
+  "Modulus with the sign of y."
+  [x y]
+  (- x (* (floor-div x y) y)))

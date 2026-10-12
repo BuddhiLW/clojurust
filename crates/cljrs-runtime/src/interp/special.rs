@@ -11,7 +11,7 @@ use crate::env::env::{Env, RequireRefer, RequireSpec};
 use crate::env::error::{EvalError, EvalResult};
 use crate::env::loader::load_ns;
 use crate::interp::destructure::bind_pattern;
-use crate::interp::eval::{eval, eval_body, is_special_form};
+use crate::interp::eval::{eval, eval_body};
 use cljrs_gc::GcPtr;
 use cljrs_reader::Form;
 use cljrs_reader::form::FormKind;
@@ -222,10 +222,10 @@ fn eval_fn(args: &[Form], env: &mut Env) -> EvalResult {
     let mut idx = 0;
     let mut name: Option<Arc<str>> = None;
 
-    // Optional name.
-    if let Some(FormKind::Symbol(s)) = args.first().map(|f| &f.kind)
-        && !is_special_form(s)
-    {
+    // Optional name. Any symbol here is the name, special-form names included:
+    // `(defmacro let ...)` (clojure.test.check.generators) expands to
+    // `(fn let [...] ...)`.
+    if let Some(FormKind::Symbol(s)) = args.first().map(|f| &f.kind) {
         name = Some(Arc::from(s.as_str()));
         idx = 1;
     }
@@ -2206,9 +2206,12 @@ fn build_impl_fn(
     };
     let arity = parse_arity(params_form, body)?;
     let (closed_over_names, closed_over_vals) = env.all_local_bindings();
-    let fn_name: Option<Arc<str>> = parts[0].as_symbol().map(Arc::from);
+    // A protocol method impl must NOT be a named fn: a name binds itself inside
+    // its own body, so `(-s [_ t] (-s inner t))` would call itself instead of the
+    // protocol function of the same name and recurse forever (malli's registries
+    // delegate this way).
     let cljrs_fn = CljxFn::new(
-        fn_name,
+        None,
         vec![arity],
         closed_over_names,
         closed_over_vals,
@@ -2392,11 +2395,18 @@ fn register_impls_for_tag(
     env: &mut Env,
 ) -> EvalResult<()> {
     let mut current_proto: Option<GcPtr<cljrs_value::Protocol>> = None;
+    let mut seen: HashSet<(Arc<str>, Arc<str>)> = HashSet::new();
 
     for form in forms {
         match &form.unmeta().kind {
             FormKind::Symbol(s) => match resolve_protocol_sym(env, s) {
                 Some(p) => current_proto = Some(p),
+                // A host interface (`Object`, `clojure.lang.Indexed`,
+                // `ThreadLocal`, ...): its methods are reachable through
+                // `.method` interop and the host hooks (`nth`).
+                None if crate::interp::host_methods::is_host_interface(s) => {
+                    current_proto = Some(crate::interp::host_methods::table(&env.globals));
+                }
                 None => {
                     return Err(EvalError::Runtime(format!(
                         "reify/defrecord: {} is not a protocol",
@@ -2415,12 +2425,22 @@ fn register_impls_for_tag(
                     Some(s) => Arc::from(s),
                     None => continue,
                 };
-                let fn_val = build_impl_fn(parts, fields, mutable_fields, env)?;
+                let mut fn_val = build_impl_fn(parts, fields, mutable_fields, env)?;
                 let mut impls = proto.get().impls.lock().unwrap();
-                impls
-                    .entry(type_tag.clone())
-                    .or_default()
-                    .insert(method_name, fn_val);
+                let methods = impls.entry(type_tag.clone()).or_default();
+                // Two bodies of one method in this form are overloads by arity
+                // (`(nth [this i] ..) (nth [this i nf] ..)`): merge them into
+                // one fn. A redefinition of the type starts afresh.
+                let overload_key = (proto.get().name.clone(), method_name.clone());
+                if !seen.insert(overload_key)
+                    && let (Some(Value::Fn(prev)), Value::Fn(new)) =
+                        (methods.get(&method_name), &fn_val)
+                {
+                    let mut merged = prev.get().clone();
+                    merged.arities.extend(new.get().arities.iter().cloned());
+                    fn_val = Value::Fn(GcPtr::new(merged));
+                }
+                methods.insert(method_name, fn_val);
                 drop(impls);
                 cljrs_value::bump_protocol_generation();
             }

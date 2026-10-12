@@ -206,6 +206,23 @@ fn hierarchy_method_key(
     }
 }
 
+/// Find the impl of `method` for dispatch `tag` in a protocol's impl map.
+///
+/// An exact tag wins. Otherwise a non-nil value falls back to an `Object`
+/// extension (JVM semantics: every non-nil value is an Object), and any
+/// value, nil included, to a `default` extension (ClojureScript semantics).
+/// Returns the impl together with the tag it was registered under.
+pub fn find_protocol_impl(
+    impls: &std::collections::HashMap<Arc<str>, cljrs_value::types::MethodMap>,
+    tag: &str,
+    method: &str,
+) -> Option<Value> {
+    let lookup = |t: &str| impls.get(t).and_then(|m| m.get(method)).cloned();
+    lookup(tag)
+        .or_else(|| (tag != "nil").then(|| lookup("Object")).flatten())
+        .or_else(|| lookup("default"))
+}
+
 /// Return the canonical type tag for a value (used by protocol dispatch).
 pub fn type_tag_of(val: &Value) -> Arc<str> {
     match val.unwrap_meta() {
@@ -390,10 +407,7 @@ pub fn apply_value(callee: &Value, args: Vec<Value>, env: &mut Env) -> EvalResul
 
             let tag = type_tag_of(dispatch_val);
             let impls = pf_ref.protocol.get().impls.lock().unwrap();
-            let impl_fn = impls
-                .get(tag.as_ref())
-                .and_then(|m| m.get(pf_ref.method_name.as_ref()))
-                .cloned()
+            let impl_fn = find_protocol_impl(&impls, tag.as_ref(), pf_ref.method_name.as_ref())
                 .ok_or_else(|| {
                     EvalError::Runtime(format!(
                         "No implementation of protocol {} for type {}",
@@ -492,6 +506,7 @@ pub fn apply_value(callee: &Value, args: Vec<Value>, env: &mut Env) -> EvalResul
                 None => Ok(Value::Nil),
             }
         }
+        Value::Vector(v) => crate::env::ifn_vector::invoke(v.get(), &args),
         Value::Set(s) => match args.first() {
             Some(k) => {
                 if s.contains(k) {

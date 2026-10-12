@@ -4895,10 +4895,11 @@ pub unsafe extern "C" fn rt_call_ic(
         let tag = cljrs_runtime::env::apply::type_tag_of(dispatch_val);
         let impl_fn = {
             let impls = pf_ref.protocol.get().impls.lock().unwrap();
-            impls
-                .get(tag.as_ref())
-                .and_then(|m| m.get(pf_ref.method_name.as_ref()))
-                .cloned()
+            cljrs_runtime::env::apply::find_protocol_impl(
+                &impls,
+                tag.as_ref(),
+                pf_ref.method_name.as_ref(),
+            )
         };
         if let Some(impl_fn) = impl_fn {
             ensure_ic_tracer_registered();

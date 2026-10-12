@@ -56,11 +56,16 @@ pub fn macroexpand_1(form: &Form, env: &mut Env) -> EvalResult<Form> {
             .iter()
             .any(|f| matches!(f.kind, FormKind::ReaderCond { .. }));
         let (form_val, arg_vals) = if spliced {
-            let mut arg_vals = Vec::with_capacity(parts.len() - 1);
-            for p in &parts[1..] {
-                arg_vals.push(form_to_value(p)?);
+            // Expand the sibling list before converting arguments. A #?@ splice
+            // has no standalone value, but its selected members do.
+            let selected = crate::builtins::form::expand_reader_conds(parts);
+            let mut vals = Vec::with_capacity(selected.len());
+            for p in &selected {
+                vals.push(form_to_value(p)?);
             }
-            (form_to_value(&resolved)?, arg_vals)
+            let form_val = crate::builtins::form::values_to_list(vals.iter().cloned());
+            let arg_vals = vals.split_off(1);
+            (form_val, arg_vals)
         } else {
             let mut vals = Vec::with_capacity(parts.len());
             for p in parts.iter() {
@@ -391,4 +396,37 @@ pub fn value_to_form(val: &Value, span: Span) -> EvalResult<Form> {
         other => FormKind::Symbol(format!("#<{}>", other.type_name())),
     };
     Ok(Form::new(kind, span))
+}
+
+#[cfg(test)]
+mod reader_cond_macro_tests {
+    use super::*;
+    use crate::interp::eval::eval;
+    use cljrs_reader::Parser;
+
+    #[test]
+    fn splicing_reader_conditional_supplies_macro_arguments() {
+        let runtime = crate::Runtime::builder().build().unwrap();
+        let mut env = runtime.env("user");
+        let source = "(defmacro args [& xs] (cons 'vector xs)) (args #?@(:rust [1 2]))";
+        let mut parser = Parser::new(source.into(), "<test>".into());
+        let mut result = Value::Nil;
+        for form in parser.parse_all().unwrap() {
+            result = eval(&form, &mut env).unwrap();
+        }
+        assert_eq!(format!("{result}"), "[1 2]");
+    }
+
+    #[test]
+    fn unmatched_splice_supplies_no_macro_arguments() {
+        let runtime = crate::Runtime::builder().build().unwrap();
+        let mut env = runtime.env("user");
+        let source = "(defmacro args [& xs] (cons 'vector xs)) (args #?@(:clj [1 2]))";
+        let mut parser = Parser::new(source.into(), "<test>".into());
+        let mut result = Value::Nil;
+        for form in parser.parse_all().unwrap() {
+            result = eval(&form, &mut env).unwrap();
+        }
+        assert_eq!(format!("{result}"), "[]");
+    }
 }

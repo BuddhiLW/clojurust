@@ -303,3 +303,51 @@ fn an_ordinary_fn_arity_error_is_unchanged() {
         "non-macro arity reporting must be untouched, got: {err}"
     );
 }
+
+/// `(T. args)` is the JVM constructor sugar; malli's regex drivers build
+/// their deftypes this way (`(CheckDriver. false stack cache)`). The macros
+/// def `T.` beside `->T`, for a private type too, and for defrecord.
+#[test]
+fn trailing_dot_constructor_sugar() {
+    assert_eq!(
+        eval_pr("(deftype ^:private A [^:unsynchronized-mutable x y]) (pr-str (.-y (A. 1 2)))"),
+        "2"
+    );
+    assert_eq!(
+        eval_pr("(defrecord R [a b]) (pr-str (:b (R. 1 2)))"),
+        "2"
+    );
+}
+
+/// `(new T args)` is the special-form spelling of `(T. args)`. `T` evaluates
+/// to the type's qualified symbol, so `new` must resolve it to the type's
+/// constructor rather than only know host classes. `Exception` still works.
+#[test]
+fn new_constructs_deftype_and_defrecord() {
+    assert_eq!(
+        eval_pr("(deftype A [x y]) (pr-str (.-y (new A 1 2)))"),
+        "2"
+    );
+    assert_eq!(
+        eval_pr("(defrecord R [a b]) (pr-str (:b (new R 1 2)))"),
+        "2"
+    );
+    assert_eq!(
+        eval_pr("(pr-str (ex-message (new Exception \"boom\")))"),
+        "\"boom\""
+    );
+}
+
+/// `hash-combine` (cljs core) mixes two hashes deterministically without
+/// overflowing; malli's regex cache keys on it.
+#[test]
+fn hash_combine_is_deterministic_and_wraps() {
+    assert_eq!(
+        eval_pr("(pr-str (= (hash-combine 7 11) (hash-combine 7 11)))"),
+        "true"
+    );
+    assert_eq!(
+        eval_pr("(pr-str (integer? (hash-combine 9223372036854775807 9223372036854775807)))"),
+        "true"
+    );
+}

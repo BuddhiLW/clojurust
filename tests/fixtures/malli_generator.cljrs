@@ -1,0 +1,19 @@
+;; Run with:
+;;   cljrs run --src-path <test.check translated to .cljrs> --src-path <malli>/src \
+;;     tests/fixtures/malli_generator.cljrs
+;; test.check 1.1.1 needs a .cljrs copy (reader conditionals select :cljrs, not :clj)
+;; with the RNG maths in random.cljrs using unchecked-multiply/unchecked-add.
+(require '[clojure.test.check.generators :as gen])
+(println :test-check (gen/generate gen/small-integer 10 42))
+(require '[malli.generator :as mg])
+(println :malli-generator-loaded)
+;; malli.generator extends Generator to #?(:clj Object, :cljs default), which
+;; selects nothing on cljrs; register the same default impl until malli carries
+;; a :cljrs branch.
+(extend-protocol mg/Generator
+  Object
+  (-generator [schema options]
+    (#'mg/-schema-generator schema (assoc options ::mg/original-generator-schema schema))))
+(println (int? (mg/generate :int {:seed 1})))
+(println (mg/generate [:map [:a :int]] {:seed 1}))
+(println (every? string? (mg/sample :string {:seed 1 :size 5})))

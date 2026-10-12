@@ -1,7 +1,7 @@
 # Reader conditionals
 
 Reader conditionals allow a single source file to contain code for multiple
-Clojure platforms. clojurust evaluates the `:rust` branch.
+Clojure platforms. clojurust uses `:cljrs` as its platform feature; `:rust` is an accepted alias.
 
 ## Syntax
 
@@ -15,8 +15,9 @@ Clojure platforms. clojurust evaluates the `:rust` branch.
 ```
 
 Exactly one branch is selected at read time based on the current platform. For
-clojurust, `:rust` is matched first. If no `:rust` key is present, `:default`
-is used. If neither is present, the entire form is skipped (reads as nothing).
+clojurust, the first `:cljrs`, `:rust`, or `:default` branch in textual order
+is selected. `:clj` does not match. If none is present, the entire form is
+skipped (reads as nothing).
 
 The selected branch is a single expression; the whole `#?(...)` form evaluates
 to that expression.
@@ -60,8 +61,8 @@ vector, map, or set literal.
 
 | Extension | Platform dispatch |
 |---|---|
-| `.cljrs` | Always `:rust`. Reader conditionals are still supported but `:rust` is always the active branch. |
-| `.cljc` | Cross-platform. Reader conditional branches are stored as-is; the evaluator selects `:rust`. |
+| `.cljrs` | Uses `:cljrs` and its `:rust` alias. Reader conditionals are supported. |
+| `.cljc` | Cross-platform. Reader conditional branches are stored as-is; the evaluator selects the first matching `:cljrs`, `:rust`, or `:default` branch. |
 
 ## Notes
 
@@ -71,4 +72,4 @@ vector, map, or set literal.
 - Order within a reader conditional matters: keys are checked left-to-right.
   `:default` should come last.
 - Unlike Clojure, there is no `:cljr` (ClojureCLR) platform; the clojurust key
-  is `:rust`.
+  is `:cljrs` (`:rust` remains an accepted alias).

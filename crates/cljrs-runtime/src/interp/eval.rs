@@ -227,6 +227,14 @@ fn eval_list(forms: &[Form], env: &mut Env) -> EvalResult {
     {
         return eval_special(s, &forms[1..], env);
     }
+    // `core/let`, `clojure.core/fn`: a special form qualified with a namespace
+    // that resolves to clojure.core (test.check excludes `let` and calls
+    // `core/let`). Its name is the special form.
+    if let Some(s) = forms[0].as_symbol()
+        && let Some(name) = crate::interp::core_alias::qualified_core_special(s, env)
+    {
+        return eval_special(name, &forms[1..], env);
+    }
 
     eval_call(&forms[0], &forms[1..], env)
 }
@@ -334,11 +342,13 @@ fn eval_symbol(s: &str, env: &mut Env) -> EvalResult {
 /// `clojure.lang.PersistentQueue/EMPTY` is the reason the function exists —
 /// it is how Clojure source spells an empty queue literal, so `.cljc` shared
 /// with the JVM cannot use cljrs's own `(queue)` instead.
+/// Portable schema libraries use `Long/MAX_VALUE` as an unbounded size.
 fn jvm_static_member(class: &str, member: &str) -> Option<Value> {
     match (class, member) {
         ("clojure.lang.PersistentQueue", "EMPTY") => Some(Value::Queue(GcPtr::new(
             cljrs_value::PersistentQueue::empty(),
         ))),
+        ("Long" | "java.lang.Long", "MAX_VALUE") => Some(Value::Long(i64::MAX)),
         _ => None,
     }
 }
@@ -449,23 +459,8 @@ pub fn eval_body(forms: &[Form], env: &mut Env) -> EvalResult {
 // ── reader cond ───────────────────────────────────────────────────────────────
 
 fn eval_reader_cond(clauses: &[Form], env: &mut Env) -> EvalResult {
-    // clauses = [kw form kw form ...]
-    let mut i = 0;
-    let mut default: Option<&Form> = None;
-    while i + 1 < clauses.len() {
-        match &clauses[i].kind {
-            FormKind::Keyword(k) if k == "rust" => {
-                return eval(&clauses[i + 1], env);
-            }
-            FormKind::Keyword(k) if k == "default" => {
-                default = Some(&clauses[i + 1]);
-            }
-            _ => {}
-        }
-        i += 2;
-    }
-    match default {
-        Some(f) => eval(f, env),
+    match crate::builtins::form::select_reader_cond(clauses) {
+        Some(form) => eval(form, env),
         None => Ok(Value::Nil),
     }
 }
@@ -930,6 +925,15 @@ mod tests {
         assert_eq!(
             eval_str("#{1 #?@(:rust [2 3]) 4}").unwrap(),
             eval_str("#{1 2 3 4}").unwrap()
+        );
+    }
+
+    #[test]
+    fn long_max_value_static_field_matches_i64_limit() {
+        assert_eq!(eval_str("Long/MAX_VALUE").unwrap(), Value::Long(i64::MAX));
+        assert_eq!(
+            eval_str("java.lang.Long/MAX_VALUE").unwrap(),
+            Value::Long(i64::MAX)
         );
     }
 

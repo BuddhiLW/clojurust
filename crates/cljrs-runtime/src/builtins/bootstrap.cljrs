@@ -256,13 +256,31 @@
               (ensure-reduced result)
               result)))))))
   ([n coll]
-   (let [n (int n)]
+   ;; ##Inf is a valid count (test.check's rose-tree unchunk takes
+   ;; Double/POSITIVE_INFINITY); it has no int, so keep it as is.
+   (let [n (if (== n ##Inf) n (int n))]
      (cond (pos? n)
            (when (pos? n)
              (lazy-seq
                (when-let [s (seq coll)]
                  (cons (first s) (take (dec n) (rest s))))))
            :else []))))
+
+(defn reductions
+  "Returns a lazy seq of the intermediate values of the reduction (as
+  per reduce) of coll by f, starting with init."
+  ([f coll]
+   (lazy-seq
+     (if-let [s (seq coll)]
+       (reductions f (first s) (rest s))
+       (list (f)))))
+  ([f init coll]
+   (if (reduced? init)
+     (list (deref init))
+     (cons init
+           (lazy-seq
+             (when-let [s (seq coll)]
+               (reductions f (f init (first s)) (rest s))))))))
 
 (defn drop
   "Returns a lazy sequence of all but the first n items in coll. With no
@@ -433,6 +451,25 @@
   [bindings & body]
   (list 'if-let bindings (cons 'do body)))
 
+(defmacro if-some
+  "bindings => binding-form test. If test is not nil, evaluates then with
+  binding-form bound to the value of test, otherwise else."
+  ([bindings then] (list 'if-some bindings then nil))
+  ([bindings then else]
+   (let [form (nth bindings 0)
+         tst  (nth bindings 1)
+         temp (gensym "if_some__")]
+     (list 'let (vector temp tst)
+           (list 'if (list 'nil? temp)
+                 else
+                 (list 'let (vector form temp) then))))))
+
+(defmacro when-some
+  "bindings => binding-form test. When test is not nil, evaluates body with
+  binding-form bound to the value of test."
+  [bindings & body]
+  (list 'if-some bindings (cons 'do body)))
+
 (defmacro cond
   "Takes a set of test/expr pairs. Evaluates each test one at a time. If a
   test returns logical true, evaluates and returns the value of the
@@ -534,9 +571,10 @@
   that binding, then binds name to that result, repeating for each
   successive form, returning the result of the last form."
   [expr name & forms]
-  (list 'let (vector name expr)
+  (list 'let (vec (concat [name expr]
+                          (interleave (repeat name) (butlast forms))))
         (if (seq forms)
-          (list* 'as-> name forms)
+          (last forms)
           name)))
 
 (defmacro doto
@@ -806,6 +844,15 @@
 (defn associative?
   "Returns true if coll implements the associative interface (map, vector)."
   [x] (or (map? x) (vector? x)))
+(defn indexed?
+  "Returns true if coll implements Indexed, indicating efficient access by index."
+  [x] (vector? x))
+(defn uri?
+  "Returns true if x is a java.net.URI. cljrs has no URI type, so this is always false."
+  [x] false)
+(defn inst?
+  "Returns true if x satisfies Inst. cljrs has no instant type, so this is always false."
+  [x] false)
 
 ;; meta and vary-meta are native builtins (see builtins.rs)
 
@@ -1545,6 +1592,9 @@
 (def ^:dynamic *out* nil)
 (def ^:dynamic *err* nil)
 (def ^:dynamic *assert* true)
+
+(def ^:dynamic *unchecked-math* false)
+(def ^:dynamic *warn-on-reflection* false)
 (def ^:dynamic *print-dup* false)
 (def ^:dynamic *print-readably* true)
 (def ^:dynamic *print-length* nil)
@@ -1879,6 +1929,15 @@
                  ret
                  (recur (isa? h (nth child i) (nth parent i)) (inc i)))))))))
 
+(defn hash-combine
+  "Mixes hash value h into seed (the ClojureScript / boost hash_combine
+  recipe). Neither argument is hashed; callers pass hashes."
+  [seed h]
+  (bit-xor seed
+           (unchecked-add (unchecked-add h 2654435769)
+                          (unchecked-add (bit-shift-left seed 6)
+                                         (bit-shift-right seed 2)))))
+
 (defn parents
   "Returns the immediate parents of tag, or nil if it has none."
   ([tag] (parents global-hierarchy tag))
@@ -1920,6 +1979,8 @@
          ~(if (seq mut)
             `(make-type-instance-mut (str ~tsym) ~immm ~mutm)
             `(make-type-instance (str ~tsym) ~immm)))
+       ;; `(T. args)` constructor sugar, as on the JVM: an alias of `->T`.
+       (def ~(symbol (str tsym ".")) ~ctor)
        ~tsym)))
 
 ;; defrecord: like deftype but fields are always immutable and it also gets the
@@ -1936,6 +1997,8 @@
        (def ~tsym (symbol (deftype* ~tsym ~plain ~@impls)))
        (defn ~pos [~@plain] (make-record-instance (str ~tsym) ~fmap))
        (defn ~mapc [m#] (make-record-instance (str ~tsym) m#))
+       ;; `(T. args)` constructor sugar, as on the JVM: an alias of `->T`.
+       (def ~(symbol (str tsym ".")) ~pos)
        ~tsym)))
 
 ;; reify: an anonymous, field-less instance whose methods close over the
@@ -1944,4 +2007,21 @@
 ;; The impl fns capture locals because deftype* registers them at the call site.
 (defmacro reify [& impls]
   `(make-reify-instance (deftype* ~(gensym "reify__") [] ~@impls) {}))
+
+;; proxy: a reify whose method bodies see an implicit `this`. Superclass
+;; constructor args are ignored (there are no host classes). A ThreadLocal
+;; proxy gets `.get` / `.set` over one cell, seeded by its `initialValue`;
+;; clojure.test.check.random keeps its RNG that way.
+(defmacro proxy [classes _args & methods]
+  (let [ms   (map (fn [[n params & body]] (list* n (vec (cons 'this params)) body)) methods)
+        tl?  (some #{'ThreadLocal 'java.lang.ThreadLocal} classes)
+        cell (gensym "cell")]
+    (if tl?
+      `(let [~cell (atom ::unset)]
+         (reify ~@classes ~@ms
+           (~'get [this#]
+            (when (= ::unset (deref ~cell)) (reset! ~cell (~'.initialValue this#)))
+            (deref ~cell))
+           (~'set [_# v#] (reset! ~cell v#) nil)))
+      `(reify ~@classes ~@ms))))
 
