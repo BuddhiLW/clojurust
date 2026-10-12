@@ -122,7 +122,10 @@ fn map_destructuring_reads_record_fields() {
 /// rose-tree's `unchunk` is `(take Double/POSITIVE_INFINITY s)`.
 #[test]
 fn take_infinite_count() {
-    assert_eq!(eval_pr("(take Double/POSITIVE_INFINITY [1 2 3])"), "(1 2 3)");
+    assert_eq!(
+        eval_pr("(take Double/POSITIVE_INFINITY [1 2 3])"),
+        "(1 2 3)"
+    );
     assert_eq!(eval_pr("(take 2.0 [1 2 3])"), "(1 2)");
 }
 
@@ -138,6 +141,9 @@ fn reductions_intermediate_values() {
 /// `gen/elements` maps a vector over a rose tree: vectors are IFn.
 #[test]
 fn vector_invoked_as_fn() {
-    assert_eq!(eval_pr("[([5 6] 1) (mapv [:a :b] [1 0]) (apply [7] [0])]"), "[6 [:b :a] 7]");
+    assert_eq!(
+        eval_pr("[([5 6] 1) (mapv [:a :b] [1 0]) (apply [7] [0])]"),
+        "[6 [:b :a] 7]"
+    );
     assert_eq!(eval_pr("(try ([1] 3) (catch Exception _ :oob))"), ":oob");
 }

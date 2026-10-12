@@ -33,7 +33,9 @@ fn long_leading_zeros(args: &[Value]) -> ValueResult<Value> {
     Ok(Value::Long(numeric_as_i64(&args[0])?.leading_zeros() as i64))
 }
 fn long_trailing_zeros(args: &[Value]) -> ValueResult<Value> {
-    Ok(Value::Long(numeric_as_i64(&args[0])?.trailing_zeros() as i64))
+    Ok(Value::Long(
+        numeric_as_i64(&args[0])?.trailing_zeros() as i64
+    ))
 }
 fn double_is_nan(args: &[Value]) -> ValueResult<Value> {
     Ok(Value::Bool(as_f64(&args[0])?.is_nan()))
@@ -45,7 +47,9 @@ fn double_to_long_bits(args: &[Value]) -> ValueResult<Value> {
     Ok(Value::Long(as_f64(&args[0])?.to_bits() as i64))
 }
 fn long_bits_to_double(args: &[Value]) -> ValueResult<Value> {
-    Ok(Value::Double(f64::from_bits(numeric_as_i64(&args[0])? as u64)))
+    Ok(Value::Double(f64::from_bits(
+        numeric_as_i64(&args[0])? as u64
+    )))
 }
 
 /// `Math/scalb` — `x * 2^exp`, stepping so every factor stays a normal double.
@@ -84,12 +88,28 @@ type Static = (&'static str, Arity, fn(&[Value]) -> ValueResult<Value>);
 const FNS: &[Static] = &[
     ("Long/bitCount", Arity::Fixed(1), long_bit_count),
     ("Long/reverse", Arity::Fixed(1), long_reverse),
-    ("Long/numberOfLeadingZeros", Arity::Fixed(1), long_leading_zeros),
-    ("Long/numberOfTrailingZeros", Arity::Fixed(1), long_trailing_zeros),
+    (
+        "Long/numberOfLeadingZeros",
+        Arity::Fixed(1),
+        long_leading_zeros,
+    ),
+    (
+        "Long/numberOfTrailingZeros",
+        Arity::Fixed(1),
+        long_trailing_zeros,
+    ),
     ("Double/isNaN", Arity::Fixed(1), double_is_nan),
     ("Double/isInfinite", Arity::Fixed(1), double_is_infinite),
-    ("Double/doubleToLongBits", Arity::Fixed(1), double_to_long_bits),
-    ("Double/longBitsToDouble", Arity::Fixed(1), long_bits_to_double),
+    (
+        "Double/doubleToLongBits",
+        Arity::Fixed(1),
+        double_to_long_bits,
+    ),
+    (
+        "Double/longBitsToDouble",
+        Arity::Fixed(1),
+        long_bits_to_double,
+    ),
     ("Math/scalb", Arity::Fixed(2), scalb),
     ("Math/getExponent", Arity::Fixed(1), get_exponent),
     ("Character/isDigit", Arity::Fixed(1), char_is_digit),

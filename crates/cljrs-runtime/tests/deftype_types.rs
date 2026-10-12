@@ -313,10 +313,7 @@ fn trailing_dot_constructor_sugar() {
         eval_pr("(deftype ^:private A [^:unsynchronized-mutable x y]) (pr-str (.-y (A. 1 2)))"),
         "2"
     );
-    assert_eq!(
-        eval_pr("(defrecord R [a b]) (pr-str (:b (R. 1 2)))"),
-        "2"
-    );
+    assert_eq!(eval_pr("(defrecord R [a b]) (pr-str (:b (R. 1 2)))"), "2");
 }
 
 /// `(new T args)` is the special-form spelling of `(T. args)`. `T` evaluates
@@ -324,10 +321,7 @@ fn trailing_dot_constructor_sugar() {
 /// constructor rather than only know host classes. `Exception` still works.
 #[test]
 fn new_constructs_deftype_and_defrecord() {
-    assert_eq!(
-        eval_pr("(deftype A [x y]) (pr-str (.-y (new A 1 2)))"),
-        "2"
-    );
+    assert_eq!(eval_pr("(deftype A [x y]) (pr-str (.-y (new A 1 2)))"), "2");
     assert_eq!(
         eval_pr("(defrecord R [a b]) (pr-str (:b (new R 1 2)))"),
         "2"
