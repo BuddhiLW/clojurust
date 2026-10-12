@@ -39,7 +39,11 @@ pub fn table(globals: &Arc<GlobalEnv>) -> GcPtr<Protocol> {
         Vec::new(),
         false,
     ));
-    globals.intern("clojure.core", Arc::from(TABLE_VAR), Value::Protocol(p.clone()));
+    globals.intern(
+        "clojure.core",
+        Arc::from(TABLE_VAR),
+        Value::Protocol(p.clone()),
+    );
     p
 }
 
