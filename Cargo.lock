@@ -1019,12 +1019,14 @@ dependencies = [
 name = "cljrs-stdlib"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "cljrs-gc",
  "cljrs-ir",
  "cljrs-reader",
  "cljrs-runtime",
  "cljrs-value",
  "proptest",
+ "uuid",
 ]
 
 [[package]]

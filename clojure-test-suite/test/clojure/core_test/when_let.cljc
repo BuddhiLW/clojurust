@@ -1,6 +1,6 @@
 (ns clojure.core-test.when-let
   (:require [clojure.test :as t :refer [are deftest is testing]]
-            [clojure.core-test.portability #?(:cljs :refer-macros :default :refer) [when-var-exists]]))
+            [clojure.core-test.portability #?(:cljs :refer-macros :default :refer) [when-var-exists] :as p]))
 
 (when-var-exists when-let
                  (deftest test-when-let
@@ -20,12 +20,12 @@
                        (is (= '(1 1 1 1 1) (when-let [x s] x)))
                        (is (= @calls 5))))
                    (testing "without a body, truth doesn't matter"
-                     (is (nil? (when-let [x nil])))
-                     (is (nil? (when-let [x [false]])))
-                     (is (nil? (when-let [x [true]]))))
+                     (is (nil? (when-let [_x nil])))
+                     (is (nil? (when-let [_x [false]])))
+                     (is (nil? (when-let [_x [true]]))))
                    (testing "when has an implicit `do`"
                      (let [counter (atom 0)]
-                       (is (= :bar (when-let [x (range 5)]
+                       (is (= :bar (when-let [_x (range 5)]
                                      (swap! counter inc)
                                      (swap! counter inc)
                                      (swap! counter inc)
@@ -34,6 +34,4 @@
                    #?(:cljs nil ; Skipped due to ClojureScript's atypical macro expansion.
                       :bb nil ; Skipped because of Babashka issue https://github.com/babashka/babashka/issues/1894
                       :default (testing "when-let accepts exactly two"
-                                 (is (thrown? Exception
-                                              (macroexpand
-                                                '(when-let [x (range 5) y (range 5)]))))))))
+                                 (is (p/thrown? (macroexpand '(when-let [x (range 5) y (range 5)]))))))))

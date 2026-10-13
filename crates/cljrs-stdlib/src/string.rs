@@ -258,8 +258,23 @@ fn split(args: &[Value]) -> ValueResult<Value> {
 }
 
 fn split_lines(args: &[Value]) -> ValueResult<Value> {
-    let s = get_str(&args[0])?;
-    let parts: Vec<Value> = s.lines().map(|l| make_str(l.to_string())).collect();
+    let s = get_strict_str(&args[0])?;
+    // Clojure implements split-lines as a split on `\r?\n` with the JVM's
+    // default split limit: preserve leading/interior empty fields, discard all
+    // trailing empty fields, and keep one empty field for an empty input.
+    let mut fields: Vec<&str> = s
+        .split('\n')
+        .map(|line| line.strip_suffix('\r').unwrap_or(line))
+        .collect();
+    if !s.is_empty() {
+        while fields.last() == Some(&"") {
+            fields.pop();
+        }
+    }
+    let parts = fields
+        .into_iter()
+        .map(|line| make_str(line.to_string()))
+        .collect::<Vec<_>>();
     Ok(Value::Vector(GcPtr::new(PersistentVector::from_iter(
         parts,
     ))))

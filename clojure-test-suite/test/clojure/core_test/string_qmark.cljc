@@ -10,6 +10,8 @@
       true "0"
       true "1"
       true "-1"
+      ; Phel/PHP lacks class type and classes are represented as strings
+      #?@(:phel [true stdClass])
 
       false 0
       false 1
@@ -49,16 +51,24 @@
       false :-1
       false 'a-sym
 
-      #?@(:cljs
+      #?@(:lpy
           [true \0
            true \1
            true \A
            true \space]
-          :lpy
+
+          :phel
           [true \0
            true \1
            true \A
            true \space]
+
+          :cljs
+          [true \0
+           true \1
+           true \A
+           true \space]
+          
           :default
           [false \0
            false \1

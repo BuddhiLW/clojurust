@@ -405,7 +405,7 @@ pub fn form_to_value(form: &Form) -> EvalResult<Value> {
                 if let FormKind::Str(s) = &inner.kind
                     && let Ok(u) = uuid::Uuid::parse_str(s)
                 {
-                    Value::Uuid(u.as_u128())
+                    Value::uuid(u.as_u128())
                 } else {
                     form_to_value(inner)?
                 }
@@ -446,18 +446,29 @@ fn map_literal_arity_error() -> EvalError {
     EvalError::Runtime("map literal must have an even number of forms".into())
 }
 
+/// The reader-conditional feature keys this runtime answers to. `:cljrs` is
+/// the canonical key: the dialect's own name, the one portable libraries write
+/// alongside `:clj`, `:cljs`, `:cljr` and `:lpy` (malli keys its branches
+/// `:cljrs`). `:rust` is the legacy alias. Both select the same platform branch.
+pub fn is_platform_feature(k: &str) -> bool {
+    k == "rust" || k == "cljrs"
+}
+
 /// Resolve a `#?(...)` reader conditional to the selected branch form, or
-/// `None` if no `:rust` or `:default` clause is present.
+/// `None` if no platform (`:cljrs` / `:rust`) or `:default` clause is present.
+///
+/// Clauses are tried in source order and the first match wins, as in
+/// Clojure: `:default` always matches, so `#?(:default :a :cljrs :b)` selects
+/// `:a`. This is the single selection rule; every evaluator path calls it.
 pub fn select_reader_cond(clauses: &[Form]) -> Option<&Form> {
-    let mut default: Option<&Form> = None;
-    for [feature, branch] in clauses.as_chunks::<2>().0 {
-        match &feature.kind {
-            FormKind::Keyword(k) if k == "rust" => return Some(branch),
-            FormKind::Keyword(k) if k == "default" => default = Some(branch),
-            _ => {}
-        }
-    }
-    default
+    clauses
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .find(|[feature, _]| {
+            matches!(&feature.kind, FormKind::Keyword(k) if is_platform_feature(k) || k == "default")
+        })
+        .map(|[_, branch]| branch)
 }
 
 /// Expand reader conditionals in a flat slice of forms.
@@ -691,17 +702,12 @@ mod tests {
         Splice(Vec<(String, Vec<String>)>),
     }
 
+    // First matching clause in source order wins; `:default` always matches.
     fn select_model<T>(branches: &[(String, T)]) -> Option<&T> {
-        let mut default = None;
-        for (k, v) in branches {
-            if k == "rust" {
-                return Some(v);
-            }
-            if k == "default" {
-                default = Some(v);
-            }
-        }
-        default
+        branches
+            .iter()
+            .find(|(k, _)| is_platform_feature(k) || k == "default")
+            .map(|(_, v)| v)
     }
 
     fn item_src(it: &Item) -> String {
@@ -737,6 +743,7 @@ mod tests {
     fn key_strat() -> impl proptest::strategy::Strategy<Value = String> {
         proptest::prop_oneof![
             proptest::strategy::Just("rust".to_string()),
+            proptest::strategy::Just("cljrs".to_string()),
             proptest::strategy::Just("clj".to_string()),
             proptest::strategy::Just("cljs".to_string()),
             proptest::strategy::Just("default".to_string()),
@@ -1024,7 +1031,7 @@ mod tests {
         let got = quoted_value("#uuid \"f81d4fae-7dec-11d0-a765-00a0c91e6bf6\"").unwrap();
         assert_eq!(
             got,
-            Value::Uuid(0xf81d4fae_7dec_11d0_a765_00a0c91e6bf6_u128)
+            Value::uuid(0xf81d4fae_7dec_11d0_a765_00a0c91e6bf6_u128)
         );
     }
 
