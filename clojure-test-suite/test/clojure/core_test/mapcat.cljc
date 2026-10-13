@@ -1,6 +1,6 @@
 (ns clojure.core-test.mapcat
   (:require [clojure.test :as t :refer [deftest is testing]]
-            [clojure.core-test.portability #?(:cljs :refer-macros :default :refer) [when-var-exists]]))
+            [clojure.core-test.portability #?(:cljs :refer-macros :default :refer) [when-var-exists] :as p]))
 
 (when-var-exists mapcat
   (deftest test-mapcat
@@ -30,6 +30,7 @@
       (is (= [\h \i] (mapcat identity ["hi"]))))
     (testing "flatten key/value pairs"
       #?(:lpy (is (contains? #{[:a 1 :b 2] [:b 2 :a 1]} (vec (mapcat identity {:a 1 :b 2}))))
+         :lg (is (contains? #{[:a 1 :b 2] [:b 2 :a 1]} (vec (mapcat identity {:a 1 :b 2}))))
          :default (is (= [:a 1 :b 2 :c 3] (mapcat identity {:a 1 :b 2 :c 3})))))
     (testing "function returns nil"
       (is (= [] (mapcat (constantly nil) [1 2 3]))))
@@ -46,14 +47,10 @@
     (testing "multiple collections"
       (is (= '(:a 1 :b 2 :c 3) (mapcat list [:a :b :c] [1 2 3]))))
     (testing "incorrect shape"
-      (is (thrown? #?(:cljs :default :default Exception)
-                   (mapcat identity 5))))
+      (is (p/thrown? (mapcat identity 5))))
     (testing "non-seqable second arg"
-      (is (thrown? #?(:cljs :default :default Exception)
-                   (mapcat identity 5))))
+      (is (p/thrown? (mapcat identity 5))))
     (testing "non-function first arg"
-      (is (thrown? #?(:cljs :default :default Exception)
-                   (mapcat 42 [1 2]))))
+      (is (p/thrown? (mapcat 42 [1 2]))))
     (testing "non-concatable return value"
-      (is (thrown? #?(:cljs :default :default Exception)
-                   (doall (mapcat identity (range 2))))))))
+      (is (p/thrown? (doall (mapcat identity (range 2))))))))

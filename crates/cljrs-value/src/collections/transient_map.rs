@@ -62,7 +62,15 @@ impl TransientMap {
     pub fn find(&self, key: &Value) -> Option<(Value, Value)> {
         let map = self.map.lock().unwrap();
         let value = map.get(key);
-        value.map(|v| (v.clone(), v.clone()))
+        value.map(|v| (key.clone(), v.clone()))
+    }
+
+    pub fn get(&self, key: &Value) -> Option<Value> {
+        self.map.lock().unwrap().get(key).cloned()
+    }
+
+    pub fn contains_key(&self, key: &Value) -> bool {
+        self.map.lock().unwrap().contains_key(key)
     }
 
     pub fn count(&self) -> usize {

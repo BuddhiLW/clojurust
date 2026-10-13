@@ -352,6 +352,18 @@ pub fn apply_value(callee: &Value, args: Vec<Value>, env: &mut Env) -> EvalResul
         Value::NativeFunction(nf) => {
             crate::env::policy::check_native(&nf.get().name)?;
             check_arity(&nf.get().arity, args.len(), &nf.get().name)?;
+            // A direct `(apply ...)` call is intercepted while forms are still
+            // available, but apply is itself an IFn and can be passed to apply.
+            // Handle that already-evaluated path here instead of invoking the
+            // registration sentinel.
+            if nf.get().name.as_ref() == "apply" {
+                let callee = args[0].clone();
+                let mut applied = args[1..args.len() - 1].to_vec();
+                let spread = crate::builtins::builtins::value_to_seq(&args[args.len() - 1])
+                    .map_err(crate::env::error::value_error_to_eval_error)?;
+                applied.extend(spread);
+                return apply_value(&callee, applied, env);
+            }
             // Register the caller's env as a GC root: native functions may
             // call back into Clojure (via invoke()), which creates a fresh Env
             // and may trigger GC.
@@ -497,8 +509,72 @@ pub fn apply_value(callee: &Value, args: Vec<Value>, env: &mut Env) -> EvalResul
                 Some(Value::TypeInstance(ti)) => {
                     Ok(ti.get().fields.get(callee).unwrap_or_else(default))
                 }
+                Some(Value::Set(set)) => {
+                    if set.contains(callee) {
+                        Ok(callee.clone())
+                    } else {
+                        Ok(default())
+                    }
+                }
+                Some(Value::TransientMap(map)) => Ok(map.get().get(callee).unwrap_or_else(default)),
+                Some(Value::TransientSet(set)) => {
+                    if set.get().contains(callee) {
+                        Ok(callee.clone())
+                    } else {
+                        Ok(default())
+                    }
+                }
                 Some(Value::Nil) => Ok(default()),
                 _ => Ok(Value::Nil),
+            }
+        }
+        Value::Vector(vector) => {
+            if args.len() != 1 {
+                return Err(EvalError::Arity {
+                    name: "vector".into(),
+                    expected: "1".into(),
+                    got: args.len(),
+                });
+            }
+            let Value::Long(index) = args[0] else {
+                return Err(EvalError::Runtime(format!(
+                    "vector index must be an integer, got {}",
+                    args[0].type_name()
+                )));
+            };
+            let found = usize::try_from(index)
+                .ok()
+                .and_then(|index| vector.get().nth(index).cloned());
+            match found {
+                Some(value) => Ok(value),
+                None => Err(EvalError::Runtime(format!(
+                    "vector index out of bounds: {index}"
+                ))),
+            }
+        }
+        Value::TransientVector(vector) => {
+            if !(1..=2).contains(&args.len()) {
+                return Err(EvalError::Arity {
+                    name: "transient-vector".into(),
+                    expected: "1 or 2".into(),
+                    got: args.len(),
+                });
+            }
+            let Value::Long(index) = args[0] else {
+                return Err(EvalError::Runtime(format!(
+                    "vector index must be an integer, got {}",
+                    args[0].type_name()
+                )));
+            };
+            let found = usize::try_from(index)
+                .ok()
+                .and_then(|index| vector.get().get(index));
+            match (found, args.get(1)) {
+                (Some(value), _) => Ok(value),
+                (None, Some(default)) => Ok(default.clone()),
+                (None, None) => Err(EvalError::Runtime(format!(
+                    "vector index out of bounds: {index}"
+                ))),
             }
         }
         Value::Map(m) => {
@@ -519,6 +595,17 @@ pub fn apply_value(callee: &Value, args: Vec<Value>, env: &mut Env) -> EvalResul
                 }
             }
             None => Ok(Value::Nil),
+        },
+        Value::TransientMap(map) => match args.first() {
+            Some(key) => Ok(map
+                .get()
+                .get(key)
+                .unwrap_or(args.get(1).cloned().unwrap_or(Value::Nil))),
+            None => Ok(Value::Nil),
+        },
+        Value::TransientSet(set) => match args.first() {
+            Some(value) if set.get().contains(value) => Ok(value.clone()),
+            Some(_) | None => Ok(Value::Nil),
         },
         Value::WithMeta(inner, _) => apply_value(inner, args, env),
         Value::Var(v) => {

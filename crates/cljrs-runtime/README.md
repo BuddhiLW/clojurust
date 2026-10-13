@@ -124,6 +124,9 @@ tests/
                                      cache invalidation on provider/trust-set change
                                      (passes with and without the `deps` feature)
   require_spec_reader_conditional.rs — reader conditionals in ns require specs
+  reader_cond_cljrs_feature.rs     — `:cljrs` (canonical) and `:rust` (alias) select alike; clause order
+                                     decides against `:default`; deftype field
+                                     vector from a conditional (malli shape)
   refer_clojure.rs                 — `(:refer-clojure ...)` narrowing of the core refer
   core_shadows.rs                  — core_shadowed_names: what a namespace binds
                                      instead of clojure.core (issue #337)
@@ -726,12 +729,23 @@ instead of throwing, and returns just the `:doc` string.
 ### Reader-conditional resolution (`form.rs`)
 
 The reader is platform-agnostic: it parses every branch of `#?(...)` / `#?@(...)`
-and hands back a `FormKind::ReaderCond` node. Selecting the `:rust` branch is
+and hands back a `FormKind::ReaderCond` node. Selecting the platform branch is
 therefore the job of each form-consuming boundary, and this module holds the
-calculations they share.
+calculations they share. This runtime answers to two feature keys: `:cljrs`, the canonical
+key (the dialect's own name, which portable libraries such as malli use), and
+`:rust`, a legacy alias that selects the same branch.
+Clauses are tried in source order and the first match wins, as in Clojure;
+`:default` always matches, so `#?(:default :a :cljrs :b)` selects `:a`.
+The tree-walk evaluator, quoted data, syntax-quote, `ns` require specs, catch
+targets and AOT all go through `select_reader_cond`.
 
 ```rust
-/// The `:rust` branch of a conditional's clauses, or the `:default` branch.
+/// Whether `k` (a keyword name, no colon) is a feature key of this runtime:
+/// `"cljrs"` (canonical) or `"rust"` (legacy alias).
+pub fn is_platform_feature(k: &str) -> bool;
+
+/// The first clause whose key is a platform feature or `:default`, in
+/// clause order; `None` when no clause matches.
 pub fn select_reader_cond(clauses: &[Form]) -> Option<&Form>;
 
 /// Expand `#?`/`#?@` across a sibling slice: a non-splicing conditional
@@ -1006,8 +1020,9 @@ value).
 
 ### `eval_defn(args, env) -> EvalResult`
 
-Evaluate a `defn` form.  Accepts metadata on the name (`(defn ^:async f …)`) and
-an attr-map (`(defn f {:async true} …)`); `^:async` marks the resulting `CljxFn`
+Evaluate a `defn` form.  Accepts metadata on the name (`(defn ^:async f …)`),
+an attr-map (`(defn f {:async true} …)`), or the params vector
+(`(defn f ^:async [..] …)`, detected by `eval_fn`); `^:async` marks the resulting `CljxFn`
 as async.  Under `no-gc`, wraps fn creation in `StaticCtxGuard` so the `CljxFn`
 object lands in the `StaticArena`.
 
@@ -1029,7 +1044,9 @@ module) read back, and what `cljrs-nrepl`'s `op_lookup` surfaces to editors.
 requests `:async`, as decided by `Form::requests_async` in `cljrs-reader` — the
 same predicate IR lowering uses.  `env::apply::dispatch_if_async` checks the
 flag at call time to route through the async runtime.  The `^:async` may sit on
-the fn's first argument (`(fn ^:async [..] ..)`, peeled by `eval_fn`) or on the
+the fn's first argument (`(fn ^:async [..] ..)`, peeled by `eval_fn`), on the
+params vector after a name (`(fn name ^:async [..] ..)`; both per
+`Form::fn_args_request_async`, which `eval_fn` and IR lowering share), or on the
 whole form (`^:async (fn [..] ..)`, handled by `eval`'s `FormKind::Meta` arm,
 which also attaches `{:async true}` as metadata since an `fn` form takes runtime
 metadata).  IR lowering refuses any body containing such an anonymous async fn
@@ -1046,8 +1063,9 @@ The spellings that request async, exhaustively (`^{:async true}` works wherever
 | `(fn ^:async name [..] ..)` | yes |
 | `(defn ^:async name [..] ..)` | yes |
 | `(defn name {:async true} [..] ..)` | yes |
-| `(fn name ^:async [..] ..)` | **no** — metadata on a params vector after a name is a hint |
-| `(defn name ^:async [..] ..)` | **no** — same |
+| `(fn name ^:async [..] ..)` | yes |
+| `(defn name ^:async [..] ..)` | yes (also after a docstring / attr-map) |
+| `(fn name (^:async [..] ..))` | **no** — metadata on a multi-arity clause's params is a hint |
 
 ### Which natives need form-level interception
 

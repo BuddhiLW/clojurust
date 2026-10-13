@@ -1,6 +1,6 @@
 (ns clojure.core-test.taps
-  (:require [clojure.test :as t :refer [deftest is]]
-            #?(:cljs [cljs.test :refer-macros [async]])
+  (:require #?(:rust [clojure.test :as t :refer [deftest is]]
+               :default [clojure.test :as t #?(:cljs :refer-macros :default :refer) #?(:cljs [async deftest is] :default [deftest is])])
             [clojure.core-test.portability #?(:cljs :refer-macros :default :refer) [when-var-exists]]))
 
 (when-var-exists add-tap
@@ -66,7 +66,10 @@
        (defn tap-tester
          [atom-ref]
          (fn [x]
-           (if (instance? #?(:lpy basilisp.lang.interfaces/IPending :default clojure.lang.IPending) x)
+           (if #?(:lpy (instance? basilisp.lang.interfaces/IPending x)
+                  :phel (instance? Phel.Fiber.Domain.Awaitable x)
+                  :jank (cpp/== (.get_type x) cpp/jank.runtime.object_type.promise)
+                  :default (instance? clojure.lang.IPending x))
              (deliver x nil)
              (swap! atom-ref conj x))))
 

@@ -66,6 +66,7 @@ pub enum Value {
     Ratio(GcPtr<num_rational::Ratio<num_bigint::BigInt>>),
     Char(char),
     Str(GcPtr<String>),
+    Uuid(GcPtr<UuidValue>),
     // Regexes (engine selected by the regex-full / small-regex features)
     Pattern(GcPtr<Pattern>),
     Matcher(GcPtr<Matcher>),
@@ -107,6 +108,12 @@ pub enum Value {
 pub enum MapValue {
     Array(GcPtr<PersistentArrayMap>),
     Hash(GcPtr<PersistentHashMap>),
+}
+
+pub struct UuidValue(pub u128);
+
+impl Value {
+    pub fn uuid(value: u128) -> Self;
 }
 ```
 
@@ -359,6 +366,50 @@ convenience pair). The tag is invisible to equality, hashing, and printing —
 can distinguish real entries from plain 2-element vectors. As in Clojure, any
 derived vector (`conj`, `assoc_nth`, `pop`, `from_iter`, ...) is a plain
 vector again.
+
+### Transient collections
+
+`TransientVector`, `TransientMap`, and `TransientSet` provide the mutable
+construction phase used by `transient`, the bang operations, and
+`persistent!`. Their read methods support the same indexed/associative lookup
+interface as their persistent counterparts while the transient is active.
+
+```rust
+impl TransientVector {
+    pub fn new() -> Self;
+    pub fn new_from_vector(vector: &rpds::VectorSync<Value>) -> Self;
+    pub fn append(&self, value: Value) -> ValueResult<()>;
+    pub fn pop(&self) -> ValueResult<()>;
+    pub fn set(&self, index: usize, value: Value) -> ValueResult<()>;
+    pub fn count(&self) -> usize;
+    pub fn get(&self, index: usize) -> Option<Value>;
+    pub fn persistent(&self) -> ValueResult<PersistentVector>;
+}
+
+impl TransientMap {
+    pub fn new() -> Self;
+    pub fn new_from_map(map: &PersistentHashMap) -> Self;
+    pub fn assoc(&self, key: Value, value: Value) -> ValueResult<()>;
+    pub fn dissoc(&self, key: &Value) -> ValueResult<()>;
+    pub fn find(&self, key: &Value) -> Option<(Value, Value)>;
+    pub fn get(&self, key: &Value) -> Option<Value>;
+    pub fn contains_key(&self, key: &Value) -> bool;
+    pub fn count(&self) -> usize;
+    pub fn persistent(&self) -> ValueResult<PersistentHashMap>;
+}
+
+impl TransientSet {
+    pub fn new() -> Self;
+    pub fn new_from_set(set: &PersistentHashSet) -> Self;
+    pub fn conj(&self, value: Value) -> ValueResult<()>;
+    pub fn disj(&self, value: &Value) -> ValueResult<()>;
+    pub fn contains(&self, value: &Value) -> bool;
+    pub fn count(&self) -> usize;
+    pub fn persistent(&self) -> ValueResult<PersistentHashSet>;
+}
+```
+
+All three implement `Default`, `Clone`, `ClojureHash`, and `Trace`.
 
 All collection Trace impls also override `gc_size_extra` to report the heap
 bytes owned by each collection beyond the GcBox struct.  Approximations used:

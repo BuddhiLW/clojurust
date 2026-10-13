@@ -1,6 +1,6 @@
 (ns clojure.core-test.keyword
   (:require [clojure.test :as t :refer [are deftest is]]
-            [clojure.core-test.portability #?(:cljs :refer-macros :default :refer) [when-var-exists]]))
+            [clojure.core-test.portability #?(:cljs :refer-macros :default :refer) [when-var-exists] :as p]))
 
 (when-var-exists keyword
   (deftest test-keyword
@@ -81,25 +81,28 @@
     (is (nil? (namespace (keyword nil "hi"))))
     (is (= #?(:jank nil :default "") (namespace (keyword "" "hi"))))
     ;; But if name is nil, then maybe we throw or maybe we don't
-    #?(; CLJS creates a keyword that isn't
+    #?(:jank
+       nil
+
+       ; CLJS creates a keyword that isn't
        ; readable (symbol part is null string: ":abc/")
        :cljs
        nil
 
-       :jank
-       nil
-
        :default
-       (is (thrown? Exception (keyword "abc" nil))))
+       (is (p/thrown? (keyword "abc" nil))))
 
-    #?@(:jank []
+    #?@(:jank
+        []
+
         :cljs
         [(is (= :abc/abc (keyword 'abc "abc")))
          (is (= :abc/abc (keyword "abc" 'abc)))
          (is (= :abc/abc (keyword :abc "abc")))
          (is (= :abc/abc (keyword "abc" :abc)))]
+
         :default
-        [(is (thrown? Exception (keyword 'abc "abc")))
-         (is (thrown? Exception (keyword "abc" 'abc)))
-         (is (thrown? Exception (keyword :abc "abc")))
-         (is (thrown? Exception (keyword "abc" :abc)))])))
+        [(is (p/thrown? (keyword 'abc "abc")))
+         (is (p/thrown? (keyword "abc" 'abc)))
+         (is (p/thrown? (keyword :abc "abc")))
+         (is (p/thrown? (keyword "abc" :abc)))])))

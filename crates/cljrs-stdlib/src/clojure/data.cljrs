@@ -39,10 +39,15 @@
         only-a (map first diffs)
         only-b (map second diffs)
         both   (map #(nth % 2) diffs)
-        nnil?  (fn [s] (some #(not (nil? %)) s))]
-    [(when (nnil? only-a) (vec only-a))
-     (when (nnil? only-b) (vec only-b))
-     (when (nnil? both)   (vec both))]))
+        compact (fn [xs]
+                  (vectorize
+                    (into {}
+                          (keep-indexed (fn [i x]
+                                          (when (not (nil? x)) [i x]))
+                                        xs))))]
+    [(compact only-a)
+     (compact only-b)
+     (compact both)]))
 
 (defn diff-set
   "Diff two sets."

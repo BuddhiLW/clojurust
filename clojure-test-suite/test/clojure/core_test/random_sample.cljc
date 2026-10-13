@@ -1,6 +1,6 @@
 (ns clojure.core-test.random-sample
   (:require [clojure.test :as t :refer [are deftest is testing]]
-            [clojure.core-test.portability #?(:cljs :refer-macros :default :refer) [when-var-exists]]))
+            [clojure.core-test.portability #?(:cljs :refer-macros :default :refer) [when-var-exists] :as p]))
 
 (when-var-exists random-sample
 
@@ -21,7 +21,7 @@
                                  (< item nitems)))
                           sub))
                 xs)))
-  
+
   (deftest test-random-sample
     ;; Multiple calls to random-sample should return non-constant
     ;; subsets If all the items in the collection are unique, every
@@ -55,7 +55,8 @@
         ;; if nil as input collection, then the result is always empty
         (is (every? (comp nil? seq) (repeatedly draws #(random-sample -1 nil))))
         (is (every? (comp nil? seq) (repeatedly draws #(transduce (random-sample -1) conj [] nil))))
-        
-        (is (thrown? Exception (seq (random-sample nil coll))))
-        (is (thrown? #?(:cljs :default :default Exception) (seq (random-sample 0.5 42))))
-        (is (thrown? #?(:cljs :default :default Exception) (seq (random-sample 0.5 :foo))))))))
+
+        #?(:cljs (is (nil? (seq (random-sample nil coll))))
+           :default (is (p/thrown? (seq (random-sample nil coll)))))
+        (is (p/thrown? (seq (random-sample 0.5 42))))
+        (is (p/thrown? (seq (random-sample 0.5 :foo))))))))

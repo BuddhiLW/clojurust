@@ -55,6 +55,10 @@ impl TransientSet {
         let set = self.set.lock().unwrap();
         set.count()
     }
+
+    pub fn contains(&self, value: &Value) -> bool {
+        self.set.lock().unwrap().contains(value)
+    }
 }
 
 impl Clone for TransientSet {

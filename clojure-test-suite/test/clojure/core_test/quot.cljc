@@ -13,6 +13,8 @@
       int? 3  -10 -3
       int? -3 10  -3
 
+      #?@(:cljs    []
+          :default [p/big-int? 0N  1/2  3/4])
       p/big-int? 3N  10   3N
       p/big-int? -3N -10  3N
       p/big-int? 3N  -10  -3N
@@ -102,9 +104,9 @@
          (is (NaN? (quot 1 ##NaN)))
          (is (NaN? (quot ##NaN 1)))]
         :default
-        [(is (thrown? #?(:cljs :default :default Exception) (quot 10 0)))
-         (is (thrown? #?(:cljs :default :default Exception) (quot ##Inf 1)))
-         (is (thrown? #?(:cljs :default :default Exception) (quot ##-Inf 1)))
-         (is (thrown? #?(:cljs :default :default Exception) (quot ##NaN 1)))
-         (is (thrown? #?(:cljs :default :default Exception) (quot 1 ##NaN)))
-         (is (thrown? #?(:cljs :default :default Exception) (quot ##NaN 1)))])))
+        [(is (p/thrown? (quot 10 0)))
+         (is (p/thrown? (quot ##Inf 1)))
+         (is (p/thrown? (quot ##-Inf 1)))
+         (is (p/thrown? (quot ##NaN 1)))
+         (is (p/thrown? (quot 1 ##NaN)))
+         (is (p/thrown? (quot ##NaN 1)))])))

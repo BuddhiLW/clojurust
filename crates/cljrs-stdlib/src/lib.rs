@@ -320,8 +320,34 @@ mod tests {
     fn test_string_split_lines() {
         let (_, mut env) = make_env();
         run("(require '[clojure.string :as str])", &mut env).unwrap();
-        let v = run("(str/split-lines \"a\\nb\\nc\")", &mut env).unwrap();
-        assert!(matches!(v, Value::Vector(_)));
+        for (form, expected) in [
+            ("(str/split-lines \"\")", "[\"\"]"),
+            ("(str/split-lines \"\\n\\n\")", "[]"),
+            ("(str/split-lines \"a\\nb\\nc\")", "[\"a\" \"b\" \"c\"]"),
+            ("(str/split-lines \"a\\r\\nb\")", "[\"a\" \"b\"]"),
+            ("(str/split-lines \"a\\n\\nb\")", "[\"a\" \"\" \"b\"]"),
+            ("(str/split-lines \"a\\n\\n\")", "[\"a\"]"),
+        ] {
+            let value = run(form, &mut env).unwrap();
+            assert_eq!(value.to_string(), expected, "{form}");
+        }
+    }
+
+    #[test]
+    fn test_string_split_lines_rejects_non_strings() {
+        let (_, mut env) = make_env();
+        run("(require '[clojure.string :as str])", &mut env).unwrap();
+        for form in [
+            "(str/split-lines nil)",
+            "(str/split-lines \\A)",
+            "(str/split-lines 0)",
+            "(str/split-lines 0.0)",
+            "(str/split-lines :foo)",
+            "(str/split-lines 'foo)",
+            "(str/split-lines [])",
+        ] {
+            assert!(run(form, &mut env).is_err(), "{form} should fail");
+        }
     }
 
     // ── clojure.set ───────────────────────────────────────────────────────────

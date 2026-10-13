@@ -164,11 +164,16 @@ impl Form {
     /// requests `:async` (`^:async`, or a map with a non-`false`/`nil`
     /// `:async`). Shared by the tree-walker and IR lowering.
     pub fn requests_async(&self) -> bool
-    /// True for an anonymous fn asking to be async, in either spelling:
-    /// `^:async (fn …)` or `(fn ^:async […] …)`. IR lowering refuses a body
-    /// containing one (a lowered closure cannot be dispatched as async), so the
-    /// tree-walker builds it in every tier.
+    /// True for an anonymous fn asking to be async, in any spelling:
+    /// `^:async (fn …)`, or one `fn_args_request_async` accepts. IR lowering
+    /// refuses a body containing one (a lowered closure cannot be dispatched
+    /// as async), so the tree-walker builds it in every tier.
     pub fn is_async_fn_form(&self) -> bool
+    /// True when an `fn`'s arguments (after the head) request `:async`:
+    /// `(fn ^:async […] …)`, `(fn ^:async name […] …)`, or
+    /// `(fn name ^:async […] …)`. Shared by `eval_fn`, IR lowering's `fn`
+    /// guard and `defn` lowering.
+    pub fn fn_args_request_async(args: &[Form]) -> bool
 
     // ── Structural views ──
     // Each reports the shape of `unmeta()`, so `^m form` has the same shape as
@@ -235,7 +240,7 @@ pub enum FormKind {
     AnonFn(Vec<Form>),                   // #(...)
     TaggedLiteral(String, Box<Form>),    // #tag form
 
-    // Reader conditionals — all branches kept; evaluator filters by :rust
+    // Reader conditionals — all branches kept; evaluator filters by :cljrs (or legacy :rust)
     // clauses is flat: [keyword, form, keyword, form, …]
     ReaderCond { splicing: bool, clauses: Vec<Form> },
 }
@@ -261,6 +266,9 @@ impl Parser {
 
     /// Parse all forms until EOF.
     pub fn parse_all(&mut self) -> CljxResult<Vec<Form>>
+
+    /// Remove and return concrete forms consumed by `#_`.
+    pub fn take_discarded_forms(&mut self) -> Vec<Form>
 }
 
 impl Iterator for Parser {
@@ -271,15 +279,16 @@ impl Iterator for Parser {
 
 #### `#_` discard semantics
 
-`#_` consumes itself plus the next form and produces nothing. Discards can be
-chained: `[#_ #_ 1 2 3]` → `[2, 3]` (outer `#_` discards the `#_ 1` group,
-leaving `2` and `3`).
+`#_` consumes itself plus the next concrete form and produces nothing. Discards
+can be chained: `[#_ #_ 1 2 3]` → `[3]` (the inner `#_` consumes `1`, then the
+outer `#_` consumes `2`).
 
 #### Reader conditionals
 
 All branches of `#?(…)` and `#?@(…)` are parsed and stored as
 `FormKind::ReaderCond { splicing, clauses }` with a flat `clauses` vec.  The
-evaluator is responsible for filtering by `:rust`.
+evaluator is responsible for filtering by the platform key `:cljrs` (or its
+legacy alias `:rust`).
 
 ---
 

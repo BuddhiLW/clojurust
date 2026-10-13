@@ -1,7 +1,7 @@
 (ns clojure.core-test.star
   (:require [clojure.test :as t :refer [are deftest is testing]]
             [clojure.core-test.number-range :as r]
-            [clojure.core-test.portability #?(:cljs :refer-macros :default :refer) [when-var-exists big-int?]]))
+            [clojure.core-test.portability #?(:cljs :refer-macros :default :refer) [when-var-exists big-int?] :as p]))
 
 (when-var-exists *
   (deftest test-*
@@ -75,11 +75,10 @@
           [(is (= 0 (* 1 nil)))
            (is (= 0 (* nil 1)))]
           :default
-          [(is (thrown? Exception (* 1 nil)))
-           (is (thrown? Exception (* nil 1)))])
+          [(is (p/thrown? (* 1 nil)))
+           (is (p/thrown? (* nil 1)))])
 
-      #?@(:cljs []
-          :lpy
+      #?@(:lpy
           [(is (big-int? (* 0 1N)))
            (is (big-int? (* 0N 1)))
            (is (big-int? (* 0N 1N)))
@@ -89,6 +88,7 @@
            (is (big-int? (* 1 5N)))
            (is (big-int? (* 1N 5)))
            (is (big-int? (* 1N 5N)))]
+
           :rust
           [(is (big-int? (* 0 1N)))
            (is (big-int? (* 0N 1)))
@@ -99,6 +99,10 @@
            (is (big-int? (* 1 5N)))
            (is (big-int? (* 1N 5)))
            (is (big-int? (* 1N 5N)))]
+
+          :cljs
+          []
+
           :default
           [(is (big-int? (* 0 1N)))
            (is (big-int? (* 0N 1)))
@@ -110,10 +114,10 @@
            (is (big-int? (* 1N 5)))
            (is (big-int? (* 1N 5N)))
 
-           (is (thrown? Exception (* -1 r/min-int)))
-           (is (thrown? Exception (* r/min-int -1)))
-           (is (thrown? Exception (* (long (/ r/min-int 2)) 3)))
-           (is (thrown? Exception (* 3 (long (/ r/min-int 2)))))]))
+           (is (p/thrown? (* -1 r/min-int)))
+           (is (p/thrown? (* r/min-int -1)))
+           (is (p/thrown? (* (long (/ r/min-int 2)) 3)))
+           (is (p/thrown? (* 3 (long (/ r/min-int 2)))))]))
 
     #?(:cljs
        nil
@@ -143,8 +147,8 @@
            -1/10 -1/2 1/5
            1/10  -1/2 -1/5)
 
-         (is (thrown? #?(:cljs :default :default Exception) (* 1/2 nil)))
-         (is (thrown? #?(:cljs :default :default Exception) (* nil 1/2)))))
+         (is (p/thrown? (* 1/2 nil)))
+         (is (p/thrown? (* nil 1/2)))))
 
     (testing "inf-nan"
       (testing "Multiplication with infinities"

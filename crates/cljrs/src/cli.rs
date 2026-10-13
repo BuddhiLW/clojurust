@@ -330,7 +330,7 @@ fn write_jit_stats(target: &str) -> std::io::Result<()> {
 /// An empty target (the flag was passed without a value) writes to stdout;
 /// any other value is treated as a filesystem path.
 fn write_gc_stats(target: &str) -> std::io::Result<()> {
-    let snapshot = cljrs_gc::GC_STATS.snapshot();
+    let snapshot = cljrs_gc::stats_report();
     if target.is_empty() {
         println!("{snapshot}");
         Ok(())

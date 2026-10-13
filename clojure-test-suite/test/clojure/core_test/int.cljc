@@ -1,6 +1,6 @@
 (ns clojure.core-test.int
   (:require [clojure.test :as t :refer [are deftest is]]
-            [clojure.core-test.portability #?(:cljs :refer-macros :default :refer) [when-var-exists]]))
+            [clojure.core-test.portability #?(:cljs :refer-macros :default :refer) [when-var-exists] :as p]))
 
 (when-var-exists int
   (deftest test-int
@@ -11,8 +11,8 @@
     ;; predicate for it. Here, we just test whether it's a fixed-length
     ;; integer of some sort.
     (is (int? (int 0)))
-    #?(:clj  (is (instance? java.lang.Integer (int 0)))
-       :cljr (is (instance? System.Int32 (int 0))))
+    #?(:cljr (is (instance? System.Int32 (int 0)))
+       :clj  (is (instance? java.lang.Integer (int 0))))
 
     ;; Check conversions and rounding from other numeric types
     (are [expected x] (= expected (int x))
@@ -37,20 +37,21 @@
            0    1/10
            0    -1/10]))
 
-    #?@(:cljs []
-        :bb []
+    #?@(:bb
+        []
+
         :cljr
         [ ;; `int` throws outside the range of 32767 ... -32768.
-         (is (thrown? Exception (int -2147483648.000001)))
-         (is (thrown? Exception (int -2147483649)))
-         (is (thrown? Exception (int 2147483648)))
-         (is (thrown? Exception (int 2147483647.000001)))
+         (is (p/thrown? (int -2147483648.000001)))
+         (is (p/thrown? (int -2147483649)))
+         (is (p/thrown? (int 2147483648)))
+         (is (p/thrown? (int 2147483647.000001)))
 
          ;; Check handling of other types
          (is (= 0 (int "0")))
-         (is (thrown? Exception (int :0)))
-         (is (thrown? Exception (int [0])))
-         (is (thrown? Exception (int nil)))]
+         (is (p/thrown? (int :0)))
+         (is (p/thrown? (int [0])))
+         (is (p/thrown? (int nil)))]
         :lpy
         [(is (= -2147483648 (int -2147483648.000001)))
          (is (= -2147483649 (int -2147483649)))
@@ -59,29 +60,44 @@
 
          ;; Check handling of other types
          (is (= 0 (int "0")))
-         (is (thrown? Exception (int :0)))
-         (is (thrown? Exception (int [0])))
-         (is (thrown? Exception (int nil)))]
-        :rust
+         (is (p/thrown? (int :0)))
+         (is (p/thrown? (int [0])))
+         (is (p/thrown? (int nil)))]
+
+        :jank
         [(is (= -2147483648 (int -2147483648.000001)))
-         (is (thrown? Exception (int -2147483649)))
-         (is (thrown? Exception (int 2147483648)))
+         (is (= -2147483649 (int -2147483649)))
+         (is (= 2147483648 (int 2147483648)))
          (is (= 2147483647 (int 2147483647.000001)))
 
          ;; Check handling of other types
+         (is (p/thrown? (int "0")))
+         (is (p/thrown? (int :0)))
+         (is (p/thrown? (int [0])))
+         (is (p/thrown? (int nil)))]
+
+        :rust
+        [(is (= -2147483648 (int -2147483648.000001)))
+         (is (p/thrown? (int -2147483649)))
+         (is (p/thrown? (int 2147483648)))
+         (is (= 2147483647 (int 2147483647.000001)))
          (is (= 0 (int "0")))
-         (is (thrown? Exception (int :0)))
-         (is (thrown? Exception (int [0])))
-         (is (thrown? Exception (int nil)))]
+         (is (p/thrown? (int :0)))
+         (is (p/thrown? (int [0])))
+         (is (p/thrown? (int nil)))]
+
+        :cljs
+        []
+
         :default
         [ ;; `int` throws outside the range of 32767 ... -32768.
-         (is (thrown? Exception (int -2147483648.000001)))
-         (is (thrown? Exception (int -2147483649)))
-         (is (thrown? Exception (int 2147483648)))
-         (is (thrown?  Exception (int 2147483647.000001)))
+         (is (p/thrown? (int -2147483648.000001)))
+         (is (p/thrown? (int -2147483649)))
+         (is (p/thrown? (int 2147483648)))
+         (is (p/thrown? (int 2147483647.000001)))
 
          ;; Check handling of other types
-         (is (thrown? Exception (int "0")))
-         (is (thrown? Exception (int :0)))
-         (is (thrown? Exception (int [0])))
-         (is (thrown? Exception (int nil)))])))
+         (is (p/thrown? (int "0")))
+         (is (p/thrown? (int :0)))
+         (is (p/thrown? (int [0])))
+         (is (p/thrown? (int nil)))])))

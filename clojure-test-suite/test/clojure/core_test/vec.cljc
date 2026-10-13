@@ -1,6 +1,6 @@
 (ns clojure.core-test.vec
   (:require [clojure.test :refer [deftest testing is are]]
-            [clojure.core-test.portability #?(:cljs :refer-macros :default :refer) [when-var-exists]]))
+            [clojure.core-test.portability #?(:cljs :refer-macros :default :refer) [when-var-exists] :as p]))
 
 (when-var-exists vec
   (deftest test-vec
@@ -25,6 +25,7 @@
 
     #?(:cljr    "cljr does not alias array"
        :lpy     "Basilisp does not alias array"
+       :phel    "Phel does not alias array"
        :rust    "Clojurust does not alias array"
        :default (testing "array aliasing"
                   (let [arr (to-array [1 2 3]), v (vec arr)]
@@ -33,7 +34,7 @@
                     (is (= [-1 2 3] v)))))
 
     (testing "bad shape"
-      (are [arg] (thrown? #?(:cljs js/Error :default Exception) (vec arg))
+      (are [arg] (p/thrown? (vec arg))
                  42
                  3.14
                  true
