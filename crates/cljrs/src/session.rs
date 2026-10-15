@@ -449,6 +449,30 @@ pub fn eval_form(form: &cljrs_reader::Form, env: &mut Env) -> Result<Value, Eval
     eval(form, env)
 }
 
+/// Let tasks queued on the shared `LocalSet` run for `slice`, then return.
+///
+/// [`eval_form`] only drives the `LocalSet` while a form is being evaluated,
+/// so between forms a long-lived task (an `^:async` loop started from an
+/// nREPL eval, a core.async producer) is frozen. A server with nothing to do
+/// calls this to keep such tasks moving. Without the `async` feature there
+/// is nothing to drive, so it just sleeps.
+#[cfg(feature = "async")]
+pub fn drive_idle(slice: std::time::Duration) {
+    ASYNC_DRIVER.with(|d| match d.borrow().as_ref() {
+        // The timer must be built inside block_on, where the runtime is
+        // entered; building it out here panics with "no reactor running".
+        Some(drv) => drv
+            .local
+            .block_on(&drv.rt, async move { tokio::time::sleep(slice).await }),
+        None => std::thread::sleep(slice),
+    })
+}
+
+#[cfg(not(feature = "async"))]
+pub fn drive_idle(slice: std::time::Duration) {
+    std::thread::sleep(slice)
+}
+
 pub fn format_eval_error(e: EvalError) -> miette::Report {
     match e {
         EvalError::Thrown(val) => miette::miette!("Unhandled exception: {}", val),

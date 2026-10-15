@@ -181,13 +181,41 @@ impl Server {
 
     /// Like [`Server::serve`], but every top-level form is evaluated through
     /// `eval_form`, letting the caller drive async forms on its own runtime.
-    pub fn serve_with(mut self, mut eval_form: impl EvalForm) -> miette::Result<()> {
+    pub fn serve_with(self, mut eval_form: impl EvalForm) -> miette::Result<()> {
         let mut engine = engine::Engine::new(self.globals.clone());
         // recv() errors once every job sender is gone, i.e. the network
         // thread (and all its connection tasks) has shut down.
         while let Ok(job) = self.job_rx.recv() {
             engine.handle(job, &mut eval_form);
         }
+        self.finish()
+    }
+
+    /// Like [`Server::serve_with`], but when no request arrives within
+    /// `slice` the interpreter thread calls `idle(slice)` instead of
+    /// blocking. Work that only advances while this thread drives it — tasks
+    /// queued on a `LocalSet` by an earlier eval, such as an `^:async` loop
+    /// started from the REPL — keeps running between requests. `idle` should
+    /// return within about `slice`: a request waits at most that long.
+    pub fn serve_with_idle(
+        self,
+        mut eval_form: impl EvalForm,
+        slice: std::time::Duration,
+        mut idle: impl FnMut(std::time::Duration),
+    ) -> miette::Result<()> {
+        let mut engine = engine::Engine::new(self.globals.clone());
+        loop {
+            match self.job_rx.recv_timeout(slice) {
+                Ok(job) => engine.handle(job, &mut eval_form),
+                Err(mpsc::RecvTimeoutError::Timeout) => idle(slice),
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+        }
+        self.finish()
+    }
+
+    /// Join the network thread and remove the port file once serving ends.
+    fn finish(mut self) -> miette::Result<()> {
         if let Some(handle) = self.net_thread.take() {
             let _ = handle.join();
         }

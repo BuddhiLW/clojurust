@@ -39,6 +39,7 @@ Each session has its own `Env` (namespace) and its own `*1`/`*2`/`*3`/`*e`, boun
 - `Server::port(&self) -> u16`
 - `Server::serve(self) -> miette::Result<()>` — blocks the calling (interpreter) thread processing requests until shutdown; evaluates with `cljrs_runtime::tiered::eval`.
 - `Server::serve_with(self, eval_form: impl EvalForm) -> miette::Result<()>` — like `serve`, but each top-level form goes through the supplied evaluator (the CLI passes its async `LocalSet` driver).
+- `Server::serve_with_idle(self, eval_form: impl EvalForm, slice: Duration, idle: impl FnMut(Duration)) -> miette::Result<()>` — like `serve_with`, but when no request arrives within `slice` it calls `idle(slice)` instead of parking, so tasks an earlier eval queued on the caller's `LocalSet` (an `^:async` loop started from the REPL) keep running between requests. `cljrs nrepl` uses it with a 20 ms slice and `session::drive_idle`.
 - `Server::shutdown_handle(&self) -> ShutdownHandle` — `Send + Clone`; `shutdown()` stops the network thread and ends `serve`.
 - `trait EvalForm: FnMut(&Form, &mut Env) -> Result<Value, EvalError>` — evaluator signature for `serve_with`.
 - `mod bencode` — `Bencode`, `encode`, `encode_to_vec`, `decode` (public for tests/clients).

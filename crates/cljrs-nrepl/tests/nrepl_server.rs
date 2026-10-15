@@ -125,6 +125,41 @@ fn nrepl_end_to_end() {
     client_thread.join().expect("client scenario failed");
 }
 
+/// With no client at all, `serve_with_idle` hands the thread to `idle` on
+/// every slice instead of parking in `recv`, and still returns on shutdown.
+#[test]
+fn serve_with_idle_drives_idle_between_requests() {
+    let globals = {
+        let runtime = cljrs_runtime::Runtime::builder()
+            .execution_mode(cljrs_runtime::ExecutionMode::Tiered)
+            .build()
+            .expect("runtime");
+        cljrs_stdlib::install(&runtime);
+        runtime.into_globals()
+    };
+    let server = cljrs_nrepl::start(cljrs_nrepl::Config::default(), globals).expect("start");
+    let shutdown = server.shutdown_handle();
+    let stopper = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(200));
+        shutdown.shutdown();
+    });
+
+    let mut idle_calls = 0u32;
+    server
+        .serve_with_idle(
+            cljrs_runtime::tiered::eval,
+            Duration::from_millis(10),
+            |_| idle_calls += 1,
+        )
+        .expect("serve");
+    stopper.join().unwrap();
+
+    assert!(
+        idle_calls >= 5,
+        "idle should run on every quiet slice, ran {idle_calls} times in 200ms"
+    );
+}
+
 fn client_scenario(port: u16) {
     let mut c = Client::connect(port);
 
