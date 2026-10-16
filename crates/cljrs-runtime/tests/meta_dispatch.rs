@@ -135,9 +135,13 @@ fn try_eval(env: &mut Env, src: &str) -> Result<Value, String> {
 /// it is the protocol-dispatch path. Its instances need a definition first, so
 /// they cannot sit in `VALUES`; each entry is (definition, instance, tag).
 const DATATYPES: &[(&str, &str, &str)] = &[
-    ("(deftype Point [x y])", "(->Point 1 2)", "Point"),
-    ("(defrecord Pair [a b])", "(->Pair 1 2)", "Pair"),
-    ("(defrecord Pair [a b])", "(map->Pair {:a 1 :b 2})", "Pair"),
+    ("(deftype Point [x y])", "(->Point 1 2)", "user.Point"),
+    ("(defrecord Pair [a b])", "(->Pair 1 2)", "user.Pair"),
+    (
+        "(defrecord Pair [a b])",
+        "(map->Pair {:a 1 :b 2})",
+        "user.Pair",
+    ),
 ];
 
 #[test]
@@ -173,7 +177,7 @@ fn a_record_keeps_its_tag_through_a_metadata_wrapper() {
         "a record changed its dispatch tag under an annotation"
     );
     assert!(
-        type_tag_matches(&annotated, "Pair"),
+        type_tag_matches(&annotated, "user.Pair"),
         "an annotated record is a permanent inline-cache miss"
     );
     assert!(!type_tag_matches(&annotated, "NoSuchTag"));

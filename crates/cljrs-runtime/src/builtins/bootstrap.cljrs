@@ -256,13 +256,11 @@
               (ensure-reduced result)
               result)))))))
   ([n coll]
-   (let [n (int n)]
-     (cond (pos? n)
-           (when (pos? n)
-             (lazy-seq
-               (when-let [s (seq coll)]
-                 (cons (first s) (take (dec n) (rest s))))))
-           :else []))))
+   (cond (pos? n)
+         (lazy-seq
+           (when-let [s (seq coll)]
+             (cons (first s) (take (dec n) (rest s)))))
+         :else [])))
 
 (defn drop
   "Returns a lazy sequence of all but the first n items in coll. With no
@@ -319,10 +317,11 @@
             (do (vreset! dv false)
                 (rf result input))))))))
   ([pred coll]
-   (loop [s (seq coll)]
-     (if (and s (pred (first s)))
-       (recur (next s))
-       (or s '())))))
+   (lazy-seq
+     (loop [s (seq coll)]
+       (if (and s (pred (first s)))
+         (recur (next s))
+         (or s '()))))))
 
 (defn dorun
   "Walks through coll, realizing each lazy element, for side effects.
@@ -763,7 +762,12 @@
 (defn repeat
   "Returns a lazy (infinite, or length n if supplied) sequence of xs."
   ([x] (lazy-seq (cons x (repeat x))))
-  ([n x] (take n (repeat x))))
+  ([n x]
+   (take (cond
+           (true? n) 1
+           (false? n) 0
+           :else (long n))
+         (repeat x))))
 
 (defn repeatedly
   "Takes a function of no args and returns a lazy (infinite, or length n
@@ -900,13 +904,14 @@
             (do (vswap! seen conj input)
                 (rf result input))))))))
   ([coll]
-   (loop [s (seq coll) seen #{} acc []]
-     (if s
-       (let [v (first s)]
-         (if (contains? seen v)
-           (recur (next s) seen acc)
-           (recur (next s) (conj seen v) (conj acc v))))
-       (seq acc)))))
+   (letfn [(step [s seen]
+             (lazy-seq
+               (when-let [s (seq s)]
+                 (let [v (first s)]
+                   (if (contains? seen v)
+                     (step (next s) seen)
+                     (cons v (step (next s) (conj seen v))))))))]
+     (step coll #{}))))
 
 (defn dedupe
   "Returns a lazy sequence removing consecutive duplicates in coll.
@@ -1471,17 +1476,39 @@
                                      (filter (fn [i] (= n (mname i))) impls))))
                  names))))
 
+;; The form naming type symbol `tsym` as a dispatch tag at run time. A record or
+;; deftype name resolves, through the namespace the code is evaluated in (the
+;; same one deftype* minted the tag in), to the qualified tag its var holds
+;; (`my.ns.Point`), aliases and qualified names included; anything else
+;; (`String`, `nil`, a native type) stays the bare symbol. `(var ...)` rather
+;; than `resolve`, because `resolve` answers in `*ns*`, which differs from the
+;; evaluating namespace under `eval` from another namespace's code.
+(defn- extend-tag-form [tsym]
+  (if (symbol? tsym)
+    ;; `var` takes a plain symbol; a head may carry metadata (^:m Type).
+    (let [bare (symbol (namespace tsym) (name tsym))]
+      `(let [v# (try (var ~bare) (catch Exception _# nil))
+             t# (when v# (deref v#))
+             n# (str "." (name (quote ~bare)))
+             s# (str t#)]
+         (if (and (symbol? t#)
+                  (> (count s#) (count n#))
+                  (= n# (subs s# (- (count s#) (count n#)))))
+           t#
+           (quote ~tsym))))
+    (list 'quote tsym)))
+
 (defmacro extend-type [tsym & specs]
   (cons 'do
         (map (fn [g]
-               (list 'extend (list 'quote tsym) (first g)
+               (list 'extend (extend-tag-form tsym) (first g)
                      (extend-impl-map (second g))))
              (extend-spec-groups specs))))
 
 (defmacro extend-protocol [psym & specs]
   (cons 'do
         (map (fn [g]
-               (list 'extend (list 'quote (first g)) psym
+               (list 'extend (extend-tag-form (first g)) psym
                      (extend-impl-map (second g))))
              (extend-spec-groups specs))))
 
@@ -1893,12 +1920,11 @@
         immm  (zipmap (map kw imm) (map bare imm))
         mutm  (zipmap (map kw mut) (map bare mut))]
     `(do
-       (deftype* ~tsym ~fields ~@impls)
+       (def ~tsym (symbol (deftype* ~tsym ~fields ~@impls)))
        (defn ~ctor [~@plain]
          ~(if (seq mut)
-            `(make-type-instance-mut ~tname ~immm ~mutm)
-            `(make-type-instance ~tname ~immm)))
-       (def ~tsym (quote ~tsym))
+            `(make-type-instance-mut (str ~tsym) ~immm ~mutm)
+            `(make-type-instance (str ~tsym) ~immm)))
        ~tsym)))
 
 ;; defrecord: like deftype but fields are always immutable and it also gets the
@@ -1912,10 +1938,9 @@
         plain (mapv bare fields)
         fmap  (zipmap (map kw fields) (map bare fields))]
     `(do
-       (deftype* ~tsym ~plain ~@impls)
-       (defn ~pos [~@plain] (make-record-instance ~tname ~fmap))
-       (defn ~mapc [m#] (make-record-instance ~tname m#))
-       (def ~tsym (quote ~tsym))
+       (def ~tsym (symbol (deftype* ~tsym ~plain ~@impls)))
+       (defn ~pos [~@plain] (make-record-instance (str ~tsym) ~fmap))
+       (defn ~mapc [m#] (make-record-instance (str ~tsym) m#))
        ~tsym)))
 
 ;; reify: an anonymous, field-less instance whose methods close over the

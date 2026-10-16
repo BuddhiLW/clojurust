@@ -242,6 +242,32 @@ pub fn type_tag_of(val: &Value) -> Arc<str> {
     }
 }
 
+/// What to add to a "No implementation" error when the method is registered
+/// under the unqualified name of the type being dispatched on.
+///
+/// A record's tag is `my.ns.Point`. An `extend-type` or `extend-protocol` that
+/// names `Point` from a namespace where the symbol does not resolve cannot tell
+/// it from a native type's tag, so it registers under bare `Point` and
+/// succeeds; the call is where that surfaces. Empty when there is no such
+/// registration.
+fn unqualified_impl_hint<V>(
+    impls: &std::collections::HashMap<Arc<str>, std::collections::HashMap<Arc<str>, V>>,
+    tag: &str,
+    method: &str,
+) -> String {
+    let Some((_, bare)) = tag.rsplit_once('.') else {
+        return String::new();
+    };
+    if !impls.get(bare).is_some_and(|m| m.contains_key(method)) {
+        return String::new();
+    }
+    format!(
+        " (an implementation is registered under the unqualified tag {bare}: \
+         where it was extended, {bare} did not resolve to {tag}; \
+         :import or :refer the type there)"
+    )
+}
+
 /// Allocation-free check that `val`'s protocol dispatch tag equals `tag`.
 ///
 /// Must agree exactly with [`type_tag_of`] — it exists so inline caches
@@ -326,6 +352,18 @@ pub fn apply_value(callee: &Value, args: Vec<Value>, env: &mut Env) -> EvalResul
         Value::NativeFunction(nf) => {
             crate::env::policy::check_native(&nf.get().name)?;
             check_arity(&nf.get().arity, args.len(), &nf.get().name)?;
+            // A direct `(apply ...)` call is intercepted while forms are still
+            // available, but apply is itself an IFn and can be passed to apply.
+            // Handle that already-evaluated path here instead of invoking the
+            // registration sentinel.
+            if nf.get().name.as_ref() == "apply" {
+                let callee = args[0].clone();
+                let mut applied = args[1..args.len() - 1].to_vec();
+                let spread = crate::builtins::builtins::value_to_seq(&args[args.len() - 1])
+                    .map_err(crate::env::error::value_error_to_eval_error)?;
+                applied.extend(spread);
+                return apply_value(&callee, applied, env);
+            }
             // Register the caller's env as a GC root: native functions may
             // call back into Clojure (via invoke()), which creates a fresh Env
             // and may trigger GC.
@@ -390,9 +428,10 @@ pub fn apply_value(callee: &Value, args: Vec<Value>, env: &mut Env) -> EvalResul
                 .cloned()
                 .ok_or_else(|| {
                     EvalError::Runtime(format!(
-                        "No implementation of protocol {} for type {}",
+                        "No implementation of protocol {} for type {}{}",
                         pf_ref.protocol.get().name,
-                        tag
+                        tag,
+                        unqualified_impl_hint(&impls, &tag, &pf_ref.method_name)
                     ))
                 })?;
             drop(impls);
@@ -470,8 +509,72 @@ pub fn apply_value(callee: &Value, args: Vec<Value>, env: &mut Env) -> EvalResul
                 Some(Value::TypeInstance(ti)) => {
                     Ok(ti.get().fields.get(callee).unwrap_or_else(default))
                 }
+                Some(Value::Set(set)) => {
+                    if set.contains(callee) {
+                        Ok(callee.clone())
+                    } else {
+                        Ok(default())
+                    }
+                }
+                Some(Value::TransientMap(map)) => Ok(map.get().get(callee).unwrap_or_else(default)),
+                Some(Value::TransientSet(set)) => {
+                    if set.get().contains(callee) {
+                        Ok(callee.clone())
+                    } else {
+                        Ok(default())
+                    }
+                }
                 Some(Value::Nil) => Ok(default()),
                 _ => Ok(Value::Nil),
+            }
+        }
+        Value::Vector(vector) => {
+            if args.len() != 1 {
+                return Err(EvalError::Arity {
+                    name: "vector".into(),
+                    expected: "1".into(),
+                    got: args.len(),
+                });
+            }
+            let Value::Long(index) = args[0] else {
+                return Err(EvalError::Runtime(format!(
+                    "vector index must be an integer, got {}",
+                    args[0].type_name()
+                )));
+            };
+            let found = usize::try_from(index)
+                .ok()
+                .and_then(|index| vector.get().nth(index).cloned());
+            match found {
+                Some(value) => Ok(value),
+                None => Err(EvalError::Runtime(format!(
+                    "vector index out of bounds: {index}"
+                ))),
+            }
+        }
+        Value::TransientVector(vector) => {
+            if !(1..=2).contains(&args.len()) {
+                return Err(EvalError::Arity {
+                    name: "transient-vector".into(),
+                    expected: "1 or 2".into(),
+                    got: args.len(),
+                });
+            }
+            let Value::Long(index) = args[0] else {
+                return Err(EvalError::Runtime(format!(
+                    "vector index must be an integer, got {}",
+                    args[0].type_name()
+                )));
+            };
+            let found = usize::try_from(index)
+                .ok()
+                .and_then(|index| vector.get().get(index));
+            match (found, args.get(1)) {
+                (Some(value), _) => Ok(value),
+                (None, Some(default)) => Ok(default.clone()),
+                (None, None) => Err(EvalError::Runtime(format!(
+                    "vector index out of bounds: {index}"
+                ))),
             }
         }
         Value::Map(m) => {
@@ -493,6 +596,17 @@ pub fn apply_value(callee: &Value, args: Vec<Value>, env: &mut Env) -> EvalResul
             }
             None => Ok(Value::Nil),
         },
+        Value::TransientMap(map) => match args.first() {
+            Some(key) => Ok(map
+                .get()
+                .get(key)
+                .unwrap_or(args.get(1).cloned().unwrap_or(Value::Nil))),
+            None => Ok(Value::Nil),
+        },
+        Value::TransientSet(set) => match args.first() {
+            Some(value) if set.get().contains(value) => Ok(value.clone()),
+            Some(_) | None => Ok(Value::Nil),
+        },
         Value::WithMeta(inner, _) => apply_value(inner, args, env),
         Value::Var(v) => {
             // Vars in function position are transparently deref'd (IFn on Var).
@@ -512,5 +626,57 @@ pub fn apply_value(callee: &Value, args: Vec<Value>, env: &mut Env) -> EvalResul
             "<{}> is not callable",
             other.type_name()
         ))),
+    }
+}
+
+#[cfg(test)]
+mod unqualified_impl_hint_tests {
+    use super::unqualified_impl_hint;
+    use proptest::prelude::*;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    proptest! {
+        /// A hint is given exactly when the dispatch tag is qualified and the
+        /// method called is registered under the tag's last segment; it then
+        /// names both tags. An impl of another method under the bare name, or
+        /// of this method under another tag, does not earn one.
+        #[test]
+        fn a_hint_is_given_iff_the_method_sits_under_the_bare_name(
+            ns in "[a-z]{1,4}(\\.[a-z]{1,4}){0,2}",
+            name in "[A-Z][a-z]{0,4}",
+            method in "[a-z]{1,4}",
+            qualified in any::<bool>(),
+            method_under_bare in any::<bool>(),
+            other_method_under_bare in any::<bool>(),
+            method_under_other_tag in any::<bool>(),
+        ) {
+            let mut impls: HashMap<Arc<str>, HashMap<Arc<str>, ()>> = HashMap::new();
+            let mut register = |tag: &str, method: &str| {
+                impls
+                    .entry(Arc::from(tag))
+                    .or_default()
+                    .insert(Arc::from(method), ());
+            };
+            if method_under_bare {
+                register(&name, &method);
+            }
+            if other_method_under_bare {
+                register(&name, &format!("{method}-other"));
+            }
+            if method_under_other_tag {
+                register(&format!("{name}Other"), &method);
+                register(&format!("other.{ns}.{name}"), &method);
+            }
+            let tag = if qualified { format!("{ns}.{name}") } else { name.clone() };
+
+            let hint = unqualified_impl_hint(&impls, &tag, &method);
+
+            prop_assert_eq!(!hint.is_empty(), qualified && method_under_bare, "{}", hint);
+            if !hint.is_empty() {
+                prop_assert!(hint.contains(&format!("unqualified tag {name}:")), "{}", hint);
+                prop_assert!(hint.contains(&format!("resolve to {tag};")), "{}", hint);
+            }
+        }
     }
 }

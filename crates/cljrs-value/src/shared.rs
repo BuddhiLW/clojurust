@@ -132,7 +132,7 @@ pub fn promote(value: &Value) -> Result<SharedValue, PromoteError> {
         Value::Long(n) => Ok(SharedValue::Long(*n)),
         Value::Double(d) => Ok(SharedValue::Double(*d)),
         Value::Char(c) => Ok(SharedValue::Char(*c)),
-        Value::Uuid(u) => Ok(SharedValue::Uuid(*u)),
+        Value::Uuid(u) => Ok(SharedValue::Uuid(u.get().0)),
         Value::Str(s) => Ok(SharedValue::Str(Arc::from(s.get().as_str()))),
         Value::Keyword(kw) => {
             let kw = kw.get();
@@ -167,7 +167,7 @@ pub fn demote(sv: &SharedValue) -> Value {
         SharedValue::Long(n) => Value::Long(*n),
         SharedValue::Double(d) => Value::Double(*d),
         SharedValue::Char(c) => Value::Char(*c),
-        SharedValue::Uuid(u) => Value::Uuid(*u),
+        SharedValue::Uuid(u) => Value::uuid(*u),
         SharedValue::Str(s) => Value::Str(GcPtr::new(s.as_ref().to_owned())),
         SharedValue::Keyword(kw) => Value::Keyword(GcPtr::new(kw.get().clone())),
         SharedValue::Symbol(sym) => Value::Symbol(GcPtr::new(sym.get().clone())),

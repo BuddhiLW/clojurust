@@ -1,7 +1,7 @@
 # Project Setup
 
 A mixed Rust/Clojure project needs three things: a `cljrs.edn` that points to
-the Rust crate, a `Cargo.toml` with the right crate type, and a `cljrs_init`
+the Rust crate, a `Cargo.toml` with the right crate type, and an init
 entry point.
 
 ## Directory layout
@@ -11,7 +11,7 @@ my-project/
 ├── cljrs.edn          # Clojure project config (source paths, :rust key)
 ├── Cargo.toml         # Rust crate manifest
 ├── src/
-│   ├── lib.rs         # Rust source — defines cljrs_init and native fns
+│   ├── lib.rs         # Rust source — defines the init fn and native fns
 │   └── main.cljrs     # Clojure entry point
 ```
 
@@ -26,14 +26,14 @@ Add a `:rust` map to the top-level config:
 {:paths ["src"]
 
  :rust {:crate "."                       ; path to Cargo.toml directory
-        :init  "my_project::cljrs_init"} ; Rust path to the init function
+        :init  "my_project::cljrs_init_my_project"} ; Rust path to the init function
 }
 ```
 
 | Key | Required | Description |
 |---|---|---|
 | `:crate` | yes | Path to the directory containing the user's `Cargo.toml`. Relative to `cljrs.edn`. |
-| `:init` | yes | Fully-qualified Rust path to the init function, e.g. `"my_crate::cljrs_init"`. The first `::` segment is used as the crate name. |
+| `:init` | yes | Fully-qualified Rust path to the init function, e.g. `"my_crate::cljrs_init_my_crate"`. The first `::` segment is used as the crate name. |
 
 ## `Cargo.toml`
 
@@ -57,7 +57,7 @@ cljrs-interop = { path = "/path/to/cljrs/crates/cljrs-interop" }
 > `rlib` allows `cljrs compile` to link the crate statically into the AOT
 > binary. Both can coexist in `crate-type`.
 
-## The `cljrs_init` entry point
+## The init entry point
 
 The init function receives a `*mut Registry` pointer and registers all native
 functions. It must have C linkage so the dynamic linker can find it by name:
@@ -66,7 +66,7 @@ functions. It must have C linkage so the dynamic linker can find it by name:
 use cljrs_interop::{Registry, wrap_fn1, wrap_fn2};
 
 #[no_mangle]
-pub extern "C" fn cljrs_init(registry: *mut Registry) {
+pub extern "C" fn cljrs_init_my_project(registry: *mut Registry) {
     let r = unsafe { &mut *registry };
 
     r.define("my.project/greet",
@@ -81,8 +81,15 @@ pub extern "C" fn cljrs_init(registry: *mut Registry) {
 
 The function name in `:rust :init` (`"my_project::cljrs_init"`) must match the
 Rust function name used in `#[no_mangle]` (`cljrs_init`). The crate prefix
-(`my_project`) is used when generating the AOT harness; it must match the
-`[package] name` in `Cargo.toml` with hyphens replaced by underscores.
+(`my_project`) is the Rust *identifier* for your crate — the `[package] name`
+with hyphens replaced by underscores, which is how Rust source always spells
+it.
+
+You do **not** have to rename your package to match. A hyphenated package name
+(`my-plugin`) is the Rust norm and works: the AOT harness reads the real name
+from your `Cargo.toml` and emits `package = "my-plugin"` alongside the
+identifier, so Cargo resolves the dependency while generated source keeps
+calling the crate `my_plugin`.
 
 ## Calling native functions from Clojure
 
@@ -100,5 +107,5 @@ as `my.project/greet`. No `require` is needed unless you want a namespace alias:
 (native/add 3 4)                 ; => 7
 ```
 
-The namespace `my.project` is created automatically when `cljrs_init` is called;
+The namespace `my.project` is created automatically when the init function runs;
 you do not need to create or load a Clojure file for it.

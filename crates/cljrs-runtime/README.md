@@ -104,6 +104,20 @@ src/
     backend.rs          — JitBackend: the seam a compiler installs on a runtime
 
 tests/
+  common/mod.rs                    — one runtime per test thread, one namespace per
+                                     case: `shared_globals`, `fresh_env`,
+                                     `fresh_env_in(mode)`, `reset_env_in(mode, ns)`,
+                                     `eval_in`, `eval_fresh`. Property suites use it
+                                     instead of building a runtime per case
+  runtime_startup_canary.rs        — the one suite that still pays for a runtime on
+                                     purpose: asserts a build stays under 150ms in
+                                     debug (best of five), so a startup regression
+                                     fails with a number rather than as CI getting
+                                     slower
+  collection_predicate_parity.rs   — coll?/map?/sequential?/associative?/counted?/
+                                     seqable?/record? as a table, against Clojure's
+                                     answers, over record, deftype, reify and the
+                                     built-in kinds
   no_gc_eval.rs                    — (no-gc) arithmetic, def provenance, region stack
   versioned_resolution.rs          — versioned resolution against a real git fixture
   vcs_provider.rs                  — the VcsProvider seam: default provider, degradation
@@ -111,6 +125,9 @@ tests/
                                      cache invalidation on provider/trust-set change
                                      (passes with and without the `deps` feature)
   require_spec_reader_conditional.rs — reader conditionals in ns require specs
+  reader_cond_cljrs_feature.rs     — `:cljrs` (canonical) and `:rust` (alias) select alike; clause order
+                                     decides against `:default`; deftype field
+                                     vector from a conditional (malli shape)
   refer_clojure.rs                 — `(:refer-clojure ...)` narrowing of the core refer
   core_shadows.rs                  — core_shadowed_names: what a namespace binds
                                      instead of clojure.core (issue #337)
@@ -426,6 +443,15 @@ an all-or-nothing checkpoint, and
 the evaluator. `EvalError::GasExhausted` is the dedicated caller-facing error.
 Exhaustion state is scoped per guard, so an exhausted inner evaluation cannot
 poison a healthy outer evaluation after the inner guard drops.
+
+The same checkpoints observe interrupt flags. `InterruptGuard::install(flag:
+Arc<AtomicBool>)` scopes a flag to an evaluation on the current thread; setting
+it from any thread fails the next `charge`, and `interrupt_requested() -> bool`
+tells an interrupt from real exhaustion. `active_interrupts() ->
+Vec<Arc<AtomicBool>>` captures the installed flags where an async task is
+spawned, and `InterruptScope::enter(&flags)` makes them the only flags observed
+for the duration of one poll (restoring the previous ones on drop), so a task
+answers only to an interrupt of the evaluation that spawned it.
 
 ### `policy` submodule
 
@@ -760,12 +786,23 @@ instead of throwing, and returns just the `:doc` string.
 ### Reader-conditional resolution (`form.rs`)
 
 The reader is platform-agnostic: it parses every branch of `#?(...)` / `#?@(...)`
-and hands back a `FormKind::ReaderCond` node. Selecting the `:rust` branch is
+and hands back a `FormKind::ReaderCond` node. Selecting the platform branch is
 therefore the job of each form-consuming boundary, and this module holds the
-calculations they share.
+calculations they share. This runtime answers to two feature keys: `:cljrs`, the canonical
+key (the dialect's own name, which portable libraries such as malli use), and
+`:rust`, a legacy alias that selects the same branch.
+Clauses are tried in source order and the first match wins, as in Clojure;
+`:default` always matches, so `#?(:default :a :cljrs :b)` selects `:a`.
+The tree-walk evaluator, quoted data, syntax-quote, `ns` require specs, catch
+targets and AOT all go through `select_reader_cond`.
 
 ```rust
-/// The `:rust` branch of a conditional's clauses, or the `:default` branch.
+/// Whether `k` (a keyword name, no colon) is a feature key of this runtime:
+/// `"cljrs"` (canonical) or `"rust"` (legacy alias).
+pub fn is_platform_feature(k: &str) -> bool;
+
+/// The first clause whose key is a platform feature or `:default`, in
+/// clause order; `None` when no clause matches.
 pub fn select_reader_cond(clauses: &[Form]) -> Option<&Form>;
 
 /// Expand `#?`/`#?@` across a sibling slice: a non-splicing conditional
@@ -1040,8 +1077,9 @@ value).
 
 ### `eval_defn(args, env) -> EvalResult`
 
-Evaluate a `defn` form.  Accepts metadata on the name (`(defn ^:async f …)`) and
-an attr-map (`(defn f {:async true} …)`); `^:async` marks the resulting `CljxFn`
+Evaluate a `defn` form.  Accepts metadata on the name (`(defn ^:async f …)`),
+an attr-map (`(defn f {:async true} …)`), or the params vector
+(`(defn f ^:async [..] …)`, detected by `eval_fn`); `^:async` marks the resulting `CljxFn`
 as async.  Under `no-gc`, wraps fn creation in `StaticCtxGuard` so the `CljxFn`
 object lands in the `StaticArena`.
 
@@ -1057,12 +1095,34 @@ for `defmacro` the implicit `&form`/`&env` params are elided from the shown
 signature.  This is what `clojure.core/doc` and `doc-data` (in the `builtins`
 module) read back, and what `cljrs-nrepl`'s `op_lookup` surfaces to editors.
 
-### `meta_form_is_async(meta: &Form) -> bool`
+### Recognising `:async`
 
-Returns true when a `^meta` form (or attr-map literal) requests `:async` — either
-the keyword shorthand `^:async` or an explicit `{:async true}` map.  `fn`/`defn`
-use it to set `CljxFn::is_async`, which `env::apply::dispatch_if_async`
-checks at call time to route through the async runtime.
+`fn`/`defn` set `CljxFn::is_async` when a `^meta` form (or attr-map literal)
+requests `:async`, as decided by `Form::requests_async` in `cljrs-reader` — the
+same predicate IR lowering uses.  `env::apply::dispatch_if_async` checks the
+flag at call time to route through the async runtime.  The `^:async` may sit on
+the fn's first argument (`(fn ^:async [..] ..)`, peeled by `eval_fn`), on the
+params vector after a name (`(fn name ^:async [..] ..)`; both per
+`Form::fn_args_request_async`, which `eval_fn` and IR lowering share), or on the
+whole form (`^:async (fn [..] ..)`, handled by `eval`'s `FormKind::Meta` arm,
+which also attaches `{:async true}` as metadata since an `fn` form takes runtime
+metadata).  IR lowering refuses any body containing such an anonymous async fn
+(`Form::is_async_fn_form`), so it is always built here and calling it returns a
+`Future` in every tier.
+
+The spellings that request async, exhaustively (`^{:async true}` works wherever
+`^:async` does, and `fn*` wherever `fn` does):
+
+| spelling | async? |
+|---|---|
+| `^:async (fn [..] ..)` | yes |
+| `(fn ^:async [..] ..)` | yes |
+| `(fn ^:async name [..] ..)` | yes |
+| `(defn ^:async name [..] ..)` | yes |
+| `(defn name {:async true} [..] ..)` | yes |
+| `(fn name ^:async [..] ..)` | yes |
+| `(defn name ^:async [..] ..)` | yes (also after a docstring / attr-map) |
+| `(fn name (^:async [..] ..))` | **no** — metadata on a multi-arity clause's params is a hint |
 
 ### Which natives are intercepted, and by whom
 
@@ -1181,6 +1241,27 @@ conditional in ANY slot of an `ns` require spec, namespace included, so
 `[#?(:clj clojure.core :cljs cljs.core) :as core]` reads — an option selecting
 no branch is dropped, a namespace selecting none is an error.
 
+**Pieces shared with the async evaluator.** `cljrs-async`'s `eval_async` has its
+own arm for every special form that evaluates a sub-expression in place, because
+running one on the sync path parks the `LocalSet` thread at any `await` inside
+it. To keep those arms from re-implementing the forms, `special.rs` exposes each
+form's non-evaluating parts:
+
+| item | used for |
+|---|---|
+| `parse_try_args`, `CatchClause`, `catch_type_matches`, `eval_error_to_value` | `try` |
+| `DefTarget`, `parse_def(args, env) -> EvalResult<DefTarget>`, `intern_def(target, val, env)` | `def`: name, merged `^meta`/docstring and value form, then interning an evaluated value |
+| `defonce_existing(name, env) -> Option<Value>` | `defonce`: the already-bound var it leaves untouched |
+| `throw_value(val) -> EvalError` | `throw`: wraps a non-error value in an `ExceptionInfo` |
+| `set_bang_symbol(sym, val, env)`, `set_bang_field_target(form) -> Option<(&str, &Form)>`, `set_type_instance_field(inst, field, val)`, `set_bang_target_error()` | `set!` on a symbol, on `(.-field inst)`, and the error for any other target |
+| `push_letfn_frame(args, env) -> EvalResult<()>` | `letfn`: pushes a frame with every fn mutually bound (popped already on error) |
+
+Two thread-local stacks gained a resume operation for the same caller, which
+keeps `binding`/`with-out-str` state installed only while its own task is
+polled: `dynamics::take_frame(guard) -> HashMap<VarKey, Value>` pops a
+`binding` frame and returns it, and
+`builtins::builtins::resume_output_capture(buf)` pushes a capture buffer back.
+
 **The datatype, protocol and multimethod family is Clojure, not Rust.**
 `deftype`, `defrecord`, `reify`, `defprotocol`, `extend-type`,
 `extend-protocol`, `defmulti` and `defmethod` are all macros in
@@ -1222,6 +1303,20 @@ Naming the target by SYMBOL in a macro expansion rather than by string in a Rust
 handler is not only shorter: `(defmethod other.ns/m ...)` and
 `(extend-type T other.ns/P ...)` resolve through the ordinary rules, aliases
 included, where a handler doing `lookup_in_ns(current_ns, "other.ns/m")` cannot.
+
+A record or deftype's dispatch tag is qualified by its defining namespace
+(`my.ns.Point`), so `extend-type` and `extend-protocol` reach it through the
+type's var. An unqualified `Point` therefore has to resolve where it is
+extended: defined there, referred, or imported. `ns` honours `(:import [my.ns
+Point])`, `(:import (my.ns Point))` and `(:import my.ns.Point)` by referring the
+var of each named type that is loaded (`import_types` in `special.rs`; the
+package is also tried with `_` read as `-`), and ignores names that are not
+loaded types, such as host classes in a `.cljc` file. A type symbol that does
+not resolve cannot be told from a native type's tag (`String`, a
+`NativeObject`'s `type_tag`), so it registers under the bare name; when a call
+then finds no implementation for `my.ns.Point` while one sits under bare
+`Point`, the "No implementation" error says so (`unqualified_impl_hint` in
+`env/apply.rs`).
 
 Putting the target in evaluation position does cost one thing, and `defmethod`
 pays it back deliberately. The two ways a target can be wrong — no such var, and

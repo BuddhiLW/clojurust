@@ -144,7 +144,21 @@ pub fn eval(form: &Form, env: &mut Env) -> EvalResult {
             //
             // `lower::anf` applies the same rule, so a promoted or AOT-compiled
             // body answers `meta` the same way an interpreted one does.
-            let value = eval(form, env)?;
+            let mut value = eval(form, env)?;
+            // `^:async (fn …)` is both: it makes the fn async, and — an `fn`
+            // taking runtime metadata — lands `{:async true}` on it.
+            // A stacked annotation (`^:async ^:a (fn …)`) has already wrapped
+            // the fresh fn. One unwrap suffices: `Value::with_meta` flattens,
+            // so stacked annotations never nest `WithMeta`.
+            if meta.requests_async() && form.unmeta().is_fn_form() {
+                let target = match &mut value {
+                    Value::WithMeta(inner, _) => inner.as_mut(),
+                    other => other,
+                };
+                if let Value::Fn(f) = target {
+                    f.get_mut().is_async = true;
+                }
+            }
             if !form.takes_runtime_meta() {
                 return Ok(value);
             }
@@ -426,22 +440,7 @@ pub fn eval_body(forms: &[Form], env: &mut Env) -> EvalResult {
 // ── reader cond ───────────────────────────────────────────────────────────────
 
 fn eval_reader_cond(clauses: &[Form], env: &mut Env) -> EvalResult {
-    // clauses = [kw form kw form ...]
-    let mut i = 0;
-    let mut default: Option<&Form> = None;
-    while i + 1 < clauses.len() {
-        match &clauses[i].kind {
-            FormKind::Keyword(k) if k == "rust" => {
-                return eval(&clauses[i + 1], env);
-            }
-            FormKind::Keyword(k) if k == "default" => {
-                default = Some(&clauses[i + 1]);
-            }
-            _ => {}
-        }
-        i += 2;
-    }
-    match default {
+    match crate::builtins::form::select_reader_cond(clauses) {
         Some(f) => eval(f, env),
         None => Ok(Value::Nil),
     }
@@ -457,7 +456,7 @@ fn eval_tagged_literal(tag: &str, inner: &Form, env: &mut Env) -> EvalResult {
                 Value::Str(s) => {
                     let uuid = uuid::Uuid::parse_str(s.get())
                         .map_err(|e| EvalError::Runtime(format!("invalid UUID: {e}")))?;
-                    Ok(Value::Uuid(uuid.as_u128()))
+                    Ok(Value::uuid(uuid.as_u128()))
                 }
                 _ => Err(EvalError::Runtime(format!(
                     "#uuid expects a string, got {}",

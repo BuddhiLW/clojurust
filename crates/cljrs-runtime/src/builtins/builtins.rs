@@ -45,8 +45,19 @@ use std::thread::sleep;
 use std::time::Duration;
 // ── Output capture (for with-out-str) ─────────────────────────────────────────
 
+/// One entry of the capture stack: a buffer, plus an optional sink that
+/// receives the buffered text incrementally (streamed capture).
+struct OutputCapture {
+    buf: String,
+    sink: Option<Box<dyn FnMut(&str)>>,
+}
+
+/// A streamed capture flushes once its buffer holds this many bytes, even
+/// without a newline.
+const STREAM_FLUSH_THRESHOLD: usize = 1024;
+
 thread_local! {
-    static OUTPUT_CAPTURE: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+    static OUTPUT_CAPTURE: std::cell::RefCell<Vec<OutputCapture>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
 // BigDecimal precision
@@ -105,26 +116,87 @@ fn apply_precision_or_default(result: BigDecimal) -> ValueResult<BigDecimal> {
 
 /// Push a new capture buffer onto the stack.
 pub fn push_output_capture() {
-    OUTPUT_CAPTURE.with(|stack| stack.borrow_mut().push(String::new()));
+    OUTPUT_CAPTURE.with(|stack| {
+        stack.borrow_mut().push(OutputCapture {
+            buf: String::new(),
+            sink: None,
+        })
+    });
 }
 
-/// Pop the top capture buffer and return its contents.
+/// Push `buf` as the capture buffer, continuing a capture previously taken off
+/// the stack with [`pop_output_capture`]. The async evaluator uses this to keep
+/// a `with-out-str` buffer installed only while its own task is being polled.
+/// Only the plain (non-streamed) capture it pushed round-trips this way; a
+/// streamed capture below it on the stack is never popped by that evaluator.
+pub fn resume_output_capture(buf: String) {
+    OUTPUT_CAPTURE.with(|stack| stack.borrow_mut().push(OutputCapture { buf, sink: None }));
+}
+
+/// Push a *streamed* capture: output written while it is the top of the
+/// stack is handed to `sink` as it is produced — at each newline, once
+/// [`STREAM_FLUSH_THRESHOLD`] bytes are pending, and when the capture is
+/// popped. A nested [`push_output_capture`] (e.g. `with-out-str`) still
+/// captures its own output without streaming it.
+pub fn push_streaming_output_capture(sink: Box<dyn FnMut(&str)>) {
+    OUTPUT_CAPTURE.with(|stack| {
+        stack.borrow_mut().push(OutputCapture {
+            buf: String::new(),
+            sink: Some(sink),
+        })
+    });
+}
+
+/// Pop the top capture buffer and return its contents. For a streamed
+/// capture the pending text is flushed to its sink first and the returned
+/// string is empty.
 pub fn pop_output_capture() -> Option<String> {
-    OUTPUT_CAPTURE.with(|stack| stack.borrow_mut().pop())
+    let top = OUTPUT_CAPTURE.with(|stack| stack.borrow_mut().pop())?;
+    match top.sink {
+        None => Some(top.buf),
+        Some(mut sink) => {
+            if !top.buf.is_empty() {
+                sink(&top.buf);
+            }
+            Some(String::new())
+        }
+    }
 }
 
 /// Write to the current capture buffer if active, otherwise to stdout.
 /// Returns true if captured, false if written to stdout.
 fn capture_or_print(s: &str) -> bool {
-    OUTPUT_CAPTURE.with(|stack| {
+    // Take any chunk due for a streamed flush out of the stack, and call the
+    // sink with the stack unborrowed (the sink may run arbitrary code).
+    let due = OUTPUT_CAPTURE.with(|stack| {
         let mut stack = stack.borrow_mut();
-        if let Some(buf) = stack.last_mut() {
-            buf.push_str(s);
-            true
+        let top = stack.last_mut()?;
+        top.buf.push_str(s);
+        top.sink.as_ref()?;
+        let cut = if top.buf.len() >= STREAM_FLUSH_THRESHOLD {
+            top.buf.len()
         } else {
-            false
+            top.buf.rfind('\n').map(|i| i + 1)?
+        };
+        let rest = top.buf.split_off(cut);
+        let chunk = std::mem::replace(&mut top.buf, rest);
+        // Borrow the sink out while it runs.
+        let depth = stack.len();
+        let top = stack.last_mut()?;
+        top.sink.take().map(|sink| (chunk, sink, depth))
+    });
+    let Some((chunk, mut sink, depth)) = due else {
+        return OUTPUT_CAPTURE.with(|stack| !stack.borrow().is_empty());
+    };
+    sink(&chunk);
+    OUTPUT_CAPTURE.with(|stack| {
+        if let Some(entry) = stack.borrow_mut().get_mut(depth - 1)
+            && entry.sink.is_none()
+        {
+            entry.sink = Some(sink);
         }
-    })
+    });
+    true
 }
 
 // ── Docstrings ───────────────────────────────────────────────────────────────
@@ -379,6 +451,10 @@ const BUILTIN_DOCS: &[(&str, &str)] = &[
     ),
     ("satisfies?", "Returns true if x extends protocol."),
     ("extends?", "Returns true if atype extends protocol."),
+    (
+        "extenders",
+        "Returns a seq of the types extending protocol, or nil if none do.",
+    ),
     ("uuid?", "Returns true if x is a UUID."),
     (
         "native-object?",
@@ -1545,6 +1621,7 @@ pub fn register_all(globals: &Arc<GlobalEnv>, ns: &str) {
         ("extends?", Arity::Fixed(2), builtin_extends_q),
         ("multi-fn", Arity::Variadic { min: 2 }, builtin_multi_fn),
         ("add-method", Arity::Fixed(3), builtin_add_method),
+        ("extenders", Arity::Fixed(1), builtin_extenders),
         ("prefer-method", Arity::Fixed(3), builtin_prefer_method),
         ("remove-method", Arity::Fixed(2), builtin_remove_method),
         ("methods", Arity::Fixed(1), builtin_methods),
@@ -1854,6 +1931,10 @@ impl Iterator for ValueIter {
                     });
                     self.current = Value::List(GcPtr::new(PersistentList::from_iter(pairs)));
                 }
+                Value::Queue(q) => {
+                    let items = q.get().iter().cloned().collect::<Vec<_>>();
+                    self.current = Value::List(GcPtr::new(PersistentList::from_iter(items)));
+                }
                 Value::Str(s) => {
                     let chars: Vec<Value> = s.get().chars().map(Value::Char).collect();
                     self.current = Value::List(GcPtr::new(PersistentList::from_iter(chars)));
@@ -1942,10 +2023,6 @@ impl Iterator for ValueIter {
                         .collect();
                     self.current = Value::List(GcPtr::new(PersistentList::from_iter(items)));
                 }
-                Value::Queue(q) => {
-                    let items: Vec<Value> = q.get().iter().cloned().collect();
-                    self.current = Value::List(GcPtr::new(PersistentList::from_iter(items)));
-                }
                 Value::TypeInstance(ti) => {
                     let mut pairs = Vec::new();
                     ti.get().fields.for_each(|k, v| {
@@ -2017,7 +2094,7 @@ fn builtin_seqable_q(args: &[Value]) -> ValueResult<Value> {
 
 // ── Helper: value to sequence vector (eager — use only when random access is needed) ──
 
-fn value_to_seq(v: &Value) -> ValueResult<Vec<Value>> {
+pub(crate) fn value_to_seq(v: &Value) -> ValueResult<Vec<Value>> {
     if !is_seqable(v) {
         return Err(ValueError::WrongType {
             expected: "seqable",
@@ -2087,7 +2164,8 @@ fn numeric_as_bigdecimal(v: &Value) -> ValueResult<BigDecimal> {
         Value::Long(n) => Ok(BigDecimal::from(*n)),
         Value::BigInt(n) => Ok(BigDecimal::from(n.get().clone())),
         Value::BigDecimal(d) => Ok(d.get().clone()),
-        Value::Double(f) => Ok(BigDecimal::try_from(*f).unwrap_or_else(|_| BigDecimal::from(0))),
+        Value::Double(f) => BigDecimal::try_from(*f)
+            .map_err(|_| ValueError::Other("cannot convert NaN or Infinity to BigDecimal".into())),
         Value::Ratio(r) => {
             let numer = BigDecimal::from(r.get().numer().clone());
             let denom = BigDecimal::from(r.get().denom().clone());
@@ -2237,32 +2315,21 @@ pub fn builtin_add(args: &[Value]) -> ValueResult<Value> {
     }
 }
 
-// Addition, with automatic promotion long->bigint, double->bigdecimal
+// Addition with automatic promotion from long to bigint on overflow. Floating
+// point operands retain the same IEEE-754 semantics as `+`.
 fn builtin_add_quote(args: &[Value]) -> ValueResult<Value> {
     let cat = widest_category(args)?;
     match cat {
-        NumCat::Double => {
-            let mut sum = BigDecimal::from(0);
-            for v in args {
-                sum += numeric_as_bigdecimal(v)?;
-            }
-            match sum.to_f64() {
-                Some(sum) => Ok(Value::Double(sum)),
-                None => Ok(Value::BigDecimal(GcPtr::new(apply_precision(sum)?))),
-            }
-        }
+        NumCat::Double => builtin_add(args),
         NumCat::Long => {
             // Do the sum as bigints, return long if it fits in i64
             let mut sum = BigInt::from(0);
             for v in args {
                 sum += numeric_as_bigint(v)?;
             }
-            if sum > BigInt::from(0x7f00000000000000i64)
-                || sum < BigInt::from(-0x8000000000000000i64)
-            {
-                Ok(Value::BigInt(GcPtr::new(sum)))
-            } else {
-                Ok(Value::Long(sum.to_i64().unwrap()))
+            match sum.to_i64() {
+                Some(sum) => Ok(Value::Long(sum)),
+                None => Ok(Value::BigInt(GcPtr::new(sum))),
             }
         }
         _ => builtin_add(args),
@@ -2346,34 +2413,15 @@ pub fn builtin_sub(args: &[Value]) -> ValueResult<Value> {
 fn builtin_sub_quote(args: &[Value]) -> ValueResult<Value> {
     let cat = widest_category(args)?;
     match cat {
-        NumCat::Double if !args.is_empty() => {
-            let mut sum = BigDecimal::from(0);
-            for v in args {
-                sum -= numeric_as_bigdecimal(v)?;
-            }
-            match sum.to_f64() {
-                // produces +Inf/-Inf on overflow
-                Some(f) => {
-                    if f.is_infinite() {
-                        Ok(Value::BigDecimal(GcPtr::new(sum)))
-                    } else {
-                        Ok(Value::Double(f))
-                    }
-                }
-                None => Ok(Value::BigDecimal(GcPtr::new(sum))),
-            }
-        }
+        NumCat::Double if !args.is_empty() => builtin_sub(args),
         NumCat::Long if !args.is_empty() => {
             let mut sum = numeric_as_bigint(&args[0])?;
             for v in args[1..].iter() {
                 sum -= numeric_as_bigint(v)?;
             }
-            if sum < BigInt::from(-0x8000000000000000i64)
-                || sum > BigInt::from(0x7f00000000000000i64)
-            {
-                Ok(Value::BigInt(GcPtr::new(sum)))
-            } else {
-                Ok(Value::Long(sum.to_i64().unwrap()))
+            match sum.to_i64() {
+                Some(sum) => Ok(Value::Long(sum)),
+                None => Ok(Value::BigInt(GcPtr::new(sum))),
             }
         }
         _ => builtin_sub(args),
@@ -2383,28 +2431,15 @@ fn builtin_sub_quote(args: &[Value]) -> ValueResult<Value> {
 fn builtin_mul_quote(args: &[Value]) -> ValueResult<Value> {
     let cat = widest_category(args)?;
     match cat {
-        NumCat::Double => {
-            let mut result = BigDecimal::from(1);
-            for v in args {
-                result *= numeric_as_bigdecimal(v)?;
-            }
-            match result.to_f64() {
-                Some(f) if f.is_infinite() => Ok(Value::BigDecimal(GcPtr::new(result))),
-                Some(f) => Ok(Value::Double(f)),
-                None => Ok(Value::BigDecimal(GcPtr::new(result))),
-            }
-        }
+        NumCat::Double => builtin_mul(args),
         NumCat::Long => {
             let mut result = BigInt::from(1);
             for v in args {
                 result *= numeric_as_bigint(v)?;
             }
-            if result < BigInt::from(-0x8000000000000000i64)
-                || result > BigInt::from(0x7f00000000000000i64)
-            {
-                Ok(Value::BigInt(GcPtr::new(result)))
-            } else {
-                Ok(Value::Long(result.to_i64().unwrap()))
+            match result.to_i64() {
+                Some(result) => Ok(Value::Long(result)),
+                None => Ok(Value::BigInt(GcPtr::new(result))),
             }
         }
         _ => builtin_mul(args),
@@ -3111,6 +3146,16 @@ fn builtin_lte(args: &[Value]) -> ValueResult<Value> {
 
 fn builtin_gte(args: &[Value]) -> ValueResult<Value> {
     for pair in args.windows(2) {
+        if let Value::Double(d) = pair[0]
+            && d.is_nan()
+        {
+            return Ok(Value::Bool(false));
+        }
+        if let Value::Double(d) = pair[1]
+            && d.is_nan()
+        {
+            return Ok(Value::Bool(false));
+        }
         if num_compare(&pair[0], &pair[1])? == Ordering::Less {
             return Ok(Value::Bool(false));
         }
@@ -3130,6 +3175,7 @@ fn builtin_identical(args: &[Value]) -> ValueResult<Value> {
         (Value::Long(a), Value::Long(b)) => a == b,
         (Value::Double(a), Value::Double(b)) => a.to_bits() == b.to_bits(),
         (Value::Char(a), Value::Char(b)) => a == b,
+        (Value::Uuid(a), Value::Uuid(b)) => peq!(a, b),
         (Value::BigInt(a), Value::BigInt(b)) => peq!(a, b),
         (Value::BigDecimal(a), Value::BigDecimal(b)) => peq!(a, b),
         (Value::Ratio(a), Value::Ratio(b)) => peq!(a, b),
@@ -3476,7 +3522,7 @@ fn builtin_sorted_q(args: &[Value]) -> ValueResult<Value> {
 fn builtin_special_symbol_q(args: &[Value]) -> ValueResult<Value> {
     let is_special = match &args[0] {
         Value::Symbol(sym) if sym.get().namespace.is_none() => {
-            crate::builtins::SPECIAL_FORMS.contains(&sym.get().name.as_ref())
+            crate::builtins::special::CLOJURE_SPECIAL_SYMBOLS.contains(&sym.get().name.as_ref())
         }
         _ => false,
     };
@@ -3773,6 +3819,23 @@ fn builtin_get(args: &[Value]) -> ValueResult<Value> {
         Value::Vector(v) => {
             if let Value::Long(idx) = &args[1] {
                 Ok(v.get().nth(*idx as usize).cloned().unwrap_or(default))
+            } else {
+                Ok(default)
+            }
+        }
+        Value::TransientVector(v) => {
+            if let Value::Long(idx) = &args[1]
+                && *idx >= 0
+            {
+                Ok(v.get().get(*idx as usize).unwrap_or(default))
+            } else {
+                Ok(default)
+            }
+        }
+        Value::TransientMap(m) => Ok(m.get().get(&args[1]).unwrap_or(default)),
+        Value::TransientSet(s) => {
+            if s.get().contains(&args[1]) {
+                Ok(args[1].clone())
             } else {
                 Ok(default)
             }
@@ -4074,6 +4137,13 @@ fn builtin_seq(args: &[Value]) -> ValueResult<Value> {
                 Ok(cons_from_iter(s.get().chars().map(Value::Char)))
             }
         }
+        Value::Queue(q) => {
+            if q.get().is_empty() {
+                Ok(Value::Nil)
+            } else {
+                Ok(cons_from_iter(q.get().iter().cloned()))
+            }
+        }
         Value::ObjectArray(a) => {
             let array = a.get().0.lock().unwrap().clone();
             if array.is_empty() {
@@ -4148,14 +4218,6 @@ fn builtin_seq(args: &[Value]) -> ValueResult<Value> {
                 Ok(cons_from_iter(array.iter().map(|f| Value::Double(*f))))
             }
         }
-        Value::Queue(q) => {
-            let items: Vec<Value> = q.get().iter().cloned().collect();
-            if items.is_empty() {
-                Ok(Value::Nil)
-            } else {
-                Ok(cons_from_iter(items))
-            }
-        }
         Value::TypeInstance(ti) => {
             let mut pairs = Vec::new();
             ti.get().fields.for_each(|k, v| {
@@ -4210,10 +4272,10 @@ fn builtin_first(args: &[Value]) -> ValueResult<Value> {
                 Ok(Value::Nil)
             }
         }
-        _ => Err(ValueError::WrongType {
-            expected: "seqable",
-            got: args[0].type_name().to_string(),
-        }),
+        other => {
+            let seq = builtin_seq(std::slice::from_ref(other))?;
+            builtin_first(&[seq])
+        }
     }
 }
 
@@ -4309,6 +4371,9 @@ fn builtin_cons(args: &[Value]) -> ValueResult<Value> {
 fn builtin_nth(args: &[Value]) -> ValueResult<Value> {
     let raw = numeric_as_i64(&args[1])?;
     let default = args.get(2).cloned();
+    if matches!(args[0].unwrap_meta(), Value::Nil) {
+        return Ok(default.unwrap_or(Value::Nil));
+    }
     // A negative index is always out of range.  Handle it before the `as usize`
     // cast so the seq paths below don't walk a (possibly infinite) lazy seq up
     // to usize::MAX.  Matches Clojure: throw, or return the not-found default.
@@ -4325,19 +4390,18 @@ fn builtin_nth(args: &[Value]) -> ValueResult<Value> {
     match &args[0].unwrap_meta() {
         Value::LazySeq(_) | Value::Cons(_) => {
             let mut iter = ValueIter::new(args[0].clone());
-            let result = iter.nth(idx).or(default).unwrap_or(Value::Nil);
+            let result = iter.nth(idx);
             if let Some(err) = iter.take_error() {
                 return Err(ValueError::Other(err));
             }
-            Ok(result)
+            nth_or_not_found(result, default.as_ref(), idx, idx + 1)
         }
-        Value::List(l) => Ok(l
-            .get()
-            .iter()
-            .nth(idx)
-            .cloned()
-            .or(default)
-            .unwrap_or(Value::Nil)),
+        Value::List(l) => nth_or_not_found(
+            l.get().iter().nth(idx).cloned(),
+            default.as_ref(),
+            idx,
+            l.get().count(),
+        ),
         Value::Vector(v) => {
             if idx >= v.get().count() && default.is_none() {
                 Err(ValueError::IndexOutOfBounds {
@@ -4348,6 +4412,9 @@ fn builtin_nth(args: &[Value]) -> ValueResult<Value> {
                 Ok(v.get().nth(idx).cloned().or(default).unwrap_or(Value::Nil))
             }
         }
+        Value::TransientVector(v) => {
+            nth_or_not_found(v.get().get(idx), default.as_ref(), idx, v.get().count())
+        }
         Value::Str(s) => Ok(s
             .get()
             .chars()
@@ -4355,6 +4422,18 @@ fn builtin_nth(args: &[Value]) -> ValueResult<Value> {
             .map(Value::Char)
             .or(default)
             .unwrap_or(Value::Nil)),
+        Value::Matcher(m) => {
+            let capture = m
+                .get()
+                .capture()
+                .ok_or_else(|| ValueError::Other("no match found".into()))?;
+            let count = capture.groups.len();
+            let result = capture.groups.get(idx).map(|group| match group {
+                Some(group) => Value::string(group.clone()),
+                None => Value::Nil,
+            });
+            nth_or_not_found(result, default.as_ref(), idx, count)
+        }
         // A queue is Sequential but not Indexed, so the JVM reaches the element
         // by walking; an array is Indexed, and the JVM indexes it directly.
         // Both are answered here by walking, because neither is a hot path
@@ -4392,6 +4471,19 @@ fn nth_walked(items: Vec<Value>, idx: usize, default: Option<Value>) -> ValueRes
         });
     }
     Ok(items.into_iter().nth(idx).or(default).unwrap_or(Value::Nil))
+}
+
+fn nth_or_not_found(
+    value: Option<Value>,
+    default: Option<&Value>,
+    idx: usize,
+    count: usize,
+) -> ValueResult<Value> {
+    match (value, default) {
+        (Some(value), _) => Ok(value),
+        (None, Some(default)) => Ok(default.clone()),
+        (None, None) => Err(ValueError::IndexOutOfBounds { idx, count }),
+    }
 }
 
 fn builtin_last(args: &[Value]) -> ValueResult<Value> {
@@ -4440,28 +4532,9 @@ fn builtin_concat(args: &[Value]) -> ValueResult<Value> {
 ///
 /// Returns a lazy-seq that walks through each collection in order,
 /// producing cons cells on demand.
-fn concat_lazy(mut colls: Vec<Value>) -> Value {
-    // Skip leading nils and empty collections eagerly to find the first element.
-    loop {
-        if colls.is_empty() {
-            return Value::List(GcPtr::new(PersistentList::empty()));
-        }
-        let first_coll = &colls[0];
-        // Check if the first collection is nil or empty without fully realizing it.
-        match first_coll {
-            Value::Nil => {
-                colls.remove(0);
-                continue;
-            }
-            Value::List(l) if l.get().is_empty() => {
-                colls.remove(0);
-                continue;
-            }
-            _ => break,
-        }
-    }
-
-    // Return a lazy-seq thunk that produces cons(first, concat_lazy(rest)).
+fn concat_lazy(colls: Vec<Value>) -> Value {
+    // Even the zero-arity and all-empty cases are lazy in Clojure. The thunk
+    // discovers emptiness when the result is first observed.
     Value::LazySeq(GcPtr::new(LazySeq::new(Box::new(ConcatThunk { colls }))))
 }
 
@@ -4683,7 +4756,16 @@ fn builtin_contains_q(args: &[Value]) -> ValueResult<Value> {
     Ok(Value::Bool(match args[0].unwrap_meta() {
         Value::Map(m) => m.contains_key(&args[1]),
         Value::Set(s) => s.contains(&args[1]),
+        Value::TransientMap(m) => m.get().contains_key(&args[1]),
+        Value::TransientSet(s) => s.get().contains(&args[1]),
         Value::Vector(v) => {
+            if let Value::Long(idx) = &args[1] {
+                *idx >= 0 && (*idx as usize) < v.get().count()
+            } else {
+                false
+            }
+        }
+        Value::TransientVector(v) => {
             if let Value::Long(idx) = &args[1] {
                 *idx >= 0 && (*idx as usize) < v.get().count()
             } else {
@@ -4807,6 +4889,12 @@ fn builtin_reduce(args: &[Value]) -> ValueResult<Value> {
     match args.len() {
         2 => {
             // (reduce f coll) — no init value
+            if !is_seqable(&args[1]) {
+                return Err(ValueError::WrongType {
+                    expected: "seqable",
+                    got: args[1].type_name().to_string(),
+                });
+            }
             let mut iter = ValueIter::new(args[1].clone());
             let Some(first) = iter.next() else {
                 // empty coll: call (f) for init
@@ -4826,6 +4914,12 @@ fn builtin_reduce(args: &[Value]) -> ValueResult<Value> {
         }
         3 => {
             // (reduce f init coll)
+            if !is_seqable(&args[2]) {
+                return Err(ValueError::WrongType {
+                    expected: "seqable",
+                    got: args[2].type_name().to_string(),
+                });
+            }
             let mut acc = args[1].clone();
             let mut iter = ValueIter::new(args[2].clone());
             for item in iter.by_ref() {
@@ -8083,6 +8177,46 @@ fn builtin_extends_q(args: &[Value]) -> ValueResult<Value> {
     Ok(Value::Bool(impls.contains_key(type_tag.as_ref())))
 }
 
+/// `(extenders protocol)` — the types that extend `protocol`, as symbols.
+///
+/// Mirrors Clojure's `(keys (:impls protocol))`, including its `nil` for a
+/// protocol nothing has extended yet: `keys` of an empty map is `nil`, not an
+/// empty seq, and code that threads the result through `seq`/`when-let`
+/// depends on that.
+///
+/// The tags are sorted. The registry behind them is a `HashMap`, so the
+/// natural iteration order differs between runs of the same program, and a
+/// caller printing or diffing this would see spurious churn. Clojure promises
+/// no particular order either, which makes sorting free to choose and the only
+/// reproducible choice.
+///
+/// A type extended through `:extend-via-metadata` is deliberately absent: it
+/// never enters `impls`, and the metadata carrier is the value, not the type.
+/// Clojure's `extenders` reports the impls map only, for the same reason.
+fn builtin_extenders(args: &[Value]) -> ValueResult<Value> {
+    let proto = match &args[0] {
+        Value::Protocol(p) => p.clone(),
+        v => {
+            return Err(ValueError::WrongType {
+                expected: "protocol",
+                got: v.type_name().to_string(),
+            });
+        }
+    };
+    let mut tags: Vec<Arc<str>> = {
+        let impls = proto.get().impls.lock().unwrap();
+        impls.keys().cloned().collect()
+    };
+    if tags.is_empty() {
+        return Ok(Value::Nil);
+    }
+    tags.sort_unstable();
+    Ok(Value::List(GcPtr::new(PersistentList::from_iter(
+        tags.into_iter()
+            .map(|t| Value::symbol(Symbol::simple(t.as_ref()))),
+    ))))
+}
+
 fn builtin_prefer_method(args: &[Value]) -> ValueResult<Value> {
     let mf = match &args[0] {
         Value::MultiFn(m) => m.clone(),
@@ -9185,7 +9319,7 @@ fn builtin_parse_uuid(args: &[Value]) -> ValueResult<Value> {
         Value::Str(s) => {
             let uuid = uuid::Uuid::parse_str(s.get());
             match uuid {
-                Ok(uuid) => Ok(Value::Uuid(uuid.as_u128())),
+                Ok(uuid) => Ok(Value::uuid(uuid.as_u128())),
                 Err(_) => Ok(Value::Nil),
             }
         }
@@ -9198,7 +9332,7 @@ fn builtin_parse_uuid(args: &[Value]) -> ValueResult<Value> {
 
 fn builtin_random_uuid(_args: &[Value]) -> ValueResult<Value> {
     let uuid = uuid::Uuid::new_v4();
-    Ok(Value::Uuid(uuid.as_u128()))
+    Ok(Value::uuid(uuid.as_u128()))
 }
 
 // ── Native objects (Phase 9 interop) ─────────────────────────────────────────
@@ -9313,6 +9447,54 @@ mod doc_tests {
         assert_bigint(
             builtin_dec(&[Value::Long(i64::MIN)]),
             "-9223372036854775809",
+        );
+    }
+
+    #[test]
+    fn promoting_arithmetic_preserves_floating_point_semantics() {
+        assert_eq!(
+            builtin_add_quote(&[Value::Long(1), Value::Double(f64::INFINITY)]).unwrap(),
+            Value::Double(f64::INFINITY)
+        );
+        assert!(matches!(
+            builtin_add_quote(&[Value::Long(1), Value::Double(f64::NAN)]).unwrap(),
+            Value::Double(value) if value.is_nan()
+        ));
+        assert!(matches!(
+            builtin_mul_quote(&[Value::Long(0), Value::Double(f64::INFINITY)]).unwrap(),
+            Value::Double(value) if value.is_nan()
+        ));
+        assert_eq!(
+            builtin_add_quote(&[Value::Long(i64::MAX), Value::Long(0)]).unwrap(),
+            Value::Long(i64::MAX)
+        );
+        assert!(matches!(
+            builtin_add_quote(&[Value::Long(i64::MAX), Value::Long(1)]).unwrap(),
+            Value::BigInt(_)
+        ));
+    }
+
+    #[test]
+    fn non_finite_numeric_edge_cases_match_clojure() {
+        for value in [f64::INFINITY, f64::NEG_INFINITY, f64::NAN] {
+            assert!(builtin_bigdec(&[Value::Double(value)]).is_err());
+        }
+        assert_eq!(
+            builtin_gte(&[Value::Double(f64::NAN), Value::Long(1)]).unwrap(),
+            Value::Bool(false)
+        );
+        assert_eq!(
+            builtin_gte(&[Value::Long(1), Value::Double(f64::NAN)]).unwrap(),
+            Value::Bool(false)
+        );
+    }
+
+    #[test]
+    fn identical_uuid_values_survive_value_cloning() {
+        let value = Value::uuid(0xf81d4fae_7dec_11d0_a765_00a0c91e6bf6);
+        assert_eq!(
+            builtin_identical(&[value.clone(), value]).unwrap(),
+            Value::Bool(true)
         );
     }
 

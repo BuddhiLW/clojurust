@@ -17,19 +17,53 @@ use cljrs_value::Value;
 use crate::native;
 
 /// Build GC config from CLI flags, or use defaults if not specified.
+///
+/// The limits apply to each isolate heap as a collection trigger.  The soft
+/// limit is only that per-heap trigger; it does not reach the process-wide
+/// memory governor (`cljrs_gc::governor`), whose soft limit would otherwise
+/// sit at Yellow whenever several isolates each approach it.  A hard limit
+/// also sets the governor's budget (soft limit 75% of it), which is
+/// reported, but not yet enforced.  Without a hard limit the governor keeps
+/// its `CLJRS_MEMORY_*` or platform defaults.  A zero hard limit or a soft limit above the hard limit is
+/// rejected.
 pub fn build_gc_config(
     soft_limit_mb: Option<usize>,
     hard_limit_mb: Option<usize>,
-) -> Arc<GcConfig> {
-    match (soft_limit_mb, hard_limit_mb) {
-        (Some(soft), Some(hard)) => Arc::new(GcConfig::with_limits(
-            soft * 1024 * 1024,
-            hard * 1024 * 1024,
-        )),
-        (Some(soft), None) => Arc::new(GcConfig::with_hard_limit(soft * 1024 * 1024)),
-        (None, Some(hard)) => Arc::new(GcConfig::with_hard_limit(hard * 1024 * 1024)),
-        (None, None) => Arc::new(GcConfig::new()),
+) -> miette::Result<Arc<GcConfig>> {
+    let (config, memory) = gc_limits(soft_limit_mb, hard_limit_mb)?;
+    if let Some(memory) = memory {
+        cljrs_gc::governor()
+            .configure(memory)
+            .map_err(|e| miette::miette!("invalid GC limits: {e}"))?;
     }
+    Ok(Arc::new(config))
+}
+
+/// Validate CLI limits into a per-heap config and, when a hard limit was
+/// given, a process governor config.  Pure: does not touch the global governor.
+fn gc_limits(
+    soft_limit_mb: Option<usize>,
+    hard_limit_mb: Option<usize>,
+) -> miette::Result<(GcConfig, Option<cljrs_gc::MemoryConfig>)> {
+    let mb = |n: usize| n.saturating_mul(1024 * 1024);
+    let invalid = |e: cljrs_gc::MemoryConfigError| miette::miette!("invalid GC limits: {e}");
+    let config = match (soft_limit_mb, hard_limit_mb) {
+        (Some(soft), Some(hard)) => {
+            GcConfig::try_with_limits(mb(soft), mb(hard)).map_err(invalid)?
+        }
+        (Some(soft), None) => GcConfig::with_soft_limit(mb(soft)),
+        (None, Some(hard)) => {
+            let config = GcConfig::with_hard_limit(mb(hard));
+            config.validate().map_err(invalid)?;
+            config
+        }
+        (None, None) => return Ok((GcConfig::new(), None)),
+    };
+    let memory = hard_limit_mb
+        .map(|hard| cljrs_gc::MemoryConfig::from_optional_limits(None, Some(mb(hard))))
+        .transpose()
+        .map_err(invalid)?;
+    Ok((config, memory))
 }
 
 /// CLI-level versioned-symbol policy flags, threaded into `setup_globals`.
@@ -469,5 +503,50 @@ pub fn format_eval_error(e: EvalError) -> miette::Report {
         EvalError::CommitSignatureVerificationFailed { commit, reason } => {
             miette::miette!("commit {commit:?} failed signature verification: {reason}")
         }
+    }
+}
+
+#[cfg(test)]
+mod gc_config_tests {
+    // These call `gc_limits`, not `build_gc_config`, so they never reconfigure
+    // the process-global governor that other tests in this binary may read.
+    use super::gc_limits;
+
+    const MB: usize = 1024 * 1024;
+
+    #[test]
+    fn soft_only_sets_the_soft_limit() {
+        let (config, memory) = gc_limits(Some(64), None).unwrap();
+        assert_eq!(config.soft_limit(), 64 * MB);
+        assert!(config.hard_limit() >= 64 * MB);
+        assert!(
+            memory.is_none(),
+            "the soft limit does not configure the governor"
+        );
+    }
+
+    #[test]
+    fn both_limits_are_kept() {
+        let (config, memory) = gc_limits(Some(64), Some(128)).unwrap();
+        assert_eq!(config.soft_limit(), 64 * MB);
+        assert_eq!(config.hard_limit(), 128 * MB);
+        let memory = memory.expect("a hard limit configures the governor");
+        assert_eq!(memory.hard_limit, 128 * MB);
+        assert_eq!(
+            memory.soft_limit,
+            96 * MB,
+            "governor soft limit is 75% of hard"
+        );
+    }
+
+    #[test]
+    fn soft_above_hard_is_rejected() {
+        assert!(gc_limits(Some(256), Some(128)).is_err());
+    }
+
+    #[test]
+    fn zero_hard_limit_is_rejected() {
+        assert!(gc_limits(None, Some(0)).is_err());
+        assert!(gc_limits(Some(0), Some(0)).is_err());
     }
 }

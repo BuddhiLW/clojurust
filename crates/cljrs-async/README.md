@@ -164,13 +164,25 @@ and reinstalls it only for each task poll, preserving nested budgets without
 leaking thread-local state across sibling `LocalSet` tasks.
 
 **Which forms yield:** `eval_async` has a yielding arm for `await`, `do`, `if`, `let`/`let*`,
-`loop`/`loop*`, `recur`, `try` (body, `catch` handlers and `finally`), collection literals, and
-function-call arguments. Every *other* special form is delegated to the synchronous evaluator,
+`loop`/`loop*`, `recur`, `try` (body, `catch` handlers and `finally`), `def`, `defonce`, `and`,
+`or`, `throw`, `set!` (value and `(.-field inst)` target), `letfn` (body), `binding` (inits and
+body), `with-out-str` (body), collection literals, and function-call arguments. Every *other* special form is delegated to the synchronous evaluator,
 which evaluates its sub-expressions on the blocking `await` path. On the single-threaded
 `LocalSet` that deadlocks as soon as the awaited future is not already settled, because the task
 that would settle it cannot run while the executor thread is parked. So a special form that can
 carry an `await` anywhere inside it needs its own arm here; a fallthrough is a latent hang, not a
-slow path. `binding`, `and`/`or` and `throw` are the remaining delegated forms.
+slow path. The remaining delegated special forms evaluate nothing an `await` could sit in at the
+point they run: `quote`, `var`, `fn`/`fn*`, `defn`/`defn-`, `defmacro`, `ns`, `in-ns`, `require`,
+`alias`, `load-file`, `protocol*` and `deftype*` either take unevaluated forms or register a body
+that runs later through the apply path. `.` is also delegated; the sync evaluator currently
+rejects it ("interop not yet implemented"), and it needs an arm once it evaluates its operands.
+
+`binding` and `with-out-str` rely on thread-local state (the dynamic-binding stack and the output
+capture buffer), and every `LocalSet` task shares the thread. Their async arms therefore install
+that state only while their own task is being polled and take it back off before yielding
+(`poll_scoped`): a task that runs while a `binding` body is suspended does not see its frame, and
+output such a task prints is not captured by a suspended `with-out-str`. A `set!` of a bound var
+inside the body persists across yields.
 
 ### `await` and the single-thread executor
 

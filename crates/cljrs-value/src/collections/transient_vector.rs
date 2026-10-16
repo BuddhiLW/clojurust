@@ -63,6 +63,10 @@ impl TransientVector {
         self.vector.lock().unwrap().len()
     }
 
+    pub fn get(&self, index: usize) -> Option<Value> {
+        self.vector.lock().unwrap().get(index).cloned()
+    }
+
     pub fn persistent(&self) -> ValueResult<PersistentVector> {
         let vector = self.vector.lock().unwrap();
         let mut persisted = self.persisted.lock().unwrap();

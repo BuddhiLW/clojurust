@@ -19,10 +19,10 @@ pub struct Args {
     /// Print each passing assertion (helps identify which test hangs).
     #[arg(long, short)]
     pub verbose: bool,
-    /// GC soft memory limit in MB (triggers collection when exceeded).
+    /// GC soft memory limit in MB (each isolate heap collects when it exceeds this).
     #[arg(long)]
     pub gc_soft_limit_mb: Option<usize>,
-    /// GC hard memory limit in MB (forces collection when exceeded).
+    /// Process managed-memory hard limit in MB (reported by --gc-stats; not yet enforced).
     #[arg(long)]
     pub gc_hard_limit_mb: Option<usize>,
 }
@@ -39,7 +39,7 @@ struct NsTestResult {
 }
 
 pub fn run(args: Args, versioning: VersioningFlags) -> miette::Result<i32> {
-    let gc_config = session::build_gc_config(args.gc_soft_limit_mb, args.gc_hard_limit_mb);
+    let gc_config = session::build_gc_config(args.gc_soft_limit_mb, args.gc_hard_limit_mb)?;
     let globals = session::setup_globals(args.src_paths, gc_config, versioning);
 
     let namespaces = if args.namespaces.is_empty() {

@@ -34,9 +34,8 @@ fn main() {
     let mut registry = cljrs_interop::Registry::new(globals.clone());
     #[allow(unused_unsafe)]
     unsafe {
-        my_project::cljrs_init(&mut registry);
+        my_project::cljrs_init_my_project(&mut registry);
     }
-
     let mut env = cljrs_runtime::tiered::Env::new(globals, "user");
     cljrs_runtime::env::callback::push_eval_context(&env);
 

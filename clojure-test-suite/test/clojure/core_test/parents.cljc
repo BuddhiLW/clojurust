@@ -2,165 +2,183 @@
   (:require [clojure.test :refer [are deftest is testing use-fixtures]]
             [clojure.core-test.portability #?(:cljs :refer-macros :default :refer) [when-var-exists]]))
 
-(when-var-exists parents
-  #?@(:rust nil
-      :default
-      [; Some custom types for testing parents by type inheritance
-       (defprotocol TestParentsProtocol)
-       (defrecord TestParentsRecord [] TestParentsProtocol)
-       (deftype TestParentsType [] TestParentsProtocol)
+(when-var-exists #?(:rust make-hierarchy :default parents)
 
-       ; A global hierarchy for testing `parents tag` and `parents h tag`
-       (def global-hierarchy [[TestParentsRecord ::record]
-                              [::leaf ::t]
-                              [::t ::p-1]
-                              [::t ::p-2]
-                              [::p-1 'ns/p-0]])
+  ; Some custom types for testing parents by type inheritance
+  (defprotocol TestParentsProtocol)
+  (defrecord TestParentsRecord [] TestParentsProtocol)
+  (deftype TestParentsType [] TestParentsProtocol)
 
-       (defn register-global-hierarchy []
-         (doseq [[tag parent] global-hierarchy]
-           (derive tag parent)))
+  (def record-tag #?(:rust ::record-type :default TestParentsRecord))
+  (def type-tag #?(:rust ::type-type :default TestParentsType))
+  (def p0-tag #?(:rust ::p-0 :default 'ns/p-0))
 
-       (defn unregister-global-hierarchy []
-         (doseq [[tag parent] global-hierarchy]
-           (underive tag parent)))
+  ; A global hierarchy for testing `parents tag` and `parents h tag`
+  (def global-hierarchy [[record-tag ::record]
+                         [::leaf ::t]
+                         [::t ::p-1]
+                         [::t ::p-2]
+                         [::p-1 p0-tag]])
 
-       ;; Basilisp does not support clojure.test style fixtures right now
-       ;; https://github.com/basilisp-lang/basilisp/issues/1306
-       (defn with-global-hierarchy [#?@(:lpy [] :default [tests])]
-         (register-global-hierarchy)
-         #?(:lpy (yield) :default (tests))
-         (unregister-global-hierarchy))
+  (defn register-global-hierarchy []
+    (doseq [[tag parent] global-hierarchy]
+      (derive tag parent)))
 
-       (use-fixtures :once with-global-hierarchy)
+  (defn unregister-global-hierarchy []
+    (doseq [[tag parent] global-hierarchy]
+      (underive tag parent)))
 
-       ; A hierarchy for testing `parents h tag`
-       (def datatypes
-         (-> (make-hierarchy)
-             (derive TestParentsRecord ::datatype)
-             (derive TestParentsType ::datatype)
-             (derive TestParentsType ::mutable)))
+  ;; Basilisp does not support clojure.test style fixtures right now
+  ;; https://github.com/basilisp-lang/basilisp/issues/1306
+  (defn with-global-hierarchy [#?@(:lpy [] :default [tests])]
+    (register-global-hierarchy)
+    #?(:lpy (yield) :default (tests))
+    (unregister-global-hierarchy))
 
-       ; Another hierarchy for testing `parents h tag`
-       (def diamond
-         (-> (make-hierarchy)
-             (derive ::b ::a)
-             (derive ::c ::a)
-             (derive ::d ::b)
-             (derive ::d ::c)
-             (derive ::leaf ::d)))
+  #?(:rust (register-global-hierarchy)
+     :default (use-fixtures :once with-global-hierarchy))
 
-       (deftest test-parents
+  ; A hierarchy for testing `parents h tag`
+  (def datatypes
+    (-> (make-hierarchy)
+        (derive record-tag ::datatype)
+        (derive type-tag ::datatype)
+        (derive type-tag ::mutable)))
 
-         (testing "parents tag"
+  ; Another hierarchy for testing `parents h tag`
+  (def diamond
+    (-> (make-hierarchy)
+        (derive ::b ::a)
+        (derive ::c ::a)
+        (derive ::d ::b)
+        (derive ::d ::c)
+        (derive ::leaf ::d)))
 
-           (testing "returns parents by relationship globally defined with derive"
-             (are [expected tag] (= expected (parents tag))
-                                 #{::t} ::leaf
-                                 #{::p-1 ::p-2} ::t
-                                 #{'ns/p-0} ::p-1
-                                 nil ::p-2)
-             #?(:bb      "bb doesn't report parents by relationship globally defined with derive for custom types
-                          (https://github.com/babashka/babashka/issues/1893)"
-                :default (is (contains? (parents TestParentsRecord) ::record))))
+  (deftest test-parents
 
-           #?(:cljs    "cljs doesn't report parents by type inheritance yet (CLJS-3464)"
-              :lpy     (testing "returns parents by type inheritance when tag is a class"
-                         (is (contains? (parents python/str) python/object))
-                         (is (nil? (parents python/object))))
-              :default (testing "returns parents by type inheritance when tag is a class"
-                         (is (contains? (parents String) Object))
-                         (is (nil? (parents Object)))))
+    (testing "parents tag"
 
-           #?(:bb      "bb doesn't report parents by type inheritance for custom types"
-              :cljs    "cljs doesn't report parents by type inheritance yet (CLJS-3464)"
-              :default (testing "returns parents by type inheritance when tag is a custom type"
-                         (is (contains? (parents TestParentsType) #?(:lpy (:interface TestParentsProtocol) :default clojure.core_test.parents.TestParentsProtocol)))
-                         (is (contains? (parents TestParentsRecord) #?(:lpy (:interface TestParentsProtocol) :default clojure.core_test.parents.TestParentsProtocol)))
-                         (is (nil? (parents TestParentsProtocol)))))
+      (testing "returns parents by relationship globally defined with derive"
+        (are [expected tag] (= expected (parents tag))
+                            #{::t} ::leaf
+                            #{::p-1 ::p-2} ::t
+                            #{p0-tag} ::p-1
+                            nil ::p-2)
+        #?(:bb      "bb doesn't report parents by relationship globally defined with derive for custom types
+                     (https://github.com/babashka/babashka/issues/1893)"
+           :default (is (contains? (parents record-tag) ::record))))
 
-           (testing "does not throw on invalid tag"
-             (are [tag] (nil? (parents tag))
-                        nil
-                        "anything"
-                        42
-                        3.14
-                        true
-                        false
-                        []
-                        {}
-                        #{}
-                        '())))
+      #?(:lpy     (testing "returns parents by type inheritance when tag is a class"
+                    (is (contains? (parents python/str) python/object))
+                    (is (nil? (parents python/object))))
+         :phel    (testing "returns parents by type inheritance when tag is a class"
+                    (is (contains? (parents RuntimeException) Exception))
+                    (is (nil? (parents stdClass))))
+         :cljs    "cljs doesn't report parents by type inheritance yet (CLJS-3464)"
+         :rust    "Clojurust has no host-type inheritance"
+         :default (testing "returns parents by type inheritance when tag is a class"
+                    (is (contains? (parents String) Object))
+                    (is (nil? (parents Object)))))
 
-         (testing "parents h tag"
+      #?(:bb      "bb doesn't report parents by type inheritance for custom types"
+         :cljs    "cljs doesn't report parents by type inheritance yet (CLJS-3464)"
+         :rust    "Clojurust has no host-type inheritance"
+         :default (testing "returns parents by type inheritance when tag is a custom type"
+                    (is (contains? (parents TestParentsType) #?(:lpy (:interface TestParentsProtocol) :phel TestParentsProtocol :default clojure.core_test.parents.TestParentsProtocol)))
+                    (is (contains? (parents TestParentsRecord) #?(:lpy (:interface TestParentsProtocol) :phel TestParentsProtocol :default clojure.core_test.parents.TestParentsProtocol)))
+                    (is (nil? (parents TestParentsProtocol)))))
 
-           (testing "returns only parents declared in h, whether the tag is in global hierarchy or not"
-             (are [expected h tag] (= expected (->> (parents h tag)
-                                                    (filter keyword?) ; filter out parents by type, tested in next sections
-                                                    set))
+      (testing "does not throw on invalid tag"
+        (are [tag] (nil? (parents tag))
+                   nil
+                   "anything"
+                   42
+                   3.14
+                   true
+                   false
+                   []
+                   {}
+                   #{}
+                   '())))
 
-                                   ; tag in h and not in global hierarchy
-                                   #{::b ::c} diamond ::d
-                                   #{::a} diamond ::b
-                                   #{} diamond ::a
-                                   #?@(; bb doesn't report parents by relationship declared in h for custom types
-                                       ; (https://github.com/babashka/babashka/issues/1893)
-                                       :bb      []
-                                       :default [#{::datatype ::mutable} datatypes TestParentsType])
+    (testing "parents h tag"
 
-                                   ; tag in both h and global hierarchy, only parents in h are returned
-                                   #{::d} diamond ::leaf
-                                   #?@(; bb doesn't report parents by relationship declared in h for custom types
-                                       ; (https://github.com/babashka/babashka/issues/1893)
-                                       :bb      []
-                                       :default [#{::datatype} datatypes TestParentsRecord])
+      (testing "returns only parents declared in h, whether the tag is in global hierarchy or not"
+        (are [expected h tag] (= expected (->> (parents h tag)
+                                               (filter keyword?) ; filter out parents by type, tested in next sections
+                                               set))
 
-                                   ; tag not in h but in global hierarchy
-                                   #{} datatypes ::t
-                                   #{} datatypes ::p-1
-                                   #{} datatypes ::p-2
+                              ; tag in h and not in global hierarchy
+                              #{::b ::c} diamond ::d
+                              #{::a} diamond ::b
+                              #{} diamond ::a
+                              #?@(; bb doesn't report parents by relationship declared in h for custom types
+                                  ; (https://github.com/babashka/babashka/issues/1893)
+                                  :bb      []
+                                  :default [#{::datatype ::mutable} datatypes type-tag])
 
-                                   ; tag neither in h nor in global hierarchy
-                                   #{} datatypes ::d
-                                   #{} datatypes ::b
-                                   #{} datatypes ::a))
+                              ; tag in both h and global hierarchy, only parents in h are returned
+                              #{::d} diamond ::leaf
+                              #?@(; bb doesn't report parents by relationship declared in h for custom types
+                                  ; (https://github.com/babashka/babashka/issues/1893)
+                                  :bb      []
+                                  :default [#{::datatype} datatypes record-tag])
 
-           #?(:cljs    "cljs doesn't report parents by type inheritance yet (CLJS-3464)"
-              :lpy     (testing "returns parents by type inheritance when tag is a class, whether the tag is in h or not"
-                         (are [h] (contains? (parents h python/str) python/object)
-                                             ; tag in h
-                           (derive (make-hierarchy) python/str ::object)
-                                             ; tag not in h
-                           diamond
-                           datatypes))
-              :default (testing "returns parents by type inheritance when tag is a class, whether the tag is in h or not"
-                         (are [h] (contains? (parents h String) Object)
-                                  ; tag in h
-                                  (derive (make-hierarchy) String ::object)
-                                  ; tag not in h
-                                  diamond
-                                  datatypes)))
+                              ; tag not in h but in global hierarchy
+                              #{} datatypes ::t
+                              #{} datatypes ::p-1
+                              #{} datatypes ::p-2
 
-           #?(:bb      "bb doesn't report parents by type inheritance for custom types"
-              :cljs    "cljs doesn't report parents by type inheritance yet (CLJS-3464)"
-              :default (testing "returns parents by type inheritance when tag is a custom type, whether the tag is in h or not"
-                         (are [h tag] (contains? (parents h tag) #?(:lpy (:interface TestParentsProtocol) :default clojure.core_test.parents.TestParentsProtocol))
-                                      ; tag in h
-                                      datatypes TestParentsType
-                                      datatypes TestParentsRecord
-                                      ; tag not in h
-                                      diamond TestParentsType
-                                      diamond TestParentsRecord)))
+                              ; tag neither in h nor in global hierarchy
+                              #{} datatypes ::d
+                              #{} datatypes ::b
+                              #{} datatypes ::a))
 
-           (testing "does not throw on invalid tag or hierarchy"
-             (are [invalid] (nil? (parents invalid invalid))
-                            nil
-                            "anything"
-                            42
-                            3.14
-                            true
-                            false
-                            []
-                            {}
-                            #{}
-                            '()))))]))
+      #?(:lpy     (testing "returns parents by type inheritance when tag is a class, whether the tag is in h or not"
+                    (are [h] (contains? (parents h python/str) python/object)
+                                        ; tag in h
+                      (derive (make-hierarchy) python/str ::object)
+                                        ; tag not in h
+                      diamond
+                      datatypes))
+         :phel    (testing "returns parents by type inheritance when tag is a class, whether the tag is in h or not"
+                    (are [h] (contains? (parents h RuntimeException) Exception)
+                                        ; tag in h
+                      (derive (make-hierarchy) RuntimeException ::object)
+                                        ; tag not in h
+                      diamond
+                      datatypes))
+         :cljs    "cljs doesn't report parents by type inheritance yet (CLJS-3464)"
+         :rust    "Clojurust has no host-type inheritance"
+         :default (testing "returns parents by type inheritance when tag is a class, whether the tag is in h or not"
+                    (are [h] (contains? (parents h String) Object)
+                             ; tag in h
+                             (derive (make-hierarchy) String ::object)
+                             ; tag not in h
+                             diamond
+                             datatypes)))
+
+      #?(:bb      "bb doesn't report parents by type inheritance for custom types"
+         :cljs    "cljs doesn't report parents by type inheritance yet (CLJS-3464)"
+         :rust    "Clojurust has no host-type inheritance"
+         :default (testing "returns parents by type inheritance when tag is a custom type, whether the tag is in h or not"
+                    (are [h tag] (contains? (parents h tag) #?(:lpy (:interface TestParentsProtocol) :phel TestParentsProtocol :default clojure.core_test.parents.TestParentsProtocol))
+                                 ; tag in h
+                                 datatypes TestParentsType
+                                 datatypes TestParentsRecord
+                                 ; tag not in h
+                                 diamond TestParentsType
+                                 diamond TestParentsRecord)))
+
+      (testing "does not throw on invalid tag or hierarchy"
+        (are [invalid] (nil? (parents invalid invalid))
+                       nil
+                       "anything"
+                       42
+                       3.14
+                       true
+                       false
+                       []
+                       {}
+                       #{}
+                       '())))))

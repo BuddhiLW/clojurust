@@ -352,7 +352,7 @@ pub fn serialize(v: &Value) -> Result<SerializedValue, CloneError> {
         Value::Long(n) => Ok(SerializedValue::Long(*n)),
         Value::Double(d) => Ok(SerializedValue::Double(*d)),
         Value::Char(c) => Ok(SerializedValue::Char(*c)),
-        Value::Uuid(u) => Ok(SerializedValue::Uuid(*u)),
+        Value::Uuid(u) => Ok(SerializedValue::Uuid(u.get().0)),
 
         Value::BigInt(p) => Ok(SerializedValue::BigInt(p.get().clone())),
         Value::BigDecimal(p) => Ok(SerializedValue::BigDecimal(p.get().clone())),
@@ -607,7 +607,7 @@ pub fn deserialize(sv: SerializedValue) -> Value {
         SerializedValue::Long(n) => Value::Long(n),
         SerializedValue::Double(d) => Value::Double(d),
         SerializedValue::Char(c) => Value::Char(c),
-        SerializedValue::Uuid(u) => Value::Uuid(u),
+        SerializedValue::Uuid(u) => Value::uuid(u),
 
         SerializedValue::BigInt(n) => Value::BigInt(GcPtr::new(n)),
         SerializedValue::BigDecimal(d) => Value::BigDecimal(GcPtr::new(d)),
@@ -796,7 +796,7 @@ mod tests {
         assert_eq!(roundtrip(&Value::Bool(true)), Value::Bool(true));
         assert_eq!(roundtrip(&Value::Long(42)), Value::Long(42));
         assert_eq!(roundtrip(&Value::Char('x')), Value::Char('x'));
-        assert_eq!(roundtrip(&Value::Uuid(12345)), Value::Uuid(12345));
+        assert_eq!(roundtrip(&Value::uuid(12345)), Value::uuid(12345));
     }
 
     #[test]
