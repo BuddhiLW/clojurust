@@ -102,6 +102,7 @@ the `IoReader`, `IoWriter`, and `StringReader` native object types.
 |-----------|---------------|-------|
 | `clojure.string` | `string.rs` + `clojure/string.cljrs` | Native Rust, loaded lazily |
 | `clojure.set` | `set.rs` + `clojure/set.cljrs` | Native Rust, loaded lazily |
+| `clojure.rust.io` | `io.rs` + `clojure/rust/io.cljrs` | Native Rust, loaded lazily; not built for wasm32 |
 | `clojure.test` | `clojure/test.cljrs` | Pure Clojure, loaded lazily |
 | `clojure.spec.alpha` | `clojure/spec/alpha.cljrs` | Pure Clojure, loaded lazily |
 | `clojure.spec.test.alpha` | `clojure/spec/test/alpha.cljrs` | Pure Clojure, loaded lazily |
@@ -122,6 +123,25 @@ replaces all occurrences and `replace-first` replaces only the first.
 
 `union`, `intersection`, `difference`, `subset?`, `superset?`,
 `select`, `map-invert`
+
+### clojure.rust.io functions and macros
+
+Streams: `reader`, `writer`, `string-reader`, `close`, `read-line`, `write`,
+`flush`, `reader?`, `writer?`, and the `with-open` macro.
+
+Paths: `file` (identity on a string, so `.cljc` code can spell
+`(io/file p)` on both sides), `make-parents`, `delete-file`, `exists?`,
+`directory?`, `regular-file?`.
+
+The three predicates answer from metadata and never open the file; before
+them the only way to ask "is it there" was `slurp` inside a `try`, which
+reads the whole file to produce a boolean and cannot tell an absent file
+from an unreadable one. `delete-file` removes a file or an EMPTY directory
+and refuses a non-empty one, as `File.delete` does on the JVM; a second
+truthy argument turns the refusal into `false` instead of an error.
+
+Every path argument is a string. Guard: `tests/cljrs/cljrs/lang_test/rust_io.cljc`,
+which runs the same assertions on the JVM through `clojure.java.io`.
 
 ### clojure.spec.alpha functions and macros
 

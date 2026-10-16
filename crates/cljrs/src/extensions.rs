@@ -19,7 +19,8 @@
 //! | `base64` | Base64 codecs |
 //!
 //! An embedding application that links the compiler directly builds its own
-//! set the same way.
+//! set the same way. Extensions that are not part of this project ship as
+//! their own crates and are loaded through `cljrs_init`, not listed here.
 
 #[cfg(any(
     feature = "async",

@@ -24,12 +24,12 @@ use crate::builtins::util::numeric_as_i64;
 use crate::env::env::GlobalEnv;
 use bigdecimal::{BigDecimal, RoundingMode};
 use cljrs_gc::GcPtr;
-use cljrs_value::value::{PrintValue, SetValue};
+use cljrs_value::value::{DatatypeKind, PrintValue, SetValue};
 use cljrs_value::{
     Arity, Atom, CljxCons, CljxFuture, CljxPromise, ExceptionInfo, FutureState, Keyword, LazySeq,
-    MapValue, Namespace, NativeFn, ObjectArray, PersistentHashMap, PersistentHashSet,
-    PersistentList, PersistentQueue, PersistentVector, SharedAtom, SortedSet, Symbol, Thunk,
-    TypeInstance, Value, ValueError, ValueResult, Volatile, demote, promote,
+    MapValue, MultiFn, Namespace, NativeFn, ObjectArray, PersistentHashMap, PersistentHashSet,
+    PersistentList, PersistentQueue, PersistentVector, ProtocolFn, SharedAtom, SortedSet, Symbol,
+    Thunk, TypeInstance, Value, ValueError, ValueResult, Volatile, demote, promote,
 };
 use num_bigint::{BigInt, Sign, ToBigInt};
 use num_rational::Ratio;
@@ -332,7 +332,11 @@ const BUILTIN_DOCS: &[(&str, &str)] = &[
     ("array?", "Returns true if x is a native array."),
     (
         "record?",
-        "Returns true if x is an instance of a defrecord/deftype.",
+        "Returns true if x is a defrecord instance (false for deftype/reify).",
+    ),
+    (
+        "make-record-instance",
+        "Low-level defrecord constructor: (make-record-instance type-tag fields).",
     ),
     ("atom?", "Returns true if x is an atom."),
     (
@@ -1211,6 +1215,7 @@ pub fn register_all(globals: &Arc<GlobalEnv>, ns: &str) {
         ("get-in", Arity::Variadic { min: 2 }, builtin_get_in),
         ("count", Arity::Fixed(1), builtin_count),
         ("seq", Arity::Fixed(1), builtin_seq),
+        ("seqable?", Arity::Fixed(1), builtin_seqable_q),
         ("rseq", Arity::Fixed(1), builtin_rseq),
         ("first", Arity::Fixed(1), builtin_first),
         ("rest", Arity::Fixed(1), builtin_rest),
@@ -1442,21 +1447,11 @@ pub fn register_all(globals: &Arc<GlobalEnv>, ns: &str) {
         ("letfn", Arity::Variadic { min: 1 }, builtin_stub_nil),
         ("in-ns", Arity::Fixed(1), builtin_stub_nil),
         ("alias", Arity::Fixed(2), builtin_stub_nil),
-        ("defprotocol", Arity::Variadic { min: 1 }, builtin_stub_nil),
-        ("extend-type", Arity::Variadic { min: 1 }, builtin_stub_nil),
-        (
-            "extend-protocol",
-            Arity::Variadic { min: 1 },
-            builtin_stub_nil,
-        ),
-        ("defmulti", Arity::Variadic { min: 1 }, builtin_stub_nil),
-        ("defmethod", Arity::Variadic { min: 2 }, builtin_stub_nil),
-        ("defrecord", Arity::Variadic { min: 2 }, builtin_stub_nil),
-        ("reify", Arity::Variadic { min: 0 }, builtin_stub_nil),
+        ("protocol*", Arity::Variadic { min: 2 }, builtin_stub_nil),
+        ("deftype*", Arity::Variadic { min: 2 }, builtin_stub_nil),
         ("load-file", Arity::Fixed(1), builtin_stub_nil),
         ("binding", Arity::Variadic { min: 1 }, builtin_stub_nil),
         ("with-out-str", Arity::Variadic { min: 0 }, builtin_stub_nil),
-        ("deftype", Arity::Variadic { min: 2 }, builtin_stub_nil),
         // Hierarchy — derive/underive/isa?/parents/ancestors/descendants are
         // defined in bootstrap.cljrs and documented there.
         ("make-hierarchy", Arity::Fixed(0), builtin_make_hierarchy),
@@ -1536,6 +1531,7 @@ pub fn register_all(globals: &Arc<GlobalEnv>, ns: &str) {
         ("Math/cosh", Arity::Fixed(1), builtin_cosh),
         ("Math/tanh", Arity::Fixed(1), builtin_tanh),
         ("Math/hypot", Arity::Fixed(2), builtin_hypot),
+        ("System/getenv", Arity::Variadic { min: 0 }, builtin_getenv),
         ("log10", Arity::Fixed(1), builtin_log10),
         ("sin", Arity::Fixed(1), builtin_sin),
         ("cos", Arity::Fixed(1), builtin_cos),
@@ -1547,10 +1543,15 @@ pub fn register_all(globals: &Arc<GlobalEnv>, ns: &str) {
         // Protocols & Multimethods
         ("satisfies?", Arity::Fixed(2), builtin_satisfies_q),
         ("extends?", Arity::Fixed(2), builtin_extends_q),
+        ("multi-fn", Arity::Variadic { min: 2 }, builtin_multi_fn),
+        ("add-method", Arity::Fixed(3), builtin_add_method),
         ("prefer-method", Arity::Fixed(3), builtin_prefer_method),
         ("remove-method", Arity::Fixed(2), builtin_remove_method),
         ("methods", Arity::Fixed(1), builtin_methods),
         ("prefers", Arity::Fixed(1), builtin_prefers),
+        // Protocols
+        ("protocol-fn", Arity::Fixed(2), builtin_protocol_fn),
+        ("extend", Arity::Variadic { min: 1 }, builtin_extend),
         // Records / reify
         (
             "make-type-instance",
@@ -1562,7 +1563,21 @@ pub fn register_all(globals: &Arc<GlobalEnv>, ns: &str) {
             Arity::Fixed(3),
             builtin_make_type_instance_mut,
         ),
-        ("record?", Arity::Fixed(1), builtin_record_q),
+        (
+            "make-reify-instance",
+            Arity::Fixed(2),
+            builtin_make_reify_instance,
+        ),
+        (
+            "make-record-instance",
+            Arity::Fixed(2),
+            crate::builtins::records::make_record_instance,
+        ),
+        (
+            "record?",
+            Arity::Fixed(1),
+            crate::builtins::records::record_q,
+        ),
         ("instance?", Arity::Fixed(2), builtin_instance_q),
         // Native objects (Phase 9 interop)
         ("native-object?", Arity::Fixed(1), builtin_native_object_q),
@@ -1927,6 +1942,10 @@ impl Iterator for ValueIter {
                         .collect();
                     self.current = Value::List(GcPtr::new(PersistentList::from_iter(items)));
                 }
+                Value::Queue(q) => {
+                    let items: Vec<Value> = q.get().iter().cloned().collect();
+                    self.current = Value::List(GcPtr::new(PersistentList::from_iter(items)));
+                }
                 Value::TypeInstance(ti) => {
                     let mut pairs = Vec::new();
                     ti.get().fields.for_each(|k, v| {
@@ -1934,46 +1953,83 @@ impl Iterator for ValueIter {
                     });
                     self.current = Value::List(GcPtr::new(PersistentList::from_iter(pairs)));
                 }
-                _ => return None,
+                // Loud, not empty. This arm used to `return None`, which reads
+                // as "the sequence ended" and is indistinguishable from a
+                // genuinely empty collection -- so a type missing from the
+                // match above made `vec`, `into`, `map` and `reduce` answer
+                // `[]`, `[]`, `nil` and the init value instead of failing.
+                // A queue sat in exactly that hole. Errors here surface through
+                // `take_error`, which every caller already checks.
+                other => {
+                    self.error = Some(format!(
+                        "cannot iterate: {} is not seqable",
+                        other.type_name()
+                    ));
+                    self.current = Value::Nil;
+                    return None;
+                }
             }
         }
     }
 }
 
+/// Whether `seq` can be called on `v`.
+///
+/// The one statement of it on the Rust side: `value_to_seq`, `vec`, and the
+/// `seqable?` builtin all ask this rather than each carrying a list of
+/// variants, and `clojure.core/seqable?` in `bootstrap.cljrs` is a thin call
+/// onto the builtin.
+///
+/// This must agree with the arms of [`ValueIter::next`], which is the actual
+/// walker. It is not derived from them -- asking the iterator would mean
+/// stepping it, and stepping a `LazySeq` realizes it, which a predicate must
+/// not do. The two are kept honest from the other side instead: `ValueIter`'s
+/// fallback raises rather than ending quietly, so a variant added to one and
+/// forgotten in the other fails loudly at the first element.
+pub fn is_seqable(v: &Value) -> bool {
+    matches!(
+        v.unwrap_meta(),
+        Value::Nil
+            | Value::Cons(_)
+            | Value::List(_)
+            | Value::Vector(_)
+            | Value::Set(_)
+            | Value::Map(_)
+            | Value::LazySeq(_)
+            | Value::Queue(_)
+            | Value::Str(_)
+            | Value::ObjectArray(_)
+            | Value::IntArray(_)
+            | Value::LongArray(_)
+            | Value::ShortArray(_)
+            | Value::ByteArray(_)
+            | Value::FloatArray(_)
+            | Value::DoubleArray(_)
+            | Value::BooleanArray(_)
+            | Value::CharArray(_)
+            | Value::TypeInstance(_)
+    )
+}
+
+fn builtin_seqable_q(args: &[Value]) -> ValueResult<Value> {
+    Ok(Value::Bool(is_seqable(&args[0])))
+}
+
 // ── Helper: value to sequence vector (eager — use only when random access is needed) ──
 
 fn value_to_seq(v: &Value) -> ValueResult<Vec<Value>> {
-    match v {
-        Value::List(_)
-        | Value::Map(_)
-        | Value::Set(_)
-        | Value::Vector(_)
-        | Value::Cons(_)
-        | Value::LazySeq(_)
-        | Value::ObjectArray(_)
-        | Value::BooleanArray(_)
-        | Value::ByteArray(_)
-        | Value::ShortArray(_)
-        | Value::IntArray(_)
-        | Value::LongArray(_)
-        | Value::CharArray(_)
-        | Value::FloatArray(_)
-        | Value::DoubleArray(_)
-        | Value::Str(_)
-        | Value::TypeInstance(_) => {
-            let mut iter = ValueIter::new(v.clone());
-            let result: Vec<Value> = iter.by_ref().collect();
-            if let Some(err) = iter.take_error() {
-                return Err(ValueError::Other(err));
-            }
-            Ok(result)
-        }
-        Value::Nil => Ok(Vec::new()),
-        _ => Err(ValueError::WrongType {
+    if !is_seqable(v) {
+        return Err(ValueError::WrongType {
             expected: "seqable",
             got: v.type_name().to_string(),
-        }),
+        });
     }
+    let mut iter = ValueIter::new(v.clone());
+    let result: Vec<Value> = iter.by_ref().collect();
+    if let Some(err) = iter.take_error() {
+        return Err(ValueError::Other(err));
+    }
+    Ok(result)
 }
 
 fn numeric_as_f64(v: &Value) -> ValueResult<f64> {
@@ -3650,6 +3706,7 @@ fn builtin_assoc(args: &[Value]) -> ValueResult<Value> {
             type_tag: ti.get().type_tag.clone(),
             fields,
             mutable: ti.get().mutable.clone(),
+            kind: ti.get().kind,
         }))));
     }
     let mut result = match coll {
@@ -4091,6 +4148,14 @@ fn builtin_seq(args: &[Value]) -> ValueResult<Value> {
                 Ok(cons_from_iter(array.iter().map(|f| Value::Double(*f))))
             }
         }
+        Value::Queue(q) => {
+            let items: Vec<Value> = q.get().iter().cloned().collect();
+            if items.is_empty() {
+                Ok(Value::Nil)
+            } else {
+                Ok(cons_from_iter(items))
+            }
+        }
         Value::TypeInstance(ti) => {
             let mut pairs = Vec::new();
             ti.get().fields.for_each(|k, v| {
@@ -4173,30 +4238,18 @@ fn builtin_rest(args: &[Value]) -> ValueResult<Value> {
             // rest() returns Arc<PersistentList>; clone the pointed-to list.
             Ok(Value::List(GcPtr::new((*l.get().rest()).clone())))
         }
-        Value::Vector(v) => {
-            let items: Vec<Value> = v.get().iter().skip(1).cloned().collect();
-            Ok(Value::List(GcPtr::new(PersistentList::from_iter(items))))
+        // Everything else that can be walked is walked the same way: drop one
+        // element and hand back a list. The arms above earn their place by
+        // being cheaper (List) or by preserving laziness (LazySeq, Cons); the
+        // vector, map, set and string arms that used to sit here were each a
+        // copy of this line, and while they were the copies, a queue, an array
+        // and a deftype instance had no `rest` at all.
+        other => {
+            let items = value_to_seq(other)?;
+            Ok(Value::List(GcPtr::new(PersistentList::from_iter(
+                items.into_iter().skip(1),
+            ))))
         }
-        Value::Map(m) => {
-            let items: Vec<Value> = m
-                .iter()
-                .skip(1)
-                .map(|(k, v)| Value::map_entry(k.clone(), v.clone()))
-                .collect();
-            Ok(Value::List(GcPtr::new(PersistentList::from_iter(items))))
-        }
-        Value::Set(s) => {
-            let items: Vec<Value> = s.iter().skip(1).cloned().collect();
-            Ok(Value::List(GcPtr::new(PersistentList::from_iter(items))))
-        }
-        Value::Str(s) => {
-            let items: Vec<Value> = s.get().chars().skip(1).map(Value::Char).collect();
-            Ok(Value::List(GcPtr::new(PersistentList::from_iter(items))))
-        }
-        _ => Err(ValueError::WrongType {
-            expected: "seqable",
-            got: args[0].type_name().to_string(),
-        }),
     }
 }
 
@@ -4302,12 +4355,43 @@ fn builtin_nth(args: &[Value]) -> ValueResult<Value> {
             .map(Value::Char)
             .or(default)
             .unwrap_or(Value::Nil)),
+        // A queue is Sequential but not Indexed, so the JVM reaches the element
+        // by walking; an array is Indexed, and the JVM indexes it directly.
+        // Both are answered here by walking, because neither is a hot path
+        // and one walk keeps the bounds rule in one place. Deliberately NOT
+        // `is_seqable`: a map and a set are seqable and `nth` refuses them,
+        // which is the whole distinction this list has to preserve.
+        coll @ (Value::Queue(_)
+        | Value::ObjectArray(_)
+        | Value::IntArray(_)
+        | Value::LongArray(_)
+        | Value::ShortArray(_)
+        | Value::ByteArray(_)
+        | Value::FloatArray(_)
+        | Value::DoubleArray(_)
+        | Value::BooleanArray(_)
+        | Value::CharArray(_)) => nth_walked(value_to_seq(coll)?, idx, default),
         Value::Nil => Ok(default.unwrap_or(Value::Nil)),
         v => Err(ValueError::WrongType {
             expected: "sequential",
             got: v.type_name().to_string(),
         }),
     }
+}
+
+/// `nth` over a collection that has already been walked into a vector.
+///
+/// Out of range without a default is an error, as it is for a vector; with a
+/// default it is the default. Shared by the sequential-but-not-indexed types
+/// (a queue) and by the array kinds, so the bounds rule is stated once.
+fn nth_walked(items: Vec<Value>, idx: usize, default: Option<Value>) -> ValueResult<Value> {
+    if idx >= items.len() && default.is_none() {
+        return Err(ValueError::IndexOutOfBounds {
+            idx,
+            count: items.len(),
+        });
+    }
+    Ok(items.into_iter().nth(idx).or(default).unwrap_or(Value::Nil))
 }
 
 fn builtin_last(args: &[Value]) -> ValueResult<Value> {
@@ -4783,42 +4867,22 @@ fn builtin_empty(args: &[Value]) -> ValueResult<Value> {
 fn builtin_vec(args: &[Value]) -> ValueResult<Value> {
     let meta = args[0].get_meta().cloned();
     let coll = args[0].unwrap_meta();
-    match coll {
-        Value::List(_)
-        | Value::Cons(_)
-        | Value::Set(_)
-        | Value::Vector(_)
-        | Value::Map(_)
-        | Value::LazySeq(_)
-        | Value::Queue(_)
-        | Value::Str(_)
-        | Value::ObjectArray(_)
-        | Value::IntArray(_)
-        | Value::LongArray(_)
-        | Value::ShortArray(_)
-        | Value::ByteArray(_)
-        | Value::FloatArray(_)
-        | Value::DoubleArray(_)
-        | Value::BooleanArray(_)
-        | Value::CharArray(_)
-        | Value::Nil => {
-            let mut iter = ValueIter::new(coll.clone());
-            let v: Vec<Value> = iter.by_ref().collect();
-            if let Some(err) = iter.take_error() {
-                return Err(ValueError::Other(err));
-            }
-            let result = Value::Vector(GcPtr::new(PersistentVector::from_iter(v)));
-            Ok(match meta {
-                Some(m) => result.with_meta(m),
-                None => result,
-            })
-        }
-
-        other => Err(ValueError::WrongType {
+    if !is_seqable(coll) {
+        return Err(ValueError::WrongType {
             expected: "seq",
-            got: other.type_name().to_string(),
-        }),
+            got: coll.type_name().to_string(),
+        });
     }
+    let mut iter = ValueIter::new(coll.clone());
+    let v: Vec<Value> = iter.by_ref().collect();
+    if let Some(err) = iter.take_error() {
+        return Err(ValueError::Other(err));
+    }
+    let result = Value::Vector(GcPtr::new(PersistentVector::from_iter(v)));
+    Ok(match meta {
+        Some(m) => result.with_meta(m),
+        None => result,
+    })
 }
 
 fn builtin_array_q(args: &[Value]) -> ValueResult<Value> {
@@ -5619,6 +5683,7 @@ fn assoc_in_impl(m: Value, keys: &[Value], val: Value) -> ValueResult<Value> {
             type_tag: ti.get().type_tag.clone(),
             fields: ti.get().fields.assoc(k.clone(), updated),
             mutable: ti.get().mutable.clone(),
+            kind: ti.get().kind,
         })),
         _ => Value::Map(MapValue::empty().assoc(k.clone(), updated)),
     };
@@ -6373,6 +6438,39 @@ fn builtin_slurp(args: &[Value]) -> ValueResult<Value> {
     };
     let content = std::fs::read_to_string(&path).map_err(|e| ValueError::Other(e.to_string()))?;
     Ok(Value::string(content))
+}
+
+/// `(System/getenv)` → a map of the whole environment;
+/// `(System/getenv "NAME")` → that variable's value, or `nil` when unset.
+///
+/// Mirrors `java.lang.System/getenv`, nil-for-unset included, so `.cljc` that
+/// reads an environment variable behaves the same here as on the JVM.
+///
+/// Reads the environment through the OS-string API and skips what is not valid
+/// UTF-8: `std::env::vars()` *panics* on a non-UTF-8 entry, and one stray
+/// variable in the caller's environment must not take the runtime down. The
+/// one-arg form reports such a variable as unset, which is `std::env::var`'s
+/// own answer rather than a guess at an encoding.
+fn builtin_getenv(args: &[Value]) -> ValueResult<Value> {
+    match args.first() {
+        None => {
+            let mut m = PersistentHashMap::empty();
+            for (k, v) in std::env::vars_os() {
+                if let (Some(k), Some(v)) = (k.to_str(), v.to_str()) {
+                    m = m.assoc(Value::string(k.to_string()), Value::string(v.to_string()));
+                }
+            }
+            Ok(Value::Map(MapValue::Hash(GcPtr::new(m))))
+        }
+        Some(Value::Str(s)) => match std::env::var(s.get().as_str()) {
+            Ok(v) => Ok(Value::string(v)),
+            Err(_) => Ok(Value::Nil),
+        },
+        Some(v) => Err(ValueError::WrongType {
+            expected: "string",
+            got: v.type_name().to_string(),
+        }),
+    }
 }
 
 fn builtin_close(args: &[Value]) -> ValueResult<Value> {
@@ -8267,6 +8365,183 @@ fn builtin_make_delay_sentinel(_args: &[Value]) -> ValueResult<Value> {
     ))
 }
 
+// ── Multimethods ─────────────────────────────────────────────────────────────
+
+/// `(multi-fn name dispatch-fn)` / `(multi-fn name dispatch-fn default-val)` —
+/// mint a multimethod with no methods registered.
+///
+/// `defmulti` is the Clojure macro that `def`s the result. The default dispatch
+/// value is stored the way every other dispatch key is, as its printed form.
+fn builtin_multi_fn(args: &[Value]) -> ValueResult<Value> {
+    let name: Arc<str> = match args[0].unwrap_meta() {
+        Value::Str(s) => Arc::from(s.get().as_str()),
+        Value::Symbol(s) => Arc::from(s.get().name.as_ref()),
+        v => {
+            return Err(ValueError::WrongType {
+                expected: "name symbol or string",
+                got: v.type_name().to_string(),
+            });
+        }
+    };
+    let default_dispatch = match args.get(2) {
+        Some(v) => format!("{v}"),
+        None => ":default".to_string(),
+    };
+    Ok(Value::MultiFn(GcPtr::new(MultiFn::new(
+        name,
+        args[1].clone(),
+        default_dispatch,
+    ))))
+}
+
+/// `(add-method multifn dispatch-val f)` — register `f` under `dispatch-val`.
+///
+/// The inverse of `remove-method`, and keyed identically: the printed form of
+/// the dispatch value, with the value itself kept alongside for `isa?` lookups.
+/// Returns the multimethod.
+fn builtin_add_method(args: &[Value]) -> ValueResult<Value> {
+    let mf = match args[0].unwrap_meta() {
+        Value::MultiFn(m) => m.clone(),
+        // `defmethod` is the only caller that reaches here with the wrong kind
+        // of value, and by then the name it was given has been evaluated away.
+        // Say what the value is NOT, so the message still tells "the wrong kind
+        // of var" apart from "no such var" without knowing which name it was.
+        v => {
+            return Err(ValueError::Other(format!(
+                "add-method: not a multimethod, got {}",
+                v.type_name()
+            )));
+        }
+    };
+    let key = format!("{}", args[1]);
+    mf.get()
+        .methods
+        .lock()
+        .unwrap()
+        .insert(key.clone(), args[2].clone());
+    mf.get()
+        .dispatch_vals
+        .lock()
+        .unwrap()
+        .insert(key, args[1].clone());
+    mf.get().bump_method_generation();
+    Ok(Value::MultiFn(mf))
+}
+
+// ── Protocols ────────────────────────────────────────────────────────────────
+
+/// `(protocol-fn proto "method-name")` — the dispatch fn for one of `proto`'s
+/// methods.
+///
+/// Arity comes from the method spec the protocol already holds rather than from
+/// a second argument: the arity is stated once, in `protocol*`'s spec vector,
+/// and every projection of it reads that one definition.
+fn builtin_protocol_fn(args: &[Value]) -> ValueResult<Value> {
+    let Value::Protocol(proto) = args[0].unwrap_meta() else {
+        return Err(ValueError::WrongType {
+            expected: "protocol",
+            got: args[0].type_name().to_string(),
+        });
+    };
+    let wanted: Arc<str> = match args[1].unwrap_meta() {
+        Value::Str(s) => Arc::from(s.get().as_str()),
+        Value::Symbol(s) => Arc::from(s.get().name.as_ref()),
+        Value::Keyword(k) => Arc::from(k.get().name.as_ref()),
+        v => {
+            return Err(ValueError::WrongType {
+                expected: "method name",
+                got: v.type_name().to_string(),
+            });
+        }
+    };
+    let method = proto
+        .get()
+        .methods
+        .iter()
+        .find(|m| m.name == wanted)
+        .ok_or_else(|| {
+            ValueError::Other(format!(
+                "protocol {} has no method {}",
+                proto.get().name,
+                wanted
+            ))
+        })?
+        .clone();
+    Ok(Value::ProtocolFn(GcPtr::new(ProtocolFn {
+        protocol: proto.clone(),
+        method_name: method.name,
+        min_arity: method.min_arity,
+        variadic: method.variadic,
+    })))
+}
+
+// ── Protocol extension ───────────────────────────────────────────────────────
+
+/// `(extend type-tag proto method-map & more-proto+method-map)` — register
+/// protocol implementations for a type tag.
+///
+/// `type-tag` is a symbol or string naming the type; each `method-map` maps a
+/// method name (keyword, symbol or string) to the function implementing it.
+/// A later registration for the same type and method replaces the earlier one.
+/// Returns nil.
+fn builtin_extend(args: &[Value]) -> ValueResult<Value> {
+    let type_tag: Arc<str> = match args[0].unwrap_meta() {
+        Value::Symbol(s) => Arc::from(s.get().name.as_ref()),
+        Value::Str(s) => Arc::from(s.get().as_str()),
+        v => {
+            return Err(ValueError::WrongType {
+                expected: "type symbol or string",
+                got: v.type_name().to_string(),
+            });
+        }
+    };
+    let pairs = &args[1..];
+    if !pairs.len().is_multiple_of(2) {
+        return Err(ValueError::ArityError {
+            name: "extend".to_string(),
+            expected: "a type tag followed by protocol/method-map pairs".to_string(),
+            got: args.len(),
+        });
+    }
+    for pair in pairs.chunks(2) {
+        let Value::Protocol(proto) = pair[0].unwrap_meta() else {
+            return Err(ValueError::WrongType {
+                expected: "protocol",
+                got: pair[0].type_name().to_string(),
+            });
+        };
+        let methods = match pair[1].unwrap_meta() {
+            Value::Map(m) => m.clone(),
+            Value::Nil => MapValue::empty(),
+            v => {
+                return Err(ValueError::WrongType {
+                    expected: "method map",
+                    got: v.type_name().to_string(),
+                });
+            }
+        };
+        let proto = proto.get();
+        let mut impls = proto.impls.lock().unwrap();
+        let table = impls.entry(type_tag.clone()).or_default();
+        for (k, f) in methods.iter() {
+            let method_name: Arc<str> = match k.unwrap_meta() {
+                Value::Keyword(kw) => Arc::from(kw.get().name.as_ref()),
+                Value::Symbol(s) => Arc::from(s.get().name.as_ref()),
+                Value::Str(s) => Arc::from(s.get().as_str()),
+                v => {
+                    return Err(ValueError::WrongType {
+                        expected: "method name",
+                        got: v.type_name().to_string(),
+                    });
+                }
+            };
+            table.insert(method_name, f.clone());
+        }
+    }
+    cljrs_value::bump_protocol_generation();
+    Ok(Value::Nil)
+}
+
 // ── Records / reify ──────────────────────────────────────────────────────────
 
 /// `(make-type-instance type-tag-str fields-map)` — low-level constructor.
@@ -8296,6 +8571,28 @@ fn builtin_make_type_instance(args: &[Value]) -> ValueResult<Value> {
         type_tag,
         fields,
         mutable: None,
+        // `deftype` only; `defrecord` uses make-record-instance and `reify`
+        // uses make-reify-instance, because the three differ in what they accept.
+        kind: DatatypeKind::Type,
+    })))
+}
+
+/// `(make-reify-instance type-tag fields-map)` -> a `reify` instance.
+///
+/// Identical in shape to `make-type-instance`; the difference is the KIND it
+/// records, which is what lets `with-meta` accept a `reify` and refuse a
+/// `deftype`. One builtin per datatype form, so the caller states which it
+/// meant instead of the runtime guessing from the gensym'd type tag.
+fn builtin_make_reify_instance(args: &[Value]) -> ValueResult<Value> {
+    let Value::TypeInstance(ti) = builtin_make_type_instance(args)? else {
+        unreachable!("make-type-instance returns a TypeInstance")
+    };
+    let inst = ti.get();
+    Ok(Value::TypeInstance(GcPtr::new(TypeInstance {
+        type_tag: inst.type_tag.clone(),
+        fields: inst.fields.clone(),
+        mutable: None,
+        kind: DatatypeKind::Reify,
     })))
 }
 
@@ -8340,12 +8637,8 @@ fn builtin_make_type_instance_mut(args: &[Value]) -> ValueResult<Value> {
         type_tag,
         fields,
         mutable: Some(cell),
+        kind: DatatypeKind::Type,
     })))
-}
-
-/// `(record? x)` — true if x is a TypeInstance.
-fn builtin_record_q(args: &[Value]) -> ValueResult<Value> {
-    Ok(Value::Bool(matches!(args[0], Value::TypeInstance(_))))
 }
 
 /// `(instance? TypeName x)` — true if x is a TypeInstance with the given type tag.
@@ -8591,6 +8884,17 @@ fn builtin_with_meta(args: &[Value]) -> ValueResult<Value> {
             ns.get().set_meta(args[1].clone());
             Ok(args[0].clone())
         }
+        // A `deftype` instance carries no metadata, here as on the JVM, where
+        // the generated class implements neither `IObj` nor `IMeta`. `reify`
+        // and `defrecord` both do, so the refusal is per datatype form and not
+        // "everything that is not a record".
+        Value::TypeInstance(ti) if !ti.get().kind.carries_meta() => Err(ValueError::WrongType {
+            expected: "value accepting metadata",
+            got: format!(
+                "{} instance (deftype does not carry metadata)",
+                ti.get().type_tag
+            ),
+        }),
         // `(with-meta x nil)` clears metadata; storing a nil-meta wrapper would
         // leave a value that is no longer `identical?` to itself after a clone.
         _ if matches!(args[1], Value::Nil) => Ok(args[0].unwrap_meta().clone()),

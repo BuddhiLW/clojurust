@@ -127,13 +127,7 @@ pub fn eval(form: &Form, env: &mut Env) -> EvalResult {
         FormKind::Var(inner) => {
             if let FormKind::Symbol(s) = &inner.kind {
                 let parsed = Symbol::parse(s);
-                let ns: Arc<str> = match parsed.namespace.as_deref() {
-                    Some(ns_part) => env
-                        .globals
-                        .resolve_alias(&env.current_ns, ns_part)
-                        .unwrap_or_else(|| Arc::from(ns_part)),
-                    None => env.current_ns.clone(),
-                };
+                let ns: Arc<str> = env.resolve_ns_or_current(parsed.namespace.as_deref());
                 env.globals
                     .lookup_var_in_ns(&ns, &parsed.name)
                     .map(Value::Var)
@@ -264,10 +258,7 @@ fn eval_symbol(s: &str, env: &mut Env) -> EvalResult {
         && !s.starts_with('/')
         && let Some(ns_part) = &sym.namespace
     {
-        let resolved: Arc<str> = env
-            .globals
-            .resolve_alias(&env.current_ns, ns_part)
-            .unwrap_or_else(|| Arc::from(ns_part.as_ref()));
+        let resolved: Arc<str> = env.resolve_ns_part(ns_part);
         // Qualified self-reference inside a versioned namespace: `mylib/x`
         // written in `mylib@hash`'s own source resolves at the pinned commit,
         // i.e. inside the versioned namespace itself.
@@ -288,10 +279,17 @@ fn eval_symbol(s: &str, env: &mut Env) -> EvalResult {
                 resolved, sym.name
             )));
         }
-        return env
-            .globals
-            .lookup_in_ns(&resolved, &sym.name)
-            .ok_or_else(|| EvalError::UnboundSymbol(s.to_string()));
+        if let Some(v) = env.globals.lookup_in_ns(&resolved, &sym.name) {
+            return Ok(v);
+        }
+        // `Class/MEMBER` where no namespace of that name exists. The namespace
+        // part is taken as WRITTEN here, not `resolved`: a class name is not
+        // aliasable, so an alias resolving to something else means the symbol
+        // was not naming a class in the first place.
+        if let Some(v) = jvm_static_member(ns_part, &sym.name) {
+            return Ok(v);
+        }
+        return Err(EvalError::UnboundSymbol(s.to_string()));
     }
 
     // JVM class names resolve to themselves as symbols (for instance?, catch, etc.)
@@ -300,6 +298,26 @@ fn eval_symbol(s: &str, env: &mut Env) -> EvalResult {
     }
 
     Err(EvalError::UnboundSymbol(s.to_string()))
+}
+
+/// The value of `Class/MEMBER` for the static members cljrs implements.
+///
+/// [`is_jvm_class_name`] says which class names resolve to themselves as
+/// symbols; this says which of their static members have a cljrs value behind
+/// them. The set is closed and stays small on purpose: there is no JVM here, so
+/// a member exists only because something in this runtime produces it, and a
+/// missing one must read as an unbound symbol rather than as `nil`.
+///
+/// `clojure.lang.PersistentQueue/EMPTY` is the reason the function exists —
+/// it is how Clojure source spells an empty queue literal, so `.cljc` shared
+/// with the JVM cannot use cljrs's own `(queue)` instead.
+fn jvm_static_member(class: &str, member: &str) -> Option<Value> {
+    match (class, member) {
+        ("clojure.lang.PersistentQueue", "EMPTY") => Some(Value::Queue(GcPtr::new(
+            cljrs_value::PersistentQueue::empty(),
+        ))),
+        _ => None,
+    }
 }
 
 /// Recognise JVM-style class names used in Clojure for `instance?`, `catch`, etc.
@@ -916,6 +934,10 @@ mod tests {
         );
     }
 
+    // These properties build ONE env per case and evaluate every spelling in
+    // it. `eval_str` bootstraps a whole runtime per call, and a property that
+    // evaluates a dozen spellings across 48 cases pays that hundreds of times.
+    // Nothing here defines anything, so one env per case is equivalent.
     proptest::proptest! {
         #![proptest_config(proptest::prelude::ProptestConfig::with_cases(48))]
         /// Splicing `#?@(:rust mid)` into any container evaluates to the same
@@ -934,14 +956,15 @@ mod tests {
             let p = kw_run(0, np);
             let m = kw_run(np, nm);
             let s = kw_run(np + nm, ns);
+            let (_g, mut env) = make_env();
             for (open, close, quote) in
                 [("[", "]", ""), ("#{", "}", ""), ("(", ")", "'"), ("(vector ", ")", "")]
             {
                 let spliced = format!("{quote}{open}{p} #?@(:rust [{m}]) {s}{close}");
                 let inlined = format!("{quote}{open}{p} {m} {s}{close}");
                 proptest::prop_assert_eq!(
-                    eval_str(&spliced).unwrap(),
-                    eval_str(&inlined).unwrap(),
+                    eval_src(&spliced, &mut env).unwrap(),
+                    eval_src(&inlined, &mut env).unwrap(),
                     "container {}{}",
                     open,
                     close
@@ -1053,13 +1076,14 @@ mod tests {
         ) {
             let (written, inlined) = render_slots(&slots, &kw_unit);
             let even = inlined.split_whitespace().count().is_multiple_of(2);
+            let (_g, mut env) = make_env();
             for (open, close) in [("[", "]"), ("#{", "}"), ("{", "}")] {
                 if open == "{" && !even {
                     continue;
                 }
                 for prefix in ["", "'", "`"] {
-                    let got = eval_str(&format!("{prefix}{open}{written}{close}"));
-                    let want = eval_str(&format!("{prefix}{open}{inlined}{close}"));
+                    let got = eval_src(&format!("{prefix}{open}{written}{close}"), &mut env);
+                    let want = eval_src(&format!("{prefix}{open}{inlined}{close}"), &mut env);
                     proptest::prop_assert_eq!(
                         got.map_err(|e| e.to_string()),
                         want.map_err(|e| e.to_string()),
@@ -1069,8 +1093,8 @@ mod tests {
             }
             // Data lists have no evaluated spelling; check both quoted forms.
             for prefix in ["'", "`"] {
-                let got = eval_str(&format!("{prefix}({written})"));
-                let want = eval_str(&format!("{prefix}({inlined})"));
+                let got = eval_src(&format!("{prefix}({written})"), &mut env);
+                let want = eval_src(&format!("{prefix}({inlined})"), &mut env);
                 proptest::prop_assert_eq!(
                     got.map_err(|e| e.to_string()),
                     want.map_err(|e| e.to_string()),
@@ -1092,9 +1116,10 @@ mod tests {
                 .map(str::to_string)
                 .collect();
             let body = format!("[{}]", names.join(" "));
+            let (_g, mut env) = make_env();
             for head in ["let*", "loop*"] {
-                let got = eval_str(&format!("({head} [{written}] {body})"));
-                let want = eval_str(&format!("({head} [{inlined}] {body})"));
+                let got = eval_src(&format!("({head} [{written}] {body})"), &mut env);
+                let want = eval_src(&format!("({head} [{inlined}] {body})"), &mut env);
                 proptest::prop_assert_eq!(
                     got.map_err(|e| e.to_string()),
                     want.map_err(|e| e.to_string()),

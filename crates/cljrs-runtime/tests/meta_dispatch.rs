@@ -121,6 +121,73 @@ fn a_wrong_tag_is_still_rejected() {
     }
 }
 
-// The `Value::TypeInstance` arm — the one an inline cache exercises hardest —
-// needs `deftype`, which this branch's base does not have. It is covered where
-// `deftype` lands.
+fn try_eval(env: &mut Env, src: &str) -> Result<Value, String> {
+    let mut parser = Parser::new(src.to_string(), "<test>".to_string());
+    let forms = parser.parse_all().expect("parse error");
+    let mut result = Value::Nil;
+    for form in forms {
+        result = cljrs_runtime::interp::eval::eval(&form, env).map_err(|e| format!("{e:?}"))?;
+    }
+    Ok(result)
+}
+
+/// The `Value::TypeInstance` arm is the one an inline cache exercises hardest:
+/// it is the protocol-dispatch path. Its instances need a definition first, so
+/// they cannot sit in `VALUES`; each entry is (definition, instance, tag).
+const DATATYPES: &[(&str, &str, &str)] = &[
+    ("(deftype Point [x y])", "(->Point 1 2)", "Point"),
+    ("(defrecord Pair [a b])", "(->Pair 1 2)", "Pair"),
+    ("(defrecord Pair [a b])", "(map->Pair {:a 1 :b 2})", "Pair"),
+];
+
+#[test]
+fn the_two_tag_tables_agree_on_every_datatype_instance() {
+    let (_g, mut env) = make_env();
+    for (definition, instance, expected) in DATATYPES {
+        eval_value(&mut env, definition);
+        let v = eval_value(&mut env, instance);
+        let tag = type_tag_of(&v);
+        assert_eq!(&*tag, *expected, "`{instance}` carries the wrong tag");
+        assert!(
+            type_tag_matches(&v, &tag),
+            "`{instance}` has tag `{tag}` but type_tag_matches denies it"
+        );
+        assert!(
+            !type_tag_matches(&v, "NoSuchTag"),
+            "`{instance}` matched a tag that names nothing"
+        );
+    }
+}
+
+#[test]
+fn a_record_keeps_its_tag_through_a_metadata_wrapper() {
+    // A record is the datatype that accepts metadata, so it is the datatype
+    // through which the wrapper case of the `TypeInstance` arm is reachable.
+    let (_g, mut env) = make_env();
+    eval_value(&mut env, "(defrecord Pair [a b])");
+    let bare = eval_value(&mut env, "(->Pair 1 2)");
+    let annotated = eval_value(&mut env, "(with-meta (->Pair 1 2) {:probe 1})");
+    assert_eq!(
+        &*type_tag_of(&annotated),
+        &*type_tag_of(&bare),
+        "a record changed its dispatch tag under an annotation"
+    );
+    assert!(
+        type_tag_matches(&annotated, "Pair"),
+        "an annotated record is a permanent inline-cache miss"
+    );
+    assert!(!type_tag_matches(&annotated, "NoSuchTag"));
+}
+
+#[test]
+fn a_deftype_instance_refuses_a_metadata_wrapper() {
+    // The negative half of the test above: a deftype is not IObj on the JVM,
+    // and cljrs refuses `with-meta` on one, so the wrapper case of the arm is
+    // unreachable for it by construction rather than merely untested.
+    let (_g, mut env) = make_env();
+    eval_value(&mut env, "(deftype Point [x y])");
+    assert!(
+        try_eval(&mut env, "(with-meta (->Point 1 2) {:probe 1})").is_err(),
+        "with-meta on a deftype instance must be refused"
+    );
+}

@@ -6,8 +6,10 @@
 pub mod anf;
 pub mod async_lower;
 pub mod context;
+pub mod dispatch_family;
 pub mod escape;
 pub mod inline;
+pub mod interop;
 pub mod known;
 pub mod optimize;
 pub mod regionalize;
@@ -17,10 +19,12 @@ pub use anf::{
     lower_fn_body_shadowed_kwargs,
 };
 pub use async_lower::{AsyncLowerError, AsyncLowering, lower_async};
+pub use dispatch_family::{DISPATCH_FAMILY, in_dispatch_family};
 pub use escape::{
     AnalysisResult, EscapeContext, EscapeState, ExternalDefn, UseInfo, UseKind, analyze,
 };
 pub use inline::inline;
+pub use interop::is_method_sugar;
 pub use known::CoreShadows;
 pub use optimize::{optimize, optimize_with_externals};
 

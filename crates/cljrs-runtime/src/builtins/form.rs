@@ -326,6 +326,16 @@ pub fn attach_meta(value: Value, annotation: Value) -> Value {
 /// Errors when the form cannot denote a value: a map literal whose expansion
 /// has odd length, or a `#?@` splice in a position that has no sibling
 /// sequence to splice into.
+/// The list value `form_to_value` builds for a `FormKind::List`, over elements
+/// that are already converted.
+///
+/// `macroexpand_1` converts a call's parts itself so that `&form` and the
+/// macro's arguments can share one conversion; this keeps how a list form
+/// becomes a value in one place rather than two.
+pub fn values_to_list(items: impl IntoIterator<Item = Value>) -> Value {
+    Value::List(GcPtr::new(PersistentList::from_iter(items)))
+}
+
 pub fn form_to_value(form: &Form) -> EvalResult<Value> {
     let value = match &form.kind {
         FormKind::Nil => Value::Nil,
@@ -350,7 +360,7 @@ pub fn form_to_value(form: &Form) -> EvalResult<Value> {
 
         FormKind::List(forms) => {
             let items = forms_to_values(&expand_reader_conds_cow(forms))?;
-            Value::List(GcPtr::new(PersistentList::from_iter(items)))
+            values_to_list(items)
         }
         FormKind::Vector(forms) => {
             let items = forms_to_values(&expand_reader_conds_cow(forms))?;

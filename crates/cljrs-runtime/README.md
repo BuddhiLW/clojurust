@@ -71,6 +71,7 @@ src/
     array_list.rs       — java.util.ArrayList-alike interop shim
     bitops.rs           — bit-and / bit-or / bit-shift-* and friends
     new.rs              — (new Type ...) construction dispatch
+    records.rs          — make-record-instance (the defrecord constructor) and record?
     regex.rs            — re-pattern / re-find / re-seq / re-matches
     taps.rs             — add-tap / tap> builtins over env::taps
     time.rs             — clock and duration builtins
@@ -118,6 +119,12 @@ tests/
                                      protocol method body; params shadow them
   deftype_types.rs                 — deftype: positional ctor, `.-field`, protocol
                                      impls, and mutable fields written with `set!`
+  ns_part_resolution.rs            — one alias-resolution rule: an alias and
+                                     a full namespace name agree for symbols,
+                                     `var`, macros, syntax-quote, `binding`
+                                     and protocol names, and an absent ns part
+                                     means the current namespace (each test
+                                     fails when the arm it names is stubbed)
   qualified_protocol_impl.rs       — a qualified protocol name in an impl position
                                      (defrecord/deftype/reify/extend-*) resolves
                                      through its own namespace
@@ -145,6 +152,16 @@ tests/
                                      eager IR lowering: the lowerer must decline
                                      a `set!` on a local (own binary — it flips
                                      the process-wide eager-lowering switch)
+  dispatch_family_expansion.rs     — the bootstrap macros and
+                                     `cljrs_ir::lower::DISPATCH_FAMILY` pinned
+                                     against each other: every primitive a
+                                     surface datatype form expands THROUGH must
+                                     be a family member
+  datatype_in_fn_tiered.rs         — `deftype`/`defrecord`/`reify` inside a
+                                     function body under forced eager lowering:
+                                     lowering sees the EXPANDED body, so the
+                                     name it must decline on is `deftype*` (own
+                                     binary — forced eager lowering)
   destructure_or_default_eager.rs  — `:or` destructuring defaults are evaluated
                                      eagerly (`(get m :k default)`), identically
                                      in the tree-walker and the IR tier (own
@@ -318,6 +335,19 @@ pub fn ir_cache(&self) -> &Arc<tiered::ir_cache::IrCache>;
 pub fn eval(&self, form: &Form, env: &mut Env) -> EvalResult;
 pub fn call_cljrs_fn(&self, f: &CljxFn, args: &[Value], env: &mut Env) -> EvalResult;
 pub fn on_fn_defined(&self, f: &CljxFn, env: &mut Env);
+
+/// The namespace a qualified symbol's `ns` part names: a `:require … :as`
+/// alias wins, anything else is taken literally.  This is the ONE definition
+/// of that rule; every construct that resolves a qualified name reads it.
+/// `Env::resolve_ns_part` is the same rule relative to that env's
+/// `current_ns`, and `Env::resolve_ns_or_current` adds the absent-ns-part
+/// case.  Callers relative to something else — `resolve`, which follows the
+/// `*ns*` dynamic var, and versioned resolution, which follows a defining
+/// namespace — name it here instead of open-coding the lookup.
+///
+/// Note what this is NOT: `eval_symbol`'s privacy check and versioned-symbol
+/// routing sit *after* its call to this, and remain its own.
+pub fn resolve_ns_part_in(&self, current_ns: &str, ns_part: &str) -> Arc<str>;
 
 /// Copy `src_ns`'s interns into `dst_ns` as refers.  Both are *explicit*
 /// refers (`(:require [x :refer :all])` / `:refer [...]`) and are never
@@ -550,10 +580,11 @@ collection.
 keywords, maps, sets, vars, protocol/multimethod dispatch). For a
 `Value::ProtocolFn` callee whose protocol has `extend_via_metadata` set (`(defprotocol
 Name :extend-via-metadata true ...)`), dispatch first checks the first arg's
-metadata for an entry keyed by the `ProtocolFn` itself (e.g. `(with-meta {}
-{my-method (fn [this] ...)})`) before falling back to the type-tag `impls`
-lookup — this lets a value implement a protocol without a matching
-`extend-type`/`extend-protocol`. Protocol dispatch helpers shared with the
+metadata for an entry keyed by the method's FULLY-QUALIFIED SYMBOL — `ns/method`,
+built from `Protocol.ns`, which is why `protocol*` has to be a special form —
+e.g. `` (with-meta {} {`my-method (fn [this] ...)}) ``, before falling back to
+the type-tag `impls` lookup. This lets a value implement a protocol without a
+matching `extend-type`/`extend-protocol`. Protocol dispatch helpers shared with the
 Phase 10.6 inline caches:
 
 - `type_tag_of(val: &Value) -> Arc<str>` — canonical protocol dispatch tag of a value
@@ -618,6 +649,62 @@ pub fn register_experimental(globals: &Arc<GlobalEnv>, ns: &str); // the future 
 rather than `clojure.core`; `EXPERIMENTAL_SOURCE` adds the `future` macro over
 them. See [`cljrs.core.experimental/future`](#cljrscoreexperimentalfuture--cooperative-not-parallel)
 for why they are not in `clojure.core`.
+
+### What is seqable, and the one place it is decided
+
+```rust
+pub fn is_seqable(v: &Value) -> bool;   // builtins.rs
+```
+
+`ValueIter` is the walker every eager sequence operation runs on — `vec`,
+`into`, `map`, `reduce`, `rest`, `value_to_seq`. `is_seqable` is the predicate
+those operations gate on, and `(seqable? x)` is a builtin over it, so
+`clojure.core/seqable?` is a call rather than a fifth opinion. (It used to be a
+`defn` in `bootstrap.cljrs` spelling the set out again as an `or` of type
+predicates, and it disagreed with the others.)
+
+`is_seqable` is **not** derived from `ValueIter`'s arms: asking the iterator
+means stepping it, and stepping a `LazySeq` realizes it, which a predicate must
+not do. The two are kept honest from the other end instead — `ValueIter`'s
+fallback arm raises, naming the type, where it used to `return None`. That
+distinction is the whole point: "the sequence ended" and "I do not know how to
+walk this" are the same answer to a caller, so a type missing from the walker
+made `vec`, `into`, `map` and `reduce` answer `[]`, `[]`, `nil` and the init
+value instead of failing. A `PersistentQueue` sat in exactly that hole —
+`(vec q)` was `[]` while `(count q)` was `2`.
+
+`seq`, `nth` and `rest` keep hand-written arms only where they earn one: `seq`
+and `rest` return a lazy tail unforced for `LazySeq`/`Cons` and use the O(1)
+`PersistentList::rest`, and everything else in `rest` now goes through the
+shared walker. `nth` is deliberately narrower than `is_seqable` — a map and a
+set are seqable and `nth` refuses them, as on the JVM — so it lists the
+sequential types itself. A queue and the nine array kinds share one arm there,
+`nth_walked`, which walks the value and states the bounds rule once: out of
+range without a default is an error, with a default it is the default.
+
+### Static members of JVM class names
+
+```rust
+fn jvm_static_member(class: &str, member: &str) -> Option<Value>;   // interp/eval.rs
+```
+
+`is_jvm_class_name` says which class names resolve to themselves as symbols;
+this says which of their static members have a value. Consulted only after
+`ns/name` fails to resolve as a namespace-qualified var, and reading the
+namespace part as WRITTEN rather than through the alias table, because a class
+name is not aliasable.
+
+The set is closed and stays small on purpose: there is no JVM here, so a member
+exists only because this runtime produces it, and a member that is absent must
+read as an unbound symbol rather than as `nil`.
+
+| member | value |
+|---|---|
+| `clojure.lang.PersistentQueue/EMPTY` | the empty `Value::Queue` |
+
+That one is not a convenience. cljrs has a `(queue)` builtin and the JVM does
+not, so the static member is the only spelling of an empty queue that a shared
+`.cljc` can use on both sides — see `tests/cljrs/cljrs/lang_test/queue.cljc`.
 
 ### Map entries
 
@@ -806,6 +893,25 @@ The `System/…` and `Thread/…` names follow the existing `Math/…` conventio
 JVM static's name registered as an ordinary builtin, so portable code that
 reaches for a clock resolves without a reader conditional.
 
+### Process environment (`builtins.rs`)
+
+- `(System/getenv)` — the whole environment, as a map of string to string.
+- `(System/getenv "NAME")` — that variable's value, or `nil` when unset.
+
+Same convention as the clock above, and the same nil-for-unset answer as
+`java.lang.System/getenv`, so `.cljc` that reads an environment variable needs
+no reader conditional.
+
+Reads through `std::env::vars_os` and skips what is not valid UTF-8:
+`std::env::vars()` *panics* on a non-UTF-8 entry, and one stray variable in the
+caller's environment must not take the runtime down. The one-arg form reports
+such a variable as unset, which is `std::env::var`'s own answer rather than a
+guess at an encoding.
+
+`System/getenv` is **denied inside a transaction function** (`env::policy`):
+the environment is process-global state the transaction was not handed as an
+argument, and it can change under it between retries.
+
 ### `eval`
 
 `eval` is registered as a sentinel and intercepted where the environment is
@@ -958,29 +1064,48 @@ the keyword shorthand `^:async` or an explicit `{:async true}` map.  `fn`/`defn`
 use it to set `CljxFn::is_async`, which `env::apply::dispatch_if_async`
 checks at call time to route through the async runtime.
 
-### Which natives need form-level interception
+### Which natives are intercepted, and by whom
 
-`is_form_intercepted(name) -> bool` is the canonical list of natives that
-`eval_call` intercepts because they need unevaluated forms or the environment.
-The async tree-walker (`cljrs-async`) and the IR interpreter consult it instead
-of keeping their own copies; the `match` in `eval_call` must have an arm for
-every name it reports.
+```rust
+pub type InterceptedFn = fn(Vec<Value>, &mut Env) -> EvalResult;
+pub fn intercepted_native(name: &str) -> Option<InterceptedFn>;
+pub fn is_form_intercepted(name: &str) -> bool;
+pub fn dispatch_intercepted(name: &str, args: Vec<Value>, env: &mut Env) -> Option<EvalResult>;
+```
 
-### Special handlers in `apply.rs`
+`intercepted_native` is the **one** definition of both which natives the
+evaluators intercept and what each one does.  These need the environment rather
+than only their argument values (`apply`, `atom`, `swap!`, `eval`, `resolve`,
+`intern`, `bound-fn*`, the whole `ns-*` family, …), so each is registered in the
+builtin table as a *sentinel* stub that errors when invoked directly — a path
+that forgets to intercept fails loudly instead of quietly.
 
-Each handler evaluates its key expressions under the correct allocation context:
+The other two are **projections** of it and cannot disagree with it:
+`is_form_intercepted` asks whether it answers, `dispatch_intercepted` calls what
+it answers with, on **already-evaluated** arguments.  There is deliberately no
+list of names beside the dispatch arms; that arrangement is what broke.
+Every caller reads the same one:
 
-| Handler | Static-sink guard coverage |
+| Caller | How it reaches the table |
 |---|---|
-| `handle_atom_call` | initial value |
-| `handle_reset_bang` | new value |
-| `handle_swap_call` | function return value |
-| `handle_volatile` | initial value |
-| `handle_vreset` | new value |
-| `handle_vswap` | function return value |
-| `handle_agent_call` | initial value |
-| `handle_alter_var_root` | function return value |
-| `handle_intern` | value expression (3-arg form) |
+| `eval_call` (tree-walker) | evaluates the arg forms, then calls `dispatch_intercepted` |
+| `tiered::ir_interp::dispatch_sentinel_by_name` | already has values; calls it directly |
+| `cljrs-async`'s `eval_call_async` | uses `is_form_intercepted` to hand the call back to the synchronous path |
+
+This used to be two independent lists, and the IR interpreter's was the shorter
+one: a function calling `(resolve 'map)` worked while it was tree-walked and
+threw "resolve sentinel should not be called directly" once it was IR-promoted.
+
+One copy survives, because it cannot be deleted: `builtins.rs` must register a
+name for it to exist as a var at all, and it carries real per-name information
+there (arity, docstring).  Its *set membership* is still a copy, so
+`every_sentinel_builtin_is_intercepted` in `tests/intercepted_natives_tiered.rs`
+reads that table out of the source and asserts every sentinel-registered name is
+intercepted.
+
+Under the `no-gc` feature, `STATIC_ARENA_ARGS` names the subset whose *argument
+evaluation* must allocate in the static arena, because the container being built
+(atom, volatile, Var root, interned Var) outlives every scratch region.
 
 ### Parameter binding: `bind_fn_params` vs `bind_fn_params_positional`
 
@@ -999,27 +1124,47 @@ anyway would evaluate each `:or` default twice per call — destructuring defaul
 are eager, so a side-effecting one would fire once here and once in the prologue
 (issue #363).
 
-### Value-level special form helpers (IR interpreter API)
+### Value-level intercepted natives
 
-The IR interpreter receives already-evaluated `Vec<Value>` arguments rather than
-`&[Form]` AST nodes.  These public functions mirror the `handle_*` form-level
-handlers but accept pre-evaluated args, allowing the IR interpreter to
-implement sentinel operations without hitting the stub errors registered in
-`clojure.core`:
+There is exactly one implementation of each intercepted native, and it takes
+already-evaluated `Vec<Value>` arguments; the tree-walker evaluates the arg
+forms first (`eval_args`) and then joins the same path.  `dispatch_intercepted`
+is the only table that names these, so a behaviour added to an arm is a
+behaviour both dispatch paths gain:
 
 | Function | Operation |
 |---|---|
+| `eval_apply(args, env)` | `apply` — spread the last argument |
+| `eval_atom(args, env)` | `atom` — with `:meta` / `:validator` options |
+| `eval_reset_bang(args, env)` | `reset!` — validator, watches, shared atoms |
 | `eval_swap_bang(args, env)` | `swap!` — apply f to atom, store result |
 | `eval_volatile(args)` | `volatile!` — create a new volatile |
 | `eval_vreset_bang(args)` | `vreset!` — reset volatile value |
 | `eval_vswap_bang(args, env)` | `vswap!` — apply f to volatile value, store result |
-| `make_delay_from_fn(f, globals, ns)` | `make-delay` — wrap zero-arg fn in a `Delay` |
+| `eval_agent(args)` | `agent` — not implemented yet |
+| `eval_make_lazy_seq(args, env)` | `make-lazy-seq` — wrap zero-arg fn in a `LazySeq` |
+| `eval_make_delay(args, env)` | `make-delay` — wrap zero-arg fn in a `Delay` |
+| `make_delay_from_fn(f, globals, ns)` | `Delay` from an explicit globals/ns pair |
 | `eval_alter_var_root(args, env)` | `alter-var-root` — apply f to var root, store result |
 | `eval_vary_meta(args, env)` | `vary-meta` — apply f to obj metadata |
+| `eval_find_ns(args, env)` | `find-ns` / `the-ns` |
+| `eval_ns_interns(args, env)` | `ns-interns` / `ns-publics` |
+| `eval_ns_refers(args, env)` | `ns-refers` |
+| `eval_ns_map(args, env)` | `ns-map` |
+| `eval_all_ns(args, env)` | `all-ns` |
+| `eval_create_ns(args, env)` | `create-ns` |
+| `eval_ns_aliases(args, env)` | `ns-aliases` |
+| `eval_remove_ns(args, env)` | `remove-ns` |
+| `eval_alter_meta(args, env)` | `alter-meta!` |
+| `eval_ns_resolve(args, env)` | `ns-resolve` |
+| `eval_resolve(args, env)` | `resolve` — relative to `*ns*`, not `env.current_ns` |
+| `eval_intern(args, env)` | `intern` — 2- and 3-arg forms |
+| `eval_bound_fn_star(args, env)` | `bound-fn*` — capture the dynamic frames |
 | `eval_eval(args, env)` | `eval` — convert a form value back to a `Form` and evaluate it at top level of the current namespace (vars visible, caller's locals not) |
 | `eval_with_bindings_star(args, env)` | `with-bindings*` — push binding frame, call f |
 | `eval_send_to_agent(args, env)` | `send` / `send-off` — dispatch action to agent |
 | `dispatch_method(method, target, args)` | `(.method target args…)` — interop method dispatch on an evaluated target (strings, vectors, seqs); on a `TypeInstance` only `.-field` reads are supported (mutable cell first, then the field map) |
+| `is_method_sugar(head)` | re-exported from `cljrs_ir::lower`: whether a head symbol is the `.method` / `.-field` sugar (`..` and a bare `.` are not). One definition, read by `eval_call`, `cljrs-async`'s `eval_call_async`, the ANF lowerer and the AOT driver |
 
 `make_lazy_seq_from_fn(f, globals, ns)` (already public) creates a `LazySeq`
 from a zero-arg callable; the above `make_delay_from_fn` is the analogous
@@ -1036,19 +1181,87 @@ conditional in ANY slot of an `ns` require spec, namespace included, so
 `[#?(:clj clojure.core :cljs cljs.core) :as core]` reads — an option selecting
 no branch is dropped, a namespace selecting none is an error.
 
-`deftype` and `defrecord` share `parse_field_specs` (field name + mutability,
-metadata-transparent), `build_positional_ctor` (`->Name`, routed to the
-`make-type-instance-mut` builtin when the type declares mutable fields) and
-`intern_type_symbol` (so `(instance? Name x)` resolves); only `defrecord` also
-gets `build_map_ctor`. `synth_field_scope` wraps a method body in a `let*`
-binding each field a param does not shadow — a mutable field through
-`(.-field this)` (the live cell) and an immutable one through `(:field this)` —
-plus a hidden `__deftype_self__` handle when any field is mutable, which is how
-`eval_set_bang` finds the instance whose cell a bare `(set! field v)` updates.
-`resolve_protocol_sym` resolves a protocol named in an impl position
-(`extend-type`, `extend-protocol`, `reify`/`defrecord`/`deftype`) through the
+**The datatype, protocol and multimethod family is Clojure, not Rust.**
+`deftype`, `defrecord`, `reify`, `defprotocol`, `extend-type`,
+`extend-protocol`, `defmulti` and `defmethod` are all macros in
+`bootstrap.cljrs`. What stays here is only what needs the interpreter, and only
+two of the seven primitives actually do:
+
+| primitive | kind | why it is irreducible |
+|---|---|---|
+| `deftype*` | special form | mints a type tag and registers method impls with the fields in scope; returns the tag |
+| `protocol*` | special form | mints a `Protocol` in the CURRENT namespace — `Protocol.ns` qualifies the method symbol that extend-via-metadata dispatch looks up |
+| `protocol-fn` | builtin fn | the dispatch `ProtocolFn` for one method, arity read back out of the protocol's own spec |
+| `extend` | builtin fn | writes `{method → fn}` into `Protocol.impls` under a type tag; Clojure's own signature |
+| `make-type-instance`, `make-type-instance-mut` | builtin fns | construct a `deftype` `TypeInstance` (the latter with interior-mutable cells) |
+| `make-reify-instance` | builtin fn | the same shape, recording `DatatypeKind::Reify` — one builtin per datatype form, so the caller states which it meant rather than the runtime guessing from a gensym'd type tag |
+| `multi-fn` | builtin fn | mints a `MultiFn` with an optional default dispatch value |
+| `add-method` | builtin fn | writes one entry into `MultiFn.methods`, keyed exactly as `remove-method` reads it |
+
+The one place the family is NOT spelled through its macros is the bootstrap's
+own use of it: the three core protocols (`ICounted`, `ILookup`, `ISeqable`)
+and their extensions over the collection types are written over `protocol*`,
+`protocol-fn` and `extend` directly. The tree-walker re-expands a macro on
+every use, and these macros expand with interpreted `map`/`zipmap`, so spelled
+as macros those five forms cost ~87ms of every runtime's startup (0.04s became
+0.25s, and every test building a runtime per case slowed 8x, measured
+2026-09-10). Each is exactly what its macro would produce, and the comment
+above them in `bootstrap.cljrs` says so; keep them in step if the macros change
+shape.
+
+Because the family is now macro-backed, the two passes that must route it away
+from compiled code — `cljrs-ir`'s ANF lowerer and `cljrs-compiler`'s
+interpreted preamble — read it on the EXPANDED form. Membership is therefore
+stated once, in `cljrs_ir::lower::DISPATCH_FAMILY`, and holds both the surface
+names and the `*` primitives they expand to. `builtins.rs` no longer registers
+`deftype`, `defrecord` or `reify` as `builtin_stub_nil`: the bootstrap
+`defmacro`s bind those vars, so `(resolve 'deftype)` finds a macro. The stubs
+that remain are for special forms with no Clojure definition.
+
+Naming the target by SYMBOL in a macro expansion rather than by string in a Rust
+handler is not only shorter: `(defmethod other.ns/m ...)` and
+`(extend-type T other.ns/P ...)` resolve through the ordinary rules, aliases
+included, where a handler doing `lookup_in_ns(current_ns, "other.ns/m")` cannot.
+
+Putting the target in evaluation position does cost one thing, and `defmethod`
+pays it back deliberately. The two ways a target can be wrong — no such var, and
+the wrong kind of var — fail at two different sites once the name is evaluated,
+and neither site knows it was serving a `defmethod`. So the missing-var case is
+diagnosed in the macro, where the target is still a symbol: `(nil? (resolve
+mname))` reports "not defined; require the namespace that defines it". The
+wrong-kind case can only be seen after evaluation, so `add-method` states what
+the value is *not* ("not a multimethod, got long") rather than naming a target
+it was never given. The two messages point at different repairs — a missing
+`:require` versus a name that is a `def` — which is what
+`defmethod_cross_ns.rs` pins. `resolve` reports a private var just as the JVM
+does, so extending one across namespaces still fails on the access rule and is
+not mistaken for a missing var.
+
+The fn the `defmethod` expansion emits is ANONYMOUS. A `fn` self-name is a
+local binding over the whole body, so naming it after the multimethod makes the
+method's own name resolve to the method rather than to the `MultiFn`, and a
+body that calls its own multimethod re-enters itself instead of dispatching.
+Clojure emits `(fn ~@fn-tail)` for the same reason. `defmulti_macro.rs` and
+`tests/cljrs/cljrs/lang_test/multimethod.cljc` pin it.
+
+`deftype*` uses `parse_field_specs` (field name + mutability,
+metadata-transparent) and `register_impls_for_tag`. `synth_field_scope` wraps a
+method body in a `let*` binding each field a param does not shadow — a mutable
+field through `(.-field this)` (the live cell) and an immutable one through
+`(:field this)` — plus a hidden `__deftype_self__` handle when any field is
+mutable, which is how `eval_set_bang` finds the instance whose cell a bare
+`(set! field v)` updates. `resolve_protocol_sym` resolves a protocol named in an
+impl position (`deftype*`, and so `reify`/`defrecord`/`deftype`) through the
 current ns's `:require :as` aliases and through its own namespace when
 qualified — not as a literal intern of the current ns.
+
+Every handler that takes a namespace part from a user-written symbol resolves it
+with `Env::resolve_ns_or_current`, never by using the part as written:
+`eval_var`, `eval_binding` and `eval_set_bang` all do, so `(set! m/*v* x)` after
+`(:require [my.lib :as m])` names the same var as `(set! my.lib/*v* x)`. An
+unaliased part is still taken literally, so an unknown namespace reports the
+symbol the way the user wrote it. `set!` was the last site reading the part
+verbatim; `tests/set_bang_alias.rs` pins it.
 
 ---
 
@@ -1390,26 +1603,34 @@ unwind with the interpreter frame.
 ### Special-form coverage in the IR interpreter
 
 Several `clojure.core` entries are sentinel stubs that error unconditionally
-when called through the normal function-call path — the real logic lives in
-`eval_call`'s special-form dispatch.  `ir_interp.rs` handles all of them
-without going through the stubs:
+when called through the normal function-call path — the real logic needs the
+environment.  `ir_interp.rs` must handle **every** one of them, and it does so
+by reading the same enumeration the tree-walker reads: `is_sentinel` forwards to
+`interp::apply::is_form_intercepted`, and `dispatch_sentinel_by_name` forwards to
+`interp::apply::dispatch_intercepted`.  Nothing is listed twice, so nothing can
+drift; before that, the IR interpreter's private list was 20 names short and
+`(resolve 'map)` inside a function threw once the function got hot.
 
 | Operation | How handled in IR |
 |---|---|
-| `swap!` (`KnownFn::AtomSwap`) | `interp::apply::eval_swap_bang` |
+| every name in `INTERCEPTED_NATIVES` | `dispatch_sentinel_by_name` → `interp::apply::dispatch_intercepted` |
+| `swap!` (`KnownFn::AtomSwap`) | `interp::apply::eval_swap_bang` (the lowered fast path; the sentinel path handles `swap!` used as a value) |
 | `with-bindings*` (`KnownFn::WithBindings`) | `interp::apply::eval_with_bindings_star` |
-| `volatile!` | `dispatch_sentinel_by_name` → `eval_volatile` |
-| `vreset!` | `dispatch_sentinel_by_name` → `eval_vreset_bang` |
-| `vswap!` | `dispatch_sentinel_by_name` → `eval_vswap_bang` |
-| `make-delay` | `dispatch_sentinel_by_name` → `make_delay_from_fn` |
-| `alter-var-root` | `dispatch_sentinel_by_name` → `eval_alter_var_root` |
-| `vary-meta` | `dispatch_sentinel_by_name` → `eval_vary_meta` |
-| `send` / `send-off` | `dispatch_sentinel_by_name` → `eval_send_to_agent` |
+| `lazy-seq` (`KnownFn::LazySeq`) | `interp::apply::make_lazy_seq_from_fn` |
 | `with-out-str` (`KnownFn::WithOutStr`) | native: `push_output_capture` → apply body thunk → `pop_output_capture` (the clojure.core var is a nil stub and must never be called) |
 | `(.method target args…)` interop | `dispatch_sentinel_by_name` intercepts dot-prefixed `CallDirect` names → `interp::apply::dispatch_method` |
 
 Both `Inst::Call` (where the callee register holds a sentinel `NativeFunction`)
 and `Inst::CallDirect` (where the callee is named directly) are intercepted.
+`CallDirect` also carries ordinary names, so its non-intercepted path stays
+`load_global_value` + `apply_value`.
+
+The regression guard is `tests/intercepted_natives_tiered.rs`.  It is its own
+test binary because `tiered::force_eager_lowering()` is process-wide; eager
+lowering is what turns "call it 200 times until it promotes" into "call it
+once", so a tiered regression is cheap to pin.  Any test about behaviour *after*
+promotion belongs there — a test that builds `ExecutionMode::TreeWalk`, as most
+of `crates/*/tests` does, cannot see this class of bug at all.
 
 `load_global_value` additionally mirrors `eval_symbol`'s whole-symbol lookup:
 when `(ns, name)` resolution fails, it retries `"{ns}/{name}"` in the defining

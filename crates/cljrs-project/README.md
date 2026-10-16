@@ -125,7 +125,12 @@ pub struct RustConfig {
 
 pub enum Dependency {
     Git(GitDep),
-    Local { root: PathBuf },
+    Local {
+        root: PathBuf,
+        rust_init:       Option<Arc<str>>,  // :rust/init  — native init fn path
+        rust_crate_dir:  Option<Arc<str>>,  // :rust/crate — Cargo.toml subdir, relative to root
+        rust_load_dylib: bool,              // :rust/load :dylib — build the working tree as a cdylib
+    },
 }
 
 pub struct GitDep {

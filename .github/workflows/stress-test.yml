@@ -54,6 +54,40 @@ jobs:
           ./target/release/cljrs compile -o clojure-test-suite-bin --test ./clojure-test-suite/test
           ./clojure-test-suite-bin
 
+      # ── cljrs-owned test tree ─────────────────────────────────────────────────
+      #
+      # `clojure-test-suite/` above is a vendored mirror of upstream's suite.
+      # `tests/cljrs/` is ours, and it is `.cljc` so the same corpus runs on JVM
+      # Clojure too — the third leg below is the differential oracle, and it is
+      # the only step in this file that can tell us a green cljrs run disagrees
+      # with what Clojure actually means.
+
+      - name: cljrs self-hosted tests — interpreter
+        id: cljrs-interp
+        continue-on-error: true
+        run: ./target/release/cljrs test --src-path ./tests/cljrs
+
+      - name: cljrs self-hosted tests — AOT compile and run
+        id: cljrs-aot
+        continue-on-error: true
+        run: |
+          ./target/release/cljrs compile -o cljrs-tests --test ./tests/cljrs
+          ./cljrs-tests
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - uses: DeLaGuardo/setup-clojure@13.0
+        with:
+          cli: latest
+
+      - name: cljrs self-hosted tests — JVM differential oracle
+        id: cljrs-jvm
+        continue-on-error: true
+        run: clojure -Sdeps '{:paths ["tests/cljrs"]}' -M tests/cljrs-jvm-oracle.clj
+
       # ── Samples — interpreted ─────────────────────────────────────────────────
 
       - name: graph sample — interpreted
@@ -117,6 +151,9 @@ jobs:
             [rust-release]="${{ steps.rust-release.outcome }}"
             [clojure-interp]="${{ steps.clojure-interp.outcome }}"
             [clojure-aot]="${{ steps.clojure-aot.outcome }}"
+            [cljrs-interp]="${{ steps.cljrs-interp.outcome }}"
+            [cljrs-aot]="${{ steps.cljrs-aot.outcome }}"
+            [cljrs-jvm]="${{ steps.cljrs-jvm.outcome }}"
             [graph-interp]="${{ steps.graph-interp.outcome }}"
             [life-interp]="${{ steps.life-interp.outcome }}"
             [async-interp]="${{ steps.async-interp.outcome }}"
@@ -131,6 +168,7 @@ jobs:
             build
             rust-debug rust-release
             clojure-interp clojure-aot
+            cljrs-interp cljrs-aot cljrs-jvm
             graph-interp life-interp async-interp http-get-interp
             graph-aot life-aot async-aot http-get-aot
           )
