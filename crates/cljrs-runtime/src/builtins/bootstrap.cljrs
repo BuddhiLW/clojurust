@@ -1960,7 +1960,22 @@
 ;; so `deftype` is a particular case of an ordinary macro rather than a bespoke
 ;; Rust form. Field mutability is read from each field's metadata (survives
 ;; macroexpansion), splitting the constructor between immutable and mutable maps.
+;; A field list that is not a vector almost always means a reader conditional
+;; such as `#?(:clj [..] :cljs [..])` with no :cljrs / :default branch read as
+;; nothing, so the first protocol name slid into the field position (malli
+;; 0.20.2's malli.impl.regex does this). Fail at the macro boundary, naming the
+;; type and the cause, instead of deep inside with "expected seqable, got symbol".
+(defn- check-type-fields! [form tsym fields]
+  (when-not (vector? fields)
+    (throw (ex-info
+            (str form " " tsym ": the field list must be a vector, got "
+                 (if (nil? fields) "nil" (str (type fields) " " (pr-str fields)))
+                 ". If the fields are written as a reader conditional (#?), it has no"
+                 " :cljrs or :default branch, so it read as nothing; add a :cljrs branch.")
+            {:form form :type tsym :fields fields}))))
+
 (defmacro deftype [tsym fields & impls]
+  (check-type-fields! 'deftype tsym fields)
   (let [tname (str tsym)
         ctor  (symbol (str "->" tsym))
         mut?  (fn [f] (let [m (meta f)]
@@ -1986,6 +2001,7 @@
 ;; defrecord: like deftype but fields are always immutable and it also gets the
 ;; map constructor `map->T`. Same macro-over-deftype* shape.
 (defmacro defrecord [tsym fields & impls]
+  (check-type-fields! 'defrecord tsym fields)
   (let [tname (str tsym)
         pos   (symbol (str "->" tsym))
         mapc  (symbol (str "map->" tsym))
