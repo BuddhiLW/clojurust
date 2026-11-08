@@ -15,6 +15,7 @@ pub mod gas;
 pub mod gc_roots;
 pub mod ifn_vector;
 pub mod loader;
+pub mod monitor;
 pub mod policy;
 pub mod taps;
 pub mod vcs;

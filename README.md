@@ -12,7 +12,8 @@ A Rust-hosted dialect of the Clojure programming language.
 
 clojurust runs a Clojure dialect natively on Rust. Source files use the
 `.cljrs` extension (native) or `.cljc` (cross-platform, with reader
-conditionals). The platform feature is `:cljrs`; `:rust` is an accepted alias.
+conditionals). The runtime platform key is `:cljrs` (`:rust` is accepted as a
+legacy alias).
 
 A program flows through a tiered execution pipeline: the reader and
 tree-walking interpreter give immediate startup, hot functions are lowered to
@@ -33,7 +34,7 @@ Current capabilities:
 - **AOT compilation** — `cljrs compile <file> -o <bin>` produces a standalone
   native binary; end-to-end for multi-file programs (variadic fns, protocols,
   escape-analysis region allocation, HOFs, sequence/collection ops)
-- **Reader conditionals** — `.cljc` files use `#?(:cljrs ... :clj ... :default ...)`; `:rust` remains an alias
+- **Reader conditionals** — `.cljc` files use `#?(:cljrs ... :clj ... :default ...)` (the legacy key `:rust` selects the same branch)
 - **Persistent collections** — HAMT-backed maps/sets, RRB vectors, sorted maps/sets (via rpds)
 - **Tracing GC** — non-moving mark-and-sweep garbage collector with `GcPtr<T>`,
   conservative scanning of JIT frames, and escape-analysis scratch regions
@@ -102,7 +103,7 @@ See [`TODO.md`](TODO.md) for the full itemised roadmap.
 | [`cljrs-value`](crates/cljrs-value) | `Value` enum; persistent collections (rpds-backed); Clojure-compatible hashing | complete |
 | [`cljrs-gc`](crates/cljrs-gc) | Non-moving mark-and-sweep GC; `GcPtr<T>` smart pointer; `Trace` trait; scratch regions | complete |
 | [`cljrs-runtime`](crates/cljrs-runtime) | The runtime: `env` (`GlobalEnv`, `Env`, dynamic bindings, namespace loader, GC roots), `builtins` (~300 native core functions, transients, regex, bitops), `interp` (tree-walking interpreter: eval, special forms, macros, destructuring), `tiered` (IR interpreter, IR cache, tiering/JIT state, background lower worker, `load_prebuilt_ir` bundle replay) | complete |
-| [`cljrs-tx`](crates/cljrs-tx) | Pure tree-walked transaction functions in a bounded, invocation-lifetime no-GC arena | initial |
+| [`cljrs-tx`](crates/cljrs-tx) | Pure tree-walked transaction functions in a bounded, invocation-lifetime no-GC arena. `no-gc` is currently experimental and may panic. | initial |
 | [`cljrs-ir`](crates/cljrs-ir) | IR types (ANF/SSA) with serialization (postcard); ANF lowering, escape analysis, OSR | complete |
 | [`cljrs-stdlib`](crates/cljrs-stdlib) | Embedded stdlib: clojure.string, clojure.set, clojure.test, clojure.walk, clojure.edn, clojure.zip, clojure.data | complete |
 

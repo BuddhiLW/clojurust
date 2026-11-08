@@ -91,3 +91,68 @@ fn a_record_prints_with_its_qualified_type_name() {
     let src = format!("{TWO_POINTS}(pr-str (a.one/->Point 1))");
     assert_eq!(eval_printed(&src), "#a.one.Point{:x 1}");
 }
+
+/// A record extended from another namespace under its unqualified name, with
+/// `import` standing for that namespace's `(:import ...)` clause.
+fn extend_imported(import: &str) -> String {
+    format!(
+        r#"
+(ns proto.r)
+(defprotocol Named (nm [x]))
+(ns my-lib.geo)
+(defrecord Point [x])
+(ns b.imp {import})
+(extend-type Point proto.r/Named (nm [_] :extended))
+(ns user)
+(pr-str (proto.r/nm (my-lib.geo/->Point 1)))
+"#
+    )
+}
+
+#[test]
+fn an_imported_record_is_extended_under_its_qualified_tag() {
+    for import in [
+        "(:import [my-lib.geo Point])",
+        "(:import (my-lib.geo Point))",
+        "(:import my-lib.geo.Point)",
+        // The JVM spelling of the namespace as a package.
+        "(:import [my_lib.geo Point])",
+    ] {
+        assert_eq!(
+            eval_printed(&extend_imported(import)),
+            ":extended",
+            "{import}"
+        );
+    }
+}
+
+#[test]
+fn importing_a_name_that_is_no_loaded_type_is_ignored() {
+    let src = r#"
+(ns d.four (:import [java.util List] java.io.File))
+(pr-str (ns-name *ns*))
+"#;
+    assert_eq!(eval_printed(src), "d.four");
+}
+
+#[test]
+fn an_unresolved_type_name_is_named_by_the_dispatch_error() {
+    let (_, mut env) = make_env();
+    let src = extend_imported("");
+    let mut parser = Parser::new(src, "<test>".to_string());
+    let err = parser
+        .parse_all()
+        .expect("parse error")
+        .iter()
+        .find_map(|form| cljrs_runtime::interp::eval::eval(form, &mut env).err())
+        .expect("the call should have no implementation");
+    let msg = format!("{err:?}");
+    assert!(
+        msg.contains("No implementation of protocol Named for type my-lib.geo.Point"),
+        "got: {msg}"
+    );
+    assert!(
+        msg.contains("registered under the unqualified tag Point"),
+        "got: {msg}"
+    );
+}

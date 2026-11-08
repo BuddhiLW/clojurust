@@ -60,6 +60,30 @@ fn cljrs_key_splices() {
     );
 }
 
+/// Clauses are tried in source order, as in Clojure: `:default` always
+/// matches, so an earlier `:default` wins over a later platform key.
+#[test]
+fn default_before_platform_key_wins() {
+    assert_eq!(
+        eval_pr("(pr-str #?(:default :generic :cljrs :specific))"),
+        ":generic"
+    );
+    assert_eq!(
+        eval_pr("(pr-str '#?(:default :generic :rust :specific))"),
+        ":generic"
+    );
+}
+
+/// With several `:default` clauses the first one wins, not the last.
+#[test]
+fn first_default_wins() {
+    assert_eq!(
+        eval_pr("(pr-str #?(:clj :jvm :default :first :default :second))"),
+        ":first"
+    );
+    assert_eq!(eval_pr("(pr-str [#?@(:default [1] :default [2])])"), "[1]");
+}
+
 /// The shape from `malli.impl.regex`: a deftype whose field vector, mutable
 /// fields included, is chosen by a reader conditional with no `:default`.
 #[test]

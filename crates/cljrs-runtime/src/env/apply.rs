@@ -132,7 +132,26 @@ pub(crate) fn prefers_in_hierarchy(
     y: &Value,
     hierarchy: &HierarchySnapshot,
 ) -> bool {
-    let prefers = mf.prefers.lock().unwrap();
+    if cljrs_value::realization::is_inert(x)
+        && cljrs_value::realization::is_inert(y)
+        && hierarchy_is_inert(hierarchy)
+    {
+        return prefers_with_table(
+            &mf.prefers.lock().unwrap(),
+            hierarchy.parents.as_ref(),
+            x,
+            y,
+        );
+    }
+    let roots: Vec<Value> = hierarchy
+        .parents
+        .iter()
+        .chain(hierarchy.ancestors.iter())
+        .cloned()
+        .map(Value::Map)
+        .collect();
+    let _roots = crate::env::gc_roots::root_values(&roots);
+    let prefers = mf.prefers.lock().unwrap().clone();
     prefers_with_table(&prefers, hierarchy.parents.as_ref(), x, y)
 }
 
@@ -167,6 +186,54 @@ fn hierarchy_method_key(
     hierarchy: &HierarchySnapshot,
 ) -> EvalResult<Option<String>> {
     let dispatch_vals = mf.dispatch_vals.lock().unwrap();
+    if cljrs_value::realization::is_inert(dispatch_val)
+        && dispatch_vals
+            .values()
+            .all(cljrs_value::realization::is_inert)
+        && hierarchy_is_inert(hierarchy)
+    {
+        let prefers = mf.prefers.lock().unwrap();
+        return hierarchy_method_key_with_tables(
+            mf,
+            dispatch_val,
+            hierarchy,
+            &dispatch_vals,
+            &prefers,
+        );
+    }
+    let snapshot = dispatch_vals.clone();
+    drop(dispatch_vals);
+    let dispatch_vals = snapshot;
+    let mut roots: Vec<Value> = dispatch_vals.values().cloned().collect();
+    roots.extend(
+        hierarchy
+            .parents
+            .iter()
+            .chain(hierarchy.ancestors.iter())
+            .cloned()
+            .map(Value::Map),
+    );
+    let _roots = crate::env::gc_roots::root_values(&roots);
+    let prefers = mf.prefers.lock().unwrap().clone();
+    hierarchy_method_key_with_tables(mf, dispatch_val, hierarchy, &dispatch_vals, &prefers)
+}
+
+fn hierarchy_is_inert(hierarchy: &HierarchySnapshot) -> bool {
+    hierarchy.parents.iter().chain(hierarchy.ancestors.iter()).all(|map| {
+        map.iter().all(|(key, value)| {
+            cljrs_value::realization::is_inert(key)
+                && matches!(value, Value::Set(set) if set.iter().all(cljrs_value::realization::is_inert))
+        })
+    })
+}
+
+fn hierarchy_method_key_with_tables(
+    mf: &cljrs_value::MultiFn,
+    dispatch_val: &Value,
+    hierarchy: &HierarchySnapshot,
+    dispatch_vals: &HashMap<String, Value>,
+    prefers: &HashMap<String, Vec<String>>,
+) -> EvalResult<Option<String>> {
     let mut matches: Vec<(String, Value)> = dispatch_vals
         .iter()
         .filter(|(k, v)| {
@@ -175,15 +242,13 @@ fn hierarchy_method_key(
         })
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
-    drop(dispatch_vals);
     matches.sort_by(|a, b| a.0.cmp(&b.0));
     if matches.len() <= 1 {
         return Ok(matches.into_iter().next().map(|(k, _)| k));
     }
 
-    let prefers = mf.prefers.lock().unwrap();
     let dominates = |a: &(String, Value), b: &(String, Value)| {
-        prefers_with_table(&prefers, hierarchy.parents.as_ref(), &a.1, &b.1)
+        prefers_with_table(prefers, hierarchy.parents.as_ref(), &a.1, &b.1)
             || isa_with_ancestors(&a.1, &b.1, hierarchy.ancestors.as_ref())
     };
     let best: Vec<&(String, Value)> = matches
@@ -259,6 +324,32 @@ pub fn type_tag_of(val: &Value) -> Arc<str> {
     }
 }
 
+/// What to add to a "No implementation" error when the method is registered
+/// under the unqualified name of the type being dispatched on.
+///
+/// A record's tag is `my.ns.Point`. An `extend-type` or `extend-protocol` that
+/// names `Point` from a namespace where the symbol does not resolve cannot tell
+/// it from a native type's tag, so it registers under bare `Point` and
+/// succeeds; the call is where that surfaces. Empty when there is no such
+/// registration.
+fn unqualified_impl_hint<V>(
+    impls: &std::collections::HashMap<Arc<str>, std::collections::HashMap<Arc<str>, V>>,
+    tag: &str,
+    method: &str,
+) -> String {
+    let Some((_, bare)) = tag.rsplit_once('.') else {
+        return String::new();
+    };
+    if !impls.get(bare).is_some_and(|m| m.contains_key(method)) {
+        return String::new();
+    }
+    format!(
+        " (an implementation is registered under the unqualified tag {bare}: \
+         where it was extended, {bare} did not resolve to {tag}; \
+         :import or :refer the type there)"
+    )
+}
+
 /// Allocation-free check that `val`'s protocol dispatch tag equals `tag`.
 ///
 /// Must agree exactly with [`type_tag_of`] — it exists so inline caches
@@ -328,8 +419,40 @@ pub fn dispatch_if_async(callee: &Value, args: &[Value], env: &Env) -> Option<Va
     Some(rt.spawn_async_call(callee.clone(), args.to_vec(), call_env))
 }
 
+/// Run the body of `callee` on the current stack, without `^:async` dispatch.
+///
+/// Native async runtimes call this from the fiber that an `^:async` call spawns,
+/// so the body runs on the ordinary synchronous evaluator instead of spawning
+/// another fiber. Non-function callees behave like [`apply_value`].
+pub fn apply_fn_body(callee: &Value, args: Vec<Value>, env: &mut Env) -> EvalResult {
+    let Value::Fn(f) = callee else {
+        return apply_value(callee, args, env);
+    };
+    cljrs_value::realization::catch(|| {
+        let _callee_root = crate::env::gc_roots::root_value(callee);
+        let _args_root = crate::env::gc_roots::root_values(&args);
+        crate::env::gc_roots::gc_safepoint(env)?;
+        env.call_cljrs_fn(f.get(), &args)
+    })
+    .unwrap_or_else(|message| {
+        Err(crate::env::error::value_error_to_eval_error(
+            cljrs_value::ValueError::Other(message),
+        ))
+    })
+}
+
 /// Apply `callee` to the already-evaluated `args`.
 pub fn apply_value(callee: &Value, args: Vec<Value>, env: &mut Env) -> EvalResult {
+    cljrs_value::realization::catch(|| apply_value_inner(callee, args, env)).unwrap_or_else(
+        |message| {
+            Err(crate::env::error::value_error_to_eval_error(
+                cljrs_value::ValueError::Other(message),
+            ))
+        },
+    )
+}
+
+fn apply_value_inner(callee: &Value, args: Vec<Value>, env: &mut Env) -> EvalResult {
     // Root the callee and args so they survive any GC triggered at the safepoint.
     // These values are on the Rust stack but not yet in any Env frame.
     //
@@ -341,21 +464,32 @@ pub fn apply_value(callee: &Value, args: Vec<Value>, env: &mut Env) -> EvalResul
 
     // GC safepoint at function application boundary — blocks if collection is in progress,
     // and initiates collection if one was requested (memory pressure).
-    crate::env::gc_roots::gc_safepoint(env);
+    crate::env::gc_roots::gc_safepoint(env)?;
 
     match callee {
         Value::NativeFunction(nf) => {
             crate::env::policy::check_native(&nf.get().name)?;
             check_arity(&nf.get().arity, args.len(), &nf.get().name)?;
+            // A direct `(apply ...)` call is intercepted while forms are still
+            // available, but apply is itself an IFn and can be passed to apply.
+            // Handle that already-evaluated path here instead of invoking the
+            // registration sentinel.
+            if nf.get().name.as_ref() == "apply" {
+                let callee = args[0].clone();
+                let mut applied = args[1..args.len() - 1].to_vec();
+                let spread = crate::builtins::builtins::value_to_seq(&args[args.len() - 1])
+                    .map_err(crate::env::error::value_error_to_eval_error)?;
+                applied.extend(spread);
+                return apply_value(&callee, applied, env);
+            }
             // Register the caller's env as a GC root: native functions may
             // call back into Clojure (via invoke()), which creates a fresh Env
             // and may trigger GC.
             let _caller_root = crate::env::gc_roots::push_env_root(env);
-            crate::env::callback::push_eval_context(env);
-            let result =
-                (nf.get().func)(&args).map_err(crate::env::error::value_error_to_eval_error);
-            crate::env::callback::pop_eval_context();
-            result
+            let _context = crate::env::callback::scoped_eval_context(env);
+            let _native_frame =
+                cljrs_gc::fiber::native_frame(&nf.get().name, &nf.get().diagnostic_id);
+            (nf.get().func)(&args).map_err(crate::env::error::value_error_to_eval_error)
         }
         Value::Fn(f) => {
             if let Some(fut) = dispatch_if_async(callee, &args, env) {
@@ -410,13 +544,19 @@ pub fn apply_value(callee: &Value, args: Vec<Value>, env: &mut Env) -> EvalResul
             let impl_fn = find_protocol_impl(&impls, tag.as_ref(), pf_ref.method_name.as_ref())
                 .ok_or_else(|| {
                     EvalError::Runtime(format!(
-                        "No implementation of protocol {} for type {}",
+                        "No implementation of protocol {} for type {}{}",
                         pf_ref.protocol.get().name,
-                        tag
+                        tag,
+                        unqualified_impl_hint(&impls, &tag, &pf_ref.method_name)
                     ))
                 })?;
             drop(impls);
             drop(args_root);
+            #[cfg(feature = "no-gc")]
+            pf_ref
+                .protocol
+                .get()
+                .protect_implementation(&tag, &pf_ref.method_name);
             let _impl_root = crate::env::gc_roots::root_value(&impl_fn);
             apply_value(&impl_fn, args, env)
         }
@@ -426,7 +566,7 @@ pub fn apply_value(callee: &Value, args: Vec<Value>, env: &mut Env) -> EvalResul
             let dispatch_root = crate::env::gc_roots::root_value(&dispatch_val);
             cljrs_gc::safepoint();
             let key = format!("{}", dispatch_val);
-            let exact = mf_ref.methods.lock().unwrap().get(&key).cloned();
+            let exact = mf_ref.method(&key);
             let impl_fn = match exact {
                 Some(f) => f,
                 None => {
@@ -465,18 +605,12 @@ pub fn apply_value(callee: &Value, args: Vec<Value>, env: &mut Env) -> EvalResul
                             resolved
                         }
                     };
-                    mf_ref
-                        .methods
-                        .lock()
-                        .unwrap()
-                        .get(&method_key)
-                        .cloned()
-                        .ok_or_else(|| {
-                            EvalError::Runtime(format!(
-                                "No method in multimethod '{}' for dispatch value {}",
-                                mf_ref.name, key
-                            ))
-                        })?
+                    mf_ref.method(&method_key).ok_or_else(|| {
+                        EvalError::Runtime(format!(
+                            "No method in multimethod '{}' for dispatch value {}",
+                            mf_ref.name, key
+                        ))
+                    })?
                 }
             };
             drop(dispatch_root);
@@ -493,8 +627,72 @@ pub fn apply_value(callee: &Value, args: Vec<Value>, env: &mut Env) -> EvalResul
                 Some(Value::TypeInstance(ti)) => {
                     Ok(ti.get().fields.get(callee).unwrap_or_else(default))
                 }
+                Some(Value::Set(set)) => {
+                    if set.contains(callee) {
+                        Ok(callee.clone())
+                    } else {
+                        Ok(default())
+                    }
+                }
+                Some(Value::TransientMap(map)) => Ok(map.get().get(callee).unwrap_or_else(default)),
+                Some(Value::TransientSet(set)) => {
+                    if set.get().contains(callee) {
+                        Ok(callee.clone())
+                    } else {
+                        Ok(default())
+                    }
+                }
                 Some(Value::Nil) => Ok(default()),
                 _ => Ok(Value::Nil),
+            }
+        }
+        Value::Vector(vector) => {
+            if args.len() != 1 {
+                return Err(EvalError::Arity {
+                    name: "vector".into(),
+                    expected: "1".into(),
+                    got: args.len(),
+                });
+            }
+            let Value::Long(index) = args[0] else {
+                return Err(EvalError::Runtime(format!(
+                    "vector index must be an integer, got {}",
+                    args[0].type_name()
+                )));
+            };
+            let found = usize::try_from(index)
+                .ok()
+                .and_then(|index| vector.get().nth(index).cloned());
+            match found {
+                Some(value) => Ok(value),
+                None => Err(EvalError::Runtime(format!(
+                    "vector index out of bounds: {index}"
+                ))),
+            }
+        }
+        Value::TransientVector(vector) => {
+            if !(1..=2).contains(&args.len()) {
+                return Err(EvalError::Arity {
+                    name: "transient-vector".into(),
+                    expected: "1 or 2".into(),
+                    got: args.len(),
+                });
+            }
+            let Value::Long(index) = args[0] else {
+                return Err(EvalError::Runtime(format!(
+                    "vector index must be an integer, got {}",
+                    args[0].type_name()
+                )));
+            };
+            let found = usize::try_from(index)
+                .ok()
+                .and_then(|index| vector.get().get(index));
+            match (found, args.get(1)) {
+                (Some(value), _) => Ok(value),
+                (None, Some(default)) => Ok(default.clone()),
+                (None, None) => Err(EvalError::Runtime(format!(
+                    "vector index out of bounds: {index}"
+                ))),
             }
         }
         Value::Map(m) => {
@@ -516,6 +714,17 @@ pub fn apply_value(callee: &Value, args: Vec<Value>, env: &mut Env) -> EvalResul
                 }
             }
             None => Ok(Value::Nil),
+        },
+        Value::TransientMap(map) => match args.first() {
+            Some(key) => Ok(map
+                .get()
+                .get(key)
+                .unwrap_or(args.get(1).cloned().unwrap_or(Value::Nil))),
+            None => Ok(Value::Nil),
+        },
+        Value::TransientSet(set) => match args.first() {
+            Some(value) if set.get().contains(value) => Ok(value.clone()),
+            Some(_) | None => Ok(Value::Nil),
         },
         Value::WithMeta(inner, _) => {
             drop(args_root);
@@ -540,5 +749,57 @@ pub fn apply_value(callee: &Value, args: Vec<Value>, env: &mut Env) -> EvalResul
             "<{}> is not callable",
             other.type_name()
         ))),
+    }
+}
+
+#[cfg(test)]
+mod unqualified_impl_hint_tests {
+    use super::unqualified_impl_hint;
+    use proptest::prelude::*;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    proptest! {
+        /// A hint is given exactly when the dispatch tag is qualified and the
+        /// method called is registered under the tag's last segment; it then
+        /// names both tags. An impl of another method under the bare name, or
+        /// of this method under another tag, does not earn one.
+        #[test]
+        fn a_hint_is_given_iff_the_method_sits_under_the_bare_name(
+            ns in "[a-z]{1,4}(\\.[a-z]{1,4}){0,2}",
+            name in "[A-Z][a-z]{0,4}",
+            method in "[a-z]{1,4}",
+            qualified in any::<bool>(),
+            method_under_bare in any::<bool>(),
+            other_method_under_bare in any::<bool>(),
+            method_under_other_tag in any::<bool>(),
+        ) {
+            let mut impls: HashMap<Arc<str>, HashMap<Arc<str>, ()>> = HashMap::new();
+            let mut register = |tag: &str, method: &str| {
+                impls
+                    .entry(Arc::from(tag))
+                    .or_default()
+                    .insert(Arc::from(method), ());
+            };
+            if method_under_bare {
+                register(&name, &method);
+            }
+            if other_method_under_bare {
+                register(&name, &format!("{method}-other"));
+            }
+            if method_under_other_tag {
+                register(&format!("{name}Other"), &method);
+                register(&format!("other.{ns}.{name}"), &method);
+            }
+            let tag = if qualified { format!("{ns}.{name}") } else { name.clone() };
+
+            let hint = unqualified_impl_hint(&impls, &tag, &method);
+
+            prop_assert_eq!(!hint.is_empty(), qualified && method_under_bare, "{}", hint);
+            if !hint.is_empty() {
+                prop_assert!(hint.contains(&format!("unqualified tag {name}:")), "{}", hint);
+                prop_assert!(hint.contains(&format!("resolve to {tag};")), "{}", hint);
+            }
+        }
     }
 }

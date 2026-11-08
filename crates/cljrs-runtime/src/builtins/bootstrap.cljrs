@@ -337,10 +337,11 @@
             (do (vreset! dv false)
                 (rf result input))))))))
   ([pred coll]
-   (loop [s (seq coll)]
-     (if (and s (pred (first s)))
-       (recur (next s))
-       (or s '())))))
+   (lazy-seq
+     (loop [s (seq coll)]
+       (if (and s (pred (first s)))
+         (recur (next s))
+         (or s '()))))))
 
 (defn dorun
   "Walks through coll, realizing each lazy element, for side effects.
@@ -801,7 +802,12 @@
 (defn repeat
   "Returns a lazy (infinite, or length n if supplied) sequence of xs."
   ([x] (lazy-seq (cons x (repeat x))))
-  ([n x] (take n (repeat x))))
+  ([n x]
+   (take (cond
+           (true? n) 1
+           (false? n) 0
+           :else (long n))
+         (repeat x))))
 
 (defn repeatedly
   "Takes a function of no args and returns a lazy (infinite, or length n
@@ -947,13 +953,14 @@
             (do (vswap! seen conj input)
                 (rf result input))))))))
   ([coll]
-   (loop [s (seq coll) seen #{} acc []]
-     (if s
-       (let [v (first s)]
-         (if (contains? seen v)
-           (recur (next s) seen acc)
-           (recur (next s) (conj seen v) (conj acc v))))
-       (seq acc)))))
+   (letfn [(step [s seen]
+             (lazy-seq
+               (when-let [s (seq s)]
+                 (let [v (first s)]
+                   (if (contains? seen v)
+                     (step (next s) seen)
+                     (cons v (step (next s) (conj seen v))))))))]
+     (step coll #{}))))
 
 (defn dedupe
   "Returns a lazy sequence removing consecutive duplicates in coll.
@@ -2041,3 +2048,22 @@
            (~'set [_# v#] (reset! ~cell v#) nil)))
       `(reify ~@classes ~@ms))))
 
+(defmacro locking [x & body]
+  (list 'clojure.core/locking-call x (cons 'fn (cons [] body))))
+
+
+;; Argument evaluation stays on the isolate. Only typed native call bodies offload.
+(defmacro blocking [& calls]
+  (cons 'do
+    (map (fn [call]
+           (if (and (seq? call) (seq call))
+             (cons 'clojure.core/blocking-call call)
+             (throw (ex-info "blocking expects native call forms" {}))))
+         calls)))
+
+(defmacro future
+  "Runs body concurrently on this isolate in a fiber. Conveys dynamic bindings.
+  Dereferencing parks the calling fiber. Use isolates for parallel execution.
+  Cancellation discards the result without interrupting the body."
+  [& body]
+  (list 'clojure.core/future-call (list 'fn [] (cons 'do body))))
