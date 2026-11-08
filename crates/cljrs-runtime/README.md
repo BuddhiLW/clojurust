@@ -87,7 +87,10 @@ src/
     apply.rs            — eval_call: macro expansion, native dispatch, recur trampoline
     arity.rs            — fresh arity ID generator
     destructure.rs      — pattern destructuring (vector, map, & rest)
-    macros.rs           — macro expansion helpers
+    macros.rs           — macro expansion helpers: macroexpand_1 / macroexpand check the
+                          call head against the evaluating frames, macroexpand_all /
+                          macroexpand_all_in against the form's own lexical scope (a local
+                          shadows a macro); binding_names lists what a pattern binds
     syntax_quote.rs     — syntax-quote (backtick) expansion
     virtualize.rs       — let-chain virtualization: assoc/conj chains → transients
     versioned.rs        — (non-WASM) tree-walker entry point for versioned resolution
@@ -1404,7 +1407,10 @@ extended: defined there, referred, or imported. `ns` honours `(:import [my.ns
 Point])`, `(:import (my.ns Point))` and `(:import my.ns.Point)` by referring the
 var of each named type that is loaded (`import_types` in `special.rs`; the
 package is also tried with `_` read as `-`), and ignores names that are not
-loaded types, such as host classes in a `.cljc` file. A type symbol that does
+loaded types, such as host classes in a `.cljc` file. Importing a name the
+namespace already binds to something else (its own definition, or an earlier
+refer or import from a namespace other than `clojure.core`) is an error, as on
+the JVM: `Point already refers to: #'b/Point in namespace: b`. A type symbol that does
 not resolve cannot be told from a native type's tag (`String`, a
 `NativeObject`'s `type_tag`), so it registers under the bare name; when a call
 then finds no implementation for `my.ns.Point` while one sits under bare
@@ -1510,7 +1516,15 @@ pub mod lower {
 
     // Phase 10.7 — the two halves of lowering, split for background use:
     /// Macro-expand a body on the calling thread (macros need the interpreter).
-    pub fn macroexpand_body(body: &[Form], env: &mut Env) -> Vec<Form>;
+    /// `locals` are the names bound around the body: a call to one of them is
+    /// a call to the local, whatever macro shares its name.  `env`'s frames
+    /// belong to whoever triggered the lowering and are not consulted.
+    pub fn macroexpand_body(body: &[Form], env: &mut Env, locals: &[Arc<str>]) -> Vec<Form>;
+    /// The names in scope throughout one arity's body: the function's name,
+    /// its parameters, and what its destructuring patterns bind.  A closure's
+    /// captured names are the caller's to append.
+    pub fn arity_locals(name, params, rest, destructure_params, destructure_rest)
+        -> Vec<Arc<str>>;
     /// Env-free lowering of an already-expanded body; callable off-thread.
     /// `arity_id: Some(id)` uses defn_registry::snapshot_externals (atomic
     /// dependent recording, required off the mutator thread); `None` uses the
