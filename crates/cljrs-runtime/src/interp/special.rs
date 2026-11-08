@@ -11,7 +11,7 @@ use crate::env::env::{Env, RequireRefer, RequireSpec};
 use crate::env::error::{EvalError, EvalResult};
 use crate::env::loader::load_ns;
 use crate::interp::destructure::bind_pattern;
-use crate::interp::eval::{eval_body, eval_unscoped as eval, is_special_form};
+use crate::interp::eval::{eval_body, eval_unscoped as eval};
 use cljrs_gc::GcPtr;
 use cljrs_reader::Form;
 use cljrs_reader::form::FormKind;
@@ -2484,7 +2484,7 @@ fn register_impls_for_tag(
                         .impls
                         .lock()
                         .unwrap()
-                        .get(&type_tag)
+                        .get::<str>(type_tag)
                         .and_then(|methods| methods.get(&method_name))
                         .cloned();
                     if let (Some(Value::Fn(prev)), Value::Fn(new)) = (prev, &fn_val) {

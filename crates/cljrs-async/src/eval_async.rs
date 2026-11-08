@@ -367,7 +367,7 @@ async fn eval_loop_async(args: &[Form], env: &mut Env) -> EvalResult {
     let body = &args[1..];
     loop {
         // Root current_vals so they survive GC — they're not yet bound in env.
-        let _vals_root = cljrs_runtime::env::gc_roots::root_values(&current_vals);
+        let vals_root = cljrs_runtime::env::gc_roots::root_values(&current_vals);
 
         // GC safepoint on every iteration, as in the synchronous `eval_loop`,
         // so a tight recur loop that never awaits still lets the collector run.
@@ -409,6 +409,7 @@ async fn eval_loop_async(args: &[Form], env: &mut Env) -> EvalResult {
                 // new_vals are moved out before the frame drops and are
                 // re-rooted at the top of the next iteration; no safepoint
                 // runs in between.
+                drop(vals_root);
                 current_vals = new_vals;
             }
             // The loop's result (or error payload) keeps its alloc-frame roots

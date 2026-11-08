@@ -548,7 +548,7 @@ pub fn default_hard_limit() -> usize {
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
-        let physical = system_memory::total() as usize;
+        let physical = crate::sysmem::total() as usize;
         let half = (physical / 2).max(256 * MIB);
         match container_memory_limit() {
             Some(limit) if limit < physical || physical == 0 => limit,

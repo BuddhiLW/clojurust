@@ -371,7 +371,9 @@ impl SerializedValue {
             | SerializedValue::HashMap(p)
             | SerializedValue::SortedMap(p) => pairs(p),
 
-            SerializedValue::TypeInstance { type_tag, fields } => type_tag.len() + pairs(fields),
+            SerializedValue::TypeInstance {
+                type_tag, fields, ..
+            } => type_tag.len() + pairs(fields),
 
             SerializedValue::Cons { head, tail } => {
                 2 * NODE + head.owned_bytes() + tail.owned_bytes()

@@ -313,32 +313,6 @@ fn byte_to_char(s: &str, b: usize) -> usize {
     s[..b].chars().count()
 }
 
-#[cfg(test)]
-mod char_index_tests {
-    use super::{byte_to_char, char_to_byte, last_index_from};
-
-    #[test]
-    fn last_index_from_never_starts_past_from() {
-        // "b€" ends inside the multibyte char after from = 0; it starts at 1.
-        assert_eq!(last_index_from("ab€", "b€", 0), None);
-        assert_eq!(last_index_from("ab€", "b€", 1), Some(1));
-        assert_eq!(last_index_from("héllo=x=y", "=", 6), Some(5));
-        assert_eq!(last_index_from("héllo=x=y", "=", 99), Some(7));
-        assert_eq!(last_index_from("abc", "a", -1), None);
-        assert_eq!(last_index_from("abc", "", 99), Some(3));
-    }
-
-    #[test]
-    fn non_ascii_offsets_are_char_indices() {
-        let s = "héllo=x";
-        let b = s.find('=').unwrap();
-        assert_eq!(b, 6);
-        assert_eq!(byte_to_char(s, b), 5);
-        assert_eq!(char_to_byte(s, 5), 6);
-        assert_eq!(char_to_byte(s, 99), s.len());
-    }
-}
-
 /// `(index-of s substr)` or `(index-of s substr from)`.
 fn index_of(args: &[Value]) -> ValueResult<Value> {
     let s = get_str(&args[0])?;
@@ -416,4 +390,30 @@ fn string_escape(args: &[Value]) -> ValueResult<Value> {
         }
     }
     Ok(make_str(result))
+}
+
+#[cfg(test)]
+mod char_index_tests {
+    use super::{byte_to_char, char_to_byte, last_index_from};
+
+    #[test]
+    fn last_index_from_never_starts_past_from() {
+        // "b€" ends inside the multibyte char after from = 0; it starts at 1.
+        assert_eq!(last_index_from("ab€", "b€", 0), None);
+        assert_eq!(last_index_from("ab€", "b€", 1), Some(1));
+        assert_eq!(last_index_from("héllo=x=y", "=", 6), Some(5));
+        assert_eq!(last_index_from("héllo=x=y", "=", 99), Some(7));
+        assert_eq!(last_index_from("abc", "a", -1), None);
+        assert_eq!(last_index_from("abc", "", 99), Some(3));
+    }
+
+    #[test]
+    fn non_ascii_offsets_are_char_indices() {
+        let s = "héllo=x";
+        let b = s.find('=').unwrap();
+        assert_eq!(b, 6);
+        assert_eq!(byte_to_char(s, b), 5);
+        assert_eq!(char_to_byte(s, 5), 6);
+        assert_eq!(char_to_byte(s, 99), s.len());
+    }
 }

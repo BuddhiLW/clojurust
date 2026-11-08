@@ -1984,13 +1984,22 @@ impl Iterator for ValueIter {
                     // it's part of) survives any GC triggered during realize().
                     let realized = {
                         let _current_root = crate::env::gc_roots::root_value(&self.current);
-                        ls.get().realize()
+                        ls.get().try_realize()
                     };
-                    self.current = realized;
-                    if let Some(err) = ls.get().error() {
-                        self.error = Some(err);
-                        self.current = Value::Nil;
-                        return None;
+                    match realized {
+                        Ok(value) => self.current = value,
+                        // Not every consumer calls `take_error`; ending the
+                        // iteration would hand a truncated result to code in
+                        // a cancelled fiber. Continue as the cancellation
+                        // unwind, which the enclosing NativeFn boundary (or
+                        // `value_to_seq`, for the evaluator) turns back into
+                        // the typed error.
+                        Err(ValueError::Cancelled) => cljrs_value::parking::resume_cancelled(),
+                        Err(error) => {
+                            self.error = Some(error);
+                            self.current = Value::Nil;
+                            return None;
+                        }
                     }
                 }
                 Value::Cons(c) => {
@@ -2115,10 +2124,6 @@ impl Iterator for ValueIter {
                         .collect();
                     self.current = Value::List(GcPtr::new(PersistentList::from_iter(items)));
                 }
-                Value::Queue(q) => {
-                    let items: Vec<Value> = q.get().iter().cloned().collect();
-                    self.current = Value::List(GcPtr::new(PersistentList::from_iter(items)));
-                }
                 Value::TypeInstance(ti) => {
                     let mut pairs = Vec::new();
                     ti.get().fields.for_each(|k, v| {
@@ -2134,10 +2139,10 @@ impl Iterator for ValueIter {
                 // A queue sat in exactly that hole. Errors here surface through
                 // `take_error`, which every caller already checks.
                 other => {
-                    self.error = Some(format!(
+                    self.error = Some(ValueError::Other(format!(
                         "cannot iterate: {} is not seqable",
                         other.type_name()
-                    ));
+                    )));
                     self.current = Value::Nil;
                     return None;
                 }
@@ -4276,14 +4281,6 @@ fn builtin_seq(args: &[Value]) -> ValueResult<Value> {
                 Ok(cons_from_iter(array.iter().map(|f| Value::Double(*f))))
             }
         }
-        Value::Queue(q) => {
-            let items: Vec<Value> = q.get().iter().cloned().collect();
-            if items.is_empty() {
-                Ok(Value::Nil)
-            } else {
-                Ok(cons_from_iter(items))
-            }
-        }
         Value::TypeInstance(ti) => {
             let mut pairs = Vec::new();
             ti.get().fields.for_each(|k, v| {
@@ -4541,6 +4538,8 @@ fn nth_walked(items: Vec<Value>, idx: usize, default: Option<Value>) -> ValueRes
         });
     }
     Ok(items.into_iter().nth(idx).or(default).unwrap_or(Value::Nil))
+}
+
 fn nth_or_not_found(
     value: Option<Value>,
     default: Option<&Value>,
@@ -4993,7 +4992,10 @@ fn builtin_reduce(args: &[Value]) -> ValueResult<Value> {
 /// The box is never moved from, so the root always points at a live `Value`.
 fn reduce_from(f: &Value, init: Value, iter: &mut ValueIter) -> ValueResult<Value> {
     let mut acc = Box::new(init);
-    let _acc_root = crate::env::gc_roots::root_value(&acc);
+    // SAFETY: the box is neither moved nor freed before the guard drops at the
+    // end of this function; the fold only overwrites the value in place.
+    let _acc_root =
+        unsafe { crate::env::gc_roots::root_values_unchecked(std::slice::from_ref(&*acc)) };
     for item in iter.by_ref() {
         *acc = crate::env::callback::invoke(f, vec![(*acc).clone(), item])?;
         if let Value::Reduced(inner) = &*acc {

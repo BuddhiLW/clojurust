@@ -68,7 +68,7 @@ pub fn to_json(v: &Value) -> Result<Json, String> {
         Value::Char(c) => Json::String(c.to_string()),
         Value::Keyword(k) => Json::String(k.get().full_name()),
         Value::Symbol(s) => Json::String(s.get().full_name()),
-        Value::Uuid(u) => Json::String(uuid_string(*u)),
+        Value::Uuid(u) => Json::String(uuid_string(u.get().0)),
 
         Value::Vector(vec) => {
             let mut out = Vec::with_capacity(vec.get().count());

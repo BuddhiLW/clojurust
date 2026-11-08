@@ -22,7 +22,6 @@ use std::task::{Context, Poll};
 
 use cljrs_gc::mutator::{MutatorState, assert_parkable};
 use cljrs_runtime::env::error::{EvalError, EvalResult};
-use cljrs_runtime::env::gc_roots::root_values;
 use cljrs_value::Value;
 use corosensei::stack::{DefaultStack, Stack};
 
@@ -371,7 +370,10 @@ impl Fiber {
         };
         task.state.swap_with_current();
         reports.install();
-        task.roots_guard = Some(root_values(&task.roots));
+        // SAFETY: `task.roots` is a boxed slice owned by the task beside the
+        // guard; it is never reallocated, and the guard is dropped first.
+        task.roots_guard =
+            Some(unsafe { cljrs_runtime::env::gc_roots::root_values_unchecked(&task.roots) });
         task.state.swap_with_current();
         task.co = Some(unsafe {
             Coroutine::with_stack_unchecked(stack, move |yielder, _resume: Resume| {
@@ -433,7 +435,7 @@ pub struct FiberTask {
     pending: Option<Park>,
     // Boxed: addresses registered in state must survive moving the task.
     roots: Box<[Value]>,
-    roots_guard: Option<cljrs_runtime::env::gc_roots::ValueRootGuard>,
+    roots_guard: Option<cljrs_runtime::env::gc_roots::ValueRootGuard<'static>>,
     bytes: usize,
     id: FiberId,
     yielder: *const Yielder<Resume, Park>,
@@ -717,7 +719,7 @@ impl Drop for FiberTask {
 pub struct FiberResult {
     result: Option<EvalResult>,
     state: MutatorState,
-    guard: Option<cljrs_runtime::env::gc_roots::ValueRootGuard>,
+    guard: Option<cljrs_runtime::env::gc_roots::ValueRootGuard<'static>>,
     _roots: Box<[Value]>,
     #[cfg(feature = "no-gc")]
     leases: Vec<cljrs_gc::region::RegionLease>,
@@ -737,7 +739,9 @@ impl FiberResult {
             .collect();
         let mut state = MutatorState::fresh();
         state.swap_with_current();
-        let guard = root_values(&roots);
+        // SAFETY: `roots` is a boxed slice stored beside the guard in the
+        // returned FiberResult; moving the box does not move its elements.
+        let guard = unsafe { cljrs_runtime::env::gc_roots::root_values_unchecked(&roots) };
         state.swap_with_current();
         Self {
             result: Some(result),

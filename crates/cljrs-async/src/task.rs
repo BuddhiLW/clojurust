@@ -20,7 +20,7 @@ use cljrs_value::{CljxFuture, FutureState, Value};
 struct CapturedRoots {
     _values: Box<[Value]>,
     state: cljrs_gc::mutator::MutatorState,
-    guard: Option<cljrs_runtime::env::gc_roots::ValueRootGuard>,
+    guard: Option<cljrs_runtime::env::gc_roots::ValueRootGuard<'static>>,
 }
 #[cfg(not(feature = "no-gc"))]
 impl CapturedRoots {
@@ -28,7 +28,9 @@ impl CapturedRoots {
         let values = values.into_boxed_slice();
         let mut state = cljrs_gc::mutator::MutatorState::fresh();
         state.swap_with_current();
-        let guard = Some(cljrs_runtime::env::gc_roots::root_values(&values));
+        // SAFETY: `values` is a boxed slice stored beside the guard; moving
+        // the box does not move its elements, and the guard drops with it.
+        let guard = Some(unsafe { cljrs_runtime::env::gc_roots::root_values_unchecked(&values) });
         state.swap_with_current();
         Self {
             _values: values,

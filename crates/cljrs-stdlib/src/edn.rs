@@ -311,6 +311,8 @@ fn instant_value(text: &str) -> ValueResult<Value> {
         type_tag: Arc::from("java.util.Date"),
         fields,
         mutable: None,
+        // A Date is not a map on the JVM: a bare type, not a record.
+        kind: cljrs_value::value::DatatypeKind::Type,
     })))
 }
 

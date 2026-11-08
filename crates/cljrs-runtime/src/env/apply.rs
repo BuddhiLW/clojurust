@@ -704,7 +704,6 @@ fn apply_value_inner(callee: &Value, args: Vec<Value>, env: &mut Env) -> EvalRes
                 None => Ok(Value::Nil),
             }
         }
-        Value::Vector(v) => crate::env::ifn_vector::invoke(v.get(), &args),
         Value::Set(s) => match args.first() {
             Some(k) => {
                 if s.contains(k) {
