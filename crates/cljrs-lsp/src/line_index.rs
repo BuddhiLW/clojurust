@@ -6,7 +6,7 @@
 //! UTF-8 when the client advertises support. We derive everything from byte
 //! offsets via a precomputed table of line-start offsets.
 
-use tower_lsp::lsp_types::{Position, Range};
+use tower_lsp_server::ls_types::{Position, Range};
 
 /// The unit in which LSP `character` offsets are counted.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]

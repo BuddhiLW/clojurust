@@ -5,7 +5,7 @@
 //! to document coordinates.
 
 use cljrs_reader::{Form, FormKind};
-use tower_lsp::lsp_types::{DocumentSymbol, SymbolKind};
+use tower_lsp_server::ls_types::{DocumentSymbol, SymbolKind};
 
 use crate::line_index::{LineIndex, OffsetEncoding};
 
