@@ -210,6 +210,13 @@ const CLASSIFICATION: &[(&str, &str, Class)] = &[
     ),
     (
         "cljrs-runtime/src/env/gc_roots.rs",
+        "NEXT_VALUE_ROOT_ID",
+        Thread(
+            "a counter that only hands out unique ids; one sequence for every fiber on the thread keeps them unique across swapped root stacks",
+        ),
+    ),
+    (
+        "cljrs-runtime/src/env/gc_roots.rs",
         "OPTION_VALUE_ROOTS",
         Fiber("cljrs-runtime/OPTION_VALUE_ROOTS"),
     ),

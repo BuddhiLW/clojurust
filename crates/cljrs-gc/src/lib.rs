@@ -15,7 +15,8 @@ pub mod stats;
 pub mod cancellation;
 #[cfg(not(feature = "no-gc"))]
 pub mod config;
-#[cfg(all(not(feature = "no-gc"), not(target_arch = "wasm32")))]
+// The governor reads it in both GC modes.
+#[cfg(not(target_arch = "wasm32"))]
 mod sysmem;
 
 #[cfg(feature = "no-gc")]
