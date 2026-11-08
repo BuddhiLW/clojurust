@@ -4,6 +4,10 @@ use std::path::PathBuf;
 
 use crate::session::{self, VersioningFlags};
 
+/// How long the idle server drives async tasks before checking for a
+/// request again: the most a request waits, and the idle wake-up period.
+const IDLE_SLICE: std::time::Duration = std::time::Duration::from_millis(20);
+
 #[derive(clap::Args)]
 pub struct Args {
     /// Port to listen on (0 = let the OS pick a free port).
@@ -47,7 +51,9 @@ pub fn run(args: Args, versioning: VersioningFlags) -> miette::Result<i32> {
         server.port()
     );
     // Evaluate forms through the CLI's async driver so core.async /
-    // ^:async code makes progress, exactly like `cljrs repl`.
-    server.serve_with(session::eval_form)?;
+    // ^:async code makes progress, exactly like `cljrs repl`. Between
+    // requests keep driving it, so a loop started from the REPL keeps
+    // running while the editor is quiet.
+    server.serve_with_idle(session::eval_form, IDLE_SLICE, session::drive_idle)?;
     Ok(0)
 }
