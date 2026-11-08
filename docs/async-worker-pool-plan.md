@@ -246,6 +246,13 @@ mutable state is copied at the boundary.
 
 ## Memory pressure signaling
 
+The detailed design now lives in
+[`managed-memory-governor-plan.md`](managed-memory-governor-plan.md). That design keeps local heaps
+and adds process-wide allocation admission, byte-bounded queues, and accounting by memory class.
+
+The following text records the original direction. The governor plan supersedes its implementation
+details.
+
 - **Per-isolate accounting** plus a global `AtomicUsize` of total live bytes (each isolate adjusts on
   collect). A coordinator watches per-isolate `GcStats` (live set, alloc rate).
 - The coordinator drives a `tokio::sync::watch<PressureLevel>` (Green/Yellow/Red) that every isolate

@@ -13,6 +13,8 @@
 //! - **`#[export]`** — proc-macro for automatic function registration
 //! - **`register_exports`** — register all `#[export]`-annotated functions at once
 
+#[doc(hidden)]
+pub mod blocking;
 pub mod error;
 pub mod exports;
 pub mod marshal;
@@ -39,6 +41,8 @@ pub use cljrs_export_macro::export;
 #[doc(hidden)]
 pub use inventory;
 
+/// Offload Send-only Rust work while the current fiber parks.
+pub use cljrs_value::parking::blocking;
 /// Fingerprint shared with the pinned-package ABI handshake. The interop crate
 /// is built in the extension's graph, so these values describe that graph's
 /// cljrs version, compiler, and profile rather than the host process's.

@@ -17,19 +17,57 @@ use cljrs_value::Value;
 use crate::native;
 
 /// Build GC config from CLI flags, or use defaults if not specified.
+///
+/// The limits apply to each isolate heap as a collection trigger.  The soft
+/// limit is only that per-heap trigger; it does not reach the process-wide
+/// memory governor (`cljrs_gc::governor`), whose soft limit would otherwise
+/// sit at Yellow whenever several isolates each approach it.  A hard limit
+/// also sets the governor's budget (soft limit 75% of it).  That budget is
+/// enforced only in strict mode (`CLJRS_MEMORY_STRICT=1`, which a hard limit
+/// keeps).  Without a hard limit the governor keeps its `CLJRS_MEMORY_*` or
+/// platform defaults.  A zero hard limit or a soft limit above the hard limit is
+/// rejected.
 pub fn build_gc_config(
     soft_limit_mb: Option<usize>,
     hard_limit_mb: Option<usize>,
-) -> Arc<GcConfig> {
-    match (soft_limit_mb, hard_limit_mb) {
-        (Some(soft), Some(hard)) => Arc::new(GcConfig::with_limits(
-            soft * 1024 * 1024,
-            hard * 1024 * 1024,
-        )),
-        (Some(soft), None) => Arc::new(GcConfig::with_hard_limit(soft * 1024 * 1024)),
-        (None, Some(hard)) => Arc::new(GcConfig::with_hard_limit(hard * 1024 * 1024)),
-        (None, None) => Arc::new(GcConfig::new()),
+) -> miette::Result<Arc<GcConfig>> {
+    let (config, memory) = gc_limits(soft_limit_mb, hard_limit_mb)?;
+    if let Some(mut memory) = memory {
+        // The flag came from the environment; the CLI limits replace only
+        // the budget.
+        memory.strict = cljrs_gc::governor().config().strict;
+        cljrs_gc::governor()
+            .configure(memory)
+            .map_err(|e| miette::miette!("invalid GC limits: {e}"))?;
     }
+    Ok(Arc::new(config))
+}
+
+/// Validate CLI limits into a per-heap config and, when a hard limit was
+/// given, a process governor config.  Pure: does not touch the global governor.
+fn gc_limits(
+    soft_limit_mb: Option<usize>,
+    hard_limit_mb: Option<usize>,
+) -> miette::Result<(GcConfig, Option<cljrs_gc::MemoryConfig>)> {
+    let mb = |n: usize| n.saturating_mul(1024 * 1024);
+    let invalid = |e: cljrs_gc::MemoryConfigError| miette::miette!("invalid GC limits: {e}");
+    let config = match (soft_limit_mb, hard_limit_mb) {
+        (Some(soft), Some(hard)) => {
+            GcConfig::try_with_limits(mb(soft), mb(hard)).map_err(invalid)?
+        }
+        (Some(soft), None) => GcConfig::with_soft_limit(mb(soft)),
+        (None, Some(hard)) => {
+            let config = GcConfig::with_hard_limit(mb(hard));
+            config.validate().map_err(invalid)?;
+            config
+        }
+        (None, None) => return Ok((GcConfig::new(), None)),
+    };
+    let memory = hard_limit_mb
+        .map(|hard| cljrs_gc::MemoryConfig::from_optional_limits(None, Some(mb(hard))))
+        .transpose()
+        .map_err(invalid)?;
+    Ok((config, memory))
 }
 
 /// CLI-level versioned-symbol policy flags, threaded into `setup_globals`.
@@ -309,7 +347,7 @@ pub fn run_source(
     args: &[String],
 ) -> miette::Result<()> {
     let mut env = Env::new(globals, "user");
-    eval_in(&mut env, src, filename)?;
+    eval_in_discard(&mut env, src, filename)?;
     call_main_if_defined(&mut env, args)?;
     Ok(())
 }
@@ -317,6 +355,8 @@ pub fn run_source(
 /// Call `-main` in the current namespace if it is defined, passing `args` as
 /// individual string arguments. Silently skips if `-main` is not defined.
 fn call_main_if_defined(env: &mut Env, args: &[String]) -> miette::Result<()> {
+    #[cfg(feature = "no-gc")]
+    let _scratch = cljrs_gc::alloc_ctx::ScratchGuard::new();
     // resolve returns nil for undefined symbols; swallow lookup errors defensively.
     let resolved = eval_in(env, "(resolve '-main)", "<main-check>").unwrap_or(Value::Nil);
     if resolved == Value::Nil {
@@ -337,13 +377,23 @@ fn call_main_if_defined(env: &mut Env, args: &[String]) -> miette::Result<()> {
 /// is a `Future`/`Promise` (e.g. the result of an `^:async` `-main`), this
 /// yields until it resolves; any other value is returned unchanged.
 #[cfg(feature = "async")]
+#[allow(clippy::result_large_err)]
 fn await_main_result(value: Value) -> miette::Result<()> {
     ASYNC_DRIVER.with(|d| {
         let guard = d.borrow();
         match guard.as_ref() {
             Some(drv) => {
+                #[cfg(not(target_arch = "wasm32"))]
+                cljrs_async::fiber::run_root(
+                    &drv.rt,
+                    &drv.local,
+                    &mut drv.carrier.borrow_mut(),
+                    move || cljrs_async::fiber::park_on(cljrs_async::await_value(value)),
+                )
+                .map_err(format_eval_error)?;
+                #[cfg(target_arch = "wasm32")]
                 drv.local
-                    .block_on(&drv.rt, cljrs_async::eval_async::await_value(value))
+                    .block_on(&drv.rt, cljrs_async::await_value(value))
                     .map_err(format_eval_error)?;
                 Ok(())
             }
@@ -376,15 +426,31 @@ fn escape_clojure_string(s: &str) -> String {
     out
 }
 
+/// Evaluate source whose final result is not needed.
+pub fn eval_in_discard(env: &mut Env, src: &str, filename: &str) -> miette::Result<()> {
+    eval_in_mode(env, src, filename, true).map(drop)
+}
+
 /// Evaluate `src` in an existing `Env`. Returns the last value.
 pub fn eval_in(env: &mut Env, src: &str, filename: &str) -> miette::Result<Value> {
+    eval_in_mode(env, src, filename, false)
+}
+
+fn eval_in_mode(env: &mut Env, src: &str, filename: &str, discard: bool) -> miette::Result<Value> {
     let mut parser = cljrs_reader::Parser::new(src.to_string(), filename.to_string());
     let forms = parser.parse_all().map_err(miette::Report::from)?;
 
     let mut result = Value::Nil;
-    for form in forms {
+    let count = forms.len();
+    for (index, form) in forms.into_iter().enumerate() {
         let _alloc_frame = cljrs_gc::push_alloc_frame();
-        result = eval_form(&form, env).map_err(format_eval_error)?;
+        if discard || index + 1 < count {
+            #[cfg(feature = "no-gc")]
+            let _scratch = cljrs_gc::alloc_ctx::ScratchGuard::new();
+            eval_form(&form, env).map_err(format_eval_error)?;
+        } else {
+            result = eval_form(&form, env).map_err(format_eval_error)?;
+        }
     }
     Ok(result)
 }
@@ -395,6 +461,17 @@ pub fn eval_in(env: &mut Env, src: &str, filename: &str) -> miette::Result<Value
 struct AsyncDriver {
     rt: tokio::runtime::Runtime,
     local: tokio::task::LocalSet,
+    #[cfg(not(target_arch = "wasm32"))]
+    carrier: std::cell::RefCell<cljrs_gc::mutator::MutatorState>,
+}
+
+#[cfg(all(feature = "async", not(target_arch = "wasm32")))]
+impl Drop for AsyncDriver {
+    fn drop(&mut self) {
+        // Legacy tasks must unwind with their carrier root stacks installed.
+        let local = std::mem::replace(&mut self.local, tokio::task::LocalSet::new());
+        cljrs_async::fiber::drop_local_with_carrier(local, self.carrier.get_mut());
+    }
 }
 
 #[cfg(feature = "async")]
@@ -419,18 +496,31 @@ pub fn with_async_driver<T>(f: impl FnOnce() -> T) -> T {
         .build()
         .expect("failed to build Tokio runtime");
     let local = tokio::task::LocalSet::new();
-    ASYNC_DRIVER.with(|d| *d.borrow_mut() = Some(AsyncDriver { rt, local }));
-    let result = f();
-    ASYNC_DRIVER.with(|d| *d.borrow_mut() = None);
-    result
+    ASYNC_DRIVER.with(|d| {
+        *d.borrow_mut() = Some(AsyncDriver {
+            rt,
+            local,
+            #[cfg(not(target_arch = "wasm32"))]
+            carrier: std::cell::RefCell::new(cljrs_gc::mutator::MutatorState::fresh()),
+        })
+    });
+    struct Cleanup;
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            ASYNC_DRIVER.with(|d| {
+                d.borrow_mut().take();
+            });
+        }
+    }
+    let _cleanup = Cleanup;
+    f()
 }
 
 /// Evaluate a single top-level form.
 ///
-/// With the `async` feature, the form is driven on the shared `LocalSet` via
-/// [`tokio::task::LocalSet::block_on`], so spawned tasks — core.async channel
-/// producers, `^:async` calls, the `cljrs-io` readers/writers — make progress
-/// and a top-level `await` resolves. Tasks that outlive a form (e.g. a producer
+/// With the `async` feature on native targets, a root fiber evaluates the
+/// form on the shared LocalSet. Blocking waits park through ordinary calls.
+/// On wasm32, the async evaluator drives the form. Tasks that outlive a form (e.g. a producer
 /// feeding a channel `def`d in one REPL line and consumed in the next) stay
 /// queued on the `LocalSet` and continue on the next form's drive. Without the
 /// feature it is a plain synchronous `eval`.
@@ -440,9 +530,20 @@ pub fn eval_form(form: &cljrs_reader::Form, env: &mut Env) -> Result<Value, Eval
     ASYNC_DRIVER.with(|d| {
         let guard = d.borrow();
         match guard.as_ref() {
-            Some(drv) => drv
-                .local
-                .block_on(&drv.rt, cljrs_async::eval_async::eval_async(form, env)),
+            Some(drv) => {
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    cljrs_async::fiber::run_root(
+                        &drv.rt,
+                        &drv.local,
+                        &mut drv.carrier.borrow_mut(),
+                        || eval(form, env),
+                    )
+                }
+                #[cfg(target_arch = "wasm32")]
+                drv.local
+                    .block_on(&drv.rt, cljrs_async::eval_async::eval_async(form, env))
+            }
             // No driver installed (shouldn't happen once `main` runs): fall back
             // to a synchronous evaluation rather than panicking.
             None => eval(form, env),
@@ -492,6 +593,8 @@ pub fn format_eval_error(e: EvalError) -> miette::Report {
         EvalError::NotCallable(s) => miette::miette!("Not a function: {}", s),
         EvalError::Runtime(msg) => miette::miette!("{}", msg),
         EvalError::GasExhausted => miette::miette!("gas exhausted"),
+        EvalError::Cancelled => miette::miette!("execution cancelled"),
+        EvalError::MemoryLimitExceeded(fault) => miette::miette!("{fault}"),
         EvalError::ForbiddenEffect(operation) => {
             miette::miette!("effect forbidden in transaction function: {operation}")
         }
@@ -500,5 +603,54 @@ pub fn format_eval_error(e: EvalError) -> miette::Report {
         EvalError::CommitSignatureVerificationFailed { commit, reason } => {
             miette::miette!("commit {commit:?} failed signature verification: {reason}")
         }
+    }
+}
+
+#[cfg(test)]
+mod gc_config_tests {
+    // These call `gc_limits`, not `build_gc_config`, so they never reconfigure
+    // the process-global governor that other tests in this binary may read.
+    use super::gc_limits;
+
+    const MB: usize = 1024 * 1024;
+
+    #[test]
+    fn soft_only_sets_the_soft_limit() {
+        let (_config, memory) = gc_limits(Some(64), None).unwrap();
+        #[cfg(not(feature = "no-gc"))]
+        assert_eq!(_config.soft_limit(), 64 * MB);
+        #[cfg(not(feature = "no-gc"))]
+        assert!(_config.hard_limit() >= 64 * MB);
+        assert!(
+            memory.is_none(),
+            "the soft limit does not configure the governor"
+        );
+    }
+
+    #[test]
+    fn both_limits_are_kept() {
+        let (_config, memory) = gc_limits(Some(64), Some(128)).unwrap();
+        #[cfg(not(feature = "no-gc"))]
+        assert_eq!(_config.soft_limit(), 64 * MB);
+        #[cfg(not(feature = "no-gc"))]
+        assert_eq!(_config.hard_limit(), 128 * MB);
+        let memory = memory.expect("a hard limit configures the governor");
+        assert_eq!(memory.hard_limit, 128 * MB);
+        assert_eq!(
+            memory.soft_limit,
+            96 * MB,
+            "governor soft limit is 75% of hard"
+        );
+    }
+
+    #[test]
+    fn soft_above_hard_is_rejected() {
+        assert!(gc_limits(Some(256), Some(128)).is_err());
+    }
+
+    #[test]
+    fn zero_hard_limit_is_rejected() {
+        assert!(gc_limits(None, Some(0)).is_err());
+        assert!(gc_limits(Some(0), Some(0)).is_err());
     }
 }

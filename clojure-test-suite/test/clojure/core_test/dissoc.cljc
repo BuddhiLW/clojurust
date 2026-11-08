@@ -1,11 +1,13 @@
 (ns clojure.core-test.dissoc
   (:require [clojure.test :refer [are deftest is testing]]
-            [clojure.core-test.portability #?(:cljs :refer-macros :default :refer) [when-var-exists]]))
+            [clojure.core-test.portability #?(:cljs :refer-macros :default :refer) [when-var-exists] :as p]))
+
+#?(:rust nil
+   :default
+   (when-var-exists defrecord
+     (defrecord TestDissocRecord [a b c])))
 
 (when-var-exists dissoc
-
-  #?(:rust nil
-     :default (defrecord TestDissocRecord [a b c]))
 
   (deftest test-dissoc
 
@@ -36,17 +38,19 @@
             with-test-meta? #(= test-meta (meta %))]
         (is (with-test-meta? (dissoc (with-test-meta {:a 1 :b 2}) :a)))))
 
-    #?(:rust "Records not yet implemented"
-       :default (testing "records"
-                  (let [r (TestDissocRecord. 1 2 nil)]
-                    (are [expected keys] (= expected (apply dissoc r keys))
-                                         {:b 2 :c nil} [:a]
-                                         {:b 2 :c nil} [:a :d]
-                                         {} [:a :b :c]
-                                         r [:d]))))
+    #?(:rust nil
+       :default
+       (when-var-exists defrecord
+         (testing "records"
+           (let [r (TestDissocRecord. 1 2 nil)]
+             (are [expected keys] (= expected (apply dissoc r keys))
+                                  {:b 2 :c nil} [:a]
+                                  {:b 2 :c nil} [:a :d]
+                                  {} [:a :b :c]
+                                  r [:d])))))
 
     (testing "bad shape"
-      (are [m keys] (thrown? #?(:cljs js/Error :default Exception) (apply dissoc m keys))
+      (are [m keys] (p/thrown? (apply dissoc m keys))
                     42 [4]
                     '() [0]
                     [] [0]

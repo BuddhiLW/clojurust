@@ -70,6 +70,7 @@ no-gc = [
     "cljrs-stdlib/no-gc",
     # Weak: only forwarded when the optional `async` feature pulls the package in.
     "cljrs-async?/no-gc",
+    "cljrs-nrepl/no-gc",
 ]
 enable-rustyline = ["rustyline"]
 # Native SSH transport for ssh:// git dependencies (russh). On by default.

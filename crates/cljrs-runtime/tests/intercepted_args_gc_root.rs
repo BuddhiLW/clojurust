@@ -28,14 +28,14 @@ use std::sync::Arc;
 use cljrs_value::Value;
 
 fn install_request_gc(globals: &cljrs_runtime::env::env::GlobalEnv, ns: &str) {
-    let nf = cljrs_value::NativeFn {
-        name: Arc::from("request-gc!"),
-        arity: cljrs_value::Arity::Fixed(1),
-        func: Arc::new(|args: &[Value]| {
+    let nf = cljrs_value::NativeFn::with_closure(
+        "request-gc!",
+        cljrs_value::Arity::Fixed(1),
+        |args: &[Value]| {
             cljrs_gc::request_gc();
             Ok(args[0].clone())
-        }),
-    };
+        },
+    );
     globals.intern(
         ns,
         Arc::from("request-gc!"),

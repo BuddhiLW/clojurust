@@ -1,6 +1,6 @@
 # clojurust TODO
 
-Implementation roadmap for a Rust-hosted Clojure dialect. Native file extension is `.cljrs`; also supports `.cljc` with reader conditional `:rust`.
+Implementation roadmap for a Rust-hosted Clojure dialect. Native file extension is `.cljrs`; also supports `.cljc` with reader conditional `:cljrs` (legacy alias `:rust`).
 
 ---
 
@@ -30,8 +30,8 @@ Implementation roadmap for a Rust-hosted Clojure dialect. Native file extension 
 - [x] Character literals (`\a`, `\newline`, `\u0041`, etc.)
 - [x] Line/column source-location tracking on all forms
 - [x] Reader conditionals (`.cljc` / `.cljrs`)
-  - [x] `#?(:rust ... :clj ... :cljs ... :default ...)` splicing and non-splicing forms
-  - [x] Platform key `:rust` selects Rust-dialect branch (evaluator filters; reader stores all branches)
+  - [x] `#?(:cljrs ... :clj ... :cljs ... :default ...)` splicing and non-splicing forms
+  - [x] Platform key `:cljrs` (legacy alias `:rust`) selects Rust-dialect branch (evaluator filters; reader stores all branches)
 - [ ] File extension dispatch: treat `.cljrs` as always-Rust-dialect, `.cljc` as cross-platform with conditionals
 
 ---
@@ -475,9 +475,10 @@ Foundations already in place:
 
 *Milestone evidence:* `crates/cljrs/tests/background_lowering.rs` — without `CLJRS_EAGER_LOWER`, a hot fn tiers tree-walk → background-lowered IR → JIT-native mid-run with per-iteration correctness; the debug log shows `background lower published`; rebinding a dependency mid-warm takes effect immediately; the worker runs without `cljrs_jit::init` (`CLJRS_NO_JIT=1`); `--ir-threshold 0` produces no lowering.
 
-### Phase H (deferred) — Async JIT
+### Phase H (closed) — Async JIT
 
-- [ ] Emit Cranelift state machines with explicit resume points for `^:async` functions, integrating with the Tokio executor
+- [x] ~~Emit Cranelift state machines with explicit resume points for `^:async` functions~~ — not pursued
+- [x] Re-evaluate against stackful fibers (`docs/virtual-threads-plan.md` Phase 5): closed. Fibers suspend every tier, including JIT and AOT frames, without a state-machine transform, so `^:async` bodies run on fibers and no dispatch path uses compiled state machines. The leftover `lower_async` transform, poll-function codegen, and `cljrs_async::state_machine` ABI are now unused by the runtime; delete them in a follow-up
 
 ---
 
@@ -558,7 +559,7 @@ inference, `typeinfer`, the `rt_abi` contract) are reused unchanged.
 
 - [ ] Define and document clojurust/Clojure compatibility surface (what is intentionally different)
 - [ ] Run a representative subset of `clojure.test` suite against clojurust
-- [ ] Reader compatibility: verify `.cljc` files with `:rust` conditionals behave correctly alongside `:clj`/`:cljs`
+- [ ] Reader compatibility: verify `.cljc` files with `:cljrs` conditionals behave correctly alongside `:clj`/`:cljs`
 - [ ] Numeric tower parity with Clojure (promotion, overflow to BigInt, etc.)
 - [ ] `*clojure-version*` / `*cljx-version*` vars
 - [x] `*print-dup*`, `*print-readably*`, `*print-length*`, `*print-level*` dynamic vars (defined in Phase 8-ext-2)

@@ -40,7 +40,8 @@ use tracing_subscriber::util::SubscriberInitExt as _;
 /// | `env` | `cljrs-runtime::env`: symbol lookup |
 /// | `ir` | `cljrs-runtime::tiered`: lowering, IR interpretation, cache eviction |
 /// | `jit` | `cljrs-runtime::tiered` and `cljrs-compiler::jit`: promotion, compilation, code-cache reclamation |
-pub const FEATURE_TARGETS: &[&str] = &["gc", "env", "ir", "jit"];
+/// | `memory` | `cljrs-gc::governor`: process pressure transitions, over-limit events |
+pub const FEATURE_TARGETS: &[&str] = &["gc", "env", "ir", "jit", "memory"];
 
 /// Crates whose logging is noisy enough to drown out everything else.
 ///

@@ -19,10 +19,10 @@ pub struct Args {
     /// Source directories to search when resolving `require`.
     #[arg(long = "src-path", value_name = "DIR")]
     pub src_paths: Vec<PathBuf>,
-    /// GC soft memory limit in MB (triggers collection when exceeded).
+    /// GC soft memory limit in MB (each isolate heap collects when it exceeds this).
     #[arg(long)]
     pub gc_soft_limit_mb: Option<usize>,
-    /// GC hard memory limit in MB (forces collection when exceeded).
+    /// Process managed-memory hard limit in MB (enforced only with CLJRS_MEMORY_STRICT=1).
     #[arg(long)]
     pub gc_hard_limit_mb: Option<usize>,
 }
@@ -35,7 +35,7 @@ pub fn run(args: Args, versioning: VersioningFlags) -> miette::Result<i32> {
         gc_soft_limit_mb,
         gc_hard_limit_mb,
     } = args;
-    let gc_config = session::build_gc_config(gc_soft_limit_mb, gc_hard_limit_mb);
+    let gc_config = session::build_gc_config(gc_soft_limit_mb, gc_hard_limit_mb)?;
     let globals = session::setup_globals(src_paths, gc_config, versioning);
     let addr: std::net::SocketAddr = format!("{bind}:{port}")
         .parse()
@@ -43,6 +43,7 @@ pub fn run(args: Args, versioning: VersioningFlags) -> miette::Result<i32> {
     let config = cljrs_nrepl::Config {
         addr,
         port_file: Some(PathBuf::from(".nrepl-port")),
+        limits: cljrs_nrepl::Limits::default(),
     };
     let server = cljrs_nrepl::start(config, globals)?;
     // Editors (CIDER, Calva) parse this exact line to auto-connect.
