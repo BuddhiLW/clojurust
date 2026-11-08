@@ -27,7 +27,6 @@ cljrs-stdlib   = { workspace = true }
 cljrs-value    = { workspace = true }
 cljrs-reader   = { workspace = true }
 cljrs-gc       = { workspace = true }
-cljrs-types    = { workspace = true }
 cljrs-async    = { workspace = true }
 wasm-bindgen          = "0.2"
 wasm-bindgen-futures  = "0.4"
@@ -74,3 +73,8 @@ features = [
     "AddEventListenerOptions",
     "console",
 ]
+
+# getrandom and uuid are never named in this crate's source: they are declared
+# only to switch on their wasm32 entropy features for the whole graph.
+[package.metadata.cargo-machete]
+ignored = ["getrandom", "uuid"]

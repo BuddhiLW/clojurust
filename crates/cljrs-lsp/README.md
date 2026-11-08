@@ -25,7 +25,7 @@ references, INCREMENTAL text sync, and semantic tokens.
 |---|---|
 | `src/lib.rs` | Crate root; module wiring; public re-exports. |
 | `src/main.rs` | `cljrs-lsp` binary — runs the server over stdio. |
-| `src/backend.rs` | `Backend` + the `tower_lsp::LanguageServer` impl; stdio entry points. |
+| `src/backend.rs` | `Backend` + the `tower_lsp_server::LanguageServer` impl; stdio entry points. |
 | `src/document.rs` | `Document` (text + version + cached symbols). |
 | `src/line_index.rs` | `LineIndex` / `OffsetEncoding`: byte offset ⇄ LSP `Position`/`Range`. |
 | `src/recovery.rs` | Lexer-based top-level form chunker for multi-error recovery. |

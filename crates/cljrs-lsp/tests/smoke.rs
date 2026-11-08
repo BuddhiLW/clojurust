@@ -6,8 +6,8 @@ use futures::StreamExt;
 use serde_json::json;
 use tower::Service;
 use tower::ServiceExt; // for `.ready()`
-use tower_lsp::LspService;
-use tower_lsp::jsonrpc::Request;
+use tower_lsp_server::LspService;
+use tower_lsp_server::jsonrpc::Request;
 
 #[tokio::test]
 async fn initialize_open_and_document_symbol() {

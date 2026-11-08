@@ -1,7 +1,7 @@
 //! Map reader errors to LSP [`Diagnostic`]s.
 
 use cljrs_types::error::CljxError;
-use tower_lsp::lsp_types::{Diagnostic, DiagnosticSeverity};
+use tower_lsp_server::ls_types::{Diagnostic, DiagnosticSeverity};
 
 use crate::line_index::{LineIndex, OffsetEncoding};
 
