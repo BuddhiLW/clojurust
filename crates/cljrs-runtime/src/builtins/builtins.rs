@@ -4484,13 +4484,12 @@ fn builtin_nth(args: &[Value]) -> ValueResult<Value> {
             });
             nth_or_not_found(result, default.as_ref(), idx, count)
         }
-        Value::Str(s) => Ok(s
-            .get()
-            .chars()
-            .nth(idx)
-            .map(Value::Char)
-            .or(default)
-            .unwrap_or(Value::Nil)),
+        Value::Str(s) => nth_or_not_found(
+            s.get().chars().nth(idx).map(Value::Char),
+            default.as_ref(),
+            idx,
+            s.get().chars().count(),
+        ),
         // A queue is Sequential but not Indexed, so the JVM reaches the element
         // by walking; an array is Indexed, and the JVM indexes it directly.
         // Both are answered here by walking, because neither is a hot path

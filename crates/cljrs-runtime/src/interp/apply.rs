@@ -1401,7 +1401,7 @@ pub fn eval_apply(mut args: Vec<Value>, env: &mut Env) -> EvalResult {
         let _f_root = crate::env::gc_roots::root_value(&f);
         let _last_root = crate::env::gc_roots::root_value(&last);
         let _args_root = crate::env::gc_roots::root_values(&args);
-        value_to_seq_vec(&last)
+        crate::builtins::builtins::value_to_seq(&last)
     }
     .map_err(crate::env::error::value_error_to_eval_error)?;
     args.extend(spread);
