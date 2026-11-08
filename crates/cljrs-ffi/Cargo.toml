@@ -1,0 +1,32 @@
+[package]
+name = "cljrs-ffi"
+version = "0.1.0"
+edition = "2024"
+description = "C FFI for Clojurust: dlopen a C ABI library and call its symbols, registered as clojure.rust.ffi"
+license.workspace = true
+repository.workspace = true
+
+[features]
+default = ["regex-full", "deps"]
+
+# Regex engine and pass-throughs. Every workspace dependency below is taken
+# with default features off (see the note in the root Cargo.toml), so what
+# their defaults used to provide is re-exported here and kept in `default`.
+regex-full  = ["cljrs-value/regex-full", "cljrs-runtime/regex-full"]
+small-regex = ["cljrs-value/small-regex", "cljrs-runtime/small-regex"]
+
+# Pass-through for cljrs-runtime's git-backed dependency support.
+deps = ["cljrs-runtime/deps"]
+
+[dependencies]
+cljrs-runtime = { workspace = true }
+cljrs-gc      = { workspace = true }
+cljrs-value   = { workspace = true }
+
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+libloading = { workspace = true }
+
+[dev-dependencies]
+cljrs-stdlib  = { workspace = true }
+cljrs-reader  = { workspace = true }
+cljrs-json    = { workspace = true }

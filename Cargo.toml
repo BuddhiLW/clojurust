@@ -23,6 +23,7 @@ members = [
     "crates/cljrs-nrepl",
     "crates/cljrs-base64",
     "crates/cljrs-json",
+    "crates/cljrs-ffi",
     "crates/cljrs-tx",
 ]
 resolver = "2"
@@ -64,6 +65,7 @@ cljrs-nrepl        = { path = "crates/cljrs-nrepl",        version = "0.1.0", de
 cljrs-base64       = { path = "crates/cljrs-base64",       version = "0.1.0", default-features = false }
 cljrs-blake3       = { path = "crates/cljrs-blake3",       version = "0.1.0", default-features = false }
 cljrs-json         = { path = "crates/cljrs-json",         version = "0.1.0", default-features = false }
+cljrs-ffi          = { path = "crates/cljrs-ffi",          version = "0.1.0", default-features = false }
 cljrs-tx           = { path = "crates/cljrs-tx",           version = "0.1.0", default-features = false }
 
 tracing            = "0.1.44"
@@ -81,7 +83,8 @@ num-rational = "0.4"
 num-traits   = "0.2"
 bigdecimal   = "0.4"
 rand         = "0.10.1"
-rpds         = "1"
+archery      = "=1.2.2"
+rpds         = "=1.2.1"
 uuid         = "1.22.0"
 tokio        = { version = "1.50.0", features = ["rt", "sync", "time", "macros"] }
 futures-util = "0.3"

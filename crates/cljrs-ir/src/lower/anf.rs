@@ -981,7 +981,15 @@ fn lower_destructure_associative(
             Some((directive_ns, "keys")) => {
                 if let FormKind::Vector(syms) = &v.kind {
                     for sym_form in syms {
-                        if let FormKind::Symbol(sym) = &sym_form.kind {
+                        // `{:keys [:a ::b]}` is legal Clojure: a keyword names
+                        // the key and binds its name, `::b` auto-resolved.
+                        let key_sym = match &sym_form.kind {
+                            FormKind::Symbol(sym) => Some(sym.clone()),
+                            FormKind::Keyword(kw) => Some(kw.clone()),
+                            FormKind::AutoKeyword(kw) => Some(auto_qualified(ctx, kw, "keyword")?),
+                            _ => None,
+                        };
+                        if let Some(sym) = &key_sym {
                             let (sym_ns, sym_name) = split_ns_name(sym);
                             let full_key = match sym_ns.or(directive_ns) {
                                 Some(ns) => format!("{ns}/{sym_name}"),

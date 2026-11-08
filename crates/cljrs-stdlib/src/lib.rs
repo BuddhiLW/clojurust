@@ -47,6 +47,7 @@ const CLOJURE_RUST_IO_SRC: &str = include_str!("clojure/rust/io.cljrs");
 #[cfg(not(target_arch = "wasm32"))]
 const CLOJURE_EDN_SRC: &str = include_str!("clojure/edn.cljrs");
 const CLOJURE_WALK_SRC: &str = include_str!("clojure/walk.cljrs");
+const CLOJURE_MATH_SRC: &str = include_str!("clojure/math.cljrs");
 const CLOJURE_PPRINT_SRC: &str = include_str!("clojure/pprint.cljrs");
 const CLOJURE_DATA_SRC: &str = include_str!("clojure/data.cljrs");
 const COLJURE_ZIP_SRC: &str = include_str!("clojure/zip.cljrs");
@@ -110,6 +111,9 @@ pub fn register(globals: &Arc<GlobalEnv>) {
 
     // clojure.walk ─ pure Clojure, no native helpers.
     globals.register_builtin_source("clojure.walk", CLOJURE_WALK_SRC);
+
+    // clojure.math ─ pure Clojure over the Math statics.
+    globals.register_builtin_source("clojure.math", CLOJURE_MATH_SRC);
 
     // clojure.data ─ pure Clojure, no native helpers.
     globals.register_builtin_source("clojure.data", CLOJURE_DATA_SRC);
@@ -175,6 +179,22 @@ mod tests {
     }
 
     // ── clojure.string ────────────────────────────────────────────────────────
+
+    // ── clojure.math ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_math_subset() {
+        let (_, mut env) = make_env();
+        run("(require '[clojure.math :as math])", &mut env).unwrap();
+        assert_eq!(
+            run(
+                "(pr-str [(math/round 2.4) (math/rint 2.5) (math/rint 3.5) (math/signum -2) (math/floor-div -7 2) (math/floor-mod -7 2)])",
+                &mut env
+            )
+            .unwrap(),
+            Value::string("[2 2.0 4.0 -1.0 -4 1]")
+        );
+    }
 
     #[test]
     fn test_string_upper_lower() {

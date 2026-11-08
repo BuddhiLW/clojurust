@@ -206,6 +206,23 @@ fn hierarchy_method_key(
     }
 }
 
+/// Find the impl of `method` for dispatch `tag` in a protocol's impl map.
+///
+/// An exact tag wins. Otherwise a non-nil value falls back to an `Object`
+/// extension (JVM semantics: every non-nil value is an Object), and any
+/// value, nil included, to a `default` extension (ClojureScript semantics).
+/// Returns the impl together with the tag it was registered under.
+pub fn find_protocol_impl(
+    impls: &std::collections::HashMap<Arc<str>, cljrs_value::types::MethodMap>,
+    tag: &str,
+    method: &str,
+) -> Option<Value> {
+    let lookup = |t: &str| impls.get(t).and_then(|m| m.get(method)).cloned();
+    lookup(tag)
+        .or_else(|| (tag != "nil").then(|| lookup("Object")).flatten())
+        .or_else(|| lookup("default"))
+}
+
 /// Return the canonical type tag for a value (used by protocol dispatch).
 pub fn type_tag_of(val: &Value) -> Arc<str> {
     match val.unwrap_meta() {
@@ -315,8 +332,12 @@ pub fn dispatch_if_async(callee: &Value, args: &[Value], env: &Env) -> Option<Va
 pub fn apply_value(callee: &Value, args: Vec<Value>, env: &mut Env) -> EvalResult {
     // Root the callee and args so they survive any GC triggered at the safepoint.
     // These values are on the Rust stack but not yet in any Env frame.
+    //
+    // An arm that hands `args` on to another `apply_value` drops `args_root`
+    // first: the root points into the Vec, and the callee roots it again
+    // before its own safepoint.
     let _callee_root = crate::env::gc_roots::root_value(callee);
-    let _args_root = crate::env::gc_roots::root_values(&args);
+    let args_root = crate::env::gc_roots::root_values(&args);
 
     // GC safepoint at function application boundary — blocks if collection is in progress,
     // and initiates collection if one was requested (memory pressure).
@@ -348,6 +369,7 @@ pub fn apply_value(callee: &Value, args: Vec<Value>, env: &mut Env) -> EvalResul
             // This means captured bindings take priority over the caller's,
             // but vars not in the capture fall through to the caller's frames.
             let _guard = crate::env::dynamics::push_frame(bf_ref.captured_bindings.clone());
+            drop(args_root);
             apply_value(&bf_ref.wrapped, args, env)
         }
         Value::ProtocolFn(pf) => {
@@ -377,6 +399,7 @@ pub fn apply_value(callee: &Value, args: Vec<Value>, env: &mut Env) -> EvalResul
                     cljrs_value::Symbol::qualified(proto.ns.clone(), pf_ref.method_name.clone()),
                 ));
                 if let Some(impl_fn) = m.get(&method_sym) {
+                    drop(args_root);
                     let _impl_root = crate::env::gc_roots::root_value(&impl_fn);
                     return apply_value(&impl_fn, args, env);
                 }
@@ -384,10 +407,7 @@ pub fn apply_value(callee: &Value, args: Vec<Value>, env: &mut Env) -> EvalResul
 
             let tag = type_tag_of(dispatch_val);
             let impls = pf_ref.protocol.get().impls.lock().unwrap();
-            let impl_fn = impls
-                .get(tag.as_ref())
-                .and_then(|m| m.get(pf_ref.method_name.as_ref()))
-                .cloned()
+            let impl_fn = find_protocol_impl(&impls, tag.as_ref(), pf_ref.method_name.as_ref())
                 .ok_or_else(|| {
                     EvalError::Runtime(format!(
                         "No implementation of protocol {} for type {}",
@@ -396,13 +416,14 @@ pub fn apply_value(callee: &Value, args: Vec<Value>, env: &mut Env) -> EvalResul
                     ))
                 })?;
             drop(impls);
+            drop(args_root);
             let _impl_root = crate::env::gc_roots::root_value(&impl_fn);
             apply_value(&impl_fn, args, env)
         }
         Value::MultiFn(mf) => {
             let mf_ref = mf.get();
             let dispatch_val = apply_value(&mf_ref.dispatch_fn, args.clone(), env)?;
-            let _dispatch_root = crate::env::gc_roots::root_value(&dispatch_val);
+            let dispatch_root = crate::env::gc_roots::root_value(&dispatch_val);
             cljrs_gc::safepoint();
             let key = format!("{}", dispatch_val);
             let exact = mf_ref.methods.lock().unwrap().get(&key).cloned();
@@ -458,6 +479,8 @@ pub fn apply_value(callee: &Value, args: Vec<Value>, env: &mut Env) -> EvalResul
                         })?
                 }
             };
+            drop(dispatch_root);
+            drop(args_root);
             let _impl_root = crate::env::gc_roots::root_value(&impl_fn);
             apply_value(&impl_fn, args, env)
         }
@@ -483,6 +506,7 @@ pub fn apply_value(callee: &Value, args: Vec<Value>, env: &mut Env) -> EvalResul
                 None => Ok(Value::Nil),
             }
         }
+        Value::Vector(v) => crate::env::ifn_vector::invoke(v.get(), &args),
         Value::Set(s) => match args.first() {
             Some(k) => {
                 if s.contains(k) {
@@ -493,7 +517,10 @@ pub fn apply_value(callee: &Value, args: Vec<Value>, env: &mut Env) -> EvalResul
             }
             None => Ok(Value::Nil),
         },
-        Value::WithMeta(inner, _) => apply_value(inner, args, env),
+        Value::WithMeta(inner, _) => {
+            drop(args_root);
+            apply_value(inner, args, env)
+        }
         Value::Var(v) => {
             // Vars in function position are transparently deref'd (IFn on Var).
             // The IR interpreter uses DefVar to create per-call mutable cells for
@@ -506,6 +533,7 @@ pub fn apply_value(callee: &Value, args: Vec<Value>, env: &mut Env) -> EvalResul
                     v.get().name,
                 ))
             })?;
+            drop(args_root);
             apply_value(&inner, args, env)
         }
         other => Err(EvalError::NotCallable(format!(

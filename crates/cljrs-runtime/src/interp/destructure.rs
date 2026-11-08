@@ -136,6 +136,7 @@ pub fn value_to_seq_vec(val: &Value) -> Vec<Value> {
             });
             result
         }
+        Value::ObjectArray(a) => a.get().0.lock().unwrap().clone(),
         _ => vec![],
     }
 }
@@ -185,6 +186,9 @@ pub fn bind_associative(pattern: &[Form], val: &Value, env: &mut Env) -> EvalRes
     let get_val = |key: &Value| -> Value {
         match val.unwrap_meta() {
             Value::Map(m) => m.get(key).unwrap_or(Value::Nil),
+            // Records destructure like maps: `{f :gen}` on a defrecord
+            // instance reads its field, as `get` does.
+            Value::TypeInstance(ti) => ti.get().fields.get(key).unwrap_or(Value::Nil),
             _ => Value::Nil,
         }
     };
@@ -214,7 +218,20 @@ pub fn bind_associative(pattern: &[Form], val: &Value, env: &mut Env) -> EvalRes
             FormKind::Keyword(_) if directive_name == "keys" => {
                 if let FormKind::Vector(syms) = &v.kind {
                     for sym_form in syms {
-                        if let FormKind::Symbol(sym) = &sym_form.kind {
+                        // Clojure also accepts keywords here: `{:keys [:a ::b]}`
+                        // binds `a` and `b`, the auto-resolved `::b` against the
+                        // current namespace.
+                        let key_sym = match &sym_form.kind {
+                            FormKind::Symbol(sym) => Some(sym.clone()),
+                            FormKind::Keyword(kw) => Some(kw.clone()),
+                            FormKind::AutoKeyword(kw) => Some(
+                                env.globals
+                                    .resolve_auto_keyword(&env.current_ns, kw)
+                                    .map_err(EvalError::Runtime)?,
+                            ),
+                            _ => None,
+                        };
+                        if let Some(sym) = &key_sym {
                             let parsed = Symbol::parse(sym);
                             let key =
                                 match parsed.namespace.clone().or_else(|| directive_ns.clone()) {

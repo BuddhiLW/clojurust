@@ -660,9 +660,11 @@ async fn eval_binding_async(args: &[Form], env: &mut Env) -> EvalResult {
         vals.push(val);
     }
 
-    // `vals` is not resized from here on, so its storage is stable while rooted.
-    let _vals_root = cljrs_runtime::env::gc_roots::root_values(&vals);
     let mut state = (keys, vals, None::<dynamics::BindingGuard>);
+    // SAFETY: `state.1` is only read from here on (the closure below clones
+    // out of it), so its buffer is neither resized nor freed while rooted,
+    // and `_vals_root`, declared after `state`, is dropped before it.
+    let _vals_root = unsafe { cljrs_runtime::env::gc_roots::root_values_unchecked(&state.1) };
     poll_scoped(
         Box::pin(eval_body_async(&args[1..], env)),
         &mut state,

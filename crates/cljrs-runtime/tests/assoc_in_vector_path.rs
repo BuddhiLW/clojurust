@@ -63,6 +63,32 @@ fn assoc_in_past_the_vector_count_is_an_error_like_assoc() {
     assert!(eval_fresh("(assoc-in [1] [5] 0)").is_err());
 }
 
+// The three error paths below are where the pre-fix assoc-in went wrong
+// silently: it turned the vector into a map keyed by the bad index, or
+// replaced the scalar with a map. Each level now goes through `assoc`, so
+// each is the same error `assoc` gives on that collection and key.
+
+#[test]
+fn assoc_in_with_a_negative_vector_index_is_an_error_like_assoc() {
+    assert!(eval_fresh("(assoc [1 2] -1 0)").is_err());
+    assert!(eval_fresh("(assoc-in [1 2] [-1] 0)").is_err());
+    assert!(eval_fresh("(assoc-in {:v [1 2]} [:v -1] 0)").is_err());
+}
+
+#[test]
+fn assoc_in_with_a_keyword_index_into_a_vector_is_an_error_like_assoc() {
+    assert!(eval_fresh("(assoc [1 2] :k 0)").is_err());
+    assert!(eval_fresh("(assoc-in [1 2] [:k] 0)").is_err());
+    assert!(eval_fresh("(assoc-in {:v [1 2]} [:v :k] 0)").is_err());
+}
+
+#[test]
+fn assoc_in_through_a_scalar_is_an_error_like_assoc() {
+    assert!(eval_fresh("(assoc 1 :b 2)").is_err());
+    assert!(eval_fresh("(assoc-in {:a 1} [:a :b] 2)").is_err());
+    assert!(eval_fresh("(assoc-in [1] [0 :b] 2)").is_err());
+}
+
 #[test]
 fn assoc_in_keeps_a_vector_s_metadata() {
     assert_true(

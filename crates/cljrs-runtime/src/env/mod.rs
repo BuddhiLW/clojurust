@@ -13,6 +13,7 @@ pub mod env;
 pub mod error;
 pub mod gas;
 pub mod gc_roots;
+pub mod ifn_vector;
 pub mod loader;
 pub mod policy;
 pub mod taps;

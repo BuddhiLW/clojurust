@@ -711,6 +711,7 @@ dependencies = [
  "cljrs-base64",
  "cljrs-charset",
  "cljrs-compiler",
+ "cljrs-ffi",
  "cljrs-gc",
  "cljrs-interop",
  "cljrs-io",
@@ -793,6 +794,7 @@ dependencies = [
  "cljrs-base64",
  "cljrs-blake3",
  "cljrs-charset",
+ "cljrs-ffi",
  "cljrs-gc",
  "cljrs-io",
  "cljrs-ir",
@@ -825,6 +827,19 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
+]
+
+[[package]]
+name = "cljrs-ffi"
+version = "0.1.0"
+dependencies = [
+ "cljrs-gc",
+ "cljrs-json",
+ "cljrs-reader",
+ "cljrs-runtime",
+ "cljrs-stdlib",
+ "cljrs-value",
+ "libloading",
 ]
 
 [[package]]
@@ -1022,6 +1037,7 @@ name = "cljrs-value"
 version = "0.1.0"
 dependencies = [
  "arc-swap",
+ "archery",
  "bigdecimal",
  "cljrs-gc",
  "cljrs-reader",

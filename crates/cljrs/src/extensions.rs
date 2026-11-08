@@ -17,6 +17,7 @@
 //! | `net` | network transports and protocols (implies `async`) |
 //! | `charset` | charset codecs and stream adapters |
 //! | `base64` | Base64 codecs |
+//! | `ffi` | `clojure.rust.ffi`, calling C ABI shared libraries |
 //!
 //! An embedding application that links the compiler directly builds its own
 //! set the same way. Extensions that are not part of this project ship as
@@ -26,7 +27,8 @@
     feature = "async",
     feature = "net",
     feature = "charset",
-    feature = "base64"
+    feature = "base64",
+    feature = "ffi"
 ))]
 use cljrs_compiler::extensions::Extension;
 use cljrs_compiler::extensions::ExtensionSet;
@@ -73,6 +75,12 @@ pub fn default_set() -> ExtensionSet {
         "cljrs-json",
         cljrs_json::init,
         "cljrs_json::init",
+    ));
+    #[cfg(feature = "ffi")]
+    set.push(Extension::new(
+        "cljrs-ffi",
+        cljrs_ffi::init,
+        "cljrs_ffi::init",
     ));
 
     set
