@@ -1,0 +1,75 @@
+name: segv probe
+
+# Diagnostic only: runs the AOT conformance suite under gdb, several times,
+# to name the site of the intermittent segfault. Not part of the gate.
+on:
+  push:
+    branches: ["ci/segv-probe"]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  # Line numbers in the backtrace of the release harness.
+  CARGO_PROFILE_RELEASE_DEBUG: "1"
+
+jobs:
+  probe:
+    name: AOT suite under gdb
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install gdb
+        run: sudo apt-get update && sudo apt-get install -y gdb
+
+      - name: Machine
+        run: |
+          nproc
+          free -m
+          rustc --version
+
+      - name: Build the suite
+        run: cargo run -p cljrs compile -o test-suite --test ./clojure-test-suite/test
+
+      - name: Run under gdb
+        run: |
+          mkdir -p probe
+          crashes=0
+          for i in 1 2 3 4 5 6; do
+            CLJRS_GC_STATS=- gdb -q -batch \
+              -ex "handle SIGPIPE nostop noprint pass" \
+              -ex "run" \
+              -ex "echo \n=== CRASH SITE ===\n" \
+              -ex "info registers rip rsp rbp" \
+              -ex "x/8i \$pc" \
+              -ex "bt 80" \
+              -ex "echo \n=== ALL THREADS ===\n" \
+              -ex "thread apply all bt 40" \
+              --args ./test-suite > "probe/run-$i.log" 2>&1 || true
+            if grep -q "SIGSEGV\|SIGBUS\|SIGABRT\|SIGILL" "probe/run-$i.log"; then
+              crashes=$((crashes + 1))
+              echo "::group::run $i CRASHED"
+              grep -n "Testing " "probe/run-$i.log" | tail -3
+              sed -n '/received signal/,$p' "probe/run-$i.log" | head -260
+              echo "::endgroup::"
+            else
+              echo "run $i clean: $(grep -c 'Testing ' "probe/run-$i.log") namespaces"
+              tail -4 "probe/run-$i.log"
+            fi
+          done
+          echo "crashes: $crashes of 6"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: probe-logs-${{ matrix.shard }}
+          path: probe/
