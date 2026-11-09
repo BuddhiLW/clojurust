@@ -106,6 +106,7 @@ h3-quinn     = "0.0.10"
 h2           = "0.4"
 tower-lsp-server = "0.23"
 dashmap       = "6"
+web-time      = "1"
 
 # Pure-Rust git (gitoxide) + native commit-signature verification
 # The http transport (and with it reqwest/hyper/rustls/aws-lc-rs) is *not*

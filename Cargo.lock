@@ -749,6 +749,7 @@ dependencies = [
  "proptest",
  "rand 0.10.2",
  "tokio",
+ "web-time",
 ]
 
 [[package]]
@@ -856,6 +857,7 @@ dependencies = [
  "num-bigint",
  "num-rational",
  "tracing",
+ "web-time",
 ]
 
 [[package]]
@@ -1006,6 +1008,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+ "web-time",
 ]
 
 [[package]]
@@ -1059,6 +1062,7 @@ dependencies = [
  "rpds",
  "thiserror",
  "uuid",
+ "web-time",
 ]
 
 [[package]]
