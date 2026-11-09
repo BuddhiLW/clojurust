@@ -1,6 +1,6 @@
 [package]
 name = "cljrs-ffi"
-version = "0.1.0"
+version = "0.2.4"
 edition = "2024"
 description = "C FFI for Clojurust: dlopen a C ABI library and call its symbols, registered as clojure.rust.ffi"
 license.workspace = true

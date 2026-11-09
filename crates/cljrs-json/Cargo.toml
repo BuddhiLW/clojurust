@@ -1,6 +1,6 @@
 [package]
 name = "cljrs-json"
-version = "0.1.0"
+version = "0.2.4"
 edition = "2024"
 description = "JSON codec for Clojurust, registered as clojure.data.json"
 license.workspace = true
