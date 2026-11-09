@@ -110,8 +110,8 @@ pub struct IrFunction {
     pub span: Option<Span>,
     pub subfunctions: Vec<IrFunction>,
     /// Whether this function was declared `^:async`.
-    /// Async IR functions fall back to tree-walking `eval_async`; Phase H JIT
-    /// will emit Cranelift state machines with explicit resume points.
+    /// Async IR functions fall back to the tree-walker, which runs their body
+    /// on a fiber (native) or `eval_async` (wasm32). Phase H is closed.
     pub is_async: bool,
     /// Static per-parameter repr seeds from `^long`/`^double` hints (positional
     /// with `params`).  Empty ⇒ no hints.  Preferred over profiled specs.
@@ -147,13 +147,20 @@ Reader metadata needs no dedicated instruction either.  `^m form` lowers to
 `meta` → `merge` → `with-meta` on `clojure.core`, through the ordinary
 `LoadGlobal` + `Call` path every backend already supports; merging rather than
 replacing is what keeps both layers of a stacked `^:a ^:b [1]` alive with the
-outer one winning.  The attach is emitted only when
-`Form::takes_runtime_meta` (in `cljrs-reader`) holds — a collection literal or
-a function — which is the same predicate the tree-walker consults, so `meta`
+outer one winning.  Because the three are resolved as vars at run time,
+redefining `clojure.core/meta`, `merge` or `with-meta` changes what an
+annotation does in lowered code but not in the tree-walker, which attaches
+natively; that is accepted as the cost of needing no new instruction.  The attach is emitted only when
+`Form::takes_runtime_meta` (in `cljrs-reader`) holds — a collection literal
+(`()` included) or a function — which is the same predicate the tree-walker consults, so `meta`
 cannot answer one way interpreted and another once promoted.  Everywhere else
 the annotation is a compile-time hint: it is dropped, and not evaluated, so
-`(f ^long n)` costs nothing.  `^:async (fn …)` keeps its own arm ahead of this
-and is consumed by `lower_fn`.
+`(f ^long n)` costs nothing.  An anonymous async fn — `^:async (fn …)` or
+`(fn ^:async […] …)` or `(fn name ^:async […] …)`, per `Form::is_async_fn_form` — is refused with
+`UnsupportedForm`: a lowered closure is a plain `NativeFunction` (or native
+closure) that the async runtime cannot dispatch, so lowering it would make
+calling it synchronous once the enclosing body was promoted.  The body stays on
+the tree-walker, which builds a real async fn and attaches `{:async true}`.
 
 Method interop needs no dedicated instruction either: `(.method target args…)`
 lowers to `CallDirect(dst, ".method", [target, args…])` — the leading dot in
@@ -189,8 +196,8 @@ be lost and a stray var defined.  The method tree-walks instead, where
 **Async instructions** (Phase H):
 
 - `Await { src, dst }` — yield point inside `^:async` fn; `dst` receives the
-  resolved `Future`/`Promise` value.  IR interpreter uses blocking deref;
-  `eval_async` yields to the Tokio executor.
+  resolved `Future`/`Promise` value.  The IR interpreter derefs, which parks
+  on a fiber.
 - `Spawn { fn_reg, args, dst }` — spawn an `^:async` call as a LocalSet task;
   `dst` receives a `Value::Future` immediately.
 - `ChanTake { chan, dst }` — async take from a channel; parks until a value is

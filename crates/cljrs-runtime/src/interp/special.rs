@@ -11,14 +11,14 @@ use crate::env::env::{Env, RequireRefer, RequireSpec};
 use crate::env::error::{EvalError, EvalResult};
 use crate::env::loader::load_ns;
 use crate::interp::destructure::bind_pattern;
-use crate::interp::eval::{eval, eval_body, is_special_form};
+use crate::interp::eval::{eval_body, eval_unscoped as eval};
 use cljrs_gc::GcPtr;
 use cljrs_reader::Form;
 use cljrs_reader::form::FormKind;
 use cljrs_value::error::ExceptionInfo;
 use cljrs_value::{
-    CljxFn, CljxFnArity, CljxFuture, FutureState, Keyword, MapValue, Protocol, ProtocolMethod,
-    ReferClojureFilter, TypeHint, Value, ValueError,
+    CljxFn, CljxFnArity, Keyword, MapValue, Protocol, ProtocolMethod, ReferClojureFilter, TypeHint,
+    Value, ValueError,
 };
 
 /// Dispatch to the right special-form handler.
@@ -62,6 +62,32 @@ pub fn eval_special(head: &str, args: &[Form], env: &mut Env) -> EvalResult {
 // ── def ───────────────────────────────────────────────────────────────────────
 
 fn eval_def(args: &[Form], env: &mut Env) -> EvalResult {
+    let target = parse_def(args, env)?;
+    crate::interp::eval::with_scratch(|| {
+        let val = match target.value_form {
+            Some(form) => eval(form, env)?,
+            None => Value::Nil,
+        };
+        intern_def(target, val, env)
+    })
+}
+
+/// A parsed `(def name "doc"? value?)`: everything but the value itself.
+///
+/// Public, together with [`parse_def`] and [`intern_def`], so the async
+/// evaluator (`cljrs-async`) can evaluate `value_form` with a yielding
+/// evaluator and still share the rest of `def`.
+pub struct DefTarget<'a> {
+    pub name: String,
+    /// Metadata from `^meta` on the name and the docstring, merged.
+    pub meta: Option<Value>,
+    /// The value expression; `None` for `(def name)`.
+    pub value_form: Option<&'a Form>,
+}
+
+/// Parse the name, metadata and docstring of a `def` without evaluating its
+/// value expression. `^{...}` metadata on the name *is* evaluated here.
+pub fn parse_def<'a>(args: &'a [Form], env: &mut Env) -> EvalResult<DefTarget<'a>> {
     if args.is_empty() {
         return Err(EvalError::Runtime("def requires a name".into()));
     }
@@ -74,23 +100,31 @@ fn eval_def(args: &[Form], env: &mut Env) -> EvalResult {
     } else {
         (None, 1)
     };
-    let val = if args.len() > val_idx {
-        // Under no-gc: def value expressions go to the StaticArena since the
-        // Var must outlive all scratch regions.
-        #[cfg(feature = "no-gc")]
-        let _static_ctx = cljrs_gc::alloc_ctx::StaticCtxGuard::new();
-        eval(&args[val_idx], env)?
-    } else {
-        Value::Nil
-    };
+    Ok(DefTarget {
+        name,
+        meta: merge_meta(meta_opt, docstring.as_deref().map(doc_meta)),
+        value_form: args.get(val_idx),
+    })
+}
+
+/// Intern `val` under a parsed `def` target in the current namespace.
+pub fn intern_def(target: DefTarget<'_>, val: Value, env: &mut Env) -> EvalResult {
     let var = env
         .globals
-        .intern(&env.current_ns, Arc::from(name.as_str()), val.clone());
-    let meta = merge_meta(meta_opt, docstring.as_deref().map(doc_meta));
-    if let Some(meta_val) = meta {
+        .intern(&env.current_ns, Arc::from(target.name.as_str()), val);
+    if let Some(meta_val) = target.meta {
         var.get().set_meta(meta_val);
     }
     Ok(Value::Var(var))
+}
+
+/// The already-bound var a `defonce` named `name` would leave untouched, if
+/// any.
+pub fn defonce_existing(name: &str, env: &Env) -> Option<Value> {
+    env.globals
+        .lookup_var(&env.current_ns, name)
+        .filter(|var| var.get().is_bound())
+        .map(Value::Var)
 }
 
 /// Build a `{:doc "..."}` metadata map fragment for a docstring.
@@ -165,32 +199,15 @@ pub fn compile_meta_form(meta: &Form, env: &mut Env) -> EvalResult<Value> {
 
 // ── fn* ───────────────────────────────────────────────────────────────────────
 
-/// Does a `^meta` form (or metadata map literal) request `:async`?
-///
-/// Handles the keyword shorthand `^:async` (a bare `:async` keyword form) and
-/// an explicit map such as `^{:async true}` or a `defn` attr-map `{:async true}`.
-pub fn meta_form_is_async(meta: &Form) -> bool {
-    match &meta.kind {
-        FormKind::Keyword(k) => k == "async",
-        FormKind::Map(entries) => entries.chunks(2).any(|kv| {
-            matches!(&kv[0].kind, FormKind::Keyword(k) if k == "async")
-                && !matches!(
-                    kv.get(1).map(|f| &f.kind),
-                    None | Some(FormKind::Bool(false)) | Some(FormKind::Nil)
-                )
-        }),
-        _ => false,
-    }
-}
-
 fn eval_fn(args: &[Form], env: &mut Env) -> EvalResult {
-    // Peel any leading `^meta` wrappers, e.g. `(fn ^:async [..] ..)` or
-    // `(fn ^:async name [..] ..)`, recording whether `:async` was requested.
-    let mut is_async = false;
+    // `:async` may be requested on the first argument, `(fn ^:async [..] ..)`
+    // / `(fn ^:async name [..] ..)`, or on the params vector after a name,
+    // `(fn name ^:async [..] ..)` (also how `defn name ^:async [..]` arrives).
+    let is_async = Form::fn_args_request_async(args);
+    // Peel any leading `^meta` wrappers off the first argument.
     let peeled: Vec<Form>;
     let args: &[Form] = if matches!(args.first().map(|f| &f.kind), Some(FormKind::Meta(..))) {
-        let (metas, head) = args[0].peel_meta();
-        is_async |= metas.iter().any(|m| meta_form_is_async(m));
+        let (_, head) = args[0].peel_meta();
         peeled = std::iter::once(head.clone())
             .chain(args[1..].iter().cloned())
             .collect();
@@ -202,10 +219,10 @@ fn eval_fn(args: &[Form], env: &mut Env) -> EvalResult {
     let mut idx = 0;
     let mut name: Option<Arc<str>> = None;
 
-    // Optional name.
-    if let Some(FormKind::Symbol(s)) = args.first().map(|f| &f.kind)
-        && !is_special_form(s)
-    {
+    // Optional name. Any symbol here is the name, special-form names included:
+    // `(defmacro let ...)` (clojure.test.check.generators) expands to
+    // `(fn let [...] ...)`.
+    if let Some(FormKind::Symbol(s)) = args.first().map(|f| &f.kind) {
         name = Some(Arc::from(s.as_str()));
         idx = 1;
     }
@@ -262,7 +279,7 @@ fn eval_fn(args: &[Form], env: &mut Env) -> EvalResult {
     // Eagerly lower each arity to IR if the compiler is ready.
     //eager_lower_fn(&cljrs_fn, env);
 
-    let mut ptr = GcPtr::new(cljrs_fn);
+    let mut ptr = GcPtr::new_isolated(cljrs_fn);
     // For named anonymous functions (fn g ...), store a back-pointer so that
     // the self-reference returned from the body is pointer-equal to the outer
     // binding — required for `(= f (f))` to be `true`.
@@ -339,7 +356,7 @@ pub fn parse_arity(params_form: &Form, body: &[Form]) -> EvalResult<CljxFnArity>
     Ok(CljxFnArity {
         params,
         rest_param,
-        body,
+        body: body.into(),
         destructure_params,
         destructure_rest,
         ir_arity_id: crate::interp::arity::fresh_arity_id(),
@@ -542,44 +559,32 @@ fn eval_let(args: &[Form], env: &mut Env) -> EvalResult {
     let chains = crate::interp::virtualize::detect_let_chains(&bindings);
     let virtualizable_chains = find_virtualizable_chains(&chains, &bindings, body);
 
-    env.push_frame();
-
-    let pairs: Vec<_> = bindings.chunks(2).collect();
-    let mut i = 0;
-    while i < pairs.len() {
-        // Check if this binding starts a virtualizable chain.
-        if let Some(chain) = virtualizable_chains.iter().find(|c| c.start == i) {
-            match eval_virtualized_chain(chain, &pairs, env) {
-                Ok(()) => {
-                    i += chain.len;
-                    continue;
-                }
-                Err(e) => {
-                    env.pop_frame();
-                    return Err(e);
+    env.with_frame(|env| {
+        let pairs: Vec<_> = bindings.chunks(2).collect();
+        let mut i = 0;
+        while i < pairs.len() {
+            // Check if this binding starts a virtualizable chain.
+            if let Some(chain) = virtualizable_chains.iter().find(|c| c.start == i) {
+                match eval_virtualized_chain(chain, &pairs, env) {
+                    Ok(()) => {
+                        i += chain.len;
+                        continue;
+                    }
+                    Err(e) => {
+                        return Err(e);
+                    }
                 }
             }
+
+            // Normal evaluation.
+            let pair = pairs[i];
+            let val = eval(&pair[1], env)?;
+            bind_pattern(&pair[0], val, env)?;
+            i += 1;
         }
 
-        // Normal evaluation.
-        let pair = pairs[i];
-        let val = match eval(&pair[1], env) {
-            Ok(v) => v,
-            Err(e) => {
-                env.pop_frame();
-                return Err(e);
-            }
-        };
-        if let Err(e) = bind_pattern(&pair[0], val, env) {
-            env.pop_frame();
-            return Err(e);
-        }
-        i += 1;
-    }
-
-    let result = eval_body(body, env);
-    env.pop_frame();
-    result
+        eval_body(body, env)
+    })
 }
 
 /// Filter chains to only those that are safe to virtualize.
@@ -734,18 +739,39 @@ pub fn eval_loop(args: &[Form], env: &mut Env) -> EvalResult {
     let patterns: Vec<Form> = bindings.iter().step_by(2).cloned().collect();
     let mut current_vals: Vec<Value> = Vec::new();
 
-    // Evaluate initial values.
+    #[cfg(feature = "no-gc")]
+    let mut initial_scope = cljrs_gc::alloc_ctx::ScratchGuard::new();
     for i in (1..bindings.len()).step_by(2) {
-        current_vals.push(eval(&bindings[i], env)?);
+        // The values already evaluated are in no Env frame yet, so root them
+        // while a later init expression runs.
+        let evaluated = {
+            let _vals_root = crate::env::gc_roots::root_values(&current_vals);
+            eval(&bindings[i], env)
+        };
+        match evaluated {
+            Ok(value) => current_vals.push(value),
+            Err(error) => {
+                #[cfg(feature = "no-gc")]
+                {
+                    initial_scope.pop_for_return();
+                    return crate::interp::eval::publish_result(Err(error), None);
+                }
+                #[cfg(not(feature = "no-gc"))]
+                return Err(error);
+            }
+        }
     }
-
+    #[cfg(feature = "no-gc")]
+    let mut recur_lease = cljrs_gc::region::RegionLease::for_values(&current_vals);
+    #[cfg(feature = "no-gc")]
+    drop(initial_scope);
     loop {
         // Root current_vals so they survive GC — they're not yet bound in env.
-        let _vals_root = crate::env::gc_roots::root_values(&current_vals);
+        let vals_root = crate::env::gc_roots::root_values(&current_vals);
 
         // GC safepoint on every loop iteration so tight recur loops
         // don't starve the collector.
-        crate::env::gc_roots::gc_safepoint(env);
+        crate::env::gc_roots::gc_safepoint(env)?;
 
         // Under no-gc: push a fresh scratch region for this iteration.
         // Intermediates allocated in the body land here and are freed
@@ -766,22 +792,27 @@ pub fn eval_loop(args: &[Form], env: &mut Env) -> EvalResult {
         #[cfg(not(feature = "no-gc"))]
         let _iter_frame = cljrs_gc::push_alloc_frame();
 
-        env.push_frame();
-        for (pat, val) in patterns.iter().zip(current_vals.iter()) {
-            if let Err(e) = bind_pattern(pat, val.clone(), env) {
-                env.pop_frame();
-                return Err(e);
+        let result = env.with_frame(|env| {
+            for (pat, val) in patterns.iter().zip(current_vals.iter()) {
+                bind_pattern(pat, val.clone(), env)?;
             }
-        }
 
-        // Under no-gc: pop scratch before tail expression so the return value
-        // or recur args are allocated in the enclosing scope's context.
-        #[cfg(not(feature = "no-gc"))]
-        let result = eval_body_recur(body, env);
-        #[cfg(feature = "no-gc")]
-        let result = eval_body_with_scratch_loop(body, &mut scratch, env);
+            // Under no-gc: transfer return/recur backing scopes into the
+            // enclosing destination before this iteration releases scratch.
+            #[cfg(not(feature = "no-gc"))]
+            let result = eval_body_recur(body, env);
+            #[cfg(feature = "no-gc")]
+            let result = crate::interp::apply::eval_body_with_scratch(
+                body,
+                &mut scratch,
+                &mut recur_lease,
+                env,
+            );
 
-        env.pop_frame();
+            result
+        });
+        // The body is done with these values; a `recur` below replaces them.
+        drop(vals_root);
         // scratch / _iter_frame drop at the end of the iteration (after the
         // match below), freeing this iteration's intermediates.
 
@@ -795,8 +826,8 @@ pub fn eval_loop(args: &[Form], env: &mut Env) -> EvalResult {
                         got: new_vals.len(),
                     });
                 }
-                // new_vals were evaluated in the caller's context (scratch was
-                // popped before the tail form), so they survive the reset.
+                // Ownership of new_vals was transferred to the enclosing
+                // destination, so they survive this iteration's scratch guard.
                 current_vals = new_vals;
             }
             Err(e) => return Err(e),
@@ -819,28 +850,6 @@ pub fn eval_body_recur(body: &[Form], env: &mut Env) -> EvalResult {
         result = eval(form, env)?;
     }
     Ok(result)
-}
-
-/// Under `no-gc`: eval loop body with scratch-region semantics.
-///
-/// Evaluates all non-tail forms inside the scratch region, then pops the
-/// scratch before the tail (return/recur) expression so it lands in the
-/// caller's context.
-#[cfg(feature = "no-gc")]
-fn eval_body_with_scratch_loop(
-    body: &[Form],
-    scratch: &mut cljrs_gc::alloc_ctx::ScratchGuard,
-    env: &mut Env,
-) -> EvalResult {
-    if body.is_empty() {
-        scratch.pop_for_return();
-        return Ok(Value::Nil);
-    }
-    for form in &body[..body.len() - 1] {
-        eval(form, env)?;
-    }
-    scratch.pop_for_return();
-    eval(&body[body.len() - 1], env)
 }
 
 // ── quote ─────────────────────────────────────────────────────────────────────
@@ -883,46 +892,59 @@ fn eval_set_bang(args: &[Form], env: &mut Env) -> EvalResult {
         Value::Nil
     };
     match &target.kind {
-        FormKind::Symbol(sym) => {
-            // A bare unqualified name inside a deftype method may be one of its
-            // mutable fields; only if not does it fall through to var logic.
-            if !sym.contains('/')
-                && let Some(v) = try_set_mutable_field(env, sym, &val)?
-            {
-                return Ok(v);
+        FormKind::Symbol(sym) => set_bang_symbol(sym, val, env),
+        _ => match set_bang_field_target(target) {
+            Some((field, inst_form)) => {
+                let inst = eval(inst_form, env)?;
+                set_type_instance_field(&inst, field, val)
             }
-            let parsed = cljrs_value::Symbol::parse(sym);
-            // The namespace part is resolved, not read literally: after
-            // `(:require [my.lib :as m])`, `(set! m/*v* x)` names the same var
-            // as `(set! my.lib/*v* x)`. Same call `eval_var` and `eval_binding`
-            // make; this was the one target site reading the part as written.
-            let ns = env.resolve_ns_or_current(parsed.namespace.as_deref());
-            let var = env
-                .globals
-                .lookup_var_in_ns(&ns, &parsed.name)
-                .ok_or_else(|| EvalError::UnboundSymbol(sym.clone()))?;
-            // Prefer updating the thread-local binding if one exists.
-            if !crate::env::dynamics::set_thread_local(&var, val.clone()) {
-                var.get().bind(val.clone());
-            }
-            Ok(val)
-        }
-        // `(set! (.-field inst) v)` — a mutable field on an explicit instance.
-        FormKind::List(parts)
-            if parts.len() == 2
-                && matches!(&parts[0].kind, FormKind::Symbol(op) if op.starts_with(".-")) =>
-        {
-            let FormKind::Symbol(op) = &parts[0].kind else {
-                unreachable!()
-            };
-            let field = &op[2..];
-            let inst = eval(&parts[1], env)?;
-            set_type_instance_field(&inst, field, val)
-        }
-        _ => Err(EvalError::Runtime(
-            "set! requires a symbol or (.-field inst) target".into(),
-        )),
+            None => Err(set_bang_target_error()),
+        },
     }
+}
+
+/// `(set! sym val)` for an already-evaluated `val`: a mutable deftype field in
+/// scope, else the thread-local binding of the var `sym` names, else its root.
+pub fn set_bang_symbol(sym: &str, val: Value, env: &mut Env) -> EvalResult {
+    // A bare unqualified name inside a deftype method may be one of its
+    // mutable fields; only if not does it fall through to var logic.
+    if !sym.contains('/')
+        && let Some(v) = try_set_mutable_field(env, sym, &val)?
+    {
+        return Ok(v);
+    }
+    let parsed = cljrs_value::Symbol::parse(sym);
+    // The namespace part is resolved, not read literally: after
+    // `(:require [my.lib :as m])`, `(set! m/*v* x)` names the same var
+    // as `(set! my.lib/*v* x)`. Same call `eval_var` and `eval_binding`
+    // make; this was the one target site reading the part as written.
+    let ns = env.resolve_ns_or_current(parsed.namespace.as_deref());
+    let var = env
+        .globals
+        .lookup_var_in_ns(&ns, &parsed.name)
+        .ok_or_else(|| EvalError::UnboundSymbol(sym.to_string()))?;
+    // Prefer updating the thread-local binding if one exists.
+    if !crate::env::dynamics::set_thread_local(&var, val.clone()) {
+        var.get().bind(val.clone());
+    }
+    Ok(val)
+}
+
+/// For a `(set! (.-field inst) v)` target, the field name and the `inst`
+/// form; `None` for any other non-symbol target.
+pub fn set_bang_field_target(target: &Form) -> Option<(&str, &Form)> {
+    match &target.kind {
+        FormKind::List(parts) if parts.len() == 2 => match &parts[0].kind {
+            FormKind::Symbol(op) if op.starts_with(".-") => Some((&op[2..], &parts[1])),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// The error for a `set!` target that is neither a symbol nor `(.-field inst)`.
+pub fn set_bang_target_error() -> EvalError {
+    EvalError::Runtime("set! requires a symbol or (.-field inst) target".into())
 }
 
 /// If `sym` names a mutable field of the `__deftype_self__` instance in scope,
@@ -950,7 +972,7 @@ fn try_set_mutable_field(env: &mut Env, sym: &str, val: &Value) -> EvalResult<Op
 }
 
 /// Set a mutable field on an explicit instance: `(set! (.-field inst) v)`.
-fn set_type_instance_field(inst: &Value, field: &str, val: Value) -> EvalResult {
+pub fn set_type_instance_field(inst: &Value, field: &str, val: Value) -> EvalResult {
     let Value::TypeInstance(ti) = inst else {
         return Err(EvalError::Runtime(format!(
             "set! (.-{field} …): target is not a type instance"
@@ -980,8 +1002,14 @@ fn eval_throw(args: &[Form], env: &mut Env) -> EvalResult {
         Some(f) => eval(f, env)?,
         None => Value::Nil,
     };
-    // Wrap non-error values in an ExceptionInfo so try/catch always sees a
-    // Value::Error and ex-message / ex-data work uniformly inside the handler.
+    Err(throw_value(val))
+}
+
+/// The error `(throw val)` raises for an already-evaluated `val`.
+///
+/// Wraps non-error values in an ExceptionInfo so try/catch always sees a
+/// Value::Error and ex-message / ex-data work uniformly inside the handler.
+pub fn throw_value(val: Value) -> EvalError {
     let val = match val {
         Value::Error(_) => val,
         other => {
@@ -994,7 +1022,7 @@ fn eval_throw(args: &[Form], env: &mut Env) -> EvalResult {
             )))
         }
     };
-    Err(EvalError::Thrown(val))
+    EvalError::Thrown(val)
 }
 
 // ── try ───────────────────────────────────────────────────────────────────────
@@ -1054,8 +1082,12 @@ fn eval_try(args: &[Form], env: &mut Env) -> EvalResult {
             result = Err(EvalError::Recur(args));
             None
         }
-        Err(EvalError::GasExhausted) => {
-            result = Err(EvalError::GasExhausted);
+        Err(
+            error @ (EvalError::GasExhausted
+            | EvalError::Cancelled
+            | EvalError::MemoryLimitExceeded(_)),
+        ) => {
+            result = Err(error);
             None
         }
         Err(other) => Some(other),
@@ -1069,10 +1101,10 @@ fn eval_try(args: &[Form], env: &mut Env) -> EvalResult {
         let mut handled = false;
         for c in &catches {
             if catch_type_matches(c.type_sym, &thrown_val) {
-                env.push_frame();
-                env.bind(Arc::from(c.binding), thrown_val.clone());
-                result = eval_body(c.body, env);
-                env.pop_frame();
+                result = env.with_frame(|env| {
+                    env.bind(Arc::from(c.binding), thrown_val.clone());
+                    eval_body(c.body, env)
+                });
                 handled = true;
                 break;
             }
@@ -1086,11 +1118,23 @@ fn eval_try(args: &[Form], env: &mut Env) -> EvalResult {
     // Always run finally.  Its normal (Ok) value is discarded — `try` returns
     // the body/catch result — but an exception thrown from `finally` supersedes
     // the pending result or exception (matching JVM/Clojure semantics).
-    if !fin_body.is_empty() {
-        eval_body(fin_body, env)?;
+    // An uncatchable resource error is never superseded, so a throwing
+    // `finally` cannot make it catchable (the compiled `rt_try` agrees).
+    if !fin_body.is_empty()
+        && let Err(error) = eval_body(fin_body, env)
+        && !matches!(&result, Err(pending) if is_resource_error(pending))
+    {
+        return Err(error);
     }
 
     result
+}
+
+fn is_resource_error(error: &EvalError) -> bool {
+    matches!(
+        error,
+        EvalError::GasExhausted | EvalError::Cancelled | EvalError::MemoryLimitExceeded(_)
+    )
 }
 
 /// The class name or `:default` keyword naming what a `catch` clause catches.
@@ -1161,13 +1205,17 @@ pub fn parse_try_args(args: &[Form]) -> (&[Form], Vec<CatchClause<'_>>, &[Form])
 // ── defn ──────────────────────────────────────────────────────────────────────
 
 pub fn eval_defn(args: &[Form], env: &mut Env, private: bool) -> EvalResult {
+    crate::interp::eval::with_scratch(|| eval_defn_inner(args, env, private))
+}
+
+fn eval_defn_inner(args: &[Form], env: &mut Env, private: bool) -> EvalResult {
     // The name may carry reader metadata, e.g. `(defn ^:async fetch ...)`.
     let name_form = args
         .first()
         .ok_or_else(|| EvalError::Runtime("defn requires a symbol name".into()))?;
     let (name_metas, name_sym) = name_form.peel_meta();
     let (name, mut is_async) = match &name_sym.kind {
-        FormKind::Symbol(s) => (s.clone(), name_metas.iter().any(|m| meta_form_is_async(m))),
+        FormKind::Symbol(s) => (s.clone(), name_metas.iter().any(|m| m.requests_async())),
         _ => return Err(EvalError::Runtime("defn name must be a symbol".into())),
     };
     // Optional docstring and/or metadata map after the name.
@@ -1184,7 +1232,7 @@ pub fn eval_defn(args: &[Form], env: &mut Env, private: bool) -> EvalResult {
     let mut attr_meta: Option<Value> = None;
     if rest_start < args.len() && args[rest_start].as_map().is_some() {
         // An attr-map such as `{:async true}` can also request async dispatch.
-        is_async |= meta_form_is_async(&args[rest_start]);
+        is_async |= args[rest_start].requests_async();
         attr_meta = Some(eval(&args[rest_start], env)?);
         rest_start += 1;
     }
@@ -1194,10 +1242,6 @@ pub fn eval_defn(args: &[Form], env: &mut Env, private: bool) -> EvalResult {
         args[0].span.clone(),
     )];
     fn_args.extend_from_slice(&args[rest_start..]);
-    // Under no-gc: the Fn object must live in the StaticArena since the Var
-    // intern outlives all scratch regions.
-    #[cfg(feature = "no-gc")]
-    let _static_ctx = cljrs_gc::alloc_ctx::StaticCtxGuard::new();
     let mut fn_val = eval_fn(&fn_args, env)?;
     if is_async && let Value::Fn(ref mut f) = fn_val {
         f.get_mut().is_async = true;
@@ -1220,6 +1264,51 @@ pub fn eval_defn(args: &[Form], env: &mut Env, private: bool) -> EvalResult {
 }
 
 // ── defmacro ──────────────────────────────────────────────────────────────────
+
+/// Whether `name` occurs as a symbol anywhere in `form`: inside every
+/// collection, reader wrapper, metadata and reader-conditional clause.
+///
+/// `defmacro` asks this about `&env` so that expansion can skip building the
+/// locals map for the macros that never read it. Every `FormKind` variant is
+/// matched by name, no wildcard, so a variant added to the reader is a compile
+/// error here rather than a silently missed mention.
+fn form_mentions_symbol(form: &Form, name: &str) -> bool {
+    match &form.kind {
+        FormKind::Symbol(s) => s == name,
+        FormKind::Nil
+        | FormKind::Bool(_)
+        | FormKind::Int(_)
+        | FormKind::BigInt(_)
+        | FormKind::Float(_)
+        | FormKind::BigDecimal(_)
+        | FormKind::Ratio(_)
+        | FormKind::Char(_)
+        | FormKind::Str(_)
+        | FormKind::Regex(_)
+        | FormKind::Symbolic(_)
+        | FormKind::Keyword(_)
+        | FormKind::AutoKeyword(_)
+        | FormKind::AutoSymbol(_) => false,
+        FormKind::List(items)
+        | FormKind::Vector(items)
+        | FormKind::Map(items)
+        | FormKind::Set(items)
+        | FormKind::AnonFn(items)
+        | FormKind::ReaderCond { clauses: items, .. } => {
+            items.iter().any(|f| form_mentions_symbol(f, name))
+        }
+        FormKind::Quote(inner)
+        | FormKind::SyntaxQuote(inner)
+        | FormKind::Unquote(inner)
+        | FormKind::UnquoteSplice(inner)
+        | FormKind::Deref(inner)
+        | FormKind::Var(inner)
+        | FormKind::TaggedLiteral(_, inner) => form_mentions_symbol(inner, name),
+        FormKind::Meta(meta, inner) => {
+            form_mentions_symbol(meta, name) || form_mentions_symbol(inner, name)
+        }
+    }
+}
 
 /// Prepend `&form` and `&env` Form symbols to an arity form's parameter vector.
 ///
@@ -1306,7 +1395,10 @@ fn eval_defmacro(args: &[Form], env: &mut Env) -> EvalResult {
         Value::Fn(f) => {
             let mut mfn = f.get().clone();
             mfn.is_macro = true;
-            Value::Macro(GcPtr::new(mfn))
+            mfn.macro_uses_env = args[rest_start..]
+                .iter()
+                .any(|f| form_mentions_symbol(f, "&env"));
+            Value::Macro(GcPtr::new_isolated(mfn))
         }
         other => other,
     };
@@ -1336,10 +1428,8 @@ fn eval_defonce(args: &[Form], env: &mut Env) -> EvalResult {
     // `(defonce ^:private registry (atom {}))` is accepted here too.
     let (name, _meta) = extract_def_name(&args[0], env)?;
     // If already bound, return immediately.
-    if let Some(var) = env.globals.lookup_var(&env.current_ns, &name)
-        && var.get().is_bound()
-    {
-        return Ok(Value::Var(var));
+    if let Some(var) = defonce_existing(&name, env) {
+        return Ok(var);
     }
     eval_def(args, env)
 }
@@ -1728,8 +1818,13 @@ fn eval_ns(args: &[Form], env: &mut Env) -> EvalResult {
                         load_ns(env.globals.clone(), &spec, &name)?;
                     }
                 }
+                Some(FormKind::Keyword(k)) if k == "import" => {
+                    for spec in &expand_reader_conds(&items[1..]) {
+                        import_types(env, &name, spec)?;
+                    }
+                }
                 // `:refer-clojure` was handled in the pass above; other clauses
-                // (`:use`, `:import`) — skip for now.
+                // (`:use`) — skip for now.
                 _ => {}
             }
         }
@@ -1737,6 +1832,69 @@ fn eval_ns(args: &[Form], env: &mut Env) -> EvalResult {
 
     let ns_ptr = env.globals.get_or_create_ns(&env.current_ns);
     Ok(Value::Namespace(ns_ptr))
+}
+
+/// Apply one `(:import ...)` spec (`[pkg Name ...]`, `(pkg Name ...)` or
+/// `pkg.Name`) by referring each named record or deftype into `dst_ns`.
+///
+/// A type's dispatch tag is qualified by its defining namespace, so an
+/// unqualified `Name` only reaches that tag through a var `dst_ns` can
+/// resolve; without the refer, `(extend-type Name ...)` in the importing
+/// namespace registers its methods under a tag no instance carries.
+fn import_types(env: &Env, dst_ns: &str, spec: &Form) -> EvalResult<()> {
+    match &spec.unmeta().kind {
+        FormKind::Vector(items) | FormKind::List(items) => {
+            let mut syms = items.iter().filter_map(Form::as_symbol);
+            if let Some(pkg) = syms.next() {
+                for name in syms {
+                    import_type(env, dst_ns, pkg, name)?;
+                }
+            }
+        }
+        FormKind::Symbol(s) => {
+            if let Some((pkg, name)) = s.rsplit_once('.') {
+                import_type(env, dst_ns, pkg, name)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+/// Refer the type `name` defined in namespace `pkg` into `dst_ns`. `pkg` is
+/// also tried with `_` read as `-`, the JVM's package spelling of a namespace.
+/// Anything that is not a loaded record or deftype (a host class in a `.cljc`
+/// file, say) is left alone, as `:import` was before it referred anything.
+///
+/// It is an error for `dst_ns` to already bind `name` to something else, as
+/// it is on the JVM: the refer would otherwise be shadowed by a local
+/// definition, or silently replace an earlier refer. A name that only
+/// `clojure.core` supplies may be replaced, as with `(:require ... :refer)`.
+fn import_type(env: &Env, dst_ns: &str, pkg: &str, name: &str) -> EvalResult<()> {
+    let demunged = pkg.replace('_', "-");
+    for ns in [pkg, demunged.as_str()] {
+        let tag = format!("{ns}.{name}");
+        let names_type = matches!(
+            env.globals.lookup_in_ns(ns, name),
+            Some(Value::Symbol(s)) if s.get().to_string() == tag
+        );
+        if names_type {
+            if let Some(bound) = env.globals.lookup_var_in_ns(dst_ns, name) {
+                let bound = bound.get();
+                let bound_ns = bound.namespace.as_ref();
+                let same = bound_ns == ns && bound.name.as_ref() == name;
+                if !same && bound_ns != "clojure.core" {
+                    return Err(EvalError::Runtime(format!(
+                        "{name} already refers to: #'{bound_ns}/{} in namespace: {dst_ns}",
+                        bound.name
+                    )));
+                }
+            }
+            env.globals.refer_named(dst_ns, ns, &[Arc::from(name)]);
+            return Ok(());
+        }
+    }
+    Ok(())
 }
 
 // ── load-file ─────────────────────────────────────────────────────────────────
@@ -1774,6 +1932,18 @@ fn eval_load_file(args: &[Form], env: &mut Env) -> EvalResult {
 // ── letfn ─────────────────────────────────────────────────────────────────────
 
 fn eval_letfn(args: &[Form], env: &mut Env) -> EvalResult {
+    push_letfn_frame(args, env)?;
+    let result = eval_body(&args[1..], env);
+    env.pop_frame();
+    result
+}
+
+/// Push a local frame binding every fn of `(letfn [fns…] body…)`, mutually
+/// visible. On success the caller evaluates the body and pops the frame; on
+/// error the frame has already been popped.
+///
+/// Public so the async evaluator can run the body with a yielding evaluator.
+pub fn push_letfn_frame(args: &[Form], env: &mut Env) -> EvalResult<()> {
     // (letfn [(f [params] body...) ...] body...)
     //
     // Three passes, because a closure here captures VALUES, not cells:
@@ -1839,7 +2009,8 @@ fn eval_letfn(args: &[Form], env: &mut Env) -> EvalResult {
     for (_, fn_val) in &built {
         if let Value::Fn(ptr) = fn_val {
             let mut ptr = ptr.clone();
-            let f = ptr.get_mut();
+            #[allow(unused_mut)]
+            let mut f = ptr.get_mut();
             for i in 0..f.closed_over_names.len() {
                 let captured = f.closed_over_names[i].clone();
                 if let Some((_, real)) = built.iter().find(|(n, _)| *n == captured) {
@@ -1849,10 +2020,7 @@ fn eval_letfn(args: &[Form], env: &mut Env) -> EvalResult {
         }
     }
 
-    let body = &args[1..];
-    let result = eval_body(body, env);
-    env.pop_frame();
-    result
+    Ok(())
 }
 
 // ── in-ns ─────────────────────────────────────────────────────────────────────
@@ -1961,7 +2129,7 @@ fn eval_protocol_star(args: &[Form], env: &mut Env) -> EvalResult {
     }
     // Name metadata belongs on the var `defprotocol` binds, not here.
     let (name, _) = require_sym_meta(args, 0, "protocol*", env)?;
-    let specs = crate::interp::eval::eval(&args[1], env)?;
+    let specs = crate::interp::eval::eval_unscoped(&args[1], env)?;
     let specs: Vec<Value> = match specs.unwrap_meta() {
         Value::Vector(v) => v.get().iter().cloned().collect(),
         Value::Nil => Vec::new(),
@@ -1978,7 +2146,7 @@ fn eval_protocol_star(args: &[Form], env: &mut Env) -> EvalResult {
         .collect::<EvalResult<Vec<_>>>()?;
     let extend_via_metadata = match args.get(2) {
         Some(f) => !matches!(
-            crate::interp::eval::eval(f, env)?,
+            crate::interp::eval::eval_unscoped(f, env)?,
             Value::Nil | Value::Bool(false)
         ),
         None => false,
@@ -2104,16 +2272,19 @@ fn build_impl_fn(
     };
     let arity = parse_arity(params_form, body)?;
     let (closed_over_names, closed_over_vals) = env.all_local_bindings();
-    let fn_name: Option<Arc<str>> = parts[0].as_symbol().map(Arc::from);
+    // A protocol method impl must NOT be a named fn: a name binds itself inside
+    // its own body, so `(-s [_ t] (-s inner t))` would call itself instead of the
+    // protocol function of the same name and recurse forever (malli's registries
+    // delegate this way).
     let cljrs_fn = CljxFn::new(
-        fn_name,
+        None,
         vec![arity],
         closed_over_names,
         closed_over_vals,
         false,
         Arc::clone(&env.current_ns),
     );
-    Ok(Value::Fn(GcPtr::new(cljrs_fn)))
+    Ok(Value::Fn(GcPtr::new_isolated(cljrs_fn)))
 }
 
 // ── binding ───────────────────────────────────────────────────────────────────
@@ -2224,7 +2395,7 @@ fn eval_deftype_star(args: &[Form], env: &mut Env) -> EvalResult {
     // Type metadata (e.g. ^:private) has no var to hold it; unwrapped so the
     // name reads, and deliberately not applied anywhere it would not belong.
     let (type_name, _) = require_sym_meta(args, 0, "deftype*", env)?;
-    let type_tag: Arc<str> = Arc::from(type_name.as_str());
+    let type_tag = qualified_type_tag(&type_name, env);
 
     let specs = parse_field_specs(&args[1], "deftype*")?;
     let field_names: Vec<Arc<str>> = specs.iter().map(|(n, _)| n.clone()).collect();
@@ -2241,7 +2412,16 @@ fn eval_deftype_star(args: &[Form], env: &mut Env) -> EvalResult {
     // Return the minted tag so a caller (e.g. the `reify` macro) can feed it
     // straight to `make-type-instance` — a single dataflow source for the tag,
     // rather than a second textual reference that a gensym could desync.
-    Ok(Value::string(type_name))
+    Ok(Value::string(type_tag.to_string()))
+}
+
+/// The dispatch tag of a record or deftype: its name qualified by the defining
+/// namespace, `my.ns.Point`, as the JVM names the generated class. Two
+/// namespaces may each define a `Point`; with a bare-name tag the second one's
+/// protocol impls replaced the first one's, and `instance?` could not tell
+/// their instances apart.
+fn qualified_type_tag(type_name: &str, env: &Env) -> Arc<str> {
+    Arc::from(format!("{}.{}", env.current_ns, type_name))
 }
 
 // ── register_impls_for_tag ────────────────────────────────────────────────────
@@ -2281,11 +2461,18 @@ fn register_impls_for_tag(
     env: &mut Env,
 ) -> EvalResult<()> {
     let mut current_proto: Option<GcPtr<cljrs_value::Protocol>> = None;
+    let mut seen: HashSet<(Arc<str>, Arc<str>)> = HashSet::new();
 
     for form in forms {
         match &form.unmeta().kind {
             FormKind::Symbol(s) => match resolve_protocol_sym(env, s) {
                 Some(p) => current_proto = Some(p),
+                // A host interface (`Object`, `clojure.lang.Indexed`,
+                // `ThreadLocal`, ...): its methods are reachable through
+                // `.method` interop and the host hooks (`nth`).
+                None if crate::interp::host_methods::is_host_interface(s) => {
+                    current_proto = Some(crate::interp::host_methods::table(&env.globals));
+                }
                 None => {
                     return Err(EvalError::Runtime(format!(
                         "reify/defrecord: {} is not a protocol",
@@ -2304,13 +2491,29 @@ fn register_impls_for_tag(
                     Some(s) => Arc::from(s),
                     None => continue,
                 };
-                let fn_val = build_impl_fn(parts, fields, mutable_fields, env)?;
-                let mut impls = proto.get().impls.lock().unwrap();
-                impls
-                    .entry(type_tag.clone())
-                    .or_default()
-                    .insert(method_name, fn_val);
-                drop(impls);
+                let mut fn_val = build_impl_fn(parts, fields, mutable_fields, env)?;
+                // Two bodies of one method in this form are overloads by arity
+                // (`(nth [this i] ..) (nth [this i nf] ..)`): merge them into
+                // one fn. A redefinition of the type starts afresh.
+                let overload_key = (proto.get().name.clone(), method_name.clone());
+                if !seen.insert(overload_key) {
+                    let prev = proto
+                        .get()
+                        .impls
+                        .lock()
+                        .unwrap()
+                        .get::<str>(type_tag)
+                        .and_then(|methods| methods.get(&method_name))
+                        .cloned();
+                    if let (Some(Value::Fn(prev)), Value::Fn(new)) = (prev, &fn_val) {
+                        let mut merged = prev.get().clone();
+                        merged.arities.extend(new.get().arities.iter().cloned());
+                        fn_val = Value::Fn(GcPtr::new(merged));
+                    }
+                }
+                proto
+                    .get()
+                    .set_implementation(type_tag.clone(), method_name, fn_val);
                 cljrs_value::bump_protocol_generation();
             }
             _ => {}
@@ -2387,40 +2590,13 @@ fn eval_with_out_str(body: &[Form], env: &mut Env) -> EvalResult {
 ///
 /// When `cljrs-async` is loaded, `eval_async` intercepts `await` forms before
 /// the sync evaluator reaches this handler, so this path is only taken in
-/// non-async (sync) code. It blocks the OS thread until the future/promise
-/// resolves — equivalent to `(deref val)`.
+/// non-async code. Inside a fiber, this path parks until settlement.
+/// Outside a fiber, it blocks the OS thread, like `(deref val)`. A channel is
+/// taken from, so `(await (go ...))` yields the block's value.
 fn eval_await(args: &[Form], env: &mut Env) -> EvalResult {
     if args.is_empty() {
         return Err(EvalError::Runtime("await requires one argument".into()));
     }
     let val = eval(&args[0], env)?;
-    match val {
-        Value::Future(f) => {
-            let mut guard = f.get().state.lock().unwrap();
-            loop {
-                match &*guard {
-                    FutureState::Done(v) => {
-                        f.get().mark_observed();
-                        return Ok(v.clone());
-                    }
-                    FutureState::Failed(v) => {
-                        f.get().mark_observed();
-                        return Err(EvalError::Thrown(v.clone()));
-                    }
-                    FutureState::GasExhausted => {
-                        f.get().mark_observed();
-                        return Err(EvalError::GasExhausted);
-                    }
-                    FutureState::Cancelled => {
-                        return Err(EvalError::Thrown(CljxFuture::cancelled_error()));
-                    }
-                    FutureState::Running => {
-                        guard = f.get().cond.wait(guard).unwrap();
-                    }
-                }
-            }
-        }
-        Value::Promise(p) => Ok(p.get().deref_blocking()),
-        other => Ok(other),
-    }
+    crate::interp::eval::await_value_sync(val, &env.globals)
 }

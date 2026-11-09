@@ -152,7 +152,7 @@ pub enum Commands {
     ///
     /// The user crate must declare `crate-type = ["cdylib"]` (or
     /// `["cdylib", "rlib"]`) and export a `#[no_mangle] pub extern "C" fn
-    /// cljrs_init(registry: *mut cljrs_interop::Registry)` entry point.
+    /// cljrs_init_<crate>(registry: *mut cljrs_interop::Registry)` entry point.
     BuildNative(commands::build_native::Args),
     /// Run the clojurust language server (LSP) over stdio.
     ///
@@ -330,7 +330,7 @@ fn write_jit_stats(target: &str) -> std::io::Result<()> {
 /// An empty target (the flag was passed without a value) writes to stdout;
 /// any other value is treated as a filesystem path.
 fn write_gc_stats(target: &str) -> std::io::Result<()> {
-    let snapshot = cljrs_gc::GC_STATS.snapshot();
+    let snapshot = cljrs_gc::stats_report();
     if target.is_empty() {
         println!("{snapshot}");
         Ok(())

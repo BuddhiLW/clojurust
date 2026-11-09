@@ -38,6 +38,11 @@ pub fn extension_set() -> ExtensionSet {
             cljrs_base64::init,
             "cljrs_base64::init",
         ))
+        .with(Extension::new(
+            "cljrs-ffi",
+            cljrs_ffi::init,
+            "cljrs_ffi::init",
+        ))
 }
 
 /// A compile session over `src_dirs` with the full extension set.

@@ -14,18 +14,26 @@ on:
   push:
     branches: [main, staging]
 
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
 
+# The gate runs on pinned inputs, so a run is red only when the tree is.
+# A floating `stable` turned every branch red twice with no code change: a new
+# lint deprecation failed clippy, and new codegen exposed a latent memory bug.
+# Bump the toolchain, the runner image and wasm-pack here, in a commit of
+# their own, so that what a bump breaks is seen as the bump's doing.
 jobs:
   ci:
     name: Build, test, lint
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
 
     steps:
       - uses: actions/checkout@v4
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.99.0
         with:
           components: clippy, rustfmt
 
@@ -34,41 +42,81 @@ jobs:
       - name: Check formatting
         run: cargo fmt --check
 
+      # `--locked`: build what Cargo.lock says, and fail if it is stale.
       - name: Check
-        run: cargo check --workspace
+        run: cargo check --locked --workspace
 
       - name: Clippy
-        run: cargo clippy --workspace -- -D warnings
+        run: cargo clippy --locked --workspace -- -D warnings
 
       - name: Tests
-        run: cargo test --workspace
+        run: cargo test --locked --workspace
 
       - name: Clojure Tests
-        run: cargo run -p cljrs compile -o test-suite --test ./clojure-test-suite/test && CLJRS_GC_STATS=- ./test-suite
+        run: cargo run --locked -p cljrs compile -o test-suite --test ./clojure-test-suite/test && CLJRS_GC_STATS=- ./test-suite
 
       # Both legs: they fail differently, and the AOT one cannot be gated from
       # cargo. Rationale in memory 20260909235156-7104b028.
       - name: cljrs self-hosted tests (interpreter)
-        run: cargo run -p cljrs test --src-path ./tests/cljrs
+        run: cargo run --locked -p cljrs test --src-path ./tests/cljrs
 
       - name: cljrs self-hosted tests (AOT compile and run)
-        run: cargo run -p cljrs compile -o cljrs-tests --test ./tests/cljrs && CLJRS_GC_STATS=- ./cljrs-tests
+        run: cargo run --locked -p cljrs compile -o cljrs-tests --test ./tests/cljrs && CLJRS_GC_STATS=- ./cljrs-tests
 
   wasm:
     name: WASM build
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
 
     steps:
       - uses: actions/checkout@v4
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.99.0
         with:
           targets: wasm32-unknown-unknown
 
       - uses: Swatinem/rust-cache@v2
 
       - name: Install wasm-pack
-        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+        uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-pack@0.13.1
 
       - name: Build cljrs-wasm
         run: wasm-pack build crates/cljrs-wasm --target web --no-typescript --release
+
+  fiber-asan:
+    name: Fiber AddressSanitizer (${{ matrix.mode }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - mode: gc
+            features: small-regex,fiber-sanitizer
+          - mode: no-gc
+            features: small-regex,fiber-sanitizer,no-gc
+    env:
+      RUSTFLAGS: -Zsanitizer=address
+      # Keep the 5,000-fiber full-collection stress loop practical under ASan.
+      CARGO_PROFILE_TEST_OPT_LEVEL: 1
+      # no-gc deliberately retains static arenas for the process lifetime.
+      # Exercise fake-stack placement explicitly: stack-margin checks must
+      # measure the machine stack even when locals live on ASan's fake stack.
+      ASAN_OPTIONS: detect_leaks=0:detect_stack_use_after_return=1
+    steps:
+      - uses: actions/checkout@v4
+      # Pinned: nightly 2026-10-31 (f9ceb4a4d) fails to compile cljrs-async
+      # with a spurious E0391 "needs async drop" query cycle. Unpin once a
+      # later nightly builds it again.
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-10-30
+          targets: x86_64-unknown-linux-gnu
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: fiber-asan-${{ matrix.mode }}
+      - name: Fiber stress and lifecycle tests
+        run: >-
+          cargo test -p cljrs-async --target x86_64-unknown-linux-gnu
+          --no-default-features --features ${{ matrix.features }}
+          --lib --test fiber --test parking --test fairness --test converged -- --test-threads=1

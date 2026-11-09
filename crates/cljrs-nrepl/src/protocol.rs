@@ -25,6 +25,10 @@ pub struct Request {
     pub sym: Option<String>,
     /// `interrupt`: id of the eval message to interrupt.
     pub interrupt_id: Option<String>,
+    /// `macroexpand`: `macroexpand-1`, `macroexpand` or `macroexpand-all`.
+    pub expander: Option<String>,
+    /// `macroexpand`: `qualified`, `none` or `tidy`.
+    pub display_namespaces: Option<String>,
 }
 
 impl Request {
@@ -48,6 +52,8 @@ impl Request {
             prefix: get("prefix"),
             sym: get("sym"),
             interrupt_id: get("interrupt-id"),
+            expander: get("expander"),
+            display_namespaces: get("display-namespaces"),
         })
     }
 }

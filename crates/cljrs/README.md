@@ -52,6 +52,10 @@ tests/
   embedding_book_examples.rs — the snippets from the book's Embedding chapter
                       (`docs/book/src/embedding/`), compiled and run so the
                       documented host API cannot drift
+  thread_local_classification.rs — every `thread_local!` under `crates/*/src`
+                      is classified per-mutator (a registered
+                      `cljrs_gc::mutator_slot!`) or per-thread, with a reason;
+                      a new unclassified one fails (virtual threads Phase 0)
   pinned_dylib_e2e.rs — gated (`CLJRS_DYLIB_E2E=1`) pinned-native end-to-end
                       test; described under Pinned native packages below
   core_shadowing_tiers.rs — shadowed `clojure.core` names (a `let`-bound `inc`,
@@ -114,8 +118,8 @@ run to completion. A synchronous `-main` is awaited as a no-op pass-through.
 
 `run`, `repl`, `compile`, `test` accept:
 - `--src-path <DIR>` — repeatable; directories searched by `require`
-- `--gc-soft-limit-mb <MB>` — soft GC threshold
-- `--gc-hard-limit-mb <MB>` — hard GC threshold
+- `--gc-soft-limit-mb <MB>` — soft GC threshold (per isolate heap only; does not set the process governor's soft limit)
+- `--gc-hard-limit-mb <MB>` — process managed-memory hard limit (reported, not yet enforced; governor soft limit is 75% of it); a soft limit above it is rejected
 
 `run` additionally accepts:
 - `[-- ARGS…]` — positional arguments forwarded verbatim to `-main`
@@ -275,7 +279,7 @@ Build with e.g. `cargo build --release --features enable-rustyline,no-gc`.
 - The miette error hook is installed at startup so `CljxError` propagated to `main` renders with terminal-linked source snippets.
 - A worker thread is spawned with the configured stack size to run the actual command; the main thread only handles signal/exit setup.
 - The REPL prints results, paginates errors via `miette`, and persists multi-line input across blank prompts.
-- **Top-level async (with the `async` feature).** `session::with_async_driver` builds a single-threaded Tokio runtime + `LocalSet` and stashes it in a thread-local `AsyncDriver` rather than wrapping the whole session in one `block_on`. Each top-level form is then evaluated through `cljrs_async::eval_async` via `LocalSet::block_on` in `eval_form`, so spawned tasks (core.async producers, `^:async` calls, `clojure.rust.io.async` readers/writers) make progress and a top-level `await` resolves. Tasks that outlive a form — e.g. a channel `def`d at one REPL prompt and consumed at the next — stay queued on the shared `LocalSet` and continue on the next form's drive. Note: blocking ops (`<!!`/`>!!`) still park the single executor thread and so are not usable at the top level; use `(await (take! ch))` / `go` instead.
+- **Top-level async (with the `async` feature).** `session::with_async_driver` retains a Tokio runtime, `LocalSet`, and carrier mutator state between forms. On native targets, each form runs in a root fiber through `fiber::run_root`. Top-level future dereferences, `<!!`, and `>!!` park that fiber while other tasks run. Tasks that outlive a form resume during the next drive of the same executor. The wasm32 path uses `eval_async` through `LocalSet::block_on`.
 - `ir viz` runs the AOT pipeline through region optimization (via `cljrs_compiler::aot::lower_file_to_ir`) and hands the resulting `IrFunction` to `commands::ir::viz::render_html`.
 - `ir build` boots a standard environment, walks every var in the requested namespaces, and lowers each function arity with `cljrs_runtime::tiered::lower::lower_arity` into an `IrBundle`. It lives in `commands/ir/mod.rs`; there is no separate pre-build crate or binary. No `cljrs` runtime path loads a bundle — `cljrs_runtime::tiered::load_prebuilt_ir` is the public API an embedder would call to replay one.
 
@@ -294,7 +298,7 @@ Build with e.g. `cargo build --release --features enable-rustyline,no-gc`.
 | `cljrs-compiler` (workspace)| AOT pipeline (`compile_file`, `compile_test_harness`, `lower_file_to_ir`) |
 | `cljrs-ir` (workspace)      | `IrBundle`, `serialize_bundle`, `deserialize_bundle` — used by `ir build` / `ir dump` |
 | `cljrs-interop` (workspace) | Rust ↔ Clojure FFI                                                |
-| `cljrs-async` (workspace, optional) | `clojure.core.async` runtime + `eval_async`; enabled by `async`  |
+| `cljrs-async` (workspace, optional) | `clojure.core.async` runtime and fibers (`eval_async` on wasm32); enabled by `async`  |
 | `cljrs-io` (workspace, optional) | `clojure.rust.io.async` async file I/O; enabled by `async`       |
 | `tokio` (workspace, optional) | Single-threaded runtime + `LocalSet` driving async; enabled by `async` |
 | `tracing` (workspace)       | `Level` for the `--debug` / `--trace` default; `--debug` / `--trace` / `-X` all build one `Targets` filter and install the stderr subscriber through `cljrs_runtime::logging`, which owns the `tracing-subscriber` dependency |
@@ -303,7 +307,7 @@ Build with e.g. `cargo build --release --features enable-rustyline,no-gc`.
 | `miette` (workspace, `fancy`) | Rich terminal error rendering. `fancy` — the renderer half of miette — is enabled *here only*; the library crates take miette without it |
 | `rustyline` (workspace, optional) | Line-editing REPL when `enable-rustyline` is on              |
 | `libloading` (workspace)    | `dlopen` for the project `:rust` cdylib and pinned native packages |
-| `serde_json`                | Reading `target_directory` out of `cargo metadata` output          |
+| `serde_json`                | Reading `cargo metadata` output (`target_directory`; a native wrapper's path packages) and the wrapper build record |
 
 ---
 
@@ -330,15 +334,33 @@ from:
   dependency leaves that path exactly as it was.  Versioned by
   `digest_source_tree` over the **whole root**, not just the `:rust/crate`
   subdirectory: the crate being built normally has path dependencies on its
-  siblings, so an edit outside it still changes what cargo produces.
+  siblings, so an edit outside it still changes what cargo produces.  The walk
+  skips `target`, `.git`, `.hg`, `.svn`, `.jj` and `node_modules`, does not
+  follow directory symlinks (a symlinked directory contributes its link
+  target, a symlinked file its contents), and identifies files over 1 MiB by
+  length and mtime rather than reading them.
 
 The generated wrapper crate and its cargo target directory are keyed by
 `(dep crate, ABI fingerprint)` and shared across versions, so an edit costs an
 incremental rebuild rather than a fresh one and leaves one target directory
 behind rather than one per edit.  The built cdylib is then copied to a
 version-unique path: `dlopen` keys on the path, so a rebuilt library has to
-arrive somewhere the previous one never occupied.  `CLJRS_DYLIB_OFFLINE=1`
+arrive somewhere the previous one never occupied.  The copy goes to a
+temporary sibling and is renamed into place, so an interrupted publish never
+leaves a truncated library at the artifact path.  `CLJRS_DYLIB_OFFLINE=1`
 builds wrappers with `cargo --offline`.
+
+Cargo decides what to recompile by mtime, so an edit that keeps a file's mtime
+(`cp -p`, `rsync --times`) would otherwise be relinked stale out of the shared
+target directory.  `last-build.json` in the wrapper directory records which
+version the target directory last built and where it was published; when it
+names another version (or is missing while a target directory exists), the
+path packages under the dep's source root are `cargo clean -p`ed before the
+build, and the record is removed until the new build is published.  For a
+`:local/root` dep the superseded version's artifact directory is then removed,
+so an edited tree keeps one library rather than one per edit.  The wrapper
+crate's files are only rewritten when their contents change, so an unchanged
+wrapper is not recompiled.
 
 ### Status
 
@@ -369,7 +391,10 @@ tests/
               rebuilds),
               `local_root_native_dep_picks_up_a_sibling_crate_edit` (a
               two-crate tree under `:rust/crate`: editing only the sibling
-              crate must still rebuild), and
+              crate must still rebuild),
+              `local_root_native_dep_picks_up_an_edit_that_keeps_its_mtime`
+              (a sibling edit whose mtime is set back must still be compiled,
+              and the superseded artifact is evicted), and
               `local_root_native_dep_does_not_serve_versioned_resolution`
               (a local dep declines `@<sha>` and the host binding answers)
 ```
@@ -598,3 +623,24 @@ fetch and commit-signature verification — and `pgp` pulls `regex` in. A CLI bu
 that way therefore links both engines and is *larger*, not smaller. The engine
 swap only pays off for an embedding that has no `pgp` in its graph; see
 [cljrs-value's README](../cljrs-value/README.md#features).
+
+### Root fibers
+
+With the `async` feature on native targets, `session::eval_form` drives ordinary
+evaluation in a root fiber. This path serves `run`, `eval`, REPL, nREPL, and tests.
+Top-level `@(future ...)` and blocking channel operations park the root fiber.
+`AsyncDriver` retains carrier roots between forms and installs them during task destruction.
+Root evaluation preserves namespace changes, host bindings, output capture, and interrupt state.
+The wasm32 path retains `eval_async`.
+
+`tests/fiber_entrypoints.rs` covers nested future waits through `eval`, `run`, REPL,
+and `clojure.test`.
+
+Root evaluation borrows the caller's Env and Form directly. It preserves lexical
+state on executor unwind and avoids deep Form copies between top-level evaluations.
+
+`session::eval_in_discard(env: &mut Env, src: &str, filename: &str) -> miette::Result<()>` evaluates ignored source results.
+Under no-GC, its read scope ends before the next evaluation.
+The test runner scopes reads to each tested namespace. File evaluation and `-main` have separate scopes.
+IR namespace lowering establishes a read scope before examining function roots.
+Bootstrap scopes end when their initialization functions return; discarded bootstrap forms release their own scratch storage.

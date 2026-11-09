@@ -21,7 +21,7 @@ mod common;
 static AOT_LOCK: Mutex<()> = Mutex::new(());
 
 /// Compile a `.cljrs` source string to a binary, run it, and return stdout.
-#[allow(dead_code, clippy::result_large_err)]
+#[allow(dead_code)]
 fn compile_and_run(name: &str, source: &str) -> String {
     let _guard = AOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 
@@ -82,7 +82,105 @@ fn assert_output(name: &str, source: &str, expected: &str) {
     );
 }
 
+// The no-gc AOT blacklist currently rejects these escaping function definitions.
+// The no-gc interpreter and JIT paths are covered by the separate fiber tests.
+#[test]
+#[cfg(not(feature = "no-gc"))]
+fn aot_cpu_loop_yields_and_overflow_names_its_fiber() {
+    assert_output(
+        "fiber_fairness",
+        r#"
+      (ns fiber-fairness)
+      (def finished (atom false))
+      (defn spin [n] (loop [i n] (if (zero? i) 42 (recur (dec i)))))
+      (defn overflow [n] (+ n (overflow (inc n))))
+      (defn -main [& _]
+        (let [cpu (future (let [v (spin 5000000)] (reset! finished true) v))
+              sibling (future (not @finished))]
+          (println @cpu @sibling))
+        (println (try @(future (overflow 0))
+                      (catch Exception e (clojure.string/includes? (str e) "stack overflow in fiber")))))
+    "#,
+        "42 true\ntrue",
+    );
+}
+
 // ── Constants & arithmetic ─────────────────────────────────────────────────
+
+/// The CLI's default extension set always pulls `cljrs-base64` into an AOT
+/// harness. A user crate that retained the formerly documented `cljrs_init`
+/// spelling must coexist with it: before Base64's hook became crate-specific,
+/// this either failed to link or silently called Base64's hook twice.
+#[test]
+#[allow(clippy::result_large_err)]
+fn test_user_rust_init_coexists_with_default_base64_extension() {
+    let _guard = AOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+    let project = tempfile::tempdir().expect("temporary user extension project");
+    let crate_dir = project.path().join("legacy-user-extension");
+    std::fs::create_dir_all(crate_dir.join("src")).unwrap();
+
+    let interop_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../cljrs-interop")
+        .canonicalize()
+        .expect("cljrs-interop checkout");
+    std::fs::write(
+        crate_dir.join("Cargo.toml"),
+        format!(
+            r#"[package]
+name = "legacy_user_extension"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+cljrs-interop = {{ path = {:?} }}
+"#,
+            interop_dir
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        crate_dir.join("src/lib.rs"),
+        r#"use cljrs_interop::Registry;
+
+// Keep the old, generic spelling to prove existing user crates remain valid.
+#[unsafe(no_mangle)]
+pub extern "C" fn cljrs_init(_registry: *mut Registry) {
+    println!("legacy-user-init");
+}
+"#,
+    )
+    .unwrap();
+
+    let src_path = project.path().join("main.cljrs");
+    let bin_path = project.path().join("aot-user-init-bin");
+    std::fs::write(&src_path, "(println \"aot-main\")\n").unwrap();
+
+    let rust_config = cljrs_project::config::RustConfig {
+        crate_dir,
+        init_fn: Some("legacy_user_extension::cljrs_init".into()),
+    };
+    let session = common::session(vec![]).rust_config(Some(rust_config));
+    let result = std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn({
+            let src = src_path.clone();
+            let bin = bin_path.clone();
+            move || cljrs_compiler::aot::compile_file(&src, &bin, &session)
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+    result.unwrap_or_else(|e| panic!("AOT compilation with user init failed: {e:?}"));
+
+    assert_eq!(
+        run_binary("user_rust_init", &bin_path).trim(),
+        "legacy-user-init\naot-main"
+    );
+}
 
 #[test]
 #[cfg(feature = "aot_full_test")]
@@ -2730,7 +2828,6 @@ fn test_auto_kw_qualified_keyword_aot() {
 }
 
 /// Compile `source` with the opacity gate on, returning the compile result.
-#[allow(clippy::result_large_err)]
 fn compile_gated(name: &str, source: &str) -> cljrs_compiler::aot::AotResult<()> {
     let _guard = AOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 
@@ -2907,4 +3004,196 @@ fn require_fully_compiled_accepts_a_complete_wasm_module() {
     )
     .expect("a plain defn lowers, so nothing is omitted");
     assert!(out.exists());
+}
+
+/// Lazy thunk errors must cross the native ABI as catchable exceptions.
+#[test]
+fn test_lazy_realization_errors() {
+    assert_output(
+        "lazy_realization_errors",
+        r#"
+(defn broken [] (lazy-seq (throw (ex-info "bad-sequence" {}))))
+(println
+  [(try (count (broken)) (catch Exception _ :count))
+   (try (first (broken)) (catch Exception _ :first))
+   (try (rest (broken)) (catch Exception _ :rest))
+   (try (apply vector (broken)) (catch Exception _ :apply))
+   (try (into [] (map identity (broken))) (catch Exception _ :into))
+   (try (= (broken) '(1)) (catch Exception _ :equal))
+   (try (hash (broken)) (catch Exception _ :hash))
+   (try (pr-str (broken)) (catch Exception _ :print))])
+"#,
+        "[:count :first :rest :apply :into :equal :hash :print]",
+    );
+}
+
+#[test]
+fn aot_root_fiber_supports_blocking_surface() {
+    let stdout = compile_and_run(
+        "root_fiber_surface",
+        r#"
+      (ns fiber-main (:require [clojure.core.async :as a]))
+      (def ^:dynamic *x* :root)
+      (println @(future 42))
+      (println @(future @(future (sleep 1) 42)))
+      (println (deref (future (deref (future (sleep 1) 42)))))
+      (println (a/<!! (a/io-thread (sleep 1) :io)))
+      (println (try @(future (throw (ex-info "failure" {:x :caught})))
+                    (catch Exception e (:x (ex-data e)))))
+      (println (try (try (throw (ex-info "original" {})) (finally nil))
+                    (catch Exception e :rethrow)))
+      (def counter (atom 0))
+      (println (try (swap! counter (fn [_] (throw (ex-info "swap failure" {}))))
+                    (catch Exception e :swap-caught)))
+      (println (try (apply (fn [x] x) []) (catch Exception e :apply-caught)))
+      (defn -main []
+        (println (binding [*x* :conveyed] @(future *x*))))
+    "#,
+    );
+    assert_eq!(stdout.lines().filter(|l| *l == "42").count(), 3, "{stdout}");
+    assert!(stdout.contains(":io"), "{stdout}");
+    assert!(stdout.contains(":conveyed"), "{stdout}");
+    assert!(stdout.contains(":caught"), "{stdout}");
+    assert!(stdout.contains(":rethrow"), "{stdout}");
+    assert!(stdout.contains(":swap-caught"), "{stdout}");
+    assert!(stdout.contains(":apply-caught"), "{stdout}");
+}
+
+#[test]
+fn aot_test_harness_runs_blocking_test_bodies() {
+    let _guard = AOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = std::env::temp_dir().join(format!("cljrs_fiber_test_harness_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("fiber_test.cljrs"),
+        r#"
+      (ns fiber-test (:require [clojure.test :refer [deftest is]]
+                               [clojure.core.async :as a]))
+      (deftest blocking-test
+        (is (= 42 @(future @(future 42))))
+        (is (= :ready (a/<!! (a/io-thread (sleep 1) :ready)))))
+    "#,
+    )
+    .unwrap();
+    let bin = dir.join("fiber_tests");
+    std::thread::Builder::new()
+        .stack_size(16 * 1024 * 1024)
+        .spawn({
+            let dir = dir.clone();
+            let bin = bin.clone();
+            move || cljrs_compiler::aot::compile_test_harness(&dir, &bin, &[])
+        })
+        .unwrap()
+        .join()
+        .unwrap()
+        .unwrap();
+    let stdout = run_binary("fiber_tests", &bin);
+    assert!(stdout.contains("2 passed, 0 failed, 0 errors"), "{stdout}");
+}
+
+#[test]
+fn test_aot_resource_failure_exits_cleanly_and_dumps_stats() {
+    let _guard = AOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let project = tempfile::tempdir().unwrap();
+    let crate_dir = project.path().join("gas-extension");
+    std::fs::create_dir_all(crate_dir.join("src")).unwrap();
+    let workspace = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+    std::fs::write(
+        crate_dir.join("Cargo.toml"),
+        format!(
+            r#"
+[package]
+name = "gas_extension"
+version = "0.1.0"
+edition = "2024"
+[dependencies]
+cljrs-interop = {{ path = {:?} }}
+cljrs-runtime = {{ path = {:?} }}
+"#,
+            workspace.join("cljrs-interop").canonicalize().unwrap(),
+            workspace.join("cljrs-runtime").canonicalize().unwrap()
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        crate_dir.join("src/lib.rs"),
+        r#"
+#[unsafe(no_mangle)]
+pub extern "C" fn gas_init(_registry: *mut cljrs_interop::Registry) {
+    std::mem::forget(cljrs_runtime::env::gas::GasGuard::install(
+        cljrs_runtime::env::gas::GasMeter::new(0)));
+}
+"#,
+    )
+    .unwrap();
+    let source = project.path().join("main.cljrs");
+    let binary = project.path().join("resource-failure");
+    let stats = project.path().join("gc-stats.txt");
+    std::fs::write(&source, "(println :unreachable)\n").unwrap();
+    let config = cljrs_project::config::RustConfig {
+        crate_dir,
+        init_fn: Some("gas_extension::gas_init".into()),
+    };
+    let session = common::session(vec![]).rust_config(Some(config));
+    std::thread::Builder::new()
+        .stack_size(16 * 1024 * 1024)
+        .spawn({
+            let source = source.clone();
+            let binary = binary.clone();
+            move || cljrs_compiler::aot::compile_file(&source, &binary, &session)
+        })
+        .unwrap()
+        .join()
+        .unwrap()
+        .unwrap();
+    let output = Command::new(binary)
+        .env("CLJRS_GC_STATS", &stats)
+        .env("RUST_BACKTRACE", "1")
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "{stderr}");
+    assert!(stderr.contains("gas exhausted"), "{stderr}");
+    assert!(!stderr.contains("panicked"), "{stderr}");
+    assert!(!stderr.contains("stack backtrace"), "{stderr}");
+    assert!(!std::fs::read_to_string(stats).unwrap().is_empty());
+}
+
+#[test]
+fn aot_uncaught_top_level_throw_stops_before_main() {
+    let _guard = AOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("throw.cljrs");
+    let binary = dir.path().join("throw-bin");
+    let stats = dir.path().join("stats.txt");
+    std::fs::write(
+        &source,
+        r#"
+      (defn -main [] (println :main-must-not-run))
+      (throw (ex-info "top-level boom" {:reason :review}))
+    "#,
+    )
+    .unwrap();
+    std::thread::Builder::new()
+        .stack_size(16 * 1024 * 1024)
+        .spawn({
+            let source = source.clone();
+            let binary = binary.clone();
+            move || cljrs_compiler::aot::compile_file(&source, &binary, &common::session(vec![]))
+        })
+        .unwrap()
+        .join()
+        .unwrap()
+        .unwrap();
+    let output = Command::new(binary)
+        .env("CLJRS_GC_STATS", &stats)
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "{stderr}");
+    assert!(stderr.contains("top-level boom"), "{stderr}");
+    assert!(!stdout.contains(":main-must-not-run"), "{stdout}");
+    assert!(!stderr.contains("panicked"), "{stderr}");
+    assert!(!std::fs::read_to_string(stats).unwrap().is_empty());
 }

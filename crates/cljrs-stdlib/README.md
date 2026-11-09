@@ -41,6 +41,8 @@ src/
     walk.cljrs            Pure Clojure implementation of clojure.walk
     data.cljrs            Pure Clojure implementation of clojure.data
     zip.cljrs             Pure Clojure implementation of clojure.zip
+    pprint.cljrs          Pure Clojure implementation of clojure.pprint
+                          (data dispatch only; no cl-format)
     edn.cljrs             Clojure source for clojure.edn (ns decl; natives pre-registered)
     rust/
       io.cljrs            Clojure source for clojure.rust.io (ns decl; natives pre-registered)
@@ -104,6 +106,7 @@ the `IoReader`, `IoWriter`, and `StringReader` native object types.
 | `clojure.set` | `set.rs` + `clojure/set.cljrs` | Native Rust, loaded lazily |
 | `clojure.rust.io` | `io.rs` + `clojure/rust/io.cljrs` | Native Rust, loaded lazily; not built for wasm32 |
 | `clojure.test` | `clojure/test.cljrs` | Pure Clojure, loaded lazily |
+| `clojure.pprint` | `clojure/pprint.cljrs` | Pure Clojure, loaded lazily; data dispatch only, no `cl-format` |
 | `clojure.spec.alpha` | `clojure/spec/alpha.cljrs` | Pure Clojure, loaded lazily |
 | `clojure.spec.test.alpha` | `clojure/spec/test/alpha.cljrs` | Pure Clojure, loaded lazily |
 | `clojure.spec.gen.alpha` | `clojure/spec/gen/alpha.cljrs` | Pure Clojure, loaded lazily; every fn throws (no generator engine) |
@@ -242,3 +245,17 @@ workspace — see the note in the root `Cargo.toml`), which is why `regex-full` 
 `deps` are forwarded rather than inherited. Cargo unions features across every
 edge to a package, so an edge left at its defaults would re-enable them for the
 whole graph and no second, direct dependency could switch them back off.
+
+## Parking file and process operations
+
+`IoReader::open`, `read_line`, `read_all`, and `close` offload owned file work inside a native fiber.
+`IoWriter::open`, `write_str`, `flush`, and `close` use the same worker path.
+`is_closed` reads an atomic flag and does not wait for a file lock.
+Writer close ignores final-flush errors and sets this flag after the flush and file release.
+An explicit `flush` still reports write errors.
+The worker retains the file state if a waiting fiber is cancelled.
+Managed values and errors stay on the isolate.
+Outside a fiber, these methods keep their synchronous behavior.
+
+`clojure.rust.process/run` offloads process creation, stdin feeding, output draining, and the process wait.
+The request contains owned strings. The result map is built on the isolate after the wait.

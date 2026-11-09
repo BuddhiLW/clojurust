@@ -51,6 +51,8 @@ const CLOJURE_EDN_SRC: &str = include_str!("clojure/edn.cljrs");
 #[cfg(not(target_arch = "wasm32"))]
 const CLOJURE_JAVA_SHELL_SRC: &str = include_str!("clojure/java/shell.cljrs");
 const CLOJURE_WALK_SRC: &str = include_str!("clojure/walk.cljrs");
+const CLOJURE_MATH_SRC: &str = include_str!("clojure/math.cljrs");
+const CLOJURE_PPRINT_SRC: &str = include_str!("clojure/pprint.cljrs");
 const CLOJURE_DATA_SRC: &str = include_str!("clojure/data.cljrs");
 const COLJURE_ZIP_SRC: &str = include_str!("clojure/zip.cljrs");
 const CLOJURE_SPEC_ALPHA_SRC: &str = include_str!("clojure/spec/alpha.cljrs");
@@ -119,8 +121,14 @@ pub fn register(globals: &Arc<GlobalEnv>) {
     // clojure.walk ─ pure Clojure, no native helpers.
     globals.register_builtin_source("clojure.walk", CLOJURE_WALK_SRC);
 
+    // clojure.math ─ pure Clojure over the Math statics.
+    globals.register_builtin_source("clojure.math", CLOJURE_MATH_SRC);
+
     // clojure.data ─ pure Clojure, no native helpers.
     globals.register_builtin_source("clojure.data", CLOJURE_DATA_SRC);
+
+    // clojure.pprint ─ pure Clojure; data dispatch only, no cl-format.
+    globals.register_builtin_source("clojure.pprint", CLOJURE_PPRINT_SRC);
 
     // clojure.zip
     globals.register_builtin_source("clojure.zip", COLJURE_ZIP_SRC);
@@ -144,6 +152,8 @@ pub fn register(globals: &Arc<GlobalEnv>) {
 /// Namespaces are registered as embedded *sources*, so each one is parsed and
 /// evaluated on its first `require` rather than at install time.
 pub fn install(runtime: &Runtime) {
+    #[cfg(feature = "no-gc")]
+    let _reads = cljrs_gc::region::ReadScope::enter();
     register(runtime.globals());
 }
 
@@ -180,6 +190,22 @@ mod tests {
     }
 
     // ── clojure.string ────────────────────────────────────────────────────────
+
+    // ── clojure.math ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_math_subset() {
+        let (_, mut env) = make_env();
+        run("(require '[clojure.math :as math])", &mut env).unwrap();
+        assert_eq!(
+            run(
+                "(pr-str [(math/round 2.4) (math/rint 2.5) (math/rint 3.5) (math/signum -2) (math/floor-div -7 2) (math/floor-mod -7 2)])",
+                &mut env
+            )
+            .unwrap(),
+            Value::string("[2 2.0 4.0 -1.0 -4 1]")
+        );
+    }
 
     #[test]
     fn test_string_upper_lower() {
@@ -316,8 +342,34 @@ mod tests {
     fn test_string_split_lines() {
         let (_, mut env) = make_env();
         run("(require '[clojure.string :as str])", &mut env).unwrap();
-        let v = run("(str/split-lines \"a\\nb\\nc\")", &mut env).unwrap();
-        assert!(matches!(v, Value::Vector(_)));
+        for (form, expected) in [
+            ("(str/split-lines \"\")", "[\"\"]"),
+            ("(str/split-lines \"\\n\\n\")", "[]"),
+            ("(str/split-lines \"a\\nb\\nc\")", "[\"a\" \"b\" \"c\"]"),
+            ("(str/split-lines \"a\\r\\nb\")", "[\"a\" \"b\"]"),
+            ("(str/split-lines \"a\\n\\nb\")", "[\"a\" \"\" \"b\"]"),
+            ("(str/split-lines \"a\\n\\n\")", "[\"a\"]"),
+        ] {
+            let value = run(form, &mut env).unwrap();
+            assert_eq!(value.to_string(), expected, "{form}");
+        }
+    }
+
+    #[test]
+    fn test_string_split_lines_rejects_non_strings() {
+        let (_, mut env) = make_env();
+        run("(require '[clojure.string :as str])", &mut env).unwrap();
+        for form in [
+            "(str/split-lines nil)",
+            "(str/split-lines \\A)",
+            "(str/split-lines 0)",
+            "(str/split-lines 0.0)",
+            "(str/split-lines :foo)",
+            "(str/split-lines 'foo)",
+            "(str/split-lines [])",
+        ] {
+            assert!(run(form, &mut env).is_err(), "{form} should fail");
+        }
     }
 
     // ── clojure.set ───────────────────────────────────────────────────────────
@@ -1577,12 +1629,131 @@ mod tests {
             "(sh \"cljrs-no-such-program-x\")",
             "(sh \"pwd\" :dir \"/no/such/dir\")",
             "(sh \"printf\" \"x\" :env {\"A=B\" \"1\"})",
+            "(sh \"printf\" \"x\" :env {\"A\" \"\\u0000\"})",
             "(sh \"printf\" \"x\" :out-enc \"latin1\")",
             "(sh :in \"x\")",
             "(clojure.rust.process/run [])",
         ] {
             assert!(run(src, &mut env).is_err(), "expected {src} to throw");
         }
+    }
+
+    /// `s` as a Clojure string literal: printable ASCII kept, `"` and `\`
+    /// escaped, everything else (NUL included) spelled `\uXXXX`.
+    #[cfg(unix)]
+    fn clj_string_lit(s: &str) -> String {
+        let mut out = String::from("\"");
+        for c in s.chars() {
+            match c {
+                '"' => out.push_str("\\\""),
+                '\\' => out.push_str("\\\\"),
+                ' '..='~' => out.push(c),
+                _ => out.push_str(&format!("\\u{:04x}", c as u32)),
+            }
+        }
+        out.push('"');
+        out
+    }
+
+    /// A string of Basic Multilingual Plane characters, NUL excluded: the
+    /// `\uXXXX` escape spells exactly these.
+    #[cfg(unix)]
+    fn bmp_string(max: usize) -> impl proptest::strategy::Strategy<Value = String> {
+        use proptest::prelude::*;
+        prop::collection::vec(prop::char::range('\u{1}', '\u{ffff}'), 0..max)
+            .prop_map(|cs| cs.into_iter().collect())
+    }
+
+    /// Law 1: an :env value holding a NUL anywhere is refused with an error,
+    /// never a panic out of `Command::env`. Law 2: every NUL-free value
+    /// reaches the child byte for byte. Law 2 is what keeps law 1 honest: a
+    /// fix that refused every value would pass law 1 alone.
+    #[test]
+    #[cfg(unix)]
+    fn test_env_value_nul_laws() {
+        use proptest::test_runner::{Config, TestRunner};
+        use std::cell::RefCell;
+        let env = RefCell::new(shell_env());
+        let mut runner = TestRunner::new(Config::with_cases(48));
+
+        runner
+            .run(&(bmp_string(8), bmp_string(8)), |(pre, post)| {
+                let v = format!("{pre}\0{post}");
+                let src = format!(
+                    "(clojure.rust.process/run [\"printf\" \"x\"] {{:env {{\"A\" {}}}}})",
+                    clj_string_lit(&v)
+                );
+                proptest::prop_assert!(run(&src, &mut env.borrow_mut()).is_err(), "{src}");
+                Ok(())
+            })
+            .unwrap();
+
+        runner
+            .run(&bmp_string(12), |v| {
+                let src = format!(
+                    "(let [v {}] (= (str \"A=\" v \"\\n\") \
+                     (:out (clojure.rust.process/run [\"/usr/bin/env\"] {{:env {{\"A\" v}}}}))))",
+                    clj_string_lit(&v)
+                );
+                let got = run(&src, &mut env.borrow_mut());
+                proptest::prop_assert_eq!(got.ok(), Some(Value::Bool(true)), "{}", src);
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    /// Golden record of the process module's :env answers, refusals and
+    /// successes alike, byte for byte, so an unintended change shows up as a
+    /// diff in review. Regenerate after an intentional change:
+    ///
+    /// ```sh
+    /// UPDATE_GOLDEN=1 cargo test -p cljrs-stdlib test_process_env_golden
+    /// ```
+    #[test]
+    #[cfg(unix)]
+    fn test_process_env_golden() {
+        const GOLDEN: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/golden/process_env.txt");
+        const ROWS: &[&str] = &[
+            "(:out (clojure.rust.process/run [\"printf\" \"x\"] {:env {\"A\" \"ok\"}}))",
+            "(:out (clojure.rust.process/run [\"/usr/bin/env\"] {:env {\"A\" \"a b=c\"}}))",
+            "(:out (clojure.rust.process/run [\"/usr/bin/env\"] {:env {:A \"kw\"}}))",
+            "(clojure.rust.process/run [\"printf\" \"x\"] {:env {\"A\" \"\\u0000\"}})",
+            "(clojure.rust.process/run [\"printf\" \"x\"] {:env {\"A\" \"a\\u0000b\"}})",
+            "(clojure.rust.process/run [\"printf\" \"x\"] {:env {\"A=B\" \"1\"}})",
+            "(clojure.rust.process/run [\"printf\" \"x\"] {:env {\"A\" 1}})",
+            "(clojure.rust.process/run [\"printf\" \"x\"] {:env [\"A\" \"1\"]})",
+            "(clojure.rust.process/run [])",
+        ];
+        let mut env = shell_env();
+        let mut actual = String::new();
+        for src in ROWS {
+            let outcome = match run(src, &mut env) {
+                Ok(v) => format!("{v:?}"),
+                Err(e) => {
+                    let text = format!("{e:?}").replace('\n', " ");
+                    let msg = text
+                        .split("message: \"")
+                        .nth(1)
+                        .and_then(|s| s.split('"').next())
+                        .or_else(|| text.split('"').nth(1))
+                        .map(str::to_string)
+                        .unwrap_or(text);
+                    format!("ERROR {msg}")
+                }
+            };
+            actual.push_str(&format!("{src}\n  => {outcome}\n"));
+        }
+        if std::env::var_os("UPDATE_GOLDEN").is_some() {
+            std::fs::create_dir_all(std::path::Path::new(GOLDEN).parent().unwrap()).unwrap();
+            std::fs::write(GOLDEN, &actual).unwrap();
+            return;
+        }
+        let expected = std::fs::read_to_string(GOLDEN)
+            .unwrap_or_else(|e| panic!("{GOLDEN}: {e}; run with UPDATE_GOLDEN=1 to create it"));
+        assert_eq!(
+            actual, expected,
+            "process :env answers changed; see {GOLDEN}"
+        );
     }
 
     #[test]

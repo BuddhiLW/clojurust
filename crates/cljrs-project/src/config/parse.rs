@@ -174,7 +174,7 @@ fn extract_dependency(form: &Form, config_dir: &Path, name: &str) -> Result<Depe
                 local_root = Some(config_dir.join(rel));
             }
             Some("rust/init") => {
-                rust_init = Some(Arc::from(require_str(&pairs[i + 1], "rust/init")?));
+                rust_init = Some(Arc::from(require_init_path(&pairs[i + 1], "rust/init")?));
             }
             Some("rust/crate") => {
                 rust_crate_dir = Some(Arc::from(require_str(&pairs[i + 1], "rust/crate")?));
@@ -259,7 +259,7 @@ fn extract_rust_config(form: &Form, config_dir: &Path) -> Result<RustConfig, Str
                 crate_dir = config_dir.join(rel);
             }
             Some("init") => {
-                let s = require_str(&pairs[i + 1], ":rust :init")?;
+                let s = require_init_path(&pairs[i + 1], ":rust :init")?;
                 init_fn = Some(Arc::from(s));
             }
             _ => {}
@@ -290,6 +290,24 @@ fn require_str<'a>(form: &'a Form, ctx: &str) -> Result<&'a str, String> {
     match &form.kind {
         FormKind::Str(s) => Ok(s.as_str()),
         _ => Err(format!("{ctx}: expected a string, got {:?}", form.kind)),
+    }
+}
+
+/// A native init hook is a Rust path `crate::fn` (e.g.
+/// `"my_crate::cljrs_init_my_crate"`): the first segment names the crate the
+/// loader links against and the last names the exported symbol. A value with
+/// no `::`, or with an empty segment, cannot name both, so it is refused here,
+/// where the config is read, instead of surfacing as a missing symbol when the
+/// dylib is opened.
+fn require_init_path<'a>(form: &'a Form, ctx: &str) -> Result<&'a str, String> {
+    let s = require_str(form, ctx)?;
+    let well_formed = s.contains("::") && s.split("::").all(|seg| !seg.is_empty());
+    if well_formed {
+        Ok(s)
+    } else {
+        Err(format!(
+            "{ctx}: expected a Rust path like \"my_crate::cljrs_init_my_crate\", got {s:?}"
+        ))
     }
 }
 
@@ -335,6 +353,22 @@ mod tests {
         let cfg = parse(r#"{:rust {:crate "." :init "my_crate::cljrs_init"}}"#).unwrap();
         let rust = cfg.rust.unwrap();
         assert_eq!(rust.init_fn.as_deref(), Some("my_crate::cljrs_init"));
+    }
+
+    #[test]
+    fn rust_key_init_without_a_crate_segment_is_refused() {
+        for bad in ["cljrs_init", "::cljrs_init", "my_crate::", "a::::b"] {
+            let src = format!(r#"{{:rust {{:crate "." :init "{bad}"}}}}"#);
+            let err = parse(&src).expect_err(bad);
+            assert!(err.contains(":rust :init"), "{bad}: {err}");
+        }
+    }
+
+    #[test]
+    fn dep_rust_init_without_a_crate_segment_is_refused() {
+        let err = parse(r#"{:deps {my.lib {:local/root "../lib" :rust/init "cljrs_init"}}}"#)
+            .expect_err("bare :rust/init");
+        assert!(err.contains("rust/init"), "{err}");
     }
 
     #[test]

@@ -341,3 +341,43 @@ fn assoc_conj_dissoc_disj_preserve_metadata_under_jit() {
         "final results wrong; got:\n{out}"
     );
 }
+
+#[test]
+fn identical_answers_like_the_interpreter_under_jit() {
+    // rt_identical compared the two `*const Value` pointers it was handed. Those
+    // are boxes, not the values: a `true` loaded from a constant and a `true`
+    // passed as an argument live in different boxes, so once a function went
+    // native `(identical? true v)` answered false, and `true?`/`false?`, which
+    // are defined over it, went wrong with it. builtin_identical is the
+    // definition: scalars by value, keywords by name, everything else by the
+    // GcPtr the value holds.
+    let src = r#"
+        (defn same? [a b] (identical? a b))
+        (defn t? [v] (true? v))
+        (defn f? [v] (false? v))
+        (defn nil-id? [v] (identical? nil v))
+
+        (dotimes [i 10000]
+          (let [v1 (vector 1) v2 (vector 1) s (str "a" i)
+                r [(same? true true) (same? false false) (same? nil nil)
+                   (same? :k :k) (same? 7 7) (same? \c \c) (same? s s) (same? v1 v1)
+                   (same? v1 v2) (same? true false) (same? 1 true) (same? :k :j)
+                   (t? true) (t? false) (f? false) (f? nil) (nil-id? nil) (nil-id? false)]]
+            (when (not= r [true true true true true true true true
+                           false false false false
+                           true false true false true false])
+              (println "WRONG at" i ":" r))
+            (when (= i 9999)
+              (println "final:" r))))
+    "#;
+
+    let out = run_jit(src);
+    assert!(
+        !out.contains("WRONG at"),
+        "identical?/true?/false? disagreed with the interpreter under JIT; got:\n{out}"
+    );
+    assert!(
+        out.contains("final: [true true true true true true true true false false false false true false true false true false]"),
+        "final results wrong; got:\n{out}"
+    );
+}

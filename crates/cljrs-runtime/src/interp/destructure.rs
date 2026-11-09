@@ -4,7 +4,7 @@ use crate::builtins::form::form_to_value;
 use cljrs_gc::GcPtr;
 use cljrs_reader::Form;
 use cljrs_reader::form::FormKind;
-use cljrs_value::{Keyword, PersistentList, Symbol, Value};
+use cljrs_value::{Keyword, PersistentList, Symbol, Value, ValueResult};
 use std::sync::Arc;
 
 use crate::env::env::Env;
@@ -41,7 +41,7 @@ pub fn bind_pattern(pattern: &Form, val: Value, env: &mut Env) -> EvalResult<()>
 /// [sym* (& rest)? (:as alias)?]
 /// ```
 pub fn bind_sequential(pattern: &[Form], val: &Value, env: &mut Env) -> EvalResult<()> {
-    let items = value_to_seq_vec(val);
+    let items = value_to_seq_vec(val).map_err(crate::env::error::value_error_to_eval_error)?;
     let mut idx = 0usize;
     let mut i = 0usize;
 
@@ -98,46 +98,48 @@ pub fn bind_sequential(pattern: &[Form], val: &Value, env: &mut Env) -> EvalResu
     Ok(())
 }
 
-/// Convert any sequential Value to a Vec of its elements.
-pub fn value_to_seq_vec(val: &Value) -> Vec<Value> {
-    match val {
-        Value::WithMeta(inner, _) => value_to_seq_vec(inner),
-        Value::Nil => vec![],
-        Value::LazySeq(ls) => value_to_seq_vec(&ls.get().realize()),
-        Value::Cons(c) => {
-            let mut result = vec![c.get().head.clone()];
-            let mut tail = c.get().tail.clone();
-            loop {
-                match tail {
-                    Value::Nil => break,
-                    Value::List(l) => {
-                        result.extend(l.get().iter().cloned());
-                        break;
-                    }
-                    Value::Cons(next_c) => {
-                        result.push(next_c.get().head.clone());
-                        tail = next_c.get().tail.clone();
-                    }
-                    Value::LazySeq(ls) => {
-                        tail = ls.get().realize();
-                    }
-                    _ => break,
-                }
+/// Convert a seqable Value to its elements, propagating lazy realization errors.
+/// Non-seqable values retain the historical empty-vector result.
+pub fn value_to_seq_vec(val: &Value) -> ValueResult<Vec<Value>> {
+    // Realization can park or collect. The original chain retains both the
+    // accumulated elements and each thunk's cached result throughout the walk.
+    let _root = crate::env::gc_roots::root_value(val);
+    let mut result = Vec::new();
+    let mut current = val.clone();
+    loop {
+        match current.unwrap_meta() {
+            Value::Nil => break,
+            Value::LazySeq(ls) => {
+                current = ls.get().try_realize()?;
             }
-            result
+            Value::Cons(c) => {
+                result.push(c.get().head.clone());
+                current = c.get().tail.clone();
+            }
+            Value::List(l) => {
+                result.extend(l.get().iter().cloned());
+                break;
+            }
+            Value::Vector(v) => {
+                result.extend(v.get().iter().cloned());
+                break;
+            }
+            Value::Set(s) => {
+                result.extend(s.iter().cloned());
+                break;
+            }
+            Value::Map(m) => {
+                m.for_each(|k, v| result.push(Value::map_entry(k.clone(), v.clone())));
+                break;
+            }
+            Value::ObjectArray(a) => {
+                result.extend(a.get().0.lock().unwrap().iter().cloned());
+                break;
+            }
+            _ => break,
         }
-        Value::List(l) => l.get().iter().cloned().collect(),
-        Value::Vector(v) => v.get().iter().cloned().collect(),
-        Value::Set(s) => s.iter().cloned().collect(),
-        Value::Map(m) => {
-            let mut result = Vec::new();
-            m.for_each(|k, v| {
-                result.push(Value::map_entry(k.clone(), v.clone()));
-            });
-            result
-        }
-        _ => vec![],
     }
+    Ok(result)
 }
 
 // ── Associative destructuring ─────────────────────────────────────────────────
@@ -185,6 +187,9 @@ pub fn bind_associative(pattern: &[Form], val: &Value, env: &mut Env) -> EvalRes
     let get_val = |key: &Value| -> Value {
         match val.unwrap_meta() {
             Value::Map(m) => m.get(key).unwrap_or(Value::Nil),
+            // Records destructure like maps: `{f :gen}` on a defrecord
+            // instance reads its field, as `get` does.
+            Value::TypeInstance(ti) => ti.get().fields.get(key).unwrap_or(Value::Nil),
             _ => Value::Nil,
         }
     };
@@ -214,7 +219,20 @@ pub fn bind_associative(pattern: &[Form], val: &Value, env: &mut Env) -> EvalRes
             FormKind::Keyword(_) if directive_name == "keys" => {
                 if let FormKind::Vector(syms) = &v.kind {
                     for sym_form in syms {
-                        if let FormKind::Symbol(sym) = &sym_form.kind {
+                        // Clojure also accepts keywords here: `{:keys [:a ::b]}`
+                        // binds `a` and `b`, the auto-resolved `::b` against the
+                        // current namespace.
+                        let key_sym = match &sym_form.kind {
+                            FormKind::Symbol(sym) => Some(sym.clone()),
+                            FormKind::Keyword(kw) => Some(kw.clone()),
+                            FormKind::AutoKeyword(kw) => Some(
+                                env.globals
+                                    .resolve_auto_keyword(&env.current_ns, kw)
+                                    .map_err(EvalError::Runtime)?,
+                            ),
+                            _ => None,
+                        };
+                        if let Some(sym) = &key_sym {
                             let parsed = Symbol::parse(sym);
                             let key =
                                 match parsed.namespace.clone().or_else(|| directive_ns.clone()) {
@@ -229,7 +247,7 @@ pub fn bind_associative(pattern: &[Form], val: &Value, env: &mut Env) -> EvalRes
                                 // Clojure's `(get m :k default)` evaluates its
                                 // third argument eagerly, so a throwing or
                                 // side-effecting default must still fire here.
-                                let dv = crate::interp::eval::eval(&d.clone(), env)?;
+                                let dv = crate::interp::eval::eval_unscoped(&d.clone(), env)?;
                                 if matches!(bound_val, Value::Nil) {
                                     bound_val = dv;
                                 }
@@ -250,7 +268,7 @@ pub fn bind_associative(pattern: &[Form], val: &Value, env: &mut Env) -> EvalRes
                                 // Clojure's `(get m :k default)` evaluates its
                                 // third argument eagerly, so a throwing or
                                 // side-effecting default must still fire here.
-                                let dv = crate::interp::eval::eval(&d.clone(), env)?;
+                                let dv = crate::interp::eval::eval_unscoped(&d.clone(), env)?;
                                 if matches!(bound_val, Value::Nil) {
                                     bound_val = dv;
                                 }
@@ -278,7 +296,7 @@ pub fn bind_associative(pattern: &[Form], val: &Value, env: &mut Env) -> EvalRes
                                 // Clojure's `(get m :k default)` evaluates its
                                 // third argument eagerly, so a throwing or
                                 // side-effecting default must still fire here.
-                                let dv = crate::interp::eval::eval(&d.clone(), env)?;
+                                let dv = crate::interp::eval::eval_unscoped(&d.clone(), env)?;
                                 if matches!(bound_val, Value::Nil) {
                                     bound_val = dv;
                                 }
@@ -306,7 +324,7 @@ pub fn bind_associative(pattern: &[Form], val: &Value, env: &mut Env) -> EvalRes
                 if let FormKind::Symbol(sym) = &k.kind
                     && let Some(d) = defaults.get(sym.as_str())
                 {
-                    let dv = crate::interp::eval::eval(&d.clone(), env)?;
+                    let dv = crate::interp::eval::eval_unscoped(&d.clone(), env)?;
                     if matches!(bound_val, Value::Nil) {
                         bound_val = dv;
                     }

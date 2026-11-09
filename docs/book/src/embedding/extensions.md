@@ -73,6 +73,7 @@ cljrs_base64::init(globals);        // cljrs.base64 — no async requirement
 | `cljrs-net` | `clojure.rust.net`, `.tcp`, `.udp`, `.tls`, `.unix`, `.frame`, `.quic`, `.h3`, `.http2` | a `LocalSet` (initialises async itself) |
 | `cljrs-charset` | `clojure.rust.charset`; `init_async` adds `clojure.rust.charset.async` | `init` is synchronous; `init_async` needs async + a `LocalSet` |
 | `cljrs-base64` | `cljrs.base64` | nothing |
+| `cljrs-ffi` | `clojure.rust.ffi` (x86_64/aarch64, non-Windows; absent elsewhere) | nothing |
 
 The CLI's own evaluation loop is the reference implementation: it builds the
 runtime and the `LocalSet` once, then drives every top-level form with
@@ -88,7 +89,7 @@ and anything that depends on a spawned task will not complete.
 
 The `Registry` is the same object described in [Rust
 interop](../rust-interop/registry.md), but an embedding host constructs it
-directly rather than exporting a `cljrs_init` symbol for a dylib to be loaded
+directly rather than exporting a `cljrs_init_<crate>` symbol for a dylib to be loaded
 through:
 
 ```rust

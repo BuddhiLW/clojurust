@@ -24,7 +24,7 @@ mode. Use this when profiling or shipping.
 2. Reads `:rust :crate` (the directory containing the user's `Cargo.toml`)
    and `:rust :init` (the fully-qualified Rust path to the init function).
 3. Derives the crate name from the first `::` segment of the init path —
-   e.g. `"my_project::cljrs_init"` → `my_project`.
+   e.g. `"my_project::cljrs_init_my_project"` → `my_project`.
 4. Runs `cargo build [--release]` in the crate directory.
 5. Prints the output library path on success:
    - Linux: `target/debug/libmy_project.so`
@@ -49,3 +49,12 @@ cljrs run src/main.cljrs
 ```
 
 See [Rust Interop](../rust-interop/index.md) for a complete walkthrough.
+
+The command also prints the built artifact's ABI fingerprint to stderr. For
+new crates, use `cljrs_interop::export_init!` to export both the init and ABI
+symbols (see [Project Setup](../rust-interop/project-setup.md)). A mismatched
+fingerprint stops startup before init and asks you to rebuild with `cljrs
+build-native`. Legacy crates without the symbol warn when loaded; set
+`CLJRS_NATIVE_STRICT=1` to refuse them until rebuilt with the macro. The
+`--release` artifact has a release fingerprint; the loader normally reads
+the debug artifact, so run a matching-profile host for release artifacts.

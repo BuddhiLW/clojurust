@@ -32,13 +32,37 @@ after CLI paths.
 
 ### `--gc-soft-limit-mb <MB>`
 
-Soft memory limit for the GC in megabytes. When live heap exceeds this value,
-a collection is triggered at the next safepoint.
+Soft memory limit for the GC in megabytes. When one isolate's heap exceeds
+this value, a collection is triggered at the next safepoint. Each isolate heap
+applies the limit independently, so *N* isolates can together hold about *N*
+times this value.
+
+The flag does not change the process-wide memory governor's soft limit. That
+limit comes from `--gc-hard-limit-mb` (75% of it), from
+`CLJRS_MEMORY_SOFT_LIMIT_MB`, or from the platform default. When managed
+memory across all isolates reaches it, the governor asks the allocating
+isolate (and the largest heap) to collect.
+
+Given alone, it leaves the hard limit at its default (raised to the soft limit
+if the soft limit is larger).
 
 ### `--gc-hard-limit-mb <MB>`
 
-Hard memory limit for the GC in megabytes. When live heap exceeds this value,
-a collection is forced immediately.
+Process-wide managed-memory hard limit in megabytes. By default the memory
+governor runs in observe-only mode: allocations above the limit succeed, and
+`--gc-stats` reports how many went over it. With `CLJRS_MEMORY_STRICT=1` the
+limit is enforced: an allocation that does not fit makes the isolate collect
+at its next safepoint, and if live data still exceeds the limit the evaluation
+fails with `managed memory limit exceeded`. `try`/`catch` does not intercept
+that error. Runtime control work (building error values, shutdown) may use the
+critical reserve (`CLJRS_MEMORY_CRITICAL_RESERVE_MB`) above the limit. The
+governor's soft limit is 75% of this value. Managed memory covers isolate GC
+heaps, region chunks, shared byte blobs and `shared-atom` values, queued
+isolate-channel messages, static data, and JIT code; it is not the process
+resident set. The flag takes precedence over
+`CLJRS_MEMORY_HARD_LIMIT_MB` and `CLJRS_MEMORY_SOFT_LIMIT_MB`.
+
+A zero hard limit, or a soft limit above the hard limit, is rejected.
 
 ## Examples
 

@@ -187,28 +187,17 @@ type R = Result<VarId, LowerError>;
 
 // ── Async metadata helper ─────────────────────────────────────────────────────
 
-/// Return `true` if a metadata form contains `:async true`.
+/// The error for an anonymous `^:async` fn inside a lowered body.
 ///
-/// Handles both shorthand `^:async` (a keyword form) and full
-/// `^{:async true}` (a map form).
-fn is_meta_async(meta: &Form) -> bool {
-    match &meta.kind {
-        FormKind::Keyword(k) => k == "async",
-        FormKind::Map(pairs) => {
-            // Map is stored as flat [k v k v ...] in FormKind::Map
-            let mut i = 0;
-            while i + 1 < pairs.len() {
-                if let FormKind::Keyword(k) = &pairs[i].kind
-                    && k == "async"
-                {
-                    return !matches!(&pairs[i + 1].kind, FormKind::Bool(false) | FormKind::Nil);
-                }
-                i += 2;
-            }
-            false
-        }
-        _ => false,
-    }
+/// A lowered closure is a plain `NativeFunction` (IR interpreter) or native
+/// closure (JIT/AOT); neither can be dispatched through the async runtime, so
+/// lowering one would silently make calling it synchronous once the enclosing
+/// body was promoted. Refusing keeps that body on the tree-walker, which builds
+/// a real async fn — the same answer in every tier.
+fn async_closure_unsupported() -> LowerError {
+    LowerError::UnsupportedForm(
+        "anonymous ^:async fn: a lowered closure cannot be dispatched as async".into(),
+    )
 }
 
 // ── Public entry point ────────────────────────────────────────────────────────
@@ -492,13 +481,8 @@ fn lower_form(ctx: &mut LowerCtx, form: &Form) -> R {
             }
         }
         FormKind::Meta(meta, inner) => {
-            // Detect `^:async (fn ...)` — propagate is_async to lower_fn.
-            if let FormKind::List(parts) = &inner.kind
-                && !parts.is_empty()
-                && matches!(&parts[0].kind, FormKind::Symbol(s) if s == "fn" || s == "fn*")
-                && is_meta_async(meta)
-            {
-                lower_fn(ctx, &parts[1..], true)
+            if form.is_async_fn_form() {
+                Err(async_closure_unsupported())
             } else if inner.takes_runtime_meta() {
                 // The annotation becomes runtime metadata, exactly as the
                 // tree-walker's `FormKind::Meta` arm does it. Without this the
@@ -685,6 +669,9 @@ fn lower_list(ctx: &mut LowerCtx, parts: &[Form]) -> R {
         "loop" | "loop*" => lower_loop(ctx, args),
         "recur" => lower_recur(ctx, args),
         "def" => lower_def(ctx, args),
+        // `(fn ^:async [..] ..)` / `(fn name ^:async [..] ..)` — see
+        // `async_closure_unsupported`.
+        "fn" | "fn*" if Form::fn_args_request_async(args) => Err(async_closure_unsupported()),
         "fn" | "fn*" => lower_fn(ctx, args, false),
         "defn" => lower_defn(ctx, args),
         "quote" => {
@@ -989,7 +976,15 @@ fn lower_destructure_associative(
             Some((directive_ns, "keys")) => {
                 if let FormKind::Vector(syms) = &v.kind {
                     for sym_form in syms {
-                        if let FormKind::Symbol(sym) = &sym_form.kind {
+                        // `{:keys [:a ::b]}` is legal Clojure: a keyword names
+                        // the key and binds its name, `::b` auto-resolved.
+                        let key_sym = match &sym_form.kind {
+                            FormKind::Symbol(sym) => Some(sym.clone()),
+                            FormKind::Keyword(kw) => Some(kw.clone()),
+                            FormKind::AutoKeyword(kw) => Some(auto_qualified(ctx, kw, "keyword")?),
+                            _ => None,
+                        };
+                        if let Some(sym) = &key_sym {
                             let (sym_ns, sym_name) = split_ns_name(sym);
                             let full_key = match sym_ns.or(directive_ns) {
                                 Some(ns) => format!("{ns}/{sym_name}"),
@@ -1307,7 +1302,7 @@ fn lower_defn(ctx: &mut LowerCtx, args: &[Form]) -> R {
             "defn name must be a symbol".into(),
         ));
     };
-    let is_async = name_metas.iter().any(|m| is_meta_async(m));
+    let is_async = name_metas.iter().any(|m| m.requests_async());
 
     // Normalise args[0] to a plain symbol (strip metadata for fn name arg).
     let plain_name_form = Form::new(FormKind::Symbol(name_str.clone()), args[0].span.clone());
@@ -1323,6 +1318,8 @@ fn lower_defn(ctx: &mut LowerCtx, args: &[Form]) -> R {
     let fn_args: Vec<Form> = std::iter::once(plain_name_form)
         .chain(args[rest_start..].iter().cloned())
         .collect();
+    // `(defn name ^:async [..] ..)` — the annotation on the params vector.
+    let is_async = is_async || Form::fn_args_request_async(&fn_args);
 
     let fn_val = lower_fn(ctx, &fn_args, is_async)?;
     let ns = ctx.ns().clone();

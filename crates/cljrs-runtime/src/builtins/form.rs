@@ -387,7 +387,10 @@ pub fn form_to_value(form: &Form) -> EvalResult<Value> {
         FormKind::SyntaxQuote(inner) => reader_form_value("syntax-quote", inner)?,
         FormKind::Unquote(inner) => reader_form_value("unquote", inner)?,
         FormKind::UnquoteSplice(inner) => reader_form_value("unquote-splicing", inner)?,
-        FormKind::Deref(inner) => reader_form_value("deref", inner)?,
+        // `@x` reads as `(clojure.core/deref x)`, fully qualified as on the
+        // JVM, so a namespace that excludes and redefines `deref` cannot
+        // capture the sugar once a macro hands the form back as data.
+        FormKind::Deref(inner) => reader_form_value("clojure.core/deref", inner)?,
         FormKind::Var(inner) => reader_form_value("var", inner)?,
         FormKind::Meta(meta, inner) => {
             let value = form_to_value(inner)?;
@@ -405,7 +408,7 @@ pub fn form_to_value(form: &Form) -> EvalResult<Value> {
                 if let FormKind::Str(s) = &inner.kind
                     && let Ok(u) = uuid::Uuid::parse_str(s)
                 {
-                    Value::Uuid(u.as_u128())
+                    Value::uuid(u.as_u128())
                 } else {
                     form_to_value(inner)?
                 }
@@ -437,7 +440,7 @@ fn forms_to_values(forms: &[Form]) -> EvalResult<Vec<Value>> {
 /// `(<sym> <inner>)` — the list encoding of a reader-sugar form as data.
 fn reader_form_value(sym: &str, inner: &Form) -> EvalResult<Value> {
     Ok(Value::List(GcPtr::new(PersistentList::from_iter([
-        Value::symbol(Symbol::simple(sym)),
+        Value::symbol(Symbol::parse(sym)),
         form_to_value(inner)?,
     ]))))
 }
@@ -446,18 +449,29 @@ fn map_literal_arity_error() -> EvalError {
     EvalError::Runtime("map literal must have an even number of forms".into())
 }
 
+/// The reader-conditional feature keys this runtime answers to. `:cljrs` is
+/// the canonical key: the dialect's own name, the one portable libraries write
+/// alongside `:clj`, `:cljs`, `:cljr` and `:lpy` (malli keys its branches
+/// `:cljrs`). `:rust` is the legacy alias. Both select the same platform branch.
+pub fn is_platform_feature(k: &str) -> bool {
+    k == "rust" || k == "cljrs"
+}
+
 /// Resolve a `#?(...)` reader conditional to the selected branch form, or
-/// `None` if no `:rust` or `:default` clause is present.
+/// `None` if no platform (`:cljrs` / `:rust`) or `:default` clause is present.
+///
+/// Clauses are tried in source order and the first match wins, as in
+/// Clojure: `:default` always matches, so `#?(:default :a :cljrs :b)` selects
+/// `:a`. This is the single selection rule; every evaluator path calls it.
 pub fn select_reader_cond(clauses: &[Form]) -> Option<&Form> {
-    let mut default: Option<&Form> = None;
-    for [feature, branch] in clauses.as_chunks::<2>().0 {
-        match &feature.kind {
-            FormKind::Keyword(k) if k == "rust" => return Some(branch),
-            FormKind::Keyword(k) if k == "default" => default = Some(branch),
-            _ => {}
-        }
-    }
-    default
+    clauses
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .find(|[feature, _]| {
+            matches!(&feature.kind, FormKind::Keyword(k) if is_platform_feature(k) || k == "default")
+        })
+        .map(|[_, branch]| branch)
 }
 
 /// Expand reader conditionals in a flat slice of forms.
@@ -670,6 +684,20 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn cljrs_feature_and_alias_follow_textual_order() {
+        for (src, expected) in [
+            ("[#?(:cljrs :c :clj :j)]", "[:c]"),
+            ("[#?(:clj :j :rust :r)]", "[:r]"),
+            ("[#?(:clj :j :default :d)]", "[:d]"),
+            ("[#?(:clj :j :cljs :s)]", "[]"),
+            ("[#?(:default :d :cljrs :c)]", "[:d]"),
+            ("[#?@(:clj [:j] :cljrs [:a :b])]", "[:a :b]"),
+        ] {
+            assert_eq!(expand_src(src), kinds(&vec_elems(expected)), "{src}");
+        }
+    }
+
     fn kw_list(names: &[String]) -> String {
         names
             .iter()
@@ -683,6 +711,7 @@ mod tests {
     // both how to render itself as source and what it must contribute after
     // expansion under the `:rust` selection rule - an independent reimplementation
     // of `select_reader_cond` the production code is checked against.
+    // The model also accepts :cljrs and :default in textual order.
 
     #[derive(Clone, Debug)]
     enum Item {
@@ -691,17 +720,12 @@ mod tests {
         Splice(Vec<(String, Vec<String>)>),
     }
 
+    // First matching clause in source order wins; `:default` always matches.
     fn select_model<T>(branches: &[(String, T)]) -> Option<&T> {
-        let mut default = None;
-        for (k, v) in branches {
-            if k == "rust" {
-                return Some(v);
-            }
-            if k == "default" {
-                default = Some(v);
-            }
-        }
-        default
+        branches
+            .iter()
+            .find(|(k, _)| is_platform_feature(k) || k == "default")
+            .map(|(_, v)| v)
     }
 
     fn item_src(it: &Item) -> String {
@@ -737,6 +761,7 @@ mod tests {
     fn key_strat() -> impl proptest::strategy::Strategy<Value = String> {
         proptest::prop_oneof![
             proptest::strategy::Just("rust".to_string()),
+            proptest::strategy::Just("cljrs".to_string()),
             proptest::strategy::Just("clj".to_string()),
             proptest::strategy::Just("cljs".to_string()),
             proptest::strategy::Just("default".to_string()),
@@ -1024,7 +1049,7 @@ mod tests {
         let got = quoted_value("#uuid \"f81d4fae-7dec-11d0-a765-00a0c91e6bf6\"").unwrap();
         assert_eq!(
             got,
-            Value::Uuid(0xf81d4fae_7dec_11d0_a765_00a0c91e6bf6_u128)
+            Value::uuid(0xf81d4fae_7dec_11d0_a765_00a0c91e6bf6_u128)
         );
     }
 

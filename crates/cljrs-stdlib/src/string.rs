@@ -258,8 +258,23 @@ fn split(args: &[Value]) -> ValueResult<Value> {
 }
 
 fn split_lines(args: &[Value]) -> ValueResult<Value> {
-    let s = get_str(&args[0])?;
-    let parts: Vec<Value> = s.lines().map(|l| make_str(l.to_string())).collect();
+    let s = get_strict_str(&args[0])?;
+    // Clojure implements split-lines as a split on `\r?\n` with the JVM's
+    // default split limit: preserve leading/interior empty fields, discard all
+    // trailing empty fields, and keep one empty field for an empty input.
+    let mut fields: Vec<&str> = s
+        .split('\n')
+        .map(|line| line.strip_suffix('\r').unwrap_or(line))
+        .collect();
+    if !s.is_empty() {
+        while fields.last() == Some(&"") {
+            fields.pop();
+        }
+    }
+    let parts = fields
+        .into_iter()
+        .map(|line| make_str(line.to_string()))
+        .collect::<Vec<_>>();
     Ok(Value::Vector(GcPtr::new(PersistentVector::from_iter(
         parts,
     ))))
@@ -273,7 +288,7 @@ fn join(args: &[Value]) -> ValueResult<Value> {
         let s = get_str(&args[0])?;
         (s.to_string(), &args[1])
     };
-    let items = cljrs_runtime::interp::destructure::value_to_seq_vec(coll);
+    let items = cljrs_runtime::interp::destructure::value_to_seq_vec(coll)?;
     let result = items
         .iter()
         .map(|v| match v {
@@ -287,25 +302,33 @@ fn join(args: &[Value]) -> ValueResult<Value> {
     Ok(make_str(result))
 }
 
+/// Byte offset of the `n`th char of `s`, clamped to `s.len()`.
+/// `index-of` and friends speak char indices, like `count` and `subs`.
+fn char_to_byte(s: &str, n: usize) -> usize {
+    s.char_indices().nth(n).map_or(s.len(), |(b, _)| b)
+}
+
+/// Char index of byte offset `b` in `s` (`b` must be a char boundary).
+fn byte_to_char(s: &str, b: usize) -> usize {
+    s[..b].chars().count()
+}
+
 /// `(index-of s substr)` or `(index-of s substr from)`.
 fn index_of(args: &[Value]) -> ValueResult<Value> {
     let s = get_str(&args[0])?;
     let needle = get_str(&args[1])?;
     let from = if args.len() >= 3 {
         match &args[2] {
-            Value::Long(n) => *n as usize,
+            Value::Long(n) => (*n).max(0) as usize,
             _ => 0,
         }
     } else {
         0
     };
-    let haystack = if from == 0 {
-        s.as_ref()
-    } else {
-        &s[from.min(s.len())..]
-    };
+    let from_byte = char_to_byte(s.as_ref(), from);
+    let haystack = &s[from_byte..];
     match haystack.find(needle.as_ref()) {
-        Some(idx) => Ok(Value::Long((idx + from) as i64)),
+        Some(idx) => Ok(Value::Long(byte_to_char(s.as_ref(), idx + from_byte) as i64)),
         None => Ok(Value::Nil),
     }
 }
@@ -314,18 +337,31 @@ fn index_of(args: &[Value]) -> ValueResult<Value> {
 fn last_index_of(args: &[Value]) -> ValueResult<Value> {
     let s = get_str(&args[0])?;
     let needle = get_str(&args[1])?;
-    let haystack = if args.len() >= 3 {
-        match &args[2] {
-            Value::Long(n) => &s[..(*n as usize).min(s.len())],
-            _ => s.as_ref(),
-        }
-    } else {
-        s.as_ref()
+    let hit = match args.get(2) {
+        Some(Value::Long(n)) => last_index_from(s.as_ref(), needle.as_ref(), *n),
+        _ => s
+            .rfind(needle.as_ref())
+            .map(|idx| byte_to_char(s.as_ref(), idx)),
     };
-    match haystack.rfind(needle.as_ref()) {
-        Some(idx) => Ok(Value::Long(idx as i64)),
-        None => Ok(Value::Nil),
+    Ok(hit.map_or(Value::Nil, |ci| Value::Long(ci as i64)))
+}
+
+/// Char index of the last occurrence of `needle` in `s` that STARTS at or
+/// before char index `from`, like `String.lastIndexOf(str, from)`: a
+/// negative `from` finds nothing, one past the end searches the whole string.
+fn last_index_from(s: &str, needle: &str, from: i64) -> Option<usize> {
+    if from < 0 {
+        return None;
     }
+    let from = from as usize;
+    s.char_indices()
+        .map(|(b, _)| b)
+        .chain(std::iter::once(s.len()))
+        .enumerate()
+        .take_while(|&(ci, _)| ci <= from)
+        .filter(|&(_, b)| s[b..].starts_with(needle))
+        .last()
+        .map(|(ci, _)| ci)
 }
 
 fn string_reverse(args: &[Value]) -> ValueResult<Value> {
@@ -354,4 +390,30 @@ fn string_escape(args: &[Value]) -> ValueResult<Value> {
         }
     }
     Ok(make_str(result))
+}
+
+#[cfg(test)]
+mod char_index_tests {
+    use super::{byte_to_char, char_to_byte, last_index_from};
+
+    #[test]
+    fn last_index_from_never_starts_past_from() {
+        // "b€" ends inside the multibyte char after from = 0; it starts at 1.
+        assert_eq!(last_index_from("ab€", "b€", 0), None);
+        assert_eq!(last_index_from("ab€", "b€", 1), Some(1));
+        assert_eq!(last_index_from("héllo=x=y", "=", 6), Some(5));
+        assert_eq!(last_index_from("héllo=x=y", "=", 99), Some(7));
+        assert_eq!(last_index_from("abc", "a", -1), None);
+        assert_eq!(last_index_from("abc", "", 99), Some(3));
+    }
+
+    #[test]
+    fn non_ascii_offsets_are_char_indices() {
+        let s = "héllo=x";
+        let b = s.find('=').unwrap();
+        assert_eq!(b, 6);
+        assert_eq!(byte_to_char(s, b), 5);
+        assert_eq!(char_to_byte(s, 5), 6);
+        assert_eq!(char_to_byte(s, 99), s.len());
+    }
 }

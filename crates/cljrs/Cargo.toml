@@ -7,7 +7,7 @@ license.workspace = true
 repository.workspace = true
 
 [features]
-default = ["async", "net", "charset", "base64", "regex-full", "deps"]
+default = ["async", "net", "charset", "base64", "json", "ffi", "regex-full", "deps", "ssh"]
 
 # Regex engine and pass-throughs. Every workspace dependency below is taken
 # with default features off (see the note in the root Cargo.toml), so what
@@ -26,6 +26,8 @@ regex-full = [
     "cljrs-net?/regex-full",
     "cljrs-charset?/regex-full",
     "cljrs-base64?/regex-full",
+    "cljrs-json?/regex-full",
+    "cljrs-ffi?/regex-full",
 ]
 small-regex = [
     "cljrs-value/small-regex",
@@ -39,6 +41,8 @@ small-regex = [
     "cljrs-net?/small-regex",
     "cljrs-charset?/small-regex",
     "cljrs-base64?/small-regex",
+    "cljrs-json?/small-regex",
+    "cljrs-ffi?/small-regex",
 ]
 
 # Pass-through for cljrs-runtime's git-backed dependency support.
@@ -53,6 +57,8 @@ deps = [
     "cljrs-net?/deps",
     "cljrs-charset?/deps",
     "cljrs-base64?/deps",
+    "cljrs-json?/deps",
+    "cljrs-ffi?/deps",
 ]
 
 # Propagate no-gc to all direct dependencies; transitive deps pick it up through their own feature chains.
@@ -64,12 +70,21 @@ no-gc = [
     "cljrs-stdlib/no-gc",
     # Weak: only forwarded when the optional `async` feature pulls the package in.
     "cljrs-async?/no-gc",
+    "cljrs-nrepl/no-gc",
 ]
 enable-rustyline = ["rustyline"]
+# Native SSH transport for ssh:// git dependencies (russh). On by default.
+# russh 0.61+ is built on the 0.11 generation of the RustCrypto crates while
+# rPGP (signature verification) is still on 0.10, so this one feature carries
+# about a hundred duplicated crate versions; `--no-default-features` builds
+# that list it without `ssh` leave them out.
+ssh = ["cljrs-project/ssh"]
 async   = ["dep:cljrs-async", "dep:cljrs-io", "dep:tokio"]
 net     = ["dep:cljrs-net", "async"]
 charset = ["dep:cljrs-charset"]
 base64  = ["dep:cljrs-base64"]
+json    = ["dep:cljrs-json"]
+ffi     = ["dep:cljrs-ffi"]
 
 [lib]
 name = "cljrs"
@@ -90,7 +105,7 @@ cljrs-stdlib   = { workspace = true }
 # `aot::compile_file_to_wasm` unconditionally for `--target wasm`.
 cljrs-compiler = { workspace = true, features = ["wasm-aot"] }
 cljrs-interop  = { workspace = true }
-cljrs-project  = { workspace = true, features = ["vcs", "vcs-net", "ssh"] }
+cljrs-project  = { workspace = true, features = ["vcs", "vcs-net"] }
 cljrs-lsp      = { workspace = true }
 cljrs-nrepl    = { workspace = true }
 cljrs-ir       = { workspace = true }
@@ -107,6 +122,8 @@ cljrs-io     = { workspace = true, optional = true }
 cljrs-net    = { workspace = true, optional = true }
 cljrs-charset = { workspace = true, optional = true }
 cljrs-base64  = { workspace = true, optional = true }
+cljrs-json    = { workspace = true, optional = true }
+cljrs-ffi     = { workspace = true, optional = true }
 tokio         = { workspace = true, optional = true }
 
 [dev-dependencies]

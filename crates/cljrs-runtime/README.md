@@ -53,9 +53,10 @@ src/
     gas.rs              — cooperative execution-credit metering
     gc_roots.rs         — GC root registration for the interpreter's Rust stack
     loader.rs           — namespace loading (require / load_ns) from source paths
+    monitor.rs          — reentrant object monitors, fiber waiters, and carrier deadlock checks
     policy.rs           — capability policy for isolated transaction functions
     taps.rs             — tap> / add-tap registry
-    async_hook.rs       — AsyncRuntime seam and the async-JIT compile hook
+    async_hook.rs       — AsyncRuntime seam (`^:async` dispatch, fiber calls, blocking channel ops)
     depth.rs            — call-depth cap for ExecutionMode::NoGcTransaction
     vcs.rs              — VcsProvider trait (the runtime's git seam) and the
                           cljrs-project-backed ProjectVcs impl (`deps` feature)
@@ -86,7 +87,10 @@ src/
     apply.rs            — eval_call: macro expansion, native dispatch, recur trampoline
     arity.rs            — fresh arity ID generator
     destructure.rs      — pattern destructuring (vector, map, & rest)
-    macros.rs           — macro expansion helpers
+    macros.rs           — macro expansion helpers: macroexpand_1 / macroexpand check the
+                          call head against the evaluating frames, macroexpand_all /
+                          macroexpand_all_in against the form's own lexical scope (a local
+                          shadows a macro); binding_names lists what a pattern binds
     syntax_quote.rs     — syntax-quote (backtick) expansion
     virtualize.rs       — let-chain virtualization: assoc/conj chains → transients
     versioned.rs        — (non-WASM) tree-walker entry point for versioned resolution
@@ -104,13 +108,33 @@ src/
     backend.rs          — JitBackend: the seam a compiler installs on a runtime
 
 tests/
+  common/mod.rs                    — one runtime per test thread, one namespace per
+                                     case: `shared_globals`, `fresh_env`,
+                                     `fresh_env_in(mode)`, `reset_env_in(mode, ns)`,
+                                     `eval_in`, `eval_fresh`. Property suites use it
+                                     instead of building a runtime per case
+  runtime_startup_canary.rs        — the one suite that still pays for a runtime on
+                                     purpose: asserts a build stays under 150ms in
+                                     debug (best of five), so a startup regression
+                                     fails with a number rather than as CI getting
+                                     slower
+  collection_predicate_parity.rs   — coll?/map?/sequential?/associative?/counted?/
+                                     seqable?/record? as a table, against Clojure's
+                                     answers, over record, deftype, reify and the
+                                     built-in kinds
   no_gc_eval.rs                    — (no-gc) arithmetic, def provenance, region stack
+  mutator_state.rs                 — virtual threads Phase 0: MutatorState save/restore
+                                     between two live evaluations on one thread keeps
+                                     bindings, output capture and eval context apart
   versioned_resolution.rs          — versioned resolution against a real git fixture
   vcs_provider.rs                  — the VcsProvider seam: default provider, degradation
                                      with none installed, signature-check routing and
                                      cache invalidation on provider/trust-set change
                                      (passes with and without the `deps` feature)
   require_spec_reader_conditional.rs — reader conditionals in ns require specs
+  reader_cond_cljrs_feature.rs     — `:cljrs` (canonical) and `:rust` (alias) select alike; clause order
+                                     decides against `:default`; deftype field
+                                     vector from a conditional (malli shape)
   refer_clojure.rs                 — `(:refer-clojure ...)` narrowing of the core refer
   core_shadows.rs                  — core_shadowed_names: what a namespace binds
                                      instead of clojure.core (issue #337)
@@ -362,6 +386,7 @@ pub fn refer_named(&self, dst_ns: &str, src_ns: &str, names: &[Arc<str>]);
 /// runtime init, the loader, `in-ns`, `ns` and versioned-namespace setup use
 /// to seed a namespace with core.
 pub fn refer_core(&self, dst_ns: &str);
+// Creates `dst_ns` if it does not exist; a no-op only while `clojure.core` itself is unregistered.
 
 /// Install (or, with `None`, remove) the `(:refer-clojure ...)` filter for
 /// `dst_ns` and re-apply the automatic core refer under it.  Refers inherited
@@ -408,11 +433,33 @@ installed by `cljrs-tx`.
 - `EvalError::to_error_value(self) -> Value` — convert an error into a Clojure
   error *value*; `Thrown` is returned unchanged, anything else is wrapped in a
   fresh `ExceptionInfo`
+- `eval_error_to_thunk_error(error: EvalError) -> ValueError` — the error a
+  `Thunk::force` implementation returns: `EvalError::Cancelled` stays
+  `ValueError::Cancelled` (so lazy cells leave the thunk pending instead of
+  caching it); every other error becomes `ValueError::Other(message)`.
+- `realize_error_to_eval_error(error: ValueError) -> EvalError` — a
+  `LazySeq::try_realize` / `Delay::force` error as an `EvalError::Runtime`,
+  keeping `ValueError::Cancelled` as the uncatchable `EvalError::Cancelled`.
 - `value_error_to_eval_error(err: ValueError) -> EvalError` — surface a builtin's
   `ValueError` as a *catchable* `EvalError::Thrown(Value::Error(..))`, preserving
   the original variant and its plain message (no `runtime error:` prefix) so
   `(catch :default e ..)` / `ex-message` / `ex-data` behave the same as for a
   user `throw` / `ex-info`. A `ValueError::Thrown` re-surfaces the exact value.
+  `ValueError::GasExhausted`, `ValueError::Cancelled`, and
+  `ValueError::MemoryLimitExceeded` map to their
+  uncatchable `EvalError` counterparts (the latter also clears the thread's
+  runtime-fault slot).
+
+`EvalError::MemoryLimitExceeded(cljrs_gc::MemoryLimitExceeded)` (governor
+Phase 4, strict mode) reports a governed allocation the process governor
+refused when a collection did not bring committed memory back within the hard
+limit.  It is fixed-size, `try`/`catch` does not intercept it, and the
+tree-walker, the Tier-1 IR interpreter, and the native-code entry seams
+(`tiered::apply`, OSR) all report it the same way.  `callback::invoke` maps it
+to `ValueError::MemoryLimitExceeded` and confirms it in the runtime-fault slot,
+so a compiled caller that drops the error still reports it at the seam.  The
+error-value helpers above allocate with `GcPtr::new_critical`, so building an
+error may use the critical reserve.
 
 ### `gas` submodule
 
@@ -424,8 +471,29 @@ propagate complete nested scopes to async polls, `charge(cost) -> bool` consumes
 an all-or-nothing checkpoint, and
 `take_exhausted() -> bool` transfers a native-tier exhaustion signal back to
 the evaluator. `EvalError::GasExhausted` is the dedicated caller-facing error.
+Fiber cancellation is the separate, equally uncatchable `EvalError::Cancelled`.
 Exhaustion state is scoped per guard, so an exhausted inner evaluation cannot
 poison a healthy outer evaluation after the inner guard drops.
+
+The same checkpoints observe interrupt flags. `InterruptFlag` is an
+`AtomicBool` paired with its own wake `Event` (`InterruptFlag::new(set: bool)`,
+`is_set() -> bool`, `request()`). `InterruptGuard::install(flag:
+Arc<InterruptFlag>)` scopes a flag to an evaluation on the current thread;
+raising it from any thread fails the next `charge`, and `interrupt_requested()
+-> bool` tells an interrupt from real exhaustion. `active_interrupts() ->
+InterruptFlags` (`Arc<[Arc<InterruptFlag>]>`, an O(1) snapshot shared rather
+than copied) captures the installed flags where an async task or fiber is
+spawned, and `InterruptScope::enter(&flags)` makes them the only flags observed
+for the duration of one poll (restoring the previous ones on drop), so a task
+answers only to an interrupt of the evaluation that spawned it.
+
+A fiber parked on a wait reaches no checkpoint, so raise interrupts with
+`InterruptFlag::request` (or `request_interrupt(flag: &InterruptFlag)`): it sets
+the flag and wakes only the waits parked under that flag, not every parked
+fiber in the process. `async fn interrupted(flags: &[Arc<InterruptFlag>])`
+completes once any of `flags` is set (never, for an empty slice), listening only
+on those flags' events; fiber parks race it against the awaited event and
+unwind as `Cancelled` when it wins.
 
 ### `policy` submodule
 
@@ -563,11 +631,24 @@ Manages GC root registration for the interpreter's Rust call stack. Public API:
 - `push_env_root(env: &Env) -> EnvRootGuard` — registers an `Env` pointer as a GC root; guard removes on drop
 - `root_value(val: &Value) -> ValueRootGuard` — registers a single `Value` pointer as a GC root
 - `root_values(vals: &[Value]) -> ValueRootGuard` — registers a slice of `Value` pointers as GC roots
+- `ValueRootGuard` removes its own entry on drop (not the top one), so guards held across `await`s by different `LocalSet` tasks may drop in any order
 - `root_option_values(vals: &[Option<Value>]) -> OptionValueRootGuard` — registers an `Option<Value>` slice (e.g. IR register file)
-- `gc_safepoint(env: &Env)` — interpreter-level safepoint: parks if collection in progress, or initiates collection on memory pressure
+- `gc_safepoint(env: &Env) -> EvalResult<()>` — interpreter-level safepoint: parks if collection in progress, or initiates collection on memory pressure; then resolves the thread's pending memory fault (`cljrs_gc::resolve_runtime_fault`) and returns `EvalError::MemoryLimitExceeded` if committed memory is still above the hard limit.  In both builds it also checks the fiber stack margin and yields whenever its time slice expires. It roots the environment only when the scheduler will yield. Runtime locks, borrowed mutator slots, and critical sections defer automatic yields in every build. Under `no-gc` the collection step is omitted
+- `check_memory_fault() -> EvalResult<()>` — the fault check alone (used at the native-code entry seams)
 - `force_collect(env: &Env)` — immediately initiates a GC collection bypassing memory-pressure threshold
+- `async_gc_pending() -> bool` — whether `async_gc_collect` has work (a GC request or a configuration cancellation in progress); also services a pending governor credit recall. The async GC service suspends while it is `false`. Always `false` under `no-gc`
 - `async_gc_collect()` — services a pending GC request from a Tokio `LocalSet` task at a cooperative yield point; safe to call when no other tasks are polling, so thread-local root stacks are stable and fully describe all suspended-task `GcPtr`s
 - `set_stw_reclaim_hook(f)` — registers a stop-the-world reclaim hook; multiple hooks may be registered and each runs (in registration order) inside the STW guard at the tail of every collection (`force_collect`, `gc_safepoint`, `async_gc_collect`), when all mutator threads are parked.  Registrants: the compiler's JIT code cache frees superseded native code (Phase 10.2); the `tiered` lowering worker sweeps idle Tier-1 IR (Phase 10.7)
+
+The root shadow stacks (`ENV_ROOTS`, `VALUE_ROOTS`, `OPTION_VALUE_ROOTS`) are
+per-mutator state: like `BINDING_STACK`, `EVAL_CONTEXT`, `CALL_DEPTH`, the gas
+stacks, the transaction policy, `OUTPUT_CAPTURE`, `BIG_DECIMAL_SCALE`,
+`WATCH_ERROR`, `IR_LOWERING_ACTIVE` and the JIT active-frame stack, they are
+registered with `cljrs_gc::mutator_slot!` so a fiber scheduler can swap them
+with `cljrs_gc::mutator::MutatorState` (docs/virtual-threads-plan.md).
+Saved states register weakly with the isolate. Their slot callbacks trace suspended stack roots,
+bindings, eval contexts, and watch errors during collection. Saved JIT frame stacks retain their
+registrations, so code reclamation also sees suspended fibers.
 
 Root tracing covers all namespaces (including immutable `ns@commit`
 namespaces) **and** the values in `GlobalEnv::version_cache`, so versioned
@@ -577,7 +658,9 @@ collection.
 ### `apply` submodule
 
 `apply_value` applies an evaluated callee to evaluated args (functions,
-keywords, maps, sets, vars, protocol/multimethod dispatch). For a
+keywords, maps, sets, vars, protocol/multimethod dispatch). `apply_fn_body(callee,
+args, env)` runs a function's body on the current stack without `^:async`
+dispatch; the async runtime calls it from the fiber an `^:async` call spawns. For a
 `Value::ProtocolFn` callee whose protocol has `extend_via_metadata` set (`(defprotocol
 Name :extend-via-metadata true ...)`), dispatch first checks the first arg's
 metadata for an entry keyed by the method's FULLY-QUALIFIED SYMBOL — `ns/method`,
@@ -624,10 +707,23 @@ Thread-local eval context for Rust→Clojure callbacks (`invoke`, `with_eval_con
 - `current_is_async() -> bool` — whether the innermost context is inside an `^:async` body
 - `invoke(f: &Value, args: Vec<Value>) -> ValueResult<Value>` — call a Clojure-callable value through the innermost context. Honors `^:async` dispatch (via `apply::dispatch_if_async`) so a native/compiled caller of an `^:async` fn gets a `Value::Future`, not a synchronously-run body
 - `with_eval_context(f)` — run a closure with a temporary `Env` built from the innermost context
+- `eval_error_to_value_error(error: EvalError) -> ValueError` — preserve thrown values and resource errors; confirm memory faults for compiled entry points
+
+`invoke` does not evaluate anything itself. It reads the context, then hands the
+call to `GlobalEnv::callback_dispatch`, a function pointer each `GlobalEnv`
+carries to `invoke_in_host` **in the binary that built it**. That is what makes
+a callback from a project cdylib safe: the plugin links its own copy of this
+crate, with its own copy of every persistent-collection routine, and running
+host state through those was observed to corrupt the structure outright (`rpds`
+panicking with "cannot have a branch at this height" once a callback grew a
+vector past 32 elements, with host `archery` 1.2.2 against plugin `archery`
+1.2.3). Dispatching through the host's pointer keeps the interpreter, the GC and
+the collections on one side of the boundary. It is not a promise of a stable
+Rust ABI across arbitrary dependency versions: it removes the need for one here.
 
 ### `async_hook` submodule
 
-The optional async-runtime seam (`AsyncRuntime` trait, installed by `cljrs-async`).  Async-JIT activation is *not* here: the dispatcher reaches it through the calling runtime's own backend (`GlobalEnv::jit_backend()` → `JitBackend::compile_async_arity`), so a runtime without a JIT simply keeps tree-walking `^:async` bodies.
+The optional async-runtime seam (`AsyncRuntime` trait, installed by `cljrs-async`).  `^:async` bodies are never compiled to state machines: on native targets each call runs its body on a fiber, and on wasm32 through `eval_async` (virtual-threads plan Phase 5; TODO.md Phase H is closed).
 
 ---
 
@@ -644,11 +740,9 @@ pub const EXPERIMENTAL_SOURCE: &str;                              // experimenta
 pub fn register_experimental(globals: &Arc<GlobalEnv>, ns: &str); // the future family
 ```
 
-`register_experimental` interns the future family (`future-call`, `future?`,
-`future-done?`, `future-cancelled?`, `future-cancel`) into `EXPERIMENTAL_NS`
-rather than `clojure.core`; `EXPERIMENTAL_SOURCE` adds the `future` macro over
-them. See [`cljrs.core.experimental/future`](#cljrscoreexperimentalfuture--cooperative-not-parallel)
-for why they are not in `clojure.core`.
+`register_experimental` adds compatibility names for the core future functions.
+`EXPERIMENTAL_SOURCE` adds the compatibility `future` macro.
+See [Futures on an isolate](#futures-on-an-isolate).
 
 ### What is seqable, and the one place it is decided
 
@@ -681,6 +775,14 @@ set are seqable and `nth` refuses them, as on the JVM — so it lists the
 sequential types itself. A queue and the nine array kinds share one arm there,
 `nth_walked`, which walks the value and states the bounds rule once: out of
 range without a default is an error, with a default it is the default.
+
+A `TypeInstance` is seqable only when its `kind` is `Record`. `deftype` and
+`reify` are not: on the JVM neither generated class implements `Seqable`, so
+`(seq (->T 1))` throws there and must here. The same `kind.is_record()` test
+decides `map?` and `Value::is_coll`, and the three are pinned together against
+Clojure's answers in `tests/collection_predicate_parity.rs` — the bug they fix
+was one predicate in the family disagreeing with its neighbours about one kind
+of value, which only a table makes visible.
 
 ### Static members of JVM class names
 
@@ -760,12 +862,23 @@ instead of throwing, and returns just the `:doc` string.
 ### Reader-conditional resolution (`form.rs`)
 
 The reader is platform-agnostic: it parses every branch of `#?(...)` / `#?@(...)`
-and hands back a `FormKind::ReaderCond` node. Selecting the `:rust` branch is
+and hands back a `FormKind::ReaderCond` node. Selecting the platform branch is
 therefore the job of each form-consuming boundary, and this module holds the
-calculations they share.
+calculations they share. This runtime answers to two feature keys: `:cljrs`, the canonical
+key (the dialect's own name, which portable libraries such as malli use), and
+`:rust`, a legacy alias that selects the same branch.
+Clauses are tried in source order and the first match wins, as in Clojure;
+`:default` always matches, so `#?(:default :a :cljrs :b)` selects `:a`.
+The tree-walk evaluator, quoted data, syntax-quote, `ns` require specs, catch
+targets and AOT all go through `select_reader_cond`.
 
 ```rust
-/// The `:rust` branch of a conditional's clauses, or the `:default` branch.
+/// Whether `k` (a keyword name, no colon) is a feature key of this runtime:
+/// `"cljrs"` (canonical) or `"rust"` (legacy alias).
+pub fn is_platform_feature(k: &str) -> bool;
+
+/// The first clause whose key is a platform feature or `:default`, in
+/// clause order; `None` when no clause matches.
 pub fn select_reader_cond(clauses: &[Form]) -> Option<&Form>;
 
 /// Expand `#?`/`#?@` across a sibling slice: a non-splicing conditional
@@ -912,6 +1025,31 @@ guess at an encoding.
 the environment is process-global state the transaction was not handed as an
 argument, and it can change under it between retries.
 
+### Process control and stdin (`process.rs`)
+
+- `(System/exit status)`: terminates the process with `status`. Never returns,
+  so nothing after it in the program runs.
+- `(read-line)`: the next line of stdin without its terminator (`\r\n` and
+  `\n` both terminate one, and an unterminated final line is still a line), or
+  `nil` at end of input.
+
+A command-line program needs both to be portable: a `.cljc` script that reads a
+line, decides, and exits with a status had no way to do any of it, and
+`(resolve 'System/exit)` answered `nil`. `clojure.rust.io/read-line` is a
+different function, taking a reader; this is `clojure.core`'s zero-argument one,
+over stdin, as on the JVM.
+
+`System/exit` flushes stdout and stderr first, because `process::exit` runs no
+destructors and would otherwise drop whatever the program had buffered. It then
+exits from a **fresh thread**: on Linux `exit` runs TLS destructors on its
+calling thread, and the evaluation thread may be inside Tokio's scheduler, whose
+thread-local core cannot be destroyed while it is checked out ("Oh no! We never
+placed the Core back"), and the abort that follows would lose the status code.
+
+Both are **denied inside a transaction function**, for the same reason
+`System/getenv` is: a retry cannot put a consumed line of stdin back, and
+nothing can undo ending the process.
+
 ### `eval`
 
 `eval` is registered as a sentinel and intercepted where the environment is
@@ -921,64 +1059,32 @@ the async tree-walker). It converts the form *value* back into a `Form`
 environment of the current namespace, so it sees vars but not the caller's
 locals.
 
-### `cljrs.core.experimental/future` — cooperative, not parallel
+### Futures on an isolate
 
-**`clojure.core/future` is deliberately undefined**, along with `future-call`,
-`future?`, `future-done?`, `future-cancelled?` and `future-cancel`. A one-thread
--per-isolate runtime cannot honour that namespace's contract (see below), and
-`clojure.core` is where callers are entitled to assume it holds. Feature probes
-such as the standard test suite's `(when-var-exists future …)` therefore keep
-seeing nothing there, and skip, as they do on any runtime without futures.
-
-The cooperative stand-in lives in `cljrs.core.experimental`, for integrators who
-want it within its real limits:
+`clojure.core` provides `future`, `future-call`, `future?`, `future-done?`,
+`future-cancelled?`, and `future-cancel`. The experimental namespace retains
+these names for compatibility.
 
 ```clojure
-(require '[cljrs.core.experimental :as x])
-(defn ^:async fetch-both [] [(await (x/future (load-a))) (await (x/future (load-b)))])
+(def ^:dynamic *request* nil)
+(binding [*request* :example]
+  @(future [*request* @(future 42)]))
+;; => [:example 42]
 ```
 
-That namespace is registered by `Runtime::build` (natives via
-`builtins::register_experimental`, the `future` macro from
-`builtins/experimental.cljrs`) and is *not* referred into `user`: an explicit
-`require` is the only way in. `(x/future body…)` expands to
-`(cljrs.core.experimental/future-call (fn [] body…))`, which hands the thunk to
-the installed async runtime's executor and returns a `Value::Future`
-immediately. `realized?` stays in `clojure.core` and answers for futures.
+The installed `AsyncRuntime::spawn_fiber_call` hook runs ordinary functions on
+native fibers. Each child receives the caller's dynamic bindings, active gas
+meters, and interrupt flags. The bindings remain private to that child.
+Future dereference parks the calling fiber, including through ordinary functions.
+The CLI and AOT entry points provide root fibers for top-level evaluation.
 
-**How this differs from the JVM, and why.** Every Clojure value is `!Send` —
-`GcPtr` cannot cross a thread, which is what makes per-isolate heaps collectable
-without cross-thread coordination. A future therefore cannot run on another OS
-thread; it is a task on the *caller's* executor. Consequences:
+Fibers share one isolate thread. Isolates provide parallel Clojure execution.
+`future-cancel` cancels the result without interrupting the body. Dereferencing
+a cancelled future raises `future was cancelled`. Cancellation remains sticky
+after the body returns.
 
-- The body does not start until the caller yields. `(let [f (x/future (f!))] …)`
-  runs nothing until something awaits.
-- **Read a future with `(await f)`, never `@f`.** `deref` blocks the one thread
-  the task needs in order to finish, so it hangs. This is the same rule Phase C
-  already enforces inside `^:async` bodies, where `@future` is a runtime error;
-  in sync code it is a hang. `(await f)` has the same shape outside an `^:async`
-  fn: it works at a top-level form (the CLI drives those through the async
-  tree-walker) and hangs from inside an ordinary `defn`. This is the sharp edge
-  that keeps the family out of `clojure.core`.
-- `future-cancel` marks the result cancelled (awaiting it raises) but does not
-  interrupt a task already running, like a JVM future past its interrupt point.
-  Cancellation is *sticky*: a task cancelled mid-body still runs to completion,
-  so its side effects happen, but its result is discarded — `future-cancelled?`
-  never un-becomes true and `await` keeps raising. Every reader of a cancelled
-  future (sync `await`/`deref`, the async tree-walker, the compiled state
-  machine) raises the same catchable error, message `future was cancelled`.
-- **Dynamic bindings are not conveyed.** `binding` is a thread-local stack with
-  an RAII guard, and `future-call` builds a fresh `Env` for the task, so
-  `(binding [*foo* 1] (x/future *foo*))` sees the *root* binding — unlike the JVM,
-  which conveys the caller's frame. The converse also holds: because the stack
-  is per-thread and tasks share the thread, a task polled while another task
-  holds a binding frame across a yield can observe that frame. This is a
-  property of the async substrate rather than of `future` itself, but `future`
-  is what makes it reachable from ordinary code; bind inside the body if the
-  task needs a binding.
-
-Genuine parallelism across threads is the isolate boundary
-(`cljrs-async`'s `Isolate` + `isolate-chan`), where values cross by copy.
+On wasm32, the hook retains LocalSet tasks and the async waiting rules.
+Without an installed async runtime, `future-call` returns an error.
 
 ## Module `interp`
 
@@ -1021,10 +1127,13 @@ evaluator may consume fewer credits than equivalent interpreted code. Compiled
 code emits a checkpoint call at every basic block even when no meter is active;
 avoiding that always-on JIT cost requires a future metering-mode fast path.
 
-### `eval_call(func_form, arg_forms, env) -> EvalResult`
+### `eval_call(site, func_form, arg_forms, env) -> EvalResult`
 
 Evaluate a function-call form.  Handles macros, native-function special cases,
-and user-defined `CljxFn` application with the recur trampoline.
+and user-defined `CljxFn` application with the recur trampoline.  `site` is the
+whole call `Form` when it is a stable AST node; a macro call's expansion is
+memoized on it (`cljrs_reader::ExpansionCache`), keyed by macro identity and
+current namespace, so re-evaluating the site does not re-run the macro.
 
 ### `eval_body(forms, env) -> EvalResult`
 
@@ -1040,8 +1149,9 @@ value).
 
 ### `eval_defn(args, env) -> EvalResult`
 
-Evaluate a `defn` form.  Accepts metadata on the name (`(defn ^:async f …)`) and
-an attr-map (`(defn f {:async true} …)`); `^:async` marks the resulting `CljxFn`
+Evaluate a `defn` form.  Accepts metadata on the name (`(defn ^:async f …)`),
+an attr-map (`(defn f {:async true} …)`), or the params vector
+(`(defn f ^:async [..] …)`, detected by `eval_fn`); `^:async` marks the resulting `CljxFn`
 as async.  Under `no-gc`, wraps fn creation in `StaticCtxGuard` so the `CljxFn`
 object lands in the `StaticArena`.
 
@@ -1054,15 +1164,41 @@ resulting Var's metadata, merged with any reader/attr-map metadata via
 `merge_meta`.  `defn`/`defmacro` additionally derive `{:arglists (...)}` from
 the evaluated `CljxFn`'s parsed arities (`arglists_meta`, in `special.rs`);
 for `defmacro` the implicit `&form`/`&env` params are elided from the shown
-signature.  This is what `clojure.core/doc` and `doc-data` (in the `builtins`
+signature. `defmacro` also records on the `CljxFn` whether the body mentions
+`&env` at all (`macro_uses_env`, via `form_mentions_symbol`, a total match
+over `FormKind`); both expansion paths, `macro_apply` and `macroexpand_1`,
+build the locals map only for a macro that can read it, because that map
+costs about 5us per local in scope on every expansion.  This is what `clojure.core/doc` and `doc-data` (in the `builtins`
 module) read back, and what `cljrs-nrepl`'s `op_lookup` surfaces to editors.
 
-### `meta_form_is_async(meta: &Form) -> bool`
+### Recognising `:async`
 
-Returns true when a `^meta` form (or attr-map literal) requests `:async` — either
-the keyword shorthand `^:async` or an explicit `{:async true}` map.  `fn`/`defn`
-use it to set `CljxFn::is_async`, which `env::apply::dispatch_if_async`
-checks at call time to route through the async runtime.
+`fn`/`defn` set `CljxFn::is_async` when a `^meta` form (or attr-map literal)
+requests `:async`, as decided by `Form::requests_async` in `cljrs-reader` — the
+same predicate IR lowering uses.  `env::apply::dispatch_if_async` checks the
+flag at call time to route through the async runtime.  The `^:async` may sit on
+the fn's first argument (`(fn ^:async [..] ..)`, peeled by `eval_fn`), on the
+params vector after a name (`(fn name ^:async [..] ..)`; both per
+`Form::fn_args_request_async`, which `eval_fn` and IR lowering share), or on the
+whole form (`^:async (fn [..] ..)`, handled by `eval`'s `FormKind::Meta` arm,
+which also attaches `{:async true}` as metadata since an `fn` form takes runtime
+metadata).  IR lowering refuses any body containing such an anonymous async fn
+(`Form::is_async_fn_form`), so it is always built here and calling it returns a
+`Future` in every tier.
+
+The spellings that request async, exhaustively (`^{:async true}` works wherever
+`^:async` does, and `fn*` wherever `fn` does):
+
+| spelling | async? |
+|---|---|
+| `^:async (fn [..] ..)` | yes |
+| `(fn ^:async [..] ..)` | yes |
+| `(fn ^:async name [..] ..)` | yes |
+| `(defn ^:async name [..] ..)` | yes |
+| `(defn name {:async true} [..] ..)` | yes |
+| `(fn name ^:async [..] ..)` | yes |
+| `(defn name ^:async [..] ..)` | yes (also after a docstring / attr-map) |
+| `(fn name (^:async [..] ..))` | **no** — metadata on a multi-arity clause's params is a hint |
 
 ### Which natives are intercepted, and by whom
 
@@ -1124,6 +1260,12 @@ anyway would evaluate each `:or` default twice per call — destructuring defaul
 are eager, so a side-effecting one would fire once here and once in the prologue
 (issue #363).
 
+`interp::destructure::value_to_seq_vec(&Value) -> ValueResult<Vec<Value>>`
+converts a seqable value to its elements. It roots the source during realization
+and propagates lazy thunk errors, including rejected carrier waits on parked fibers.
+Non-seqable values return an empty vector. Destructuring and sequence consumers
+propagate these errors to their evaluator.
+
 ### Value-level intercepted natives
 
 There is exactly one implementation of each intercepted native, and it takes
@@ -1181,6 +1323,40 @@ conditional in ANY slot of an `ns` require spec, namespace included, so
 `[#?(:clj clojure.core :cljs cljs.core) :as core]` reads — an option selecting
 no branch is dropped, a namespace selecting none is an error.
 
+**Pieces shared with the async evaluator.** `cljrs-async`'s `eval_async` (wasm32 only; native
+targets run `^:async` bodies on fibers with this evaluator) has its
+own arm for every special form that evaluates a sub-expression in place, because
+running one on the sync path parks the `LocalSet` thread at any `await` inside
+it. To keep those arms from re-implementing the forms, `special.rs` exposes each
+form's non-evaluating parts:
+
+| item | used for |
+|---|---|
+| `parse_try_args`, `CatchClause`, `catch_type_matches`, `eval_error_to_value` | `try` |
+| `DefTarget`, `parse_def(args, env) -> EvalResult<DefTarget>`, `intern_def(target, val, env)` | `def`: name, merged `^meta`/docstring and value form, then interning an evaluated value |
+| `defonce_existing(name, env) -> Option<Value>` | `defonce`: the already-bound var it leaves untouched |
+| `throw_value(val) -> EvalError` | `throw`: wraps a non-error value in an `ExceptionInfo` |
+| `set_bang_symbol(sym, val, env)`, `set_bang_field_target(form) -> Option<(&str, &Form)>`, `set_type_instance_field(inst, field, val)`, `set_bang_target_error()` | `set!` on a symbol, on `(.-field inst)`, and the error for any other target |
+| `push_letfn_frame(args, env) -> EvalResult<()>` | `letfn`: pushes a frame with every fn mutually bound (popped already on error) |
+
+Two thread-local stacks gained a resume operation for the same caller, which
+keeps `binding`/`with-out-str` state installed only while its own task is
+polled: `dynamics::take_frame(guard) -> HashMap<VarKey, Value>` pops a
+`binding` frame and returns it, and
+`builtins::builtins::suspend_output_capture() -> Option<SuspendedOutputCapture>`
+takes the top capture entry off the stack without draining it
+(`SuspendedOutputCapture::resume(&self)` pushes it back,
+`SuspendedOutputCapture::finish(self) -> String` takes the captured text).
+
+Capture-stack entries are shared handles, so output capture follows spawned
+fibers the way the JVM conveys `*out*`:
+`builtins::builtins::convey_output_capture() -> ConveyedOutputCapture`
+snapshots the stack and `ConveyedOutputCapture::install(self)` installs it in
+the child (cljrs-async's `conveyed_fiber` does both). Text a `future`,
+`thread` or `go` body prints therefore lands in the enclosing `with-out-str`
+buffer or nREPL streaming sink; a streaming sink stays live after
+`pop_output_capture` for fibers that still hold it.
+
 **The datatype, protocol and multimethod family is Clojure, not Rust.**
 `deftype`, `defrecord`, `reify`, `defprotocol`, `extend-type`,
 `extend-protocol`, `defmulti` and `defmethod` are all macros in
@@ -1193,6 +1369,7 @@ two of the seven primitives actually do:
 | `protocol*` | special form | mints a `Protocol` in the CURRENT namespace — `Protocol.ns` qualifies the method symbol that extend-via-metadata dispatch looks up |
 | `protocol-fn` | builtin fn | the dispatch `ProtocolFn` for one method, arity read back out of the protocol's own spec |
 | `extend` | builtin fn | writes `{method → fn}` into `Protocol.impls` under a type tag; Clojure's own signature |
+| `extenders` | builtin fn | reads `Protocol.impls` back out as a sorted list of type-tag symbols, `nil` when nothing extends it |
 | `make-type-instance`, `make-type-instance-mut` | builtin fns | construct a `deftype` `TypeInstance` (the latter with interior-mutable cells) |
 | `make-reify-instance` | builtin fn | the same shape, recording `DatatypeKind::Reify` — one builtin per datatype form, so the caller states which it meant rather than the runtime guessing from a gensym'd type tag |
 | `multi-fn` | builtin fn | mints a `MultiFn` with an optional default dispatch value |
@@ -1222,6 +1399,23 @@ Naming the target by SYMBOL in a macro expansion rather than by string in a Rust
 handler is not only shorter: `(defmethod other.ns/m ...)` and
 `(extend-type T other.ns/P ...)` resolve through the ordinary rules, aliases
 included, where a handler doing `lookup_in_ns(current_ns, "other.ns/m")` cannot.
+
+A record or deftype's dispatch tag is qualified by its defining namespace
+(`my.ns.Point`), so `extend-type` and `extend-protocol` reach it through the
+type's var. An unqualified `Point` therefore has to resolve where it is
+extended: defined there, referred, or imported. `ns` honours `(:import [my.ns
+Point])`, `(:import (my.ns Point))` and `(:import my.ns.Point)` by referring the
+var of each named type that is loaded (`import_types` in `special.rs`; the
+package is also tried with `_` read as `-`), and ignores names that are not
+loaded types, such as host classes in a `.cljc` file. Importing a name the
+namespace already binds to something else (its own definition, or an earlier
+refer or import from a namespace other than `clojure.core`) is an error, as on
+the JVM: `Point already refers to: #'b/Point in namespace: b`. A type symbol that does
+not resolve cannot be told from a native type's tag (`String`, a
+`NativeObject`'s `type_tag`), so it registers under the bare name; when a call
+then finds no implementation for `my.ns.Point` while one sits under bare
+`Point`, the "No implementation" error says so (`unqualified_impl_hint` in
+`env/apply.rs`).
 
 Putting the target in evaluation position does cost one thing, and `defmethod`
 pays it back deliberately. The two ways a target can be wrong — no such var, and
@@ -1322,7 +1516,15 @@ pub mod lower {
 
     // Phase 10.7 — the two halves of lowering, split for background use:
     /// Macro-expand a body on the calling thread (macros need the interpreter).
-    pub fn macroexpand_body(body: &[Form], env: &mut Env) -> Vec<Form>;
+    /// `locals` are the names bound around the body: a call to one of them is
+    /// a call to the local, whatever macro shares its name.  `env`'s frames
+    /// belong to whoever triggered the lowering and are not consulted.
+    pub fn macroexpand_body(body: &[Form], env: &mut Env, locals: &[Arc<str>]) -> Vec<Form>;
+    /// The names in scope throughout one arity's body: the function's name,
+    /// its parameters, and what its destructuring patterns bind.  A closure's
+    /// captured names are the caller's to append.
+    pub fn arity_locals(name, params, rest, destructure_params, destructure_rest)
+        -> Vec<Arc<str>>;
     /// Env-free lowering of an already-expanded body; callable off-thread.
     /// `arity_id: Some(id)` uses defn_registry::snapshot_externals (atomic
     /// dependent recording, required off the mutator thread); `None` uses the
@@ -1368,8 +1570,9 @@ pub mod defn_registry {
 3. If cached **and not async**: executes via `ir_interp::interpret_ir` (register-file interpreter)
 4. If not cached **or async**: counts the call (`jit_state::record_interp_call`, Phase 10.7 —
    see "Background lowering" below) and falls back to `interp::apply::call_cljrs_fn`
-   (tree-walking).  For `^:async` functions the tree-walking path dispatches to `eval_async`
-   in `cljrs-async`, which cooperatively yields to the Tokio `LocalSet` executor.
+   (tree-walking).  An `^:async` call first dispatches through the async runtime hook: on
+   native targets `cljrs-async` runs the body on a fiber via `env::apply::apply_fn_body`
+   (which skips async dispatch); on wasm32 it runs `eval_async`.
 5. How IR gets into the cache:
    - **Warm-threshold background lowering (default, Phase 10.7)**: when a function's
      tree-walked call count crosses `ir_threshold()` (default 50), the dispatch seam
@@ -1475,7 +1678,6 @@ pub trait JitBackend: Send + Sync {
     fn mark_stale(&self, epoch: u64);
     fn take_pending_exception(&self) -> Option<Value>;
     fn deopt_sentinel(&self) -> usize;
-    fn compile_async_arity(&self, callee: &Value, nargs: usize, env: &mut Env);
 }
 ```
 
@@ -1693,3 +1895,132 @@ the default provider at runtime.
 | `num-bigint`, `num-rational`, `bigdecimal`, `num-traits` | numeric tower |
 | `rand`, `rpds`, `uuid` | builtin implementations |
 | `log`, `thiserror` | diagnostics and error derivation |
+
+## Fiber monitors and blocking primitives
+
+`env::monitor::enter(&Value) -> ValueResult<MonitorGuard>` acquires an object monitor.
+`MonitorGuard` releases one reentrant acquisition on drop and stays on its creating thread.
+The caller must root the object while a guard or waiter retains its address.
+
+Monitor owners use `cljrs_value::types::Realizer`, which distinguishes fibers on the same isolate thread.
+A waiting fiber parks without an OS lock. Carrier code receives an error if the owner is a fiber on that thread.
+A different OS thread can still wait on the Condvar.
+The final owner or waiter removes its own registry entry. Acquisition does not scan the monitor table.
+
+The Clojure `locking` macro calls `locking-call` with a zero-argument callback.
+The callback retains the monitor through parks and releases it on return, error, or cancellation.
+`deref`, synchronous `await`, `sleep`, `Thread/sleep`, `slurp`, and `spit` use the optional parking hooks.
+Sequence builtins and macro conversion use `LazySeq::try_realize` to report realization errors without caching carrier wait errors.
+Native CLI and AOT entry points create root fibers for top-level evaluation.
+
+`env::monitor::monitor_enter(&Value) -> ValueResult<()>` acquires an explicit monitor.
+`env::monitor::monitor_exit(&Value) -> ValueResult<()>` releases one explicit acquisition.
+The Clojure functions are `monitor-enter` and `monitor-exit`.
+An exit without an explicit acquisition in the current computation returns an error.
+The per-fiber `HELD_MONITORS` slot traces retained objects.
+`env::monitor::MonitorCleanup` releases unmatched acquisitions on drop.
+Native fibers install this cleanup guard, including during cancellation.
+Synchronous callers outside fibers must pair explicit acquisitions with `monitor-exit` or install a `MonitorCleanup` guard.
+Legacy async tasks cannot retain explicit monitors because those tasks share the root mutator.
+`env::monitor::AsyncMonitorScope::enter() -> AsyncMonitorScope` marks each poll of these tasks.
+Its drop restores the caller's state. Explicit monitor calls from synchronous helpers also reject this task context.
+
+Evaluation and function boundaries convert trait realization failures to catchable Clojure errors.
+The IR interpreter installs one boundary per function execution.
+Atoms and identifier lookups need no realization boundary.
+Lexical scope guards remove `let` and `loop` frames on errors and unwinds.
+Native callback guards restore the eval context on unwinds.
+
+Multimethod dispatch borrows registry tables for scalar dispatch values and scalar hierarchy tags.
+Other values use traced snapshots and release registry locks before equality or formatting can run user code.
+
+## Restricted native blocking form
+
+`(blocking & calls)` and `cljrs.fiber/blocking` expand each call into `clojure.core/blocking-call`.
+`blocking-call` accepts a native function and its evaluated arguments.
+It roots the function and arguments, then calls `NativeFn::call_blocking`.
+Unsupported functions return an error before their native body runs.
+The form returns the last result, or nil for no calls.
+
+```clojure
+(require '[cljrs.fiber :as fiber])
+(let [path "data.edn"]
+  (fiber/blocking (host/read-text path)))
+```
+
+`host/read-text` must provide a typed native adapter, such as a fixed-arity `#[export]` function.
+Arguments can contain ordinary Clojure expressions. Their evaluation and conversion stay on the isolate.
+Native inputs and outputs must implement `Send + 'static`.
+Clojure closures and native functions without an adapter are rejected.
+A native fiber parks during worker execution. Outside a fiber, the call runs synchronously.
+
+`AsyncRuntime::spawn_fiber_call(callee, args, env) -> EvalResult` dispatches an
+ordinary function into a fiber. The default implementation delegates to
+`spawn_async_call` for runtimes without fiber support.
+
+`AsyncRuntime::take_if_channel(&val) -> Option<EvalResult>` lets `await` take from the
+runtime's channels (what `go` returns): it parks or blocks and keeps the channel rooted
+while waiting, and returns `None` for any other value (the default). On wasm32, which
+cannot park, it returns a ready value or `nil` for a closed channel, and errors when the
+take would block; `await_value_sync` treats unsettled futures and promises the same way. The tree-walker and
+the IR interpreter both use it through `interp::eval::await_value_sync(val, globals)`,
+which dereferences futures and promises and returns other values unchanged.
+
+`macroexpand_all` expands the operand of reader dereference (`@`). Thus AOT
+and IR lowering expand `@(future ...)` before they compile the future body.
+
+Native JIT and OSR dispatch preserve resource-limit errors through
+`JitBackend::take_pending_resource_error() -> Option<ValueError>` and the matching
+`JitState` method. Gas exhaustion and memory-limit faults bypass Clojure catch clauses.
+
+In `no-gc` builds, dynamic binding frames own one replaceable lease per bound Var.
+A `set!` update replaces that Var's cached ownership.
+Values written by nested calls remain valid after those calls release their scratch storage.
+Object-array writes use the destination ownership barrier before storing an element.
+
+No-GC final raw results retain their backing regions at explicit program-lifetime boundaries.
+Dynamic binding writes compact small immutable scalars and reuse existing compact copies.
+Regional destinations retain backing scopes through ownership edges. Pending sequences and mutable identities preserve their original objects.
+
+No-gc recur values use a lease owned by the function or loop trampoline.
+Each iteration replaces this lease before it releases the previous iteration.
+Atom and volatile updates evaluate in the current allocation context.
+The cells lease new contents and release replaced contents after their last consumer releases them.
+Update callbacks and watches hold temporary leases for the previous contents.
+
+The no-GC evaluator bounds temporary reads with `region::ReadScope`.
+The public evaluator enters this scope once. Recursive form evaluation uses the direct interpreter entry.
+Each call and loop iteration bounds its own temporary reads.
+Body statements share the enclosing allocation and read scope. This permits updates to outer mutable containers.
+Only the final escaping result receives program-lifetime publication.
+Definition expressions use scratch storage. Namespace and Var containers remain permanent, while Var payloads use replaceable leases.
+Protocol method registration transfers function ownership before it stores the implementation.
+Atom and volatile update callbacks use cached snapshots for previous contents.
+Their returned values acquire caller ownership, including shared children from earlier versions.
+Cell payloads preserve structural sharing and identity. Small immutable scalar copies retain a stable logical identity.
+Replacement releases obsolete ownership edges.
+Native and IR closures share one immutable capture slice between execution and tracing.
+
+
+`interp::eval::eval_discard(form: &Form, env: &mut Env) -> EvalResult<()>` evaluates an ignored form result.
+No-GC builds use one temporary arena for the form and publish errors before releasing it.
+Namespace loading and bootstrap evaluation use this entry point.
+`interp::eval::publish_result(result: EvalResult, recur: Option<&mut RegionLease>) -> EvalResult` is available under no-GC.
+It applies the shared return, thrown-value, and recur ownership policy before a producing scope closes.
+Definition initializers and function bodies use this policy, including early errors.
+Dynamic binding frames own one replaceable lease per variable.
+
+No-GC definitions pack immutable data and metadata before the initializer scratch scope closes.
+Function and atom roots use separate small regions. Immutable aliases keep their logical identities.
+Borrowed reads remain scoped; explicit escaping raw results use result publication.
+Protocol and multimethod dispatch borrow ownership cached beside the implementation.
+
+Standalone macro-expansion APIs keep their temporary values in a scratch scope under no-GC.
+They release successful temporary values after building the returned Rust form and publish thrown errors before teardown.
+
+
+Native calls through `env::apply_value` register their function name and cached
+`diagnostic_id` with `cljrs_gc::fiber::native_frame`. The native driver uses this name for stall diagnostics.
+Interpreter and IR safepoints return a fiber-specific stack-overflow error before
+recursion reaches the guard page. Automatic-yield cancellation uses the uncatchable
+resource-error path to return safely through compiled native frames.

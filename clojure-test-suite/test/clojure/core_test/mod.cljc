@@ -45,6 +45,51 @@
       double? -1.0 -10.0 -3.0
       double? -2.0 10.0  -3.0
 
+      ;; test near max/min value of int and long
+      #?@(:cljs
+          [int? 7 2147483647 10
+           int? -3 2147483647 -10
+           int? 8 2147483648 10
+           int? -2 2147483648 -10
+           
+           int? 2 -2147483648 10
+           int? -8 -2147483648 -10
+           int? 1 -2147483649 10
+           int? -9 -2147483649 -10
+           
+           ;; cljs fails here with wrong mod result 
+           ;; int? 7 9223372036854775807 10
+           ;; int? -3 9223372036854775807 -10
+           p/big-int? 8N 9223372036854775808 10
+           p/big-int? -2N 9223372036854775808 -10
+           
+           int? 2 -9223372036854775808 10
+           int? -8 -9223372036854775808 -10
+           ;; p/big-int? 1N -9223372036854775809 10
+           ;; p/big-int? -9N -9223372036854775809 -10
+           ]
+
+          :default
+          [int? 7 2147483647 10
+           int? -3 2147483647 -10
+           int? 8 2147483648 10
+           int? -2 2147483648 -10
+
+           int? 2 -2147483648 10
+           int? -8 -2147483648 -10
+           int? 1 -2147483649 10
+           int? -9 -2147483649 -10
+
+           int? 7 9223372036854775807 10
+           int? -3 9223372036854775807 -10
+           p/big-int? 8N 9223372036854775808 10
+           p/big-int? -2N 9223372036854775808 -10
+
+           int? 2 -9223372036854775808 10
+           int? -8 -9223372036854775808 -10
+           p/big-int? 1N -9223372036854775809 10
+           p/big-int? -9N -9223372036854775809 -10])
+
       ;; CLJS can read big decimals at the reader, but just converts
       ;; them to doubles.
       #?@(:cljs
@@ -108,11 +153,11 @@
          (is (NaN? (mod 1 ##NaN)))
          (is (NaN? (mod ##NaN 1)))]
         :default
-        [(is (thrown? Exception (mod 10 0)))
-         (is (thrown? Exception (mod ##Inf 1)))
+        [(is (p/thrown? (mod 10 0)))
+         (is (p/thrown? (mod ##Inf 1)))
          (is (NaN? (mod 1 ##Inf)))
-         (is (thrown? Exception (mod ##-Inf 1)))
+         (is (p/thrown? (mod ##-Inf 1)))
          (is (NaN? (mod 1 ##-Inf)))
-         (is (thrown? Exception (mod ##NaN 1)))
-         (is (thrown? Exception (mod 1 ##NaN)))
-         (is (thrown? Exception (mod ##NaN 1)))])))
+         (is (p/thrown? (mod ##NaN 1)))
+         (is (p/thrown? (mod 1 ##NaN)))
+         (is (p/thrown? (mod ##NaN 1)))])))

@@ -8,6 +8,8 @@ thread_local! {
     static TRANSACTION_DEPTH: Cell<usize> = const { Cell::new(0) };
     static TRANSACTION_GENSYM: Cell<u64> = const { Cell::new(0) };
 }
+cljrs_gc::mutator_slot!("cljrs-runtime/TRANSACTION_DEPTH", cell TRANSACTION_DEPTH: usize);
+cljrs_gc::mutator_slot!("cljrs-runtime/TRANSACTION_GENSYM", cell TRANSACTION_GENSYM: u64);
 
 /// Installs the side-effect-free transaction policy for its dynamic extent.
 #[must_use = "dropping the guard removes the transaction execution policy"]
@@ -95,11 +97,19 @@ pub fn check_native(name: &str) -> EvalResult<()> {
         // Reads process-global state the transaction did not receive as an
         // argument, and which can change under it between calls.
         "System/getenv",
+        // Consumes a line of stdin, which a retry cannot put back.
+        "read-line",
+        // A transaction function can be retried; ending the process is the one
+        // effect no retry can undo.
+        "System/exit",
         // clojure.java.shell's substrate: a child process reaches everything
         // this policy exists to forbid.
         "clojure.rust.process/run",
     ];
-    if DENIED.contains(&name) {
+    // Whole namespaces whose every function is a host effect. `clojure.rust.ffi`
+    // loads native code and calls into it: nothing it does can be retried.
+    const DENIED_NAMESPACES: &[&str] = &["clojure.rust.ffi/"];
+    if DENIED.contains(&name) || DENIED_NAMESPACES.iter().any(|ns| name.starts_with(ns)) {
         Err(forbidden(name))
     } else {
         Ok(())

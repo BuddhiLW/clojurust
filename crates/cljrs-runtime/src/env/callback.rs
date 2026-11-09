@@ -25,6 +25,7 @@ struct EvalContext {
 thread_local! {
     static EVAL_CONTEXT: RefCell<Vec<EvalContext>> = const { RefCell::new(Vec::new()) };
 }
+cljrs_gc::mutator_slot!("cljrs-runtime/EVAL_CONTEXT", refcell EVAL_CONTEXT: Vec<EvalContext>, trace trace_saved);
 
 /// Push the current eval context before calling a native function.
 pub fn push_eval_context(env: &Env) {
@@ -35,6 +36,11 @@ pub fn push_eval_context(env: &Env) {
             is_async: env.is_async,
         });
     });
+}
+
+pub(crate) fn scoped_eval_context(env: &Env) -> EvalContextGuard {
+    push_eval_context(env);
+    EvalContextGuard { _priv: () }
 }
 
 /// True when the innermost active eval context is inside an `^:async` function
@@ -139,34 +145,76 @@ where
     f(&mut env)
 }
 
+/// How a callback reaches an evaluator. A `GlobalEnv` carries one of these,
+/// pointing at [`invoke_in_host`] in the binary that BUILT that runtime.
+pub(crate) type CallbackDispatch =
+    fn(Arc<GlobalEnv>, Arc<str>, bool, &Value, Vec<Value>) -> ValueResult<Value>;
+
 pub fn invoke(f: &Value, args: Vec<Value>) -> ValueResult<Value> {
-    let (globals, ns) = EVAL_CONTEXT.with(|stack| {
+    let (globals, ns, is_async) = EVAL_CONTEXT.with(|stack| {
         let s = stack.borrow();
         let ec = s
             .last()
             .ok_or_else(|| ValueError::Other("invoke called outside eval context".into()))?;
-        Ok((ec.globals.clone(), ec.current_ns.clone()))
+        Ok((ec.globals.clone(), ec.current_ns.clone(), ec.is_async))
     })?;
+    // Hand the call to the runtime that owns these values. A project cdylib
+    // links its own copy of this crate: evaluating there would run the host's
+    // state through the plugin's persistent-collection code.
+    (globals.callback_dispatch)(globals.clone(), ns, is_async, f, args)
+}
+
+pub(crate) fn invoke_in_host(
+    globals: Arc<GlobalEnv>,
+    ns: Arc<str>,
+    is_async: bool,
+    f: &Value,
+    args: Vec<Value>,
+) -> ValueResult<Value> {
     let mut env = Env::new(globals, &ns);
+    // The eval context knew this, and the Env rebuilt from it has to agree:
+    // blocking builtins reject inside an `^:async` body.
+    env.is_async = is_async;
     // Fast path for Clojure functions: call directly through the GlobalEnv
     // function pointer, bypassing the large apply_value stack frame.
     // Unwrap metadata so a WithMeta-wrapped fn is callable.
     let f = f.unwrap_meta();
-    let result = if let Value::Fn(cljx_fn) = f {
-        // Honor `^:async` dispatch (spawn the body, return a Future) just like
-        // `apply_value` — otherwise a compiled/native caller invoking an async
-        // fn would run its body synchronously and never get a Future.
-        if let Some(fut) = crate::env::apply::dispatch_if_async(f, &args, &env) {
-            Ok(fut)
+    let result = crate::interp::eval::with_read_scope(|| {
+        if let Value::Fn(cljx_fn) = f {
+            // Honor `^:async` dispatch (spawn the body, return a Future) just like
+            // `apply_value` — otherwise a compiled/native caller invoking an async
+            // fn would run its body synchronously and never get a Future.
+            if let Some(fut) = crate::env::apply::dispatch_if_async(f, &args, &env) {
+                Ok(fut)
+            } else {
+                env.call_cljrs_fn(cljx_fn.get(), &args)
+            }
         } else {
-            env.call_cljrs_fn(cljx_fn.get(), &args)
+            crate::env::apply::apply_value(f, args, &mut env)
         }
-    } else {
-        crate::env::apply::apply_value(f, args, &mut env)
-    };
-    result.map_err(|e| match e {
+    });
+    result.map_err(eval_error_to_value_error)
+}
+
+/// Preserve resource faults across Rust and compiled callback boundaries.
+pub fn eval_error_to_value_error(e: crate::env::error::EvalError) -> ValueError {
+    match e {
         crate::env::error::EvalError::Thrown(v) => ValueError::Thrown(v),
         crate::env::error::EvalError::GasExhausted => ValueError::GasExhausted,
+        crate::env::error::EvalError::Cancelled => ValueError::Cancelled,
+        crate::env::error::EvalError::MemoryLimitExceeded(fault) => {
+            // Compiled callers drop most errors on the floor; keep the
+            // fault in the runtime-fault slot so the compiled-code entry
+            // seam still reports it.
+            cljrs_gc::governor::confirm_runtime_fault(fault);
+            ValueError::MemoryLimitExceeded(fault)
+        }
         other => ValueError::Other(format!("{other}")),
-    })
+    }
+}
+
+fn trace_saved(contexts: &Vec<EvalContext>, visitor: &mut cljrs_gc::MarkVisitor) {
+    for context in contexts {
+        crate::env::gc_roots::trace_globals(&context.globals, visitor);
+    }
 }

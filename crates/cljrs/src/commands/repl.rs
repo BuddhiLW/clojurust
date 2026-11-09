@@ -14,16 +14,16 @@ pub struct Args {
     /// Source directories to search when resolving `require`.
     #[arg(long = "src-path", value_name = "DIR")]
     pub src_paths: Vec<PathBuf>,
-    /// GC soft memory limit in MB (triggers collection when exceeded).
+    /// GC soft memory limit in MB (each isolate heap collects when it exceeds this).
     #[arg(long)]
     pub gc_soft_limit_mb: Option<usize>,
-    /// GC hard memory limit in MB (forces collection when exceeded).
+    /// Process managed-memory hard limit in MB (enforced only with CLJRS_MEMORY_STRICT=1).
     #[arg(long)]
     pub gc_hard_limit_mb: Option<usize>,
 }
 
 pub fn run(args: Args, versioning: VersioningFlags) -> miette::Result<i32> {
-    let gc_config = session::build_gc_config(args.gc_soft_limit_mb, args.gc_hard_limit_mb);
+    let gc_config = session::build_gc_config(args.gc_soft_limit_mb, args.gc_hard_limit_mb)?;
     let globals = session::setup_globals(args.src_paths, gc_config, versioning);
     run_repl(globals);
     Ok(0)
@@ -53,6 +53,8 @@ fn run_repl(globals: Arc<GlobalEnv>) {
                 } else if line.starts_with(":quit") {
                     break;
                 } else {
+                    #[cfg(feature = "no-gc")]
+                    let _reads = cljrs_gc::region::ReadScope::enter();
                     match session::eval_in(&mut env, &line, "<repl>") {
                         Ok(Value::Nil) => println!("nil"),
                         Ok(v) => println!("{}", v),
@@ -109,6 +111,8 @@ fn run_repl(globals: Arc<GlobalEnv>) {
         if depth <= 0 && !input_buf.trim().is_empty() {
             depth = 0;
             let src = std::mem::take(&mut input_buf);
+            #[cfg(feature = "no-gc")]
+            let _reads = cljrs_gc::region::ReadScope::enter();
             match session::eval_in(&mut env, &src, "<repl>") {
                 Ok(Value::Nil) => {}
                 Ok(v) => println!("{}", v),

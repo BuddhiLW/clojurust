@@ -41,6 +41,22 @@ pub enum ValueError {
     #[error("gas exhausted")]
     GasExhausted,
 
+    /// Execution was cancelled; the gas budget was not exhausted.
+    ///
+    /// Reserved for fiber cancellation (`parking::catch_cancelled` and
+    /// cancelled safepoints). It is uncatchable inside the cancelled
+    /// computation, but a future it settles is treated like `future-cancel`:
+    /// awaiters get a catchable exception, and an unread one is not reported
+    /// unless `CLJRS_WARN_INTERRUPTED_FUTURES` is enabled.
+    /// Native code must not return it for other failures.
+    #[error("execution cancelled")]
+    Cancelled,
+
+    /// The process memory governor refused a governed allocation (strict
+    /// mode).  Like `GasExhausted`, it is not catchable by Clojure code.
+    #[error("{0}")]
+    MemoryLimitExceeded(cljrs_gc::MemoryLimitExceeded),
+
     #[error("out of range")]
     OutOfRange,
 
@@ -79,24 +95,34 @@ impl ExceptionInfo {
         }
     }
 
-    fn to_via_map(&self) -> ValueResult<Value> {
+    /// Short name of the underlying error kind (`"WrongType"`, `"Other"`,
+    /// …) — the `:type` of this exception's `:via` entry.
+    pub fn type_name(&self) -> &'static str {
+        match self.error {
+            ValueError::WrongType { .. } => "WrongType",
+            ValueError::IndexOutOfBounds { .. } => "IndexOutOfBounds",
+            ValueError::ArityError { .. } => "ArityError",
+            ValueError::NotCallable { .. } => "NotCallable",
+            ValueError::OddMap { .. } => "OddMap",
+            ValueError::Unsupported => "Unsupported",
+            ValueError::Other(_) => "Other",
+            ValueError::GasExhausted => "GasExhausted",
+            ValueError::Cancelled => "Cancelled",
+            ValueError::MemoryLimitExceeded(_) => "MemoryLimitExceeded",
+            ValueError::OutOfRange => "OutOfRange",
+            ValueError::TransientAlreadyPersisted => "TransientAlreadyPersisted",
+            ValueError::Parse => "ParseError",
+            ValueError::Thrown(_) => "Thrown",
+        }
+    }
+
+    /// This exception alone (causes excluded) as a `Throwable->map` `:via`
+    /// entry: `{:type .. :message .. :data ..}`.
+    pub fn to_via_map(&self) -> ValueResult<Value> {
         let map = TransientMap::new();
         map.assoc(
             Value::keyword(Keyword::simple("type")),
-            Value::string(match self.error {
-                ValueError::WrongType { .. } => "WrongType",
-                ValueError::IndexOutOfBounds { .. } => "IndexOutOfBounds",
-                ValueError::ArityError { .. } => "ArityError",
-                ValueError::NotCallable { .. } => "NotCallable",
-                ValueError::OddMap { .. } => "OddMap",
-                ValueError::Unsupported => "Unsupported",
-                ValueError::Other(_) => "Other",
-                ValueError::GasExhausted => "GasExhausted",
-                ValueError::OutOfRange => "OutOfRange",
-                ValueError::TransientAlreadyPersisted => "TransientAlreadyPersisted",
-                ValueError::Parse => "ParseError",
-                ValueError::Thrown(_) => "Thrown",
-            }),
+            Value::string(self.type_name()),
         )?;
         map.assoc(
             Value::keyword(Keyword::simple("message")),
@@ -164,6 +190,12 @@ impl ExceptionInfo {
 
 impl Trace for ExceptionInfo {
     fn trace(&self, visitor: &mut MarkVisitor) {
+        if let Some(data) = &self.data {
+            data.trace(visitor);
+        }
+        if let ValueError::Thrown(value) = &self.error {
+            value.trace(visitor);
+        }
         if let Some(cause) = self.cause.as_ref() {
             visitor.visit(cause);
         }

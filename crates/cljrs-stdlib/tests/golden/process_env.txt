@@ -1,0 +1,18 @@
+(:out (clojure.rust.process/run ["printf" "x"] {:env {"A" "ok"}}))
+  => Str("x")
+(:out (clojure.rust.process/run ["/usr/bin/env"] {:env {"A" "a b=c"}}))
+  => Str("A=a b=c\n")
+(:out (clojure.rust.process/run ["/usr/bin/env"] {:env {:A "kw"}}))
+  => Str("A=kw\n")
+(clojure.rust.process/run ["printf" "x"] {:env {"A" "\u0000"}})
+  => ERROR clojure.rust.process/run: an :env value must not contain a NUL character
+(clojure.rust.process/run ["printf" "x"] {:env {"A" "a\u0000b"}})
+  => ERROR clojure.rust.process/run: an :env value must not contain a NUL character
+(clojure.rust.process/run ["printf" "x"] {:env {"A=B" "1"}})
+  => ERROR clojure.rust.process/run: every :env key must be a valid variable name (string/keyword) and every value a string
+(clojure.rust.process/run ["printf" "x"] {:env {"A" 1}})
+  => ERROR clojure.rust.process/run: every :env key must be a valid variable name (string/keyword) and every value a string
+(clojure.rust.process/run ["printf" "x"] {:env ["A" "1"]})
+  => ERROR clojure.rust.process/run: the :env option must be a map of name to string value
+(clojure.rust.process/run [])
+  => ERROR clojure.rust.process/run: the command must be a non-empty vector of strings

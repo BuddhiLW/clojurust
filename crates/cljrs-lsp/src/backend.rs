@@ -1,10 +1,10 @@
-//! The tower-lsp [`LanguageServer`] implementation and stdio entry points.
+//! The tower-lsp-server [`LanguageServer`] implementation and stdio entry points.
 
 use std::sync::RwLock;
 
 use dashmap::DashMap;
-use tower_lsp::lsp_types::*;
-use tower_lsp::{Client, LanguageServer, LspService, Server, jsonrpc::Result};
+use tower_lsp_server::ls_types::*;
+use tower_lsp_server::{Client, LanguageServer, LspService, Server, jsonrpc::Result};
 
 use crate::analysis;
 use crate::document::Document;
@@ -13,7 +13,7 @@ use crate::line_index::OffsetEncoding;
 /// The clojurust language server backend.
 pub struct Backend {
     client: Client,
-    docs: DashMap<Url, Document>,
+    docs: DashMap<Uri, Document>,
     /// Position encoding negotiated in `initialize` (UTF-16 until then).
     encoding: RwLock<OffsetEncoding>,
 }
@@ -32,7 +32,7 @@ impl Backend {
     }
 
     /// Re-analyze a document and publish its diagnostics.
-    async fn refresh(&self, uri: Url) {
+    async fn refresh(&self, uri: Uri) {
         // Snapshot the text and drop the store guard before any `.await`.
         let Some((text, version)) = self.docs.get(&uri).map(|d| (d.text.clone(), d.version)) else {
             return;
@@ -73,7 +73,6 @@ fn to_lsp_encoding(enc: OffsetEncoding) -> PositionEncodingKind {
     }
 }
 
-#[tower_lsp::async_trait]
 impl LanguageServer for Backend {
     async fn initialize(&self, params: InitializeParams) -> Result<InitializeResult> {
         let enc = negotiate_encoding(&params);
@@ -92,6 +91,9 @@ impl LanguageServer for Backend {
                 name: "cljrs-lsp".to_string(),
                 version: Some(env!("CARGO_PKG_VERSION").to_string()),
             }),
+            // clangd's unofficial extension; the standard `position_encoding`
+            // above already carries the negotiated encoding.
+            offset_encoding: None,
         })
     }
 

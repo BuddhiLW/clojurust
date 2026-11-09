@@ -2,7 +2,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
-use std::sync::{Arc, Condvar, Mutex, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 
 use crate::env::async_hook::AsyncRuntime;
 
@@ -84,12 +84,15 @@ pub struct GlobalEnv {
     pub source_paths: RwLock<Vec<std::path::PathBuf>>,
     /// Namespaces that have been fully loaded from a file (idempotent guard).
     pub loaded: Mutex<std::collections::HashSet<Arc<str>>>,
-    /// Namespaces currently being loaded, mapped to the thread loading them.
-    /// Used to detect true circular requires (same thread) vs concurrent loads
-    /// (different thread — those wait on `loading_done` instead of erroring).
-    pub loading: Mutex<HashMap<Arc<str>, std::thread::ThreadId>>,
-    /// Signalled whenever a namespace finishes loading (or fails).
-    pub loading_done: Condvar,
+    /// Namespaces currently being loaded, mapped to the computation (thread +
+    /// fiber, see [`cljrs_value::types::Realizer`]) loading them.  Used to
+    /// detect true circular requires (same computation) vs concurrent loads
+    /// (another thread or another fiber — those wait on `loading_done`
+    /// instead of erroring).
+    pub loading: Mutex<HashMap<Arc<str>, cljrs_value::types::Realizer>>,
+    /// Signalled whenever a namespace finishes loading (or fails).  A
+    /// parking event: a waiting fiber parks, a plain thread blocks.
+    pub loading_done: cljrs_value::parking::Event,
     /// Built-in namespace sources embedded in the binary.
     /// Checked by `load_ns` before falling back to source-path search.
     pub builtin_sources: RwLock<HashMap<Arc<str>, &'static str>>,
@@ -98,6 +101,10 @@ pub struct GlobalEnv {
     /// How this runtime executes function calls.  Fixed when the runtime is
     /// built; see [`crate::RuntimeBuilder::execution_mode`].
     execution_mode: ExecutionMode,
+    /// Callback entry point in the binary that constructed this runtime, so a
+    /// project cdylib does not interpret host values with its own copy of the
+    /// runtime. See [`crate::env::callback::invoke`].
+    pub(crate) callback_dispatch: crate::env::callback::CallbackDispatch,
     /// Which tiers are live right now (see [`TierState`]).  Starts at
     /// [`TierState::TreeWalk`] — nothing can be lowered until `clojure.core`
     /// exists — and is raised once to `execution_mode.target_tier()` when the
@@ -230,10 +237,11 @@ impl GlobalEnv {
             source_paths: RwLock::new(Vec::new()),
             loaded: Mutex::new(std::collections::HashSet::new()),
             loading: Mutex::new(HashMap::new()),
-            loading_done: Condvar::new(),
+            loading_done: cljrs_value::parking::Event::default(),
             builtin_sources: RwLock::new(HashMap::new()),
             gc_config: RwLock::new(None),
             execution_mode,
+            callback_dispatch: crate::env::callback::invoke_in_host,
             tier_state: AtomicU8::new(TierState::TreeWalk as u8),
             tiers: crate::tiered::tiers::Tiers::new(id),
             async_rt: RwLock::new(None),
@@ -360,7 +368,11 @@ impl GlobalEnv {
         if let Some(ns) = map.get(name) {
             return ns.clone();
         }
-        let ns = GcPtr::new(Namespace::new(name));
+        let ns = {
+            #[cfg(feature = "no-gc")]
+            let _static = cljrs_gc::alloc_ctx::StaticCtxGuard::new();
+            GcPtr::new(Namespace::new(name))
+        };
         map.insert(Arc::from(name), ns.clone());
         ns
     }
@@ -374,7 +386,11 @@ impl GlobalEnv {
             var.get().bind(val);
             return var.clone();
         }
-        let var = GcPtr::new(Var::new(ns_name, name.as_ref()));
+        let var = {
+            #[cfg(feature = "no-gc")]
+            let _static = cljrs_gc::alloc_ctx::StaticCtxGuard::new();
+            GcPtr::new(Var::new(ns_name, name.as_ref()))
+        };
         var.get().bind(val);
         interns.insert(name, var.clone());
         var
@@ -460,6 +476,14 @@ impl GlobalEnv {
 
     /// Apply the automatic `clojure.core` refer that every namespace starts
     /// with, narrowed by `dst_ns`'s `(:refer-clojure ...)` filter.
+    ///
+    /// Creates `dst_ns` when it does not exist yet. It used to return
+    /// silently instead, which made `refer_core` on a not-yet-registered
+    /// namespace a no-op nobody could see: every caller had to remember
+    /// `get_or_create_ns` first, and the two that forgot got a namespace in
+    /// which `inc` was unbound (7ea56de's fixtures were modelling a namespace
+    /// nobody could be in). A namespace that is worth referring core into is
+    /// worth existing.
     pub fn refer_core(&self, dst_ns: &str) {
         self.refer_core_impl(dst_ns, false);
     }
@@ -469,12 +493,13 @@ impl GlobalEnv {
     /// a filter after the namespace was pre-referred neither leaves stale
     /// names behind nor exposes a window where core is only half-referred.
     fn refer_core_impl(&self, dst_ns: &str, replace: bool) {
+        // Before the read lock below: creation takes the write lock.
+        let dst = self.get_or_create_ns(dst_ns);
         let map = self.namespaces.read().unwrap();
+        // `clojure.core` itself is registered by `builtins::register_all`
+        // before anything can ask for it; the bootstrap is the only caller
+        // that could run ahead of it, and it does not.
         let src = match map.get("clojure.core") {
-            Some(ns) => ns.clone(),
-            None => return,
-        };
-        let dst = match map.get(dst_ns) {
             Some(ns) => ns.clone(),
             None => return,
         };
@@ -1094,6 +1119,23 @@ impl Env {
 
     pub fn pop_frame(&mut self) {
         self.frames.pop();
+    }
+
+    // Keep lexical frames balanced across errors and realization unwinds.
+    pub(crate) fn with_frame<T>(&mut self, body: impl FnOnce(&mut Env) -> T) -> T {
+        struct Scope<'a> {
+            env: &'a mut Env,
+            depth: usize,
+        }
+        impl Drop for Scope<'_> {
+            fn drop(&mut self) {
+                self.env.frames.truncate(self.depth);
+            }
+        }
+        let depth = self.frames.len();
+        self.push_frame();
+        let scope = Scope { env: self, depth };
+        body(scope.env)
     }
 
     /// Bind `name` to `val` in the top frame.

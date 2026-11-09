@@ -19,7 +19,6 @@ small-regex = ["cljrs-value/small-regex", "cljrs-runtime/small-regex"]
 deps = ["cljrs-runtime/deps"]
 
 [dependencies]
-cljrs-types        = { workspace = true }
 cljrs-gc           = { workspace = true }
 cljrs-value        = { workspace = true }
 cljrs-runtime      = { workspace = true }

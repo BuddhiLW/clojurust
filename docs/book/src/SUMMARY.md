@@ -39,6 +39,7 @@
 - [The `#[export]` macro](rust-interop/export-macro.md)
 - [Interpreter mode](rust-interop/interpreter.md)
 - [AOT mode](rust-interop/aot.md)
+- [Calling C libraries](rust-interop/c-ffi.md)
 
 # Embedding
 

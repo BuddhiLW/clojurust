@@ -123,7 +123,7 @@ impl Lexer {
                 }
                 Some(';') => {
                     while let Some(ch) = self.advance() {
-                        if ch == '\n' {
+                        if ch == '\n' || ch == '\r' {
                             break;
                         }
                     }
@@ -427,6 +427,26 @@ impl Lexer {
                     let span = self.span_from(start_pos, start_line, start_col);
                     return Err(self.make_error(format!("unknown character name: {rest}"), span));
                 }
+            }
+            _ if rest.starts_with('o') && rest.len() > 1 => {
+                let digits = &rest[1..];
+                if digits.is_empty()
+                    || digits.len() > 3
+                    || !digits.chars().all(|c| matches!(c, '0'..='7'))
+                {
+                    let span = self.span_from(start_pos, start_line, start_col);
+                    return Err(self.make_error(format!("invalid octal character: {rest}"), span));
+                }
+                let code = u32::from_str_radix(digits, 8).unwrap();
+                if code > 0o377 {
+                    let span = self.span_from(start_pos, start_line, start_col);
+                    return Err(
+                        self.make_error(format!("octal character out of range: {rest}"), span)
+                    );
+                }
+                self.pos += rest.len();
+                self.col += rest.len() as u32;
+                char::from_u32(code).unwrap()
             }
             _ if rest.len() == 1 => {
                 // Single ASCII or first char
@@ -800,6 +820,29 @@ impl Lexer {
 
         // Plain integer
         let full = format!("{sign_str}{int_part}");
+        if int_part.len() > 1 && int_part.starts_with('0') {
+            if !int_part.chars().all(|c| matches!(c, '0'..='7')) {
+                let span = self.span_from(start_pos, start_line, start_col);
+                return Err(self.make_error(format!("invalid octal integer: {full}"), span));
+            }
+            let magnitude = u128::from_str_radix(&int_part, 8).unwrap_or(u128::MAX);
+            let signed = if negative {
+                -(magnitude as i128)
+            } else {
+                magnitude as i128
+            };
+            return if let Ok(value) = i64::try_from(signed) {
+                Ok((
+                    Token::Int(value),
+                    self.span_from(start_pos, start_line, start_col),
+                ))
+            } else {
+                Ok((
+                    Token::BigInt(signed.to_string()),
+                    self.span_from(start_pos, start_line, start_col),
+                ))
+            };
+        }
         match full.parse::<i64>() {
             Ok(n) => Ok((
                 Token::Int(n),
@@ -1080,6 +1123,14 @@ mod tests {
     fn test_char_unicode() {
         assert_eq!(lex_one("\\u0041"), Token::Char('A'));
         assert_eq!(lex_one("\\u00e9"), Token::Char('é'));
+    }
+
+    #[test]
+    fn test_char_octal() {
+        assert_eq!(lex_one("\\o"), Token::Char('o'));
+        assert_eq!(lex_one("\\o0"), Token::Char('\0'));
+        assert_eq!(lex_one("\\o101"), Token::Char('A'));
+        assert_eq!(lex_one("\\o377"), Token::Char('\u{ff}'));
     }
 
     // ── Strings ──────────────────────────────────────────────────────────
