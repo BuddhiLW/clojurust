@@ -35,6 +35,9 @@ env:
 jobs:
   check:
     name: Check for releasable changes
+    # Only the upstream repository can publish these crates.  Every later
+    # job needs this one, so they skip with it.
+    if: github.repository == 'csm/clojurust'
     runs-on: ubuntu-latest
     permissions:
       contents: read
