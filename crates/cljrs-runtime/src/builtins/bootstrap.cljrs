@@ -2023,12 +2023,12 @@
        (def ~(symbol (str tsym ".")) ~pos)
        ~tsym)))
 
-;; reify: an anonymous, field-less instance whose methods close over the
-;; surrounding lexical scope. One gensym'd tag per reify FORM (Clojure semantics:
-;; one anonymous type per form, a fresh instance each time the form evaluates).
-;; The impl fns capture locals because deftype* registers them at the call site.
+;; reify: an anonymous instance whose methods close over the surrounding
+;; lexical scope. One gensym'd tag per reify FORM, a fresh instance each time
+;; the form evaluates; `deftype* ... :reify` stores the referenced locals on
+;; that instance.
 (defmacro reify [& impls]
-  `(make-reify-instance (deftype* ~(gensym "reify__") [] ~@impls) {}))
+  `(deftype* ~(gensym "reify__") :reify ~@impls))
 
 ;; proxy: a reify whose method bodies see an implicit `this`. Superclass
 ;; constructor args are ignored (there are no host classes). A ThreadLocal

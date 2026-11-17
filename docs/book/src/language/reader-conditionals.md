@@ -78,3 +78,26 @@ vector, map, or set literal.
 - `:cljr` is ClojureCLR's key, not clojurust's; the clojurust key is `:cljrs`.
 - `:rust` is a legacy alias for `:cljrs`. Both keys match, so a form that
   lists both selects whichever comes first. Prefer `:cljrs` in new code.
+
+## Libraries written for `:clj` and `:cljs` only
+
+clojurust never falls back to the `:clj` branch. A `.cljc` library whose forms
+have only `:clj` and `:cljs` branches reads those forms as nothing, so it
+fails to load. A `deftype` whose field vector is such a form reports it:
+`the field list must be a vector ... add a :cljrs branch`.
+
+Such a library needs `:cljrs` branches. [malli](https://github.com/metosin/malli)
+is the common case: stock malli releases do not load. A fork with the
+branches is under review upstream (metosin/malli#1324). Until it merges, pin
+the fork in `cljrs.edn` and fetch it:
+
+```clojure
+{:paths ["src"]
+ :deps  {metosin/malli {:git/url "https://github.com/BuddhiLW/malli"
+                        :git/sha "e7b910ed244d0e294a70766b455d72660dbc75af"}}}
+```
+
+```bash
+cljrs deps fetch
+cljrs run src/my/app.cljrs   # (require '[malli.core :as m]) now loads
+```

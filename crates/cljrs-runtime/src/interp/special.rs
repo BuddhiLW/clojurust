@@ -2256,7 +2256,10 @@ fn build_impl_fn(
         ));
     }
     // parts[1] should be the params vector.
-    let params_form = &parts[1];
+    let unshadowed = (!fields.is_empty())
+        .then(|| crate::interp::reify::unshadow_this(&parts[1]))
+        .flatten();
+    let params_form = unshadowed.as_ref().unwrap_or(&parts[1]);
     let body = &parts[2..];
     let scoped;
     let body: &[Form] = if fields.is_empty() {
@@ -2322,7 +2325,7 @@ fn eval_binding(args: &[Form], env: &mut Env) -> EvalResult {
 /// Hidden `let*` binding a `deftype` method body carries when the type has
 /// mutable fields: a handle to `this`, so `set!` can locate the instance whose
 /// interior-mutable cell to update.
-const DEFTYPE_SELF: &str = "__deftype_self__";
+pub(crate) const DEFTYPE_SELF: &str = "__deftype_self__";
 
 /// Does a field's `^meta` mark it `^:unsynchronized-mutable` or
 /// `^:volatile-mutable`? Instances are single-threaded here, so the two are
@@ -2396,6 +2399,9 @@ fn eval_deftype_star(args: &[Form], env: &mut Env) -> EvalResult {
     // name reads, and deliberately not applied anywhere it would not belong.
     let (type_name, _) = require_sym_meta(args, 0, "deftype*", env)?;
     let type_tag = qualified_type_tag(&type_name, env);
+    if matches!(&args[1].unmeta().kind, FormKind::Keyword(k) if k == "reify") {
+        return crate::interp::reify::eval_reify_star(&type_tag, &args[2..], env);
+    }
 
     let specs = parse_field_specs(&args[1], "deftype*")?;
     let field_names: Vec<Arc<str>> = specs.iter().map(|(n, _)| n.clone()).collect();
@@ -2409,9 +2415,8 @@ fn eval_deftype_star(args: &[Form], env: &mut Env) -> EvalResult {
     // each body — same machinery as defrecord/reify. Mutable fields read
     // through the live cell and are writable with `set!`.
     register_impls_for_tag(&type_tag, &args[2..], &field_names, &mutable_names, env)?;
-    // Return the minted tag so a caller (e.g. the `reify` macro) can feed it
-    // straight to `make-type-instance` — a single dataflow source for the tag,
-    // rather than a second textual reference that a gensym could desync.
+    // Return the minted tag so a caller can feed it straight to
+    // `make-type-instance`: one dataflow source for the tag.
     Ok(Value::string(type_tag.to_string()))
 }
 
@@ -2453,7 +2458,7 @@ fn resolve_protocol_sym(env: &Env, s: &str) -> Option<GcPtr<Protocol>> {
 
 /// Parse `Proto (method [params] body) ...` segments and register them under `type_tag`.
 /// Shared by `defrecord` and `reify`.
-fn register_impls_for_tag(
+pub(crate) fn register_impls_for_tag(
     type_tag: &Arc<str>,
     forms: &[Form],
     fields: &[Arc<str>],

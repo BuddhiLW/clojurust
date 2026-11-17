@@ -513,6 +513,12 @@ impl PartialEq for Value {
             }
             // Resource equality: pointer identity.
             (Value::Resource(a), Value::Resource(b)) => Arc::ptr_eq(&a.0, &b.0),
+            // A reify is equal only to itself; its fields are captured locals.
+            (Value::TypeInstance(a), Value::TypeInstance(b))
+                if a.get().kind == DatatypeKind::Reify || b.get().kind == DatatypeKind::Reify =>
+            {
+                std::ptr::eq(a.get() as *const _, b.get() as *const _)
+            }
             // Record equality: same tag and same fields.
             (Value::TypeInstance(a), Value::TypeInstance(b)) => {
                 a.get().type_tag == b.get().type_tag && maps_equal(&a.get().fields, &b.get().fields)
@@ -809,6 +815,9 @@ impl ClojureHash for Value {
             Value::Promise(p) => p.get() as *const _ as u32,
             Value::Future(fu) => fu.get() as *const _ as u32,
             Value::Agent(a) => a.get() as *const _ as u32,
+            Value::TypeInstance(ti) if ti.get().kind == DatatypeKind::Reify => {
+                ti.get() as *const _ as u32
+            }
             // Record hash: combine type tag hash with fields hash.
             Value::TypeInstance(ti) => {
                 let tag_hash = hash_string(&ti.get().type_tag);
@@ -1106,6 +1115,9 @@ pub fn pr_str(v: &Value, f: &mut fmt::Formatter<'_>, readably: bool) -> fmt::Res
         Value::Promise(_) => write!(f, "#<Promise>"),
         Value::Future(_) => write!(f, "#<Future>"),
         Value::Agent(_) => write!(f, "#<Agent>"),
+        Value::TypeInstance(ti) if ti.get().kind == DatatypeKind::Reify => {
+            write!(f, "#{}{{}}", ti.get().type_tag)
+        }
         Value::TypeInstance(ti) => {
             let ti = ti.get();
             write!(f, "#{}{{", ti.type_tag)?;

@@ -13,6 +13,7 @@ pub mod destructure;
 pub mod eval;
 pub mod host_methods;
 pub mod macros;
+mod reify;
 pub mod special;
 pub mod syntax_quote;
 #[cfg(not(target_arch = "wasm32"))]
